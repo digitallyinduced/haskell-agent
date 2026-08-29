@@ -14,6 +14,14 @@ import Agent.Store.Postgres.Session
     ( NativeConversationSearchResult(..)
     , searchNativeConversations
     )
+import Data.Bifunctor (first)
+import Agent.Store.Postgres.Scope (Scope(..), scopeKindText)
+import Agent.Store.Postgres.Skill
+    ( LearnedSkill(..)
+    , learnedSkillActivationText
+    , learnedSkillStatusText
+    , listAllLearnedSkills
+    )
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     )
@@ -47,6 +55,10 @@ import qualified Agent.OpenAI.Auth.Types as OpenAIAuthTypes
 import qualified Agent.XAI.Auth as XAIAuth
 import qualified Agent.OpenRouter.Usage as OpenRouter
 import Agent.CLI.ModelConfig (loadModelCatalogAt)
+import Agent.CLI.Database.Store
+    ( applicableDatabaseScopes
+    , deriveDatabaseScopes
+    )
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
@@ -133,6 +145,7 @@ import Control.Concurrent.STM
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
     ( SomeException
+    , bracket
     , finally
     , tryAny
     )
@@ -186,6 +199,7 @@ import System.IO
     )
 import System.OsPath
     ( OsPath
+    , decodeFS
     , takeDirectory
     , unsafeEncodeUtf
     )
@@ -245,6 +259,13 @@ type SearchCallback =
     -> Ptr Word8 -> CSize -- error
     -> IO ()
 
+type LearnedSkillsListCallback =
+    Ptr () -> CInt
+    -> CString -> CSize -> CString -> CSize -> CLLong
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
+
 foreign import ccall "dynamic"
     invokeEventCallback :: FunPtr EventCallback -> EventCallback
 
@@ -266,6 +287,10 @@ foreign import ccall "dynamic"
 
 foreign import ccall "dynamic"
     invokeSearchCallback :: FunPtr SearchCallback -> SearchCallback
+
+foreign import ccall "dynamic"
+    invokeLearnedSkillsListCallback
+        :: FunPtr LearnedSkillsListCallback -> LearnedSkillsListCallback
 
 data BridgeRequest = BridgeRequest
     { requestId :: !Text
@@ -479,6 +504,85 @@ foreign export ccall ha_account_set_enabled
 
 foreign export ccall ha_account_delete
     :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_learned_skills_list
+    :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
+
+ha_learned_skills_list
+    :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
+ha_learned_skills_list cwdBytes (CSize cwdLength) callback context
+    | callback == nullFunPtr = pure 1
+    | cwdBytes == nullPtr && cwdLength > 0 = pure 2
+    | otherwise = do
+        cwd <- decodeInput cwdBytes cwdLength
+        _ <- forkIO do
+            tryAny (listLearnedSkillsFor (Text.unpack cwd)) >>= \case
+                Left exception ->
+                    withText (Text.pack (show exception)) $ \errorPtr errorLength ->
+                        learnedSkillsTerminal callback context (-1) errorPtr errorLength
+                Right (Left err) ->
+                    withText err $ \errorPtr errorLength ->
+                        learnedSkillsTerminal callback context (-1) errorPtr errorLength
+                Right (Right skills) -> do
+                    forM_ skills \skill ->
+                        withLearnedSkillStrings skill $
+                            invokeLearnedSkillsListCallback callback context 0
+                    learnedSkillsTerminal callback context 1 nullPtr 0
+        pure 0
+  where
+    listLearnedSkillsFor cwd = do
+        home <- getHomeDirectory
+        projectRoot <- resolveProjectRoot (unsafeEncodeUtf cwd)
+        stateDirectory <- decodeFS (takeDirectory (sessionsRoot home))
+        projectRootPath <- decodeFS projectRoot
+        scopes <- deriveDatabaseScopes stateDirectory projectRootPath
+        case scopes of
+            Left err -> pure (Left err)
+            Right databaseScopes -> do
+                store <- openStore =<< managedPostgresConfigForHome home
+                case store of
+                    Left err -> pure (Left (renderStoreError err))
+                    Right opened ->
+                        bracket (pure opened) closeStore \store ->
+                            first renderStoreError
+                                <$> listAllLearnedSkills
+                                    (trustedPool store)
+                                    (applicableDatabaseScopes databaseScopes)
+
+type LearnedSkillItemCallback =
+    CString -> CSize -> CString -> CSize -> CLLong
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
+
+withLearnedSkillStrings :: LearnedSkill -> LearnedSkillItemCallback -> IO ()
+withLearnedSkillStrings skill action =
+    withText (scopeKindText skill.learnedSkillScope.scopeKind) $ \scope scopeLength ->
+    withText skill.learnedSkillSlug $ \slug slugLength ->
+    withText skill.learnedSkillTitle $ \title titleLength ->
+    withText skill.learnedSkillDescription $ \description descriptionLength ->
+    withText skill.learnedSkillAppliesWhen $ \applies appliesLength ->
+    withText skill.learnedSkillInstructions $ \instructions instructionsLength ->
+    withText (learnedSkillActivationText skill.learnedSkillActivation) $ \activation activationLength ->
+    withText (learnedSkillStatusText skill.learnedSkillStatus) $ \status statusLength ->
+    withText (Text.pack (show skill.learnedSkillUpdatedAt)) $ \updated updatedLength ->
+        action scope scopeLength slug slugLength
+            (fromIntegral skill.learnedSkillRevision)
+            title titleLength description descriptionLength
+            applies appliesLength instructions instructionsLength
+            activation activationLength status statusLength
+            (fromIntegral skill.learnedSkillPriority) updated updatedLength
+            nullPtr 0
+
+learnedSkillsTerminal
+    :: FunPtr LearnedSkillsListCallback
+    -> Ptr () -> CInt -> CString -> CSize -> IO ()
+learnedSkillsTerminal callback context status errorPtr errorLength =
+    invokeLearnedSkillsListCallback callback context status
+        nullPtr 0 nullPtr 0 0
+        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+        nullPtr 0 nullPtr 0
+        0 nullPtr 0 errorPtr errorLength
 
 ha_accounts_list
     :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
