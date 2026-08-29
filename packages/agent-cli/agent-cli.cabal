@@ -377,7 +377,6 @@ test-suite agent-cli-test
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.GatewayClientSpec
-                    , Agent.CLI.GatewayClientSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
