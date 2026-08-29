@@ -228,6 +228,12 @@ streamClaudeProgress state = \case
             in (next, map ToolRetracted calls <> nativeRetractions)
     QueryMessagesRetracted _ _ ->
         (state, [])
+    QueryConversationReset _ ->
+        ( emptyClaudeEventState
+            { warnedUnknownTypes = state.warnedUnknownTypes
+            }
+        , [ResponseAttemptDiscarded | state.emittedActivity]
+        )
 
 nativeLifecycleEvents
     :: Map.Map Text ToolCall
