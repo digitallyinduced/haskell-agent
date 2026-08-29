@@ -221,9 +221,13 @@ streamToolBlockDecoder = Json.withType \case
 
 conversationResetDecoder :: Json.Decoder ConversationResetMessage
 conversationResetDecoder = Json.object do
-    newConversationId <- optionalNonEmptyText "new_conversation_id"
+    newConversationId <-
+        fmap normalizeSessionId
+            <$> optionalNonEmptyText "new_conversation_id"
     uuid <- optionalNonEmptyText "uuid"
-    sessionId <- optionalNonEmptyText "session_id"
+    sessionId <-
+        fmap normalizeSessionId
+            <$> optionalNonEmptyText "session_id"
     parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
     hasParentToolUseId <- parentFieldPresent
     pure ConversationResetMessage{..}
@@ -404,12 +408,52 @@ optionalOrigin
 optionalOrigin key =
     (Json.atKeyOptional key $
         Json.withType \case
-            Json.VObject -> Json.object do
-                kind <- fromMaybe "unclassified"
-                    <$> optionalNonEmptyText "kind"
-                pure (Just MessageOrigin{kind})
+            Json.VObject -> do
+                raw <- rawJsonDecoder
+                case Json.decodeEither
+                        originStringFieldsDecoder
+                        (rawJsonBytes raw)
+                    of
+                    Left _ ->
+                        pure (Just MessageOrigin
+                            { kind = "unclassified"
+                            , identifiers = Map.empty
+                            , raw
+                            })
+                    Right fields ->
+                        pure (Just MessageOrigin
+                            { kind =
+                                fromMaybe "unclassified"
+                                    (Map.lookup "kind" fields)
+                            , identifiers =
+                                Map.filterWithKey
+                                    (\field _ -> isIdentifierField field)
+                                    fields
+                            , raw
+                            })
             _ -> pure Nothing)
         >>= pure . (>>= id)
+
+-- Origin objects are intentionally extensible. Retain all of their string
+-- fields instead of teaching the SDK a closed list of task/agent identifiers.
+originStringFieldsDecoder :: Json.Decoder (Map Text Text)
+originStringFieldsDecoder =
+    Json.objectFold Map.empty \field fields ->
+        Json.withType \case
+            Json.VString -> do
+                value <- Json.text
+                pure $
+                    maybe fields
+                        (\identifier -> Map.insert field identifier fields)
+                        (nonEmptyText value)
+            _ -> pure fields
+
+isIdentifierField :: Text -> Bool
+isIdentifierField field =
+    field == "id"
+        || "_id" `Text.isSuffixOf` field
+        || "Id" `Text.isSuffixOf` field
+        || "ID" `Text.isSuffixOf` field
 
 requiredText
     :: Text

@@ -202,6 +202,15 @@ modelUsageToUsage modelUsage =
 -- | Provenance attached to user messages and terminal results.
 data MessageOrigin = MessageOrigin
     { kind :: !Text
+    -- | String-valued identifier fields carried by the origin object.
+    --
+    -- Claude Code adds route-specific identifiers to autonomous messages.
+    -- Keeping the field names as well as their values lets the router remain
+    -- forward compatible when a new autonomous origin kind is introduced.
+    , identifiers :: !(Map Text Text)
+    -- | The complete origin object for diagnostics and future protocol
+    -- extensions which are not string identifiers.
+    , raw :: !RawJson
     } deriving (Eq, Show)
 
 -- | Content accepted in one streaming-input user message.
@@ -370,6 +379,9 @@ data QueryMessageScope
 data QueryProgress
     = QueryMessageObserved !QueryMessageScope !Message
     | QueryMessagesRetracted !(Maybe QueryMessageScope) ![Text]
+    -- | Claude Code moved the active query to a new conversation. Messages
+    -- accumulated before the reset are discarded transactionally.
+    | QueryConversationReset !ConversationResetMessage
     deriving (Eq, Show)
 
 messageUuid :: Message -> Maybe Text

@@ -22,6 +22,8 @@ import Claude.Agent.SDK.Types
     , messageParentToolUseId
     , messageUuid
     )
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -46,14 +48,34 @@ data MessageBuffer = MessageBuffer
 
 data QueryAccumulator = QueryAccumulator
     { ownBuffer :: !MessageBuffer
-    , foreignBuffer :: !(Maybe MessageBuffer)
+    , foreignRoutes :: !(Map RouteKey MessageBuffer)
+    , currentForeignRoute :: !(Maybe RouteKey)
+    , toolOwners :: !(Map Text RouteOwner)
     , progressSeenIds :: !(Set (MessageScope, Text))
     } deriving (Eq, Show)
+
+data RouteKey = RouteKey
+    { routeKind :: !Text
+    , routeIdentifiers :: !(Map Text Text)
+    } deriving (Eq, Ord, Show)
+
+data RouteOwner
+    = OwnRoute
+    | ForeignRoute !RouteKey
+    deriving (Eq, Ord, Show)
+
+data RouteDecision
+    = RouteOwn
+    | RouteForeign !RouteKey
+    | RouteHidden
+    deriving (Eq, Show)
 
 emptyQueryAccumulator :: QueryAccumulator
 emptyQueryAccumulator = QueryAccumulator
     { ownBuffer = emptyMessageBuffer
-    , foreignBuffer = Nothing
+    , foreignRoutes = Map.empty
+    , currentForeignRoute = Nothing
+    , toolOwners = Map.empty
     , progressSeenIds = Set.empty
     }
 
@@ -76,33 +98,21 @@ consumeQueryMessage
         ClaudeSDKError
         (QueryAccumulator, Maybe ([Message], ResultMessage))
 consumeQueryMessage accumulator message =
-    case accumulator.foreignBuffer of
-        Just foreignMessages ->
-            consumeForeignMessage accumulator foreignMessages message
-        Nothing
-            | messageHasParentToolUseId message -> do
-                next <-
-                    consumeBufferedMessage accumulator.ownBuffer message
+    case message of
+        MessageConversationReset _
+            | not (messageHasParentToolUseId message) ->
                 Right
-                    ( accumulator { ownBuffer = next }
+                    ( resetQueryAccumulator accumulator
                     , Nothing
                     )
-            | beginsForeignTurn message -> do
-                foreignMessages <-
-                    consumeBufferedMessage emptyMessageBuffer message
-                Right
-                    ( accumulator
-                        { foreignBuffer = Just foreignMessages }
-                    , Nothing
-                    )
-            | MessageResult result <- message
-            , not (isHumanOrigin result.origin) ->
-                -- A current Claude Code process can emit autonomous turns on
-                -- the same stream. A detached result does not answer the
-                -- prompt this query submitted.
-                Right (accumulator, Nothing)
-            | otherwise ->
-                consumeOwnMessage accumulator message
+        _ ->
+            case routeMessage accumulator message of
+                RouteOwn ->
+                    consumeOwnMessage accumulator message
+                RouteForeign key ->
+                    consumeForeignMessage accumulator key message
+                RouteHidden ->
+                    Right (accumulator, Nothing)
 
 -- | Consume a message and report live progress only when it belongs to the
 -- submitted human turn. Autonomous/background records remain transactional
@@ -118,10 +128,15 @@ consumeQueryMessageWithProgress
         )
 consumeQueryMessageWithProgress accumulator message = do
     (next, completed) <- consumeQueryMessage accumulator message
-    let progress = observedProgress accumulator message
+    let progress = case message of
+            MessageConversationReset reset
+                | not (messageHasParentToolUseId message) ->
+                    [QueryConversationReset reset]
+            _ ->
+                observedProgress accumulator message
         nextWithProgress = next
             { progressSeenIds = applyProgressSeen
-                accumulator.progressSeenIds
+                next.progressSeenIds
                 progress
             }
     pure (nextWithProgress, progress, completed)
@@ -162,26 +177,12 @@ applyProgressSeen = foldl' step
                             Set.delete (internal, identifier) current)
                         seen
                         identifiers
+        QueryConversationReset{} ->
+            Set.empty
 
 belongsToOwnTurn :: QueryAccumulator -> Message -> Bool
 belongsToOwnTurn accumulator message =
-    case accumulator.foreignBuffer of
-        Nothing ->
-            messageHasParentToolUseId message
-                || not (beginsForeignTurn message)
-                    && not (isForeignResult message)
-        Just _
-            | messageHasParentToolUseId message -> False
-            | MessageSystem SystemMessage{subtype = "init"} <- message -> True
-            | MessageUser UserMessage{origin} <- message ->
-                isExplicitHumanOrigin origin
-            | MessageResult result <- message ->
-                isHumanOrigin result.origin
-            | otherwise -> False
-  where
-    isForeignResult = \case
-        MessageResult result -> not (isHumanOrigin result.origin)
-        _ -> False
+    routeMessage accumulator message == RouteOwn
 
 messageWouldBeObserved :: QueryAccumulator -> Message -> Bool
 messageWouldBeObserved accumulator message =
@@ -189,6 +190,7 @@ messageWouldBeObserved accumulator message =
         MessageResult{} -> messageHasParentToolUseId message
         MessageConversationReset{} -> False
         MessageControlRequest{} -> False
+        MessageUnknown{} -> False
         MessageAssistant AssistantMessage{error = Just _} -> False
         MessageStreamEvent{} -> not (alreadySeen accumulator.ownBuffer message)
         _ -> not (alreadySeen accumulator.ownBuffer message)
@@ -248,10 +250,14 @@ consumeOwnMessage
         (QueryAccumulator, Maybe ([Message], ResultMessage))
 consumeOwnMessage accumulator message =
     case message of
-        MessageConversationReset _ ->
-            Left $
-                CLIProtocolError
-                    "Claude Code reset the conversation while a query was active."
+        MessageResult result
+            | result.hasParentToolUseId ->
+                bufferForRoute OwnRoute accumulator message
+        MessageConversationReset _
+            | messageHasParentToolUseId message ->
+                bufferForRoute OwnRoute accumulator message
+            | otherwise ->
+                Right (resetQueryAccumulator accumulator, Nothing)
         MessageControlRequest _ ->
             Left $
                 CLIProtocolError
@@ -275,70 +281,173 @@ consumeOwnMessage accumulator message =
         _ -> do
             next <- consumeBufferedMessage accumulator.ownBuffer message
             Right
-                ( accumulator { ownBuffer = next }
+                ( registerToolOwners OwnRoute message $
+                    accumulator
+                        { ownBuffer = next
+                        , currentForeignRoute = Nothing
+                        }
                 , Nothing
                 )
 
 consumeForeignMessage
     :: QueryAccumulator
-    -> MessageBuffer
+    -> RouteKey
     -> Message
     -> Either
         ClaudeSDKError
         (QueryAccumulator, Maybe ([Message], ResultMessage))
-consumeForeignMessage accumulator foreignMessages message
-    | messageHasParentToolUseId message = do
-        next <- consumeBufferedMessage foreignMessages message
-        Right
-            ( accumulator { foreignBuffer = Just next }
-            , Nothing
-            )
+consumeForeignMessage accumulator key message =
+    case message of
+        MessageResult result
+            | not result.hasParentToolUseId ->
+                Right
+                    ( removeForeignRoute key accumulator
+                    , Nothing
+                    )
+        _ ->
+            bufferForRoute (ForeignRoute key) accumulator message
+
+bufferForRoute
+    :: RouteOwner
+    -> QueryAccumulator
+    -> Message
+    -> Either
+        ClaudeSDKError
+        (QueryAccumulator, Maybe ([Message], ResultMessage))
+bufferForRoute owner accumulator message = do
+    let oldBuffer = case owner of
+            OwnRoute -> accumulator.ownBuffer
+            ForeignRoute key ->
+                Map.findWithDefault emptyMessageBuffer
+                    key
+                    accumulator.foreignRoutes
+    next <- consumeBufferedMessage oldBuffer message
+    let routed = case owner of
+            OwnRoute ->
+                accumulator
+                    { ownBuffer = next
+                    , currentForeignRoute = Nothing
+                    }
+            ForeignRoute key ->
+                accumulator
+                    { foreignRoutes =
+                        Map.insert key next accumulator.foreignRoutes
+                    , currentForeignRoute = Just key
+                    }
+    Right (registerToolOwners owner message routed, Nothing)
+
+routeMessage :: QueryAccumulator -> Message -> RouteDecision
+routeMessage accumulator message
+    | messageHasParentToolUseId message =
+        case
+            messageParentToolUseId message
+                >>= (`Map.lookup` accumulator.toolOwners)
+        of
+            Just OwnRoute -> RouteOwn
+            Just (ForeignRoute key) -> RouteForeign key
+            Nothing -> RouteHidden
+    | Just origin <- messageOrigin message =
+        if origin.kind == "human"
+            then RouteOwn
+            else
+                maybe RouteHidden RouteForeign
+                    (resolveForeignRoute accumulator origin)
+    | MessageSystem SystemMessage{subtype = "init"} <- message =
+        RouteOwn
+    | MessageConversationReset{} <- message =
+        RouteOwn
     | otherwise =
-        case message of
-            MessageConversationReset _ ->
-                Left $
-                    CLIProtocolError
-                        "Claude Code reset the conversation while a query was active."
-            MessageControlRequest _ ->
-                Left $
-                    CLIProtocolError
-                        "Claude Code requested interactive protocol input that this client does not support."
-            MessageResult result
-                | isHumanOrigin result.origin ->
-                    consumeOwnMessage
-                        accumulator { foreignBuffer = Nothing }
-                        message
+        case accumulator.currentForeignRoute of
+            Just key
+                | Map.member key accumulator.foreignRoutes ->
+                    RouteForeign key
+            _
+                | Map.null accumulator.foreignRoutes ->
+                    RouteOwn
                 | otherwise ->
-                    Right
-                        ( accumulator { foreignBuffer = Nothing }
-                        , Nothing
-                        )
-            MessageSystem SystemMessage{subtype = "init"} -> do
-                next <- consumeBufferedMessage accumulator.ownBuffer message
-                Right
-                    ( accumulator
-                        { ownBuffer = next
-                        , foreignBuffer = Just foreignMessages
-                        }
-                    , Nothing
-                    )
-            MessageUser UserMessage{origin}
-                | isExplicitHumanOrigin origin -> do
-                    next <-
-                        consumeBufferedMessage accumulator.ownBuffer message
-                    Right
-                        ( accumulator
-                            { ownBuffer = next
-                            , foreignBuffer = Just foreignMessages
-                            }
-                        , Nothing
-                        )
-            _ -> do
-                next <- consumeBufferedMessage foreignMessages message
-                Right
-                    ( accumulator { foreignBuffer = Just next }
-                    , Nothing
-                    )
+                    -- Without an origin or a known parent, assigning this
+                    -- record to either the human query or one of several
+                    -- autonomous routes could leak unrelated output.
+                    RouteHidden
+
+messageOrigin :: Message -> Maybe MessageOrigin
+messageOrigin = \case
+    MessageUser user -> user.origin
+    MessageResult result -> result.origin
+    _ -> Nothing
+
+resolveForeignRoute
+    :: QueryAccumulator
+    -> MessageOrigin
+    -> Maybe RouteKey
+resolveForeignRoute accumulator origin =
+    let requested = RouteKey origin.kind origin.identifiers
+        compatible =
+            [ existing
+            | existing <- Map.keys accumulator.foreignRoutes
+            , routesCompatible requested existing
+            ]
+    in if Map.member requested accumulator.foreignRoutes
+        then Just requested
+        else case compatible of
+            [existing] -> Just existing
+            [] -> Just requested
+            _ -> Nothing
+
+routesCompatible :: RouteKey -> RouteKey -> Bool
+routesCompatible left right =
+    left.routeKind == right.routeKind
+        && not (Map.null common)
+        && all
+            (\field -> Map.lookup field left.routeIdentifiers
+                == Map.lookup field right.routeIdentifiers)
+            (Map.keys common)
+  where
+    common =
+        Map.intersection
+            left.routeIdentifiers
+            right.routeIdentifiers
+
+registerToolOwners
+    :: RouteOwner
+    -> Message
+    -> QueryAccumulator
+    -> QueryAccumulator
+registerToolOwners owner message accumulator =
+    accumulator
+        { toolOwners =
+            foldl'
+                (\owners identifier -> Map.insert identifier owner owners)
+                accumulator.toolOwners
+                (messageToolUseIds message)
+        }
+
+messageToolUseIds :: Message -> [Text]
+messageToolUseIds = \case
+    MessageAssistant AssistantMessage{content} ->
+        [ identifier
+        | block <- content
+        , identifier <- case block of
+            ToolUseBlock{toolUseId} -> [toolUseId]
+            ServerToolUseBlock{toolUseId} -> [toolUseId]
+            _ -> []
+        ]
+    _ -> []
+
+removeForeignRoute :: RouteKey -> QueryAccumulator -> QueryAccumulator
+removeForeignRoute key accumulator =
+    accumulator
+        { foreignRoutes = Map.delete key accumulator.foreignRoutes
+        , currentForeignRoute =
+            if accumulator.currentForeignRoute == Just key
+                then Nothing
+                else accumulator.currentForeignRoute
+        , toolOwners =
+            Map.filter (/= ForeignRoute key) accumulator.toolOwners
+        }
+
+resetQueryAccumulator :: QueryAccumulator -> QueryAccumulator
+resetQueryAccumulator _ = emptyQueryAccumulator
 
 consumeBufferedMessage
     :: MessageBuffer
@@ -513,20 +622,3 @@ messageScope message
         NestedScope (messageParentToolUseId message)
     | otherwise =
         TopLevelScope
-
-beginsForeignTurn :: Message -> Bool
-beginsForeignTurn = \case
-    MessageUser UserMessage{origin} ->
-        not (isHumanOrigin origin)
-    _ ->
-        False
-
-isHumanOrigin :: Maybe MessageOrigin -> Bool
-isHumanOrigin = \case
-    Nothing -> True
-    Just origin -> origin.kind == "human"
-
-isExplicitHumanOrigin :: Maybe MessageOrigin -> Bool
-isExplicitHumanOrigin = \case
-    Just origin -> origin.kind == "human"
-    Nothing -> False

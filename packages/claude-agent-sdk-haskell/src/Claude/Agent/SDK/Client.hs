@@ -11,6 +11,7 @@ module Claude.Agent.SDK.Client
     , receiveMessage
     , resolveTurnUsage
     , acceptTurnSessionId
+    , acceptConversationReset
     , turnSessionId
     , turnIsNewSession
     , turnProcessExit
@@ -43,6 +44,7 @@ import Claude.Agent.SDK.Transport
     )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
+    , ConversationResetMessage(..)
     , Message
     , ModelUsage(..)
     , UserContentBlock(..)
@@ -403,6 +405,25 @@ acceptTurnSessionId turn actual =
                                     <> " was active."
                                 )
                         )
+
+-- | Adopt the conversation selected by a @conversation_reset@ event and
+-- clear process-cumulative usage accounting. Claude Code starts cumulative
+-- model usage from a new baseline after a reset even when the subprocess is
+-- reused.
+acceptConversationReset
+    :: ClaudeSDKTurn
+    -> ConversationResetMessage
+    -> IO ()
+acceptConversationReset turn reset = do
+    writeIORef
+        turn.turnRunning.runningSessionId
+        (canonicalSessionId <$> (reset.newConversationId <|> reset.sessionId))
+    writeIORef
+        turn.turnRunning.runningUsageAccounting
+        UsageAccounting
+            { usageCumulativeBaseline = Nothing
+            , usagePendingFallback = emptyUsage
+            }
 
 turnIsNewSession :: ClaudeSDKTurn -> Bool
 turnIsNewSession = (.turnIsNew)

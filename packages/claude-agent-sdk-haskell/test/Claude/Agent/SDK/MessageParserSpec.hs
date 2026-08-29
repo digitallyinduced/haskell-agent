@@ -4,11 +4,31 @@ import Agent.Json (rawJsonBytes)
 import Claude.Agent.SDK.Internal.MessageParser (decodeMessageLine)
 import Claude.Agent.SDK.Types
 import Data.ByteString (ByteString)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "decodeMessageLine" do
+    it "retains autonomous origin identifiers and the raw origin object" do
+        let originBytes =
+                "{\"kind\":\"task_notification\",\"task_id\":\"task-7\",\
+                \\"agent_id\":\"agent-2\",\"attempt\":3}"
+            line =
+                "{\"type\":\"user\",\"uuid\":\"notification\",\
+                \\"origin\":" <> originBytes <> ",\
+                \\"message\":{\"role\":\"user\",\"content\":\"done\"}}"
+        case decodeMessageLine line of
+            Right (MessageUser UserMessage{origin = Just origin}) -> do
+                origin.kind `shouldBe` "task_notification"
+                origin.identifiers `shouldBe` Map.fromList
+                    [ ("agent_id", "agent-2")
+                    , ("task_id", "task-7")
+                    ]
+                rawJsonBytes origin.raw `shouldBe` originBytes
+            other ->
+                expectationFailure ("unexpected decode: " <> show other)
+
     describe "tool_result content" do
         it "keeps string content" do
             block <- decodeToolResult "\"hello\""

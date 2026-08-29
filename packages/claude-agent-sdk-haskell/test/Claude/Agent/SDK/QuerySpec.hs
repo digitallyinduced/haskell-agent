@@ -128,7 +128,11 @@ spec = describe "query" do
 
     it "deduplicates unknown UUIDs in their parent scope" do
         (result, messages) <- runQueryLines
-            [ "{\"type\":\"future_event\",\"uuid\":\"future-nested\",\
+            [ "{\"type\":\"assistant\",\"uuid\":\"parent-tool\",\
+              \\"session_id\":\"" <> testSessionId <> "\",\
+              \\"message\":{\"content\":[{\"type\":\"tool_use\",\
+              \\"id\":\"agent-tool\",\"name\":\"Agent\",\"input\":{}}]}}"
+            , "{\"type\":\"future_event\",\"uuid\":\"future-nested\",\
               \\"parent_tool_use_id\":\"agent-tool\",\
               \\"payload\":{\"value\":\"original\"}}"
             , "{\"type\":\"future_event\",\"uuid\":\"future-nested\",\
@@ -294,6 +298,78 @@ spec = describe "query" do
         show messages `shouldNotContain` "background answer"
         show messages `shouldNotContain` "background tool output"
 
+    it "isolates multiple interleaved autonomous routes by origin identifiers" do
+        let foreignUser identifier =
+                "{\"type\":\"user\",\"uuid\":\"user-" <> identifier <> "\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"origin\":{\"kind\":\"task_notification\",\
+                \\"task_id\":\"" <> identifier <> "\"},\
+                \\"message\":{\"role\":\"user\",\"content\":\"start "
+                    <> identifier <> "\"}}"
+            foreignAssistant identifier =
+                assistantLine ("assistant-" <> identifier)
+                    ("private-" <> identifier)
+            foreignResult identifier =
+                "{\"type\":\"result\",\"subtype\":\"success\",\
+                \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
+                \\"uuid\":\"result-" <> identifier <> "\",\
+                \\"origin\":{\"kind\":\"task_notification\",\
+                \\"task_id\":\"" <> identifier <> "\"}}"
+            explicitHuman =
+                "{\"type\":\"user\",\"uuid\":\"human-user\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"origin\":{\"kind\":\"human\",\"request_id\":\"request-1\"},\
+                \\"message\":{\"role\":\"user\",\"content\":\"human\"}}"
+            humanResult =
+                "{\"type\":\"result\",\"subtype\":\"success\",\
+                \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
+                \\"uuid\":\"human-result\",\
+                \\"origin\":{\"kind\":\"human\",\"request_id\":\"request-1\"},\
+                \\"result\":\"human answer\"}"
+        (result, messages) <- runQueryLines
+            [ foreignUser "task-a"
+            , foreignAssistant "task-a"
+            , foreignUser "task-b"
+            , foreignAssistant "task-b"
+            , foreignResult "task-a"
+            , foreignResult "task-b"
+            , explicitHuman
+            , assistantLine "human-assistant" "public answer"
+            , humanResult
+            ]
+
+        completed <- expectRight result
+        completed.result `shouldBe` Just "human answer"
+        show messages `shouldContain` "public answer"
+        show messages `shouldNotContain` "private-task-a"
+        show messages `shouldNotContain` "private-task-b"
+
+    it "hides unoriginated output when its autonomous route is ambiguous" do
+        let foreignUser identifier =
+                "{\"type\":\"user\",\"uuid\":\"user-" <> identifier <> "\",\
+                \\"origin\":{\"kind\":\"task_notification\",\
+                \\"task_id\":\"" <> identifier <> "\"},\
+                \\"message\":{\"role\":\"user\",\"content\":\"start\"}}"
+            foreignResult identifier =
+                "{\"type\":\"result\",\"subtype\":\"success\",\
+                \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
+                \\"origin\":{\"kind\":\"task_notification\",\
+                \\"task_id\":\"" <> identifier <> "\"}}"
+        (result, messages) <- runQueryLines
+            [ foreignUser "task-a"
+            , foreignUser "task-b"
+            , foreignResult "task-b"
+            , assistantLine "ambiguous" "must remain hidden"
+            , "{\"type\":\"result\",\"subtype\":\"success\",\
+              \\"is_error\":false,\"session_id\":\""
+                <> testSessionId
+                <> "\",\"uuid\":\"human-result\",\
+                   \\"origin\":{\"kind\":\"human\"},\"result\":\"done\"}"
+            ]
+
+        _ <- expectRight result
+        show messages `shouldNotContain` "must remain hidden"
+
     it "classifies live own and nested records while hiding foreign turns" do
         let topTool =
                 "{\"type\":\"assistant\",\"uuid\":\"top-tool\",\
@@ -412,31 +488,61 @@ spec = describe "query" do
                 \\"parent_tool_use_id\":\"agent-tool\",\
                 \\"session_id\":\"" <> wrongSessionId <> "\",\
                 \\"result\":\"must stay hidden\"}"
-        mapM_
-            (\wrongMessage -> do
-                (result, progress) <- runQueryProgress
-                    [wrongMessage, successResult testSessionId]
-                result `shouldSatisfy` \case
-                    Left (CLIProtocolError message) ->
-                        "while 123e4567-e89b-42d3-a456-426614174000 was active"
-                            `Text.isInfixOf` message
-                    _ -> False
-                progress `shouldBe` [])
-            [wrongTool, wrongNestedResult]
+            parentTool =
+                "{\"type\":\"assistant\",\"uuid\":\"parent-tool\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"message\":{\"content\":[{\"type\":\"tool_use\",\
+                \\"id\":\"agent-tool\",\"name\":\"Agent\",\"input\":{}}]}}"
+        (wrongToolResult, wrongToolProgress) <- runQueryProgress
+            [wrongTool, successResult testSessionId]
+        wrongToolResult `shouldSatisfy` isSessionMismatch
+        wrongToolProgress `shouldBe` []
 
-    it "treats an origin-less result as the human result for compatibility" do
+        (wrongNestedResultValue, wrongNestedProgress) <- runQueryProgress
+            [parentTool, wrongNestedResult, successResult testSessionId]
+        wrongNestedResultValue `shouldSatisfy` isSessionMismatch
+        show wrongNestedProgress `shouldNotContain` "wrong-nested-result"
+
+    it "treats an unambiguous origin-less result as human for compatibility" do
         (result, messages) <- runQueryLines
-            [ "{\"type\":\"user\",\"uuid\":\"background-user\",\
-              \\"session_id\":\""
-                <> testSessionId
-                <> "\",\"origin\":{\"kind\":\"scheduled\"},\
-                   \\"message\":{\"role\":\"user\",\"content\":\"background\"}}"
-            , successResult testSessionId
-            ]
+            [successResult testSessionId]
 
         completed <- expectRight result
         completed.result `shouldBe` Just "ok"
         map messageUuid messages `shouldBe` [Just "result"]
+
+    it "adopts conversation resets and discards pre-reset query state" do
+        let newSessionId = "223e4567-e89b-42d3-a456-426614174000"
+            reset =
+                "{\"type\":\"conversation_reset\",\"uuid\":\"reset\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"new_conversation_id\":\"" <> newSessionId <> "\"}"
+            newAssistant =
+                "{\"type\":\"assistant\",\"uuid\":\"after-reset\",\
+                \\"session_id\":\"" <> newSessionId <> "\",\
+                \\"message\":{\"content\":[{\"type\":\"text\",\
+                \\"text\":\"new answer\"}]}}"
+            newResult =
+                "{\"type\":\"result\",\"subtype\":\"success\",\
+                \\"is_error\":false,\"session_id\":\"" <> newSessionId <> "\",\
+                \\"uuid\":\"new-result\",\"origin\":{\"kind\":\"human\"},\
+                \\"result\":\"new answer\"}"
+        (result, progress, messages) <- runQueryProgressAndMessages
+            [ assistantLine "before-reset" "stale answer"
+            , reset
+            , newAssistant
+            , newResult
+            ]
+
+        completed <- expectRight result
+        completed.sessionId `shouldBe` newSessionId
+        progress `shouldSatisfy` any \case
+            QueryConversationReset
+                ConversationResetMessage{newConversationId = Just adopted} ->
+                    adopted == newSessionId
+            _ -> False
+        show messages `shouldContain` "new answer"
+        show messages `shouldNotContain` "stale answer"
 
     it "skips non-JSON stdout diagnostics before parsing protocol records" do
         (result, messages) <- runQueryLines
@@ -446,6 +552,45 @@ spec = describe "query" do
 
         _ <- expectRight result
         map messageUuid messages `shouldBe` [Just "result"]
+
+    it "keeps the startup timeout until submitted-turn progress arrives" do
+        let delayedResultScript firstRecord =
+                Text.unpack $ Text.unlines
+                    [ "#!/bin/sh"
+                    , "IFS= read -r _query"
+                    , "printf '%s\\n' " <> shellQuote firstRecord
+                    , "sleep 0.3"
+                    , "printf '%s\\n' "
+                        <> shellQuote (successResult testSessionId)
+                    ]
+            background =
+                "{\"type\":\"user\",\"uuid\":\"background\",\
+                \\"origin\":{\"kind\":\"task_notification\",\
+                \\"task_id\":\"task-1\"},\
+                \\"message\":{\"role\":\"user\",\"content\":\"background\"}}"
+            unknown =
+                "{\"type\":\"future_event\",\"uuid\":\"unknown\",\
+                \\"payload\":{\"diagnostic\":true}}"
+        mapM_
+            (\firstRecord ->
+                withFakeClaude
+                    (delayedResultScript firstRecord)
+                    \directory executable -> do
+                        result <-
+                            query
+                                ((testOptions executable directory)
+                                    { streamStartupTimeoutMicros = 100_000
+                                    , streamInactivityTimeoutMicros = 1_000_000
+                                    , environment = Nothing
+                                    })
+                                "hello"
+                                (\_ -> pure ())
+                        result `shouldSatisfy` \case
+                            Left (CLIConnectionError message) ->
+                                "did not produce structured output"
+                                    `Text.isInfixOf` message
+                            _ -> False)
+            [background, unknown]
 
     it "returns structured JSON decode errors without publishing buffered messages" do
         (result, messages) <- runQueryLines
@@ -698,17 +843,49 @@ runQueryProgress linesToEmit =
         progress <- readIORef progressRef
         pure (result, progress)
 
+runQueryProgressAndMessages
+    :: [Text]
+    -> IO
+        ( Either ClaudeSDKError ResultMessage
+        , [QueryProgress]
+        , [Message]
+        )
+runQueryProgressAndMessages linesToEmit =
+    withFakeClaude (oneShotScript linesToEmit) \directory executable -> do
+        progressRef <- newIORef []
+        messagesRef <- newIORef []
+        result <-
+            queryWithProgress
+                (testOptions executable directory)
+                "hello"
+                (\progress ->
+                    modifyIORef' progressRef (<> [progress]))
+                (\message ->
+                    modifyIORef' messagesRef (<> [message]))
+        progress <- readIORef progressRef
+        messages <- readIORef messagesRef
+        pure (result, progress, messages)
+
 progressTag :: QueryProgress -> Text
 progressTag = \case
     QueryMessageObserved _ message ->
         "message:" <> maybe "anonymous" id (messageUuid message)
     QueryMessagesRetracted scope identifiers ->
         "retract:" <> scopeTag scope <> ":" <> Text.intercalate "," identifiers
+    QueryConversationReset{} ->
+        "conversation-reset"
   where
     scopeTag = \case
         Nothing -> "global"
         Just QueryTopLevel -> "top"
         Just QueryNested{} -> "nested"
+
+isSessionMismatch :: Either ClaudeSDKError a -> Bool
+isSessionMismatch = \case
+    Left (CLIProtocolError message) ->
+        "while 123e4567-e89b-42d3-a456-426614174000 was active"
+            `Text.isInfixOf` message
+    _ -> False
 
 canonicalResponseLines :: [Text]
 canonicalResponseLines =

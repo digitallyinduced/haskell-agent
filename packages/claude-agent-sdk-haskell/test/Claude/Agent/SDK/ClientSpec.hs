@@ -13,6 +13,7 @@ import Control.Concurrent
     , threadDelay
     , tryPutMVar
     )
+import qualified Data.Map.Strict as Map
 import Control.Monad (void, when)
 import Control.Exception.Safe (finally, tryAny)
 import qualified Data.ByteString as ByteString
@@ -472,6 +473,66 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                 "connect failed" `Text.isInfixOf` message
             _ -> False
         readIORef closeCount `shouldReturn` 1
+
+    it "resets cumulative usage and adopts the reset conversation" do
+        let options = testOptions "unused-by-custom-transport" "."
+            newSessionId = "223e4567-e89b-42d3-a456-426614174000"
+            transportFactory _ =
+                pure Transport
+                    { transportConnect = pure (Right ())
+                    , transportWrite = \_ -> pure (Right ())
+                    , transportRead = pure (Right Nothing)
+                    , transportClose = pure ()
+                    , transportIsReady = pure True
+                    , transportEndInput = pure ()
+                    , transportProcessExit = pure Nothing
+                    , transportDiagnostic = pure ""
+                    }
+            usageSnapshot input output =
+                Map.singleton "claude-test" ModelUsage
+                    { inputTokens = input
+                    , outputTokens = output
+                    , cacheReadInputTokens = 0
+                    , cacheCreationInputTokens = 0
+                    , costUSD = Nothing
+                    }
+            reset = ConversationResetMessage
+                { newConversationId = Just newSessionId
+                , uuid = Just "reset"
+                , sessionId = Just testSessionId
+                , parentToolUseId = Nothing
+                , hasParentToolUseId = False
+                }
+
+        outcome <-
+            withClaudeSDKClientWithTransport
+                options
+                transportFactory
+                \client ->
+                    withClaudeSDKTurn
+                        client
+                        (pure True)
+                        Nothing
+                        Nothing
+                        Nothing
+                        \turn -> do
+                            first <- resolveTurnUsage
+                                turn
+                                emptyUsage
+                                (usageSnapshot 100 10)
+                            acceptConversationReset turn reset
+                            second <- resolveTurnUsage
+                                turn
+                                emptyUsage
+                                (usageSnapshot 150 15)
+                            adopted <- turnSessionId turn
+                            pure (Right ((first, second, adopted), pure ()))
+
+        outcome `shouldBe` Right
+            ( Usage 100 10 0
+            , Usage 150 15 0
+            , Just newSessionId
+            )
 
     it "closes a custom transport when graceful shutdown throws" do
         closeCount <- newIORef (0 :: Int)
