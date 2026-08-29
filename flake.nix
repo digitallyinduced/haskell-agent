@@ -752,9 +752,11 @@
                     agent-cli-functional-openai-hello-world =
                         agentCliHelloWorldFunctional "openai"
                             (functionalTestModel "OPENAI" "gpt-5.6-terra");
-                    agent-cli-functional-xai-hello-world =
-                        agentCliHelloWorldFunctional "xai"
-                            (functionalTestModel "XAI" "grok-4.6");
+                    # Temporarily disabled while the CI Grok account has no
+                    # verified available usage. Keep package/unit checks enabled.
+                    # agent-cli-functional-xai-hello-world =
+                    #     agentCliHelloWorldFunctional "xai"
+                    #         (functionalTestModel "XAI" "grok-4.6");
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;
