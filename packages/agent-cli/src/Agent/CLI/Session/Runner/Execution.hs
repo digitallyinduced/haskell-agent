@@ -89,6 +89,7 @@ runSession
 runSession callbacks SessionRequest{..} SessionBackend{..} = do
   initialPrevious <- readLivePreviousResponseId conversationRef
   ioLock <- newMVar ()
+  policyRef <- newIORef policy
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
       stdoutHandle = startup.startupStdout
@@ -102,26 +103,28 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
       withIoLock action = withMVar ioLock (const action)
       requestRootAccess root =
-          withMVar ioLock \_ ->
-              case promptRequest of
-                  Just request
-                      | isJust request.managedTurnBridgeDirectory ->
-                          requestManagedRootAccess request root
-                  _ -> case fullscreen of
-                      Just runtime -> do
-                          notifyAttention stderrHandle PermissionRequested
-                          maybe False (== 0)
-                              <$> requestFullscreenChoiceWithBody
-                                  runtime
-                                  "Filesystem access requested"
-                                  ("Allow access to " <> toText root
-                                      <> " for this session?")
-                                  0
-                                  [ ("Allow directory for this session", "")
-                                  , ("Deny", "")
-                                  ]
-                      Nothing ->
-                          withStdinPaused escPaused (promptRootAccess useColor root)
+          approveFilesystemRootAccess policyRef $
+              withMVar ioLock \_ ->
+                  case promptRequest of
+                      Just request
+                          | isJust request.managedTurnBridgeDirectory ->
+                              requestManagedRootAccess request root
+                      _ -> case fullscreen of
+                          Just runtime -> do
+                              notifyAttention stderrHandle PermissionRequested
+                              maybe False (== 0)
+                                  <$> requestFullscreenChoiceWithBody
+                                      runtime
+                                      "Filesystem access requested"
+                                      ("Allow access to " <> toText root
+                                          <> " for this session?")
+                                      0
+                                      [ ("Allow directory for this session", "")
+                                      , ("Deny", "")
+                                      ]
+                          Nothing ->
+                              withStdinPaused escPaused
+                                  (promptRootAccess useColor root)
       reportSessionError message =
           case fullscreen of
               Just runtime ->
@@ -404,7 +407,6 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     when (omitted > 0) $
                         emitUiEvent runtime
                             (UiSystemMessage (formatSkillOmission omitted))
-    policyRef <- newIORef policy
     managedLoopPublisher <-
         maybe
             (pure (const (pure ())))
