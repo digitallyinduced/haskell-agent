@@ -194,6 +194,19 @@ handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
     stateBeforeEvent <- get
+    imagePreviewRevisionBefore <-
+        liftIO $
+            readIORef
+                stateBeforeEvent.appRuntime.runtimeImagePreviewRevision
+    when
+        ( stateBeforeEvent.appTerminalFocus == TerminalUnfocused
+            && terminalInteractionImpliesFocus event
+        ) do
+        -- A key, paste, or pointer event can only come from the active
+        -- terminal. Recover when a tab transition omitted EvGainedFocus;
+        -- otherwise every interaction would keep mutating state invisibly.
+        noteTerminalFocusGained
+        resolveConversationFollow
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
     when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
@@ -216,8 +229,21 @@ handleEvent event = do
                 (+ 1)
     syncMotionDemand
     stateAfterMotionSync <- get
+    imagePreviewRevisionAfter <-
+        liftIO $
+            readIORef
+                stateAfterMotionSync.appRuntime.runtimeImagePreviewRevision
     when
         ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && eventMaySkipUnfocusedRedraw event
+            && imagePreviewRevisionBefore == imagePreviewRevisionAfter
+            && not
+                (userActionPending stateBeforeEvent
+                    /= userActionPending stateAfterMotionSync)
+            && not
+                (agentStructureRequiresUnfocusedRedraw
+                    stateBeforeEvent
+                    stateAfterMotionSync)
             && not
                 (completionRequiresRedraw
                     stateBeforeEvent.appUi
@@ -227,6 +253,77 @@ handleEvent event = do
         ) $
         continueWithoutRedraw
   where
+    -- Suppression is deliberately opt-in. continueWithoutRedraw is Brick's
+    -- final EventM action, so applying it to an unknown event can overwrite a
+    -- halt/suspend request or hide a new blocking/structural UI state. Only
+    -- known high-frequency and cosmetic events are safe to throttle.
+    eventMaySkipUnfocusedRedraw = \case
+        AppEvent appEvent ->
+            appEventMaySkipUnfocusedRedraw appEvent
+        VtyEvent V.EvLostFocus -> True
+        VtyEvent V.EvResize{} -> True
+        -- The patched backend represents pointer motion as a no-button mouse
+        -- release; it is not proof that the hidden terminal regained focus.
+        VtyEvent (V.EvMouseUp _ _ Nothing) -> True
+        MouseUp _ Nothing _ -> True
+        _ -> False
+
+    appEventMaySkipUnfocusedRedraw = \case
+        AppUi uiEvent ->
+            uiEventMaySkipUnfocusedRedraw uiEvent
+        AppUiBatch uiEvents ->
+            all uiEventMaySkipUnfocusedRedraw uiEvents
+        AppDictationPartial{} -> True
+        AppAgentSnapshot{} -> True
+        AppSetWindowTitle{} -> True
+        AppSyntaxHighlighterChanged -> True
+        AppHistoryLiveStarted -> True
+        AppConversationReflow -> True
+        AppSyncSubmittedImagePlacements -> True
+        AppMotionTick -> True
+        AppRecapPoll -> True
+        _ -> False
+
+    uiEventMaySkipUnfocusedRedraw = \case
+        UiLoop loopEvent ->
+            loopEventMaySkipUnfocusedRedraw loopEvent
+        _ -> False
+
+    loopEventMaySkipUnfocusedRedraw = \case
+        TextDelta{} -> True
+        ReasoningDelta{} -> True
+        ActivityUpdated{} -> True
+        ToolUpdated{} -> True
+        ToolOutputUpdated{} -> True
+        NativeAgentOutput{} -> True
+        _ -> False
+
+    agentStructureRequiresUnfocusedRedraw previous next =
+        previous.appAgentSelected /= next.appAgentSelected
+            || agentChromeSignature previous.appAgentEntries
+                /= agentChromeSignature next.appAgentEntries
+
+    -- Snapshot steps and conversations can update at streaming cadence. The
+    -- sorted chrome fields change only for low-rate lifecycle/layout updates.
+    agentChromeSignature entries =
+        sortOn id
+            [ ( entry.agentTarget
+              , entry.agentPath
+              , entry.agentStatus
+              , entry.agentModel
+              )
+            | entry <- entries
+            ]
+
+    terminalInteractionImpliesFocus = \case
+        MouseDown{} -> True
+        MouseUp _ (Just _) _ -> True
+        VtyEvent V.EvKey{} -> True
+        VtyEvent V.EvMouseDown{} -> True
+        VtyEvent (V.EvMouseUp _ _ (Just _)) -> True
+        VtyEvent V.EvPaste{} -> True
+        _ -> False
+
     isMotionTick = \case
         AppEvent AppMotionTick -> True
         _ -> False
@@ -412,6 +509,7 @@ handleEventInner event = case event of
     AppEvent (AppHistoryReset page) -> do
         modify' (resetHistoryPage page)
         invalidateCache
+        resolveConversationFollow
         queueConversationReflow
     AppEvent (AppHistoryLoaded request result) -> do
         state <- get
