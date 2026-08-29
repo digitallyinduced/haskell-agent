@@ -49,13 +49,6 @@ library
                     , Agent.Provider.Options
                     , Agent.ReasoningEffort
                     , Agent.Loop
-                    , Agent.MCP
-                    , Agent.MCP.Client
-                    , Agent.MCP.Elicitation
-                    , Agent.MCP.Fleet
-                    , Agent.MCP.Supervisor
-                    , Agent.MCP.Types
-                    , Agent.MCP.OAuth
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -151,20 +144,6 @@ benchmark streaming-text-bench
                     , text
                     , text-builder >= 1.0 && < 1.1
 
-benchmark mcp-startup-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          McpStartup.hs
-    ghc-options:      -O2
-    build-depends:    agent-core
-                    , base >= 4.14 && < 5
-                    , bytestring
-                    , directory
-                    , safe-exceptions
-                    , text
-                    , unix
-
 benchmark tool-scheduling-bench
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -223,8 +202,6 @@ test-suite agent-core-test
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
-                    , Agent.MCPSpec
-                    , Agent.MCP.OAuthSpec
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec

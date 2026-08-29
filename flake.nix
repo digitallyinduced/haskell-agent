@@ -193,6 +193,18 @@
                     ];
                 };
 
+                agentMcpSource = nix-filter.lib {
+                    root = ./packages/agent-mcp;
+                    include = [
+                        "src"
+                        "test"
+                        "benchmark"
+                        "agent-mcp.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentResponsesSource = nix-filter.lib {
                     root = ./packages/agent-responses;
                     include = [
@@ -372,6 +384,11 @@
                                 bun_1_4
                                 pkgs.ripgrep
                             ]);
+                        agent-mcp = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-mcp/package.nix { })
+                            {
+                                src = agentMcpSource;
+                            });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
