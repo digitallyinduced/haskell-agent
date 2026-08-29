@@ -167,6 +167,20 @@ spec = do
             first `shouldBe` ""
             first <> second `shouldSatisfy` Text.isInfixOf "hello world"
 
+        it "keeps lowercase multiword table headers reclassifiable" do
+            let (state1, first) =
+                    streamMarkdown "first name " emptyRenderState
+                (_state2, second) =
+                    streamMarkdown
+                        "| age\n--- | ---:\nalice smith | 42\nafter\n"
+                        state1
+                output = first <> second
+            first `shouldBe` ""
+            output `shouldSatisfy` Text.isInfixOf "first name"
+            output `shouldSatisfy` Text.isInfixOf "alice smith"
+            output `shouldSatisfy` Text.isInfixOf "─"
+            output `shouldSatisfy` (not . Text.isInfixOf "|")
+
     describe "summarizeToolCall" do
         it "uses English verbs and argument highlights" do
             summarizeToolCall (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")

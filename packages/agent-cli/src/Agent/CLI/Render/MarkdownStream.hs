@@ -19,7 +19,7 @@ import Agent.TUI.FencedCode
     )
 import qualified Agent.TUI.Markdown.Block as Block
 import Agent.TUI.TextWidth (splitTerminalGraphemeSuffix)
-import Data.Char (isDigit, isSpace, isUpper)
+import Data.Char (isDigit, isSpace)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -335,15 +335,13 @@ lineNeedsLookahead line =
                 || plausibleTableHeaderPrefix stripped
 
 -- Before the first pipe, a table header is indistinguishable from prose.
--- Retain a single cell label (including common title-cased multiword labels),
--- but release ordinary lowercase multiword prose promptly.
+-- Retain a single word and whitespace-terminated token prefixes so the next
+-- chunk can supply a delimiter without imposing casing or script assumptions.
+-- Once a second word is complete, ordinary prose can stream immediately.
 plausibleTableHeaderPrefix :: Text -> Bool
-plausibleTableHeaderPrefix stripped = case Text.words stripped of
-    [] -> True
-    [_] -> True
-    words_ -> all startsUpper words_
-  where
-    startsUpper word = maybe False (isUpper . fst) (Text.uncons word)
+plausibleTableHeaderPrefix stripped =
+    length (Text.words stripped) <= 1
+        || maybe False (isSpace . snd) (Text.unsnoc stripped)
 
 lineIsBlock :: Text -> Bool
 lineIsBlock line =
