@@ -208,19 +208,19 @@ spec = do
             formatReplStatusLine False Nothing "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 Nothing
-                `shouldBe` "  grok-4.6 · high · ask  1.2k in · 340 out"
+                `shouldBe` "  grok-4.6 · high · ask  1.2k ↓ · 340 ↑"
 
         it "appends last generation speed next to usage" do
             formatReplStatusLine False Nothing "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 (Just 42)
-                `shouldBe` "  grok-4.6 · high · ask  1.2k in · 340 out · 42 tok/s"
+                `shouldBe` "  grok-4.6 · high · ask  1.2k ↓ · 340 ↑ · 42 ◈/s"
 
         it "right-aligns session usage when the TTY is wide enough" do
             formatReplStatusLine False (Just 48) "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 Nothing
-                `shouldBe` "  grok-4.6 · high · ask        1.2k in · 340 out"
+                `shouldBe` "  grok-4.6 · high · ask           1.2k ↓ · 340 ↑"
 
         it "drops usage rather than wrapping when only the state fits" do
             formatReplStatusLine False (Just 24) "grok-4.6" "high" ReplModeNormal ""
@@ -359,43 +359,43 @@ spec = do
         it "omits empty totals" do
             formatTokenUsage emptyTokenUsage `shouldBe` ""
 
-        it "formats compact in/out counts" do
+        it "formats compact input/output counts with arrows" do
             formatTokenUsage TokenUsage
                 { inputTokens = 42
                 , outputTokens = 7
                 , cachedTokens = 0
-                } `shouldBe` "42 in · 7 out"
+                } `shouldBe` "42 ↓ · 7 ↑"
 
         it "includes cached tokens when present" do
             formatTokenUsage TokenUsage
                 { inputTokens = 1500
                 , outputTokens = 80
                 , cachedTokens = 1200
-                } `shouldBe` "1.5k in · 80 out · 1.2k cached"
+                } `shouldBe` "1.5k ↓ · 80 ↑ · 1.2k ↻"
 
         it "uses k/M suffixes" do
             formatTokenUsage TokenUsage
                 { inputTokens = 12500
                 , outputTokens = 1500000
                 , cachedTokens = 0
-                } `shouldBe` "13k in · 1.5M out"
+                } `shouldBe` "13k ↓ · 1.5M ↑"
 
     describe "formatTokensPerSecond" do
         it "uses one decimal below 10 and compact counts above" do
-            formatTokensPerSecond 0.04 `shouldBe` "<0.1 tok/s"
-            formatTokensPerSecond 4.2 `shouldBe` "4.2 tok/s"
-            formatTokensPerSecond 42 `shouldBe` "42 tok/s"
-            formatTokensPerSecond 12500 `shouldBe` "13k tok/s"
+            formatTokensPerSecond 0.04 `shouldBe` "<0.1 ◈/s"
+            formatTokensPerSecond 4.2 `shouldBe` "4.2 ◈/s"
+            formatTokensPerSecond 42 `shouldBe` "42 ◈/s"
+            formatTokensPerSecond 12500 `shouldBe` "13k ◈/s"
 
         it "marks character-derived rates as estimates" do
             formatEstimatedTokensPerSecond True 42
-                `shouldBe` "~42 tok/s"
+                `shouldBe` "~42 ◈/s"
             formatEstimatedTokensPerSecond False 42
-                `shouldBe` "42 tok/s"
+                `shouldBe` "42 ◈/s"
 
         it "joins usage and rate" do
             formatUsageWithRate emptyTokenUsage (Just 42)
-                `shouldBe` "42 tok/s"
+                `shouldBe` "42 ◈/s"
             formatUsageWithRate
                 TokenUsage
                     { inputTokens = 1200
@@ -403,7 +403,7 @@ spec = do
                     , cachedTokens = 0
                     }
                 (Just 42)
-                `shouldBe` "1.2k in · 340 out · 42 tok/s"
+                `shouldBe` "1.2k ↓ · 340 ↑ · 42 ◈/s"
 
 withTempDir :: String -> (FilePath -> IO a) -> IO a
 withTempDir prefix action = do
