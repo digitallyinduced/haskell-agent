@@ -173,9 +173,22 @@ isInside root path
     | otherwise =
         let relative = makeRelative root path
         in not (isAbsolute relative)
-            && case splitDirectories relative of
-                (first : _) | first == unsafeEncodeUtf ".." -> False
-                _ -> True
+            && staysWithinRoot (splitDirectories relative)
+  where
+    parent = unsafeEncodeUtf ".."
+    current = unsafeEncodeUtf "."
+
+    -- A missing path is intentionally kept lexical by 'resolveMissing'.
+    -- Track directory depth instead of checking only the first component:
+    -- e.g. @nested/../../outside@ escapes even though it starts safely.
+    staysWithinRoot = go (0 :: Int)
+      where
+        go _ [] = True
+        go depth (component : rest)
+            | component == current = go depth rest
+            | component == parent =
+                depth > 0 && go (depth - 1) rest
+            | otherwise = go (depth + 1) rest
 
 -- | Present a resolved filesystem path relative to the tool workspace.
 displayPathInWorkspace :: ToolEnv -> OsPath -> IO Text
