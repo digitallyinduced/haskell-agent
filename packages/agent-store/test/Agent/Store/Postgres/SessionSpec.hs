@@ -161,6 +161,28 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected conversation search: " <> show other)
+                            setSessionArchived pool "session-2" True now
+                                `shouldReturn` Right True
+                            searchNativeConversations pool "second" 10 >>= \case
+                                Right [match] -> do
+                                    match.nativeSearchSessionId
+                                        `shouldBe` "session-2"
+                                    match.nativeSearchArchived `shouldBe` True
+                                    match.nativeSearchTurnIndex `shouldBe` Nothing
+                                other ->
+                                    expectationFailure
+                                        ("unexpected native metadata search: "
+                                            <> show other)
+                            searchNativeConversations pool "batch" 10 >>= \case
+                                Right [match] -> do
+                                    match.nativeSearchSessionId
+                                        `shouldBe` "session-2"
+                                    match.nativeSearchTurnIndex `shouldBe` Just 0
+                                    match.nativeSearchRole `shouldBe` Just "user"
+                                other ->
+                                    expectationFailure
+                                        ("unexpected native turn search: "
+                                            <> show other)
                             deleteSession pool "session-1" now
                                 `shouldReturn` Right True
                             events <- loadSessionEvents pool "session-1"
