@@ -16,6 +16,7 @@ module Agent.CLI.Auth
     , hasOpenAiAuth
     , loadAuth
     , loadAuthForAccount
+    , loadOpenAiDictationAuth
     , managedAuthSelectionId
     , managedGrokTokenProvider
     , ExternalGrokLoaded(..)
@@ -43,6 +44,7 @@ import Agent.CLI.Auth.Grok
     )
 import Agent.CLI.Auth.OpenAI
     ( loadOpenAi
+    , loadOpenAiDictationAuth
     , openAiAuthStateChanged
     , preferredOpenAiTokenProvider
     )
@@ -373,8 +375,14 @@ hasOpenAiAuth = do
     envJson <- lookupNonEmpty "CODEX_AUTH_JSON"
     envToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     home <- getHomeDirectory
+    configuredCodexHome <- lookupNonEmpty "CODEX_HOME"
+    let codexDirectory =
+            maybe
+                (home </> unsafeEncodeUtf ".codex")
+                (unsafeEncodeUtf . Text.unpack)
+                configuredCodexHome
     file <- doesFileExist
-        (home </> unsafeEncodeUtf ".codex" </> unsafeEncodeUtf "auth.json")
+        (codexDirectory </> unsafeEncodeUtf "auth.json")
     managed <- hasManagedProvider OpenAIProvider
     pure (isJust envJson || isJust envToken || file || managed)
 

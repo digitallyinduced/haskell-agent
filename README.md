@@ -84,8 +84,8 @@ have to be.
 - **Guided agent workflows:** use plan mode, reusable skills, and scoped learned
   guidance for repeatable tasks and project or user preferences.
 - **Multimodal input and live voice dictation:** attach images and files, or
-  press `Ctrl+R` on macOS to stream microphone audio to xAI and insert the live
-  transcript into the prompt.
+  press `Ctrl+R` on macOS to stream microphone audio to OpenAI or xAI and
+  insert the transcript into the prompt.
 - **Telegram access:** run a durable, allowlisted Telegram gateway with
   per-conversation sessions, multimodal messages, approvals, retries, and
   bounded concurrent processing.
@@ -209,9 +209,18 @@ Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
 
 Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop
 (or `Esc` to cancel). Recording stays in the TUI; it does not suspend or close
-the session. On macOS, audio is streamed to xAI and the live transcript is
-inserted at the cursor. Dictation uses the configured xAI credentials; set
-`XAI_STT_LANGUAGE` to override the default `en`.
+the session. On macOS, the resulting transcript is inserted at the cursor.
+Dictation prefers OpenAI credentials. ChatGPT/Codex OAuth uses the
+subscription-backed streaming protocol used by the official desktop app and
+falls back to its buffered ChatGPT transcription route with the same recording
+if streaming fails. API keys use the public OpenAI Realtime API. Both paths can
+update the composer while recording. Subscription auth is preferred when both
+are configured. Credentials can come from
+`CODEX_ACCESS_TOKEN`, `CODEX_AUTH_JSON`, `$CODEX_HOME/auth.json` (defaulting to
+`~/.codex/auth.json`),
+`OPENAI_API_KEY`, `CODEX_API_KEY`, or a managed OpenAI account. Without an
+OpenAI credential, dictation falls back to the configured xAI credentials; set
+`XAI_STT_LANGUAGE` to override xAI's default `en`.
 
 ### Claude Code subscription
 

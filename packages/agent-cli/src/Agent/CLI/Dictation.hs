@@ -1,4 +1,4 @@
--- | Terminal microphone recording and xAI streaming transcription.
+-- | Terminal microphone recording and provider transcription.
 module Agent.CLI.Dictation
     ( DictationControl(..)
     , DictationResult(..)
@@ -8,7 +8,15 @@ module Agent.CLI.Dictation
     , transcribeAudio
     ) where
 
-import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Auth
+    ( LoadedAuth(..)
+    , loadAuth
+    , loadOpenAiDictationAuth
+    )
+import Agent.OpenAI.Transcription
+    ( openAITranscriptionSampleRate
+    , transcribePcmWithOpenAI
+    )
 import Agent.Provider (Provider(XAIProvider))
 import Agent.XAI.Transcription
     ( transcribeAudioWithXAI
@@ -69,7 +77,7 @@ data DictationResult
     | DictationFailed !Text
     deriving (Eq, Show)
 
--- | Stream the default microphone to xAI until Enter and return the transcript.
+-- | Stream the default microphone until Enter and return the transcript.
 dictate :: IO Text
 dictate = do
     Text.hPutStrLn stderr "● Starting dictation…"
@@ -88,8 +96,8 @@ dictate = do
         DictationTranscript transcript -> pure transcript
         DictationFailed err -> fail (Text.unpack err)
 
--- | Stream microphone audio until the caller signals stop. Partial transcripts
--- are delivered through the control callback so a TUI can stay on-screen.
+-- | Record microphone audio until the caller signals stop. Providers that
+-- stream partial transcripts deliver them through the control callback.
 dictateWith :: DictationControl -> IO DictationResult
 dictateWith control =
     try run >>= \case
@@ -100,19 +108,35 @@ dictateWith control =
   where
     run = do
         requireExecutable "ffmpeg"
-        loadAuth (Just XAIProvider) >>= \case
-            Left err ->
-                pure (DictationFailed err)
-            Right loaded -> do
-                result <-
-                    transcribePcmWithXAI
+        loadOpenAiDictationAuth >>= \case
+            Just loaded ->
+                finish =<<
+                    transcribePcmWithOpenAI
                         loaded.loadedTokenProvider
-                        (streamMicrophone control.dictationWaitForStop)
+                        (streamMicrophone
+                            openAITranscriptionSampleRate
+                            control.dictationWaitForStop)
                         control.dictationOnTranscript
-                pure $ case result of
-                    Left err -> DictationFailed (Text.pack (show err))
-                    Right transcript ->
-                        DictationTranscript (Text.strip transcript)
+            Nothing ->
+                loadAuth (Just XAIProvider) >>= \case
+                    Left err ->
+                        pure $ DictationFailed $
+                            err
+                                <> " Configure ChatGPT/Codex OAuth or an OpenAI \
+                                   \API key to use OpenAI dictation."
+                    Right loaded ->
+                        finish =<<
+                            transcribePcmWithXAI
+                                loaded.loadedTokenProvider
+                                (streamMicrophone
+                                    16_000
+                                    control.dictationWaitForStop)
+                                control.dictationOnTranscript
+    finish = \case
+        Left err ->
+            pure (DictationFailed (Text.pack (show err)))
+        Right transcript ->
+            pure (DictationTranscript (Text.strip transcript))
 
 -- | Transcribe an existing audio file using the configured Grok/xAI
 -- subscription or API-key credential.
@@ -137,8 +161,8 @@ requireExecutable command =
                 command
                     <> " is required for dictation but was not found on PATH"
 
-streamMicrophone :: IO () -> (BS.ByteString -> IO ()) -> IO ()
-streamMicrophone waitForStop sendAudio =
+streamMicrophone :: Int -> IO () -> (BS.ByteString -> IO ()) -> IO ()
+streamMicrophone sampleRate waitForStop sendAudio =
     bracket start stop \(input, output, process) ->
         withAsync waitForStop \stopKey ->
             withAsync (pump output) \audioPump ->
@@ -160,7 +184,7 @@ streamMicrophone waitForStop sendAudio =
                                         <> ")"
   where
     pump output = do
-        bytes <- BS.hGetSome output 3200
+        bytes <- BS.hGetSome output (sampleRate * 2 `div` 10)
         unless (BS.null bytes) do
             sendAudio bytes
             pump output
@@ -173,7 +197,7 @@ streamMicrophone waitForStop sendAudio =
                     , "-f", "avfoundation"
                     , "-i", ":default"
                     , "-ac", "1"
-                    , "-ar", "16000"
+                    , "-ar", show sampleRate
                     , "-c:a", "pcm_s16le"
                     , "-f", "s16le"
                     , "pipe:1"
