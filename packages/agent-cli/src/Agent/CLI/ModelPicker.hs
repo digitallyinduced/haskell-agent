@@ -1,6 +1,7 @@
 -- | Interactive TTY model picker for bare @/model@.
 module Agent.CLI.ModelPicker
     ( pickModel
+    , pickModelWithOptions
     , formatCatalogListing
     , renderPickerFrame
     , decodePickerKey
@@ -8,7 +9,7 @@ module Agent.CLI.ModelPicker
 
 import Agent.CLI.Models
 import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.Picker (PickerKey(..), runOverlay)
+import Agent.CLI.Picker (PickerKey(..), runOverlayWithDecoder)
 import qualified Agent.CLI.Picker as Picker
 import Agent.Dialect (DialectId, dialectSlug)
 import Agent.CLI.Style
@@ -20,6 +21,7 @@ import Agent.CLI.Style
     )
 import Agent.Provider (Provider)
 import Control.Monad (join)
+import Data.Char (isPrint)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -27,7 +29,13 @@ import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 
 -- | Decode one keypress (including CSI arrow sequences) into a picker event.
 decodePickerKey :: String -> Maybe PickerEvent
-decodePickerKey raw = toEvent <$> Picker.decodePickerKey raw
+decodePickerKey raw = toEvent <$> decodeModelPickerKey raw
+
+decodeModelPickerKey :: String -> Maybe PickerKey
+decodeModelPickerKey raw = case raw of
+    [c]
+        | isPrint c -> Just (PickerKeyChar c)
+    _ -> Picker.decodePickerKey raw
 
 toEvent :: PickerKey -> PickerEvent
 toEvent = \case
@@ -50,10 +58,32 @@ pickModel
     -> DialectId
     -> IO (Maybe ModelOption)
 pickModel catalog color connectionId provider current currentDialect = do
+    pickModelWithOptions
+        catalog
+        []
+        color
+        connectionId
+        provider
+        current
+        currentDialect
+
+-- | Open the picker with extra runtime-discovered entries appended to the
+-- configured catalog.
+pickModelWithOptions
+    :: ModelCatalog
+    -> [ModelOption]
+    -> Bool
+    -> Text
+    -> Provider
+    -> Text
+    -> DialectId
+    -> IO (Maybe ModelOption)
+pickModelWithOptions
+        catalog discovered color connectionId provider current currentDialect = do
     isTty <- hIsTerminalDevice stdin
     state0 <-
-        initialPickerStateResolved
-            catalog connectionId provider current currentDialect
+        initialPickerStateResolvedWith
+            catalog discovered connectionId provider current currentDialect
     if not isTty
         then do
             Text.hPutStrLn stderr
@@ -62,7 +92,12 @@ pickModel catalog color connectionId provider current currentDialect = do
             hFlush stderr
             pure Nothing
         else do
-            result <- runOverlay (renderPickerFrame color) step state0
+            result <-
+                runOverlayWithDecoder
+                    decodeModelPickerKey
+                    (renderPickerFrame color)
+                    step
+                    state0
             pure (join result)
   where
     step key state = applyPickerEvent (toEvent key) state
@@ -124,6 +159,13 @@ renderPickerFrame color state =
     let visible = visibleOptions state
         n = length visible
         idx = if n == 0 then 0 else min state.pickerIndex (n - 1)
+        windowStart =
+            max 0
+                $ min
+                    (max 0 (n - pickerViewportSize))
+                    (idx - pickerViewportSize `div` 2)
+        window =
+            take pickerViewportSize (drop windowStart visible)
         header =
             rolePrompt color "model"
                 <> roleMuted color
@@ -139,19 +181,31 @@ renderPickerFrame color state =
                     <> roleWarn color state.pickerFilter
         body = case visible of
             [] -> [roleMuted color "(no matches)"]
-            opts ->
+            _ ->
                 zipWith
                     (\i opt -> renderRow color (i == idx)
                         state.pickerConnectionId
                         state.pickerCurrent
                         state.pickerCurrentDialect
                         opt)
-                    [0 ..]
-                    opts
+                    [windowStart ..]
+                    window
+        position
+            | n == 0 = roleMuted color "0 models"
+            | otherwise =
+                roleMuted color
+                    (Text.pack (show (idx + 1))
+                        <> "/"
+                        <> Text.pack (show n)
+                        <> " models")
         footer =
             roleMuted color
-                "↑↓/jk or scroll · click/enter · esc/q · type to filter"
-    in Text.intercalate "\n" (header : filterLine : body <> [footer])
+                "↑↓ or scroll · click/enter · esc · type to filter"
+    in Text.intercalate "\n"
+        (header : filterLine : body <> [position, footer])
+
+pickerViewportSize :: Int
+pickerViewportSize = 12
 
 renderRow
     :: Bool

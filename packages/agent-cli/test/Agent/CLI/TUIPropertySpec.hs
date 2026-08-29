@@ -610,6 +610,8 @@ applyAction action harness =
                                 , choiceBody = body
                                 , choiceIndex = index
                                 , choiceRows = rows
+                                , choiceSearch = False
+                                , choiceQuery = ""
                                 , choiceCloseOnTurnEnd = False
                                 }
                         , appTextPrompt = Nothing

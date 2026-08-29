@@ -60,6 +60,8 @@ import Agent.CLI.TUI.Types
     , AppState(appConversationReflowQueued)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , choiceVisibleRows
+    , selectedChoiceIndex
     , FullscreenRuntime(..)
     , HistoryCommit(..)
     , Name(..)
@@ -378,6 +380,29 @@ spec = do
                 continuing
                 (choiceOverlay True)
                 `shouldBe` False
+
+    describe "searchable choice rows" do
+        let searchable = (choiceOverlay False)
+                { choiceSearch = True
+                , choiceQuery = "claude"
+                , choiceRows =
+                    [ ("gpt-5.6", "Vendor: OpenAI")
+                    , ("anthropic/claude-sonnet", "Anthropic")
+                    , ("google/gemini", "Google")
+                    ]
+                }
+        it "matches title and detail case-insensitively" do
+            choiceVisibleRows searchable
+                `shouldBe` [(1, ("anthropic/claude-sonnet", "Anthropic"))]
+            choiceVisibleRows searchable { choiceQuery = "VENDOR" }
+                `shouldBe` [(0, ("gpt-5.6", "Vendor: OpenAI"))]
+        it "returns the source index after filtering" do
+            selectedChoiceIndex searchable
+                `shouldBe` Just 1
+        it "returns no selection when a query has no matches" do
+            selectedChoiceIndex
+                searchable { choiceQuery = "missing" }
+                `shouldBe` Nothing
 
     describe "prompt model refresh" do
         it "preserves the live draft and cursor across a provider restart" do
@@ -1521,6 +1546,8 @@ choiceOverlay closeOnTurnEnd = ChoiceOverlay
     , choiceBody = ""
     , choiceIndex = 0
     , choiceRows = [("one", "")]
+    , choiceSearch = False
+    , choiceQuery = ""
     , choiceCloseOnTurnEnd = closeOnTurnEnd
     }
 

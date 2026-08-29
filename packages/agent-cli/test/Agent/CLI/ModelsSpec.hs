@@ -98,6 +98,34 @@ spec = do
                     , ClaudeCodeProvider
                     ]
 
+        it "merges live models without replacing configured metadata" do
+            let duplicate =
+                    (rawModelOption OpenRouterProvider "stealth/ox-alpha")
+                        { modelLabel = Just "live duplicate" }
+                discovered =
+                    (rawModelOption OpenRouterProvider "qwen/example-new")
+                        { modelLabel = Just "OpenRouter live" }
+            state <-
+                initialPickerStateResolvedWith
+                    catalog
+                    [duplicate, discovered]
+                    "openrouter"
+                    OpenRouterProvider
+                    "stealth/ox-alpha"
+                    GenericResponsesDialect
+            let matching model =
+                    filter
+                        ((== model) . (.modelTarget.targetModelId))
+                        state.pickerAll
+            length (matching "stealth/ox-alpha") `shouldBe` 1
+            fmap (.modelLabel) (listToMaybe (matching "stealth/ox-alpha"))
+                `shouldBe`
+                    Just
+                        (Just
+                            "default · frontier · free · coding · 1M context")
+            fmap (.modelLabel) (listToMaybe (matching "qwen/example-new"))
+                `shouldBe` Just (Just "OpenRouter live")
+
     describe "modelTargetRequiresRebuild" do
         let sameDialect =
                 testOption OpenRouterProvider "openrouter"

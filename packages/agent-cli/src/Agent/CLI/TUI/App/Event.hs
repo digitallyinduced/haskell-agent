@@ -677,6 +677,28 @@ handleEventInner event = case event of
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
+                    , choiceSearch = False
+                    , choiceQuery = ""
+                    , choiceCloseOnTurnEnd = False
+                    }
+                , appChoiceReply = Just (atomically . putTMVar reply)
+                , appAgentHover = Nothing
+                }
+        vScrollToBeginning (viewportScroll OverlayViewport)
+    AppEvent (AppAskFilterChoice title initial rows reply) -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
+        modify' \state ->
+            state
+                { appChoice = Just ChoiceOverlay
+                    { choicePresentation = ChoiceDialog
+                    , choiceTitle = title
+                    , choiceBody = ""
+                    , choiceIndex =
+                        max 0 (min (max 0 (length rows - 1)) initial)
+                    , choiceRows = rows
+                    , choiceSearch = True
+                    , choiceQuery = ""
                     , choiceCloseOnTurnEnd = False
                     }
                 , appChoiceReply = Just (atomically . putTMVar reply)
