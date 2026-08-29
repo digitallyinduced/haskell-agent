@@ -6,7 +6,7 @@ import Agent.FileRetry
     , retryOnFileBusy
     , writeLazyFileAtomically
     )
-import System.OsPath (unsafeEncodeUtf)
+import System.OsPath (equalFilePath, unsafeEncodeUtf)
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
@@ -28,7 +28,12 @@ import Agent.Tools.OutputArtifact
     ( OutputArtifact(..)
     , readOutputArtifact
     )
-import Agent.Tools.Types (ToolEnv(..), defaultToolEnv, setToolSessionTmp)
+import Agent.Tools.Types
+    ( ToolEnv(..)
+    , defaultToolEnv
+    , setToolRootAccessRequest
+    , setToolSessionTmp
+    )
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception.Safe (bracket, tryIO)
@@ -213,6 +218,45 @@ spec = describe "Agent.Tools.IO" do
             resolveUnderCwd env
                 (fromFilePath (dir </> "unrelated" </> "file.txt"))
                 >>= (`shouldSatisfy` isLeft)
+
+    it "requests and remembers approval for an escaped filesystem root" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                outside = dir </> "outside"
+                target = outside </> "file.txt"
+            createDirectory workspace
+            createDirectory outside
+            writeFile target "approved"
+            env <- defaultToolEnv (fromFilePath workspace)
+            requests <- newIORef []
+            setToolRootAccessRequest env $ Just \root -> do
+                modifyIORef' requests (<> [root])
+                pure True
+            resolveUnderCwd env (fromFilePath target)
+                `shouldReturn` Right (fromFilePath target)
+            readIORef requests `shouldReturn` [fromFilePath outside]
+            roots <- readIORef env.toolAllowedRoots
+            roots `shouldSatisfy` any (equalFilePath (fromFilePath outside))
+            resolveUnderCwd env (fromFilePath target)
+                `shouldReturn` Right (fromFilePath target)
+            readIORef requests `shouldReturn` [fromFilePath outside]
+
+    it "keeps rejecting an escaped root when access is denied" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                outside = dir </> "outside"
+                target = outside </> "file.txt"
+            createDirectory workspace
+            createDirectory outside
+            writeFile target "denied"
+            env <- defaultToolEnv (fromFilePath workspace)
+            requests <- newIORef []
+            setToolRootAccessRequest env $ Just \root -> do
+                modifyIORef' requests (<> [root])
+                pure False
+            result <- resolveUnderCwd env (fromFilePath target)
+            result `shouldSatisfy` isLeft
+            readIORef requests `shouldReturn` [fromFilePath outside]
 
     it "rejects symlink escapes from an additional filesystem root" do
         withTempDir \dir -> do

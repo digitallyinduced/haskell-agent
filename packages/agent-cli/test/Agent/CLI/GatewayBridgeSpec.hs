@@ -6,6 +6,7 @@ import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.Loop (LoopEvent(..), defaultLoopDispatch)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
+import Agent.Json (rawJsonBytes)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , dispatchToolCall
@@ -25,6 +26,7 @@ import System.Directory
     , removePathForcibly
     )
 import System.FilePath ((</>), takeExtension)
+import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
@@ -78,6 +80,26 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     , bridgeResponseError = Nothing
                     }
                 wait running `shouldReturn` Just PermissionAllowOnce
+
+    it "uses the bridge for filesystem root access choices" $
+        withBridgeRequest \request -> do
+            let root = "/tmp/agent-root"
+            withAsync
+                (requestManagedRootAccess request (unsafeEncodeUtf root))
+                \running -> do
+                    bridgeRequest <- waitForBridgeRequest request
+                    bridgeRequest.bridgeRequestKind
+                        `shouldBe` "filesystem_access"
+                    rawJsonBytes bridgeRequest.bridgeRequestPayload
+                        `shouldBe` "{\"path\":\"/tmp/agent-root\"}"
+                    writeManagedBridgeResponse request ManagedBridgeResponse
+                        { bridgeResponseVersion = 1
+                        , bridgeResponseId = bridgeRequest.bridgeRequestId
+                        , bridgeResponseOk = True
+                        , bridgeResponseResult = Just (String "allow")
+                        , bridgeResponseError = Nothing
+                        }
+                    wait running `shouldReturn` True
 
     it "publishes accumulated reasoning summaries and response text" $
         withBridgeRequest \request -> do

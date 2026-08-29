@@ -122,6 +122,14 @@ approvalRequestDecoder = Hermes.object $
         <$> Hermes.atKey "tool_name" Hermes.text
         <*> Hermes.atKey "arguments" Hermes.text
 
+data FilesystemAccessRequest = FilesystemAccessRequest
+    { filesystemAccessPath :: !Text
+    }
+
+filesystemAccessRequestDecoder :: Hermes.Decoder FilesystemAccessRequest
+filesystemAccessRequestDecoder = Hermes.object $
+    FilesystemAccessRequest <$> Hermes.atKey "path" Hermes.text
+
 data AllowlistRequest = AllowlistRequest
     { allowlistQuery :: !(Maybe Text)
     , allowlistUserId :: !(Maybe Integer)
@@ -294,6 +302,14 @@ processBridgeRequest env request =
                         [ ("Allow once", "allow_once")
                         , ("Always this tool", "allow_tool")
                         , ("Allow all", "allow_all")
+                        , ("Deny", "deny")
+                        ]
+            "filesystem_access" ->
+                withPayload filesystemAccessRequestDecoder current \payload ->
+                    registerChoice env current
+                        ("Allow access to " <> payload.filesystemAccessPath
+                            <> " for this session?")
+                        [ ("Allow directory for this session", "allow")
                         , ("Deny", "deny")
                         ]
             "allow_user" ->
