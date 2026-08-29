@@ -100,6 +100,31 @@ int ha_gateway_abi_smoke(void) {
     return 0;
 }
 
+int ha_mcp_admin_abi_smoke(void) {
+    static const uint8_t arg[] = "--stdio";
+    static const uint8_t key[] = "TOKEN";
+    static const uint8_t secret[] = "not-returned";
+    const ha_utf8_slice arguments[] = {
+        {.bytes = arg, .length = sizeof(arg) - 1},
+    };
+    const ha_mcp_env_entry environment[] = {
+        {
+            .key = {.bytes = key, .length = sizeof(key) - 1},
+            .value = {.bytes = secret, .length = sizeof(secret) - 1},
+        },
+    };
+    if (offsetof(ha_utf8_slice, bytes) != 0
+            || offsetof(ha_utf8_slice, length) != sizeof(const uint8_t *)
+            || sizeof(ha_mcp_env_entry) != 2 * sizeof(ha_utf8_slice)) {
+        return 1;
+    }
+    if (arguments[0].length != 7 || environment[0].key.length != 5
+            || environment[0].value.length != 12) {
+        return 2;
+    }
+    return 0;
+}
+
 static void image_stage_callback(void *context, const uint8_t *bytes,
                                  size_t length) {
     (void)context;
