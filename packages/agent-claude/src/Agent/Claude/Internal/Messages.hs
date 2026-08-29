@@ -2,6 +2,7 @@
 -- provider-neutral events expected by the harness.
 module Agent.Claude.Internal.Messages
     ( CompletedClaudeTurn(..)
+    , ClaudeLiveEvent(..)
     , ClaudeEventState
     , emptyClaudeEventState
     , claudeEventStateHasActivity
@@ -9,6 +10,7 @@ module Agent.Claude.Internal.Messages
     , streamClaudeProgress
     , streamClaudeMessage
     , remainingClaudeEvents
+    , assistantMessageItem
     ) where
 
 import Agent.Loop (LoopEvent(..))
@@ -23,7 +25,11 @@ import Agent.Responses.Types
     ( FunctionCall(..)
     , FunctionCallOutput(..)
     , ItemStatus(..)
+    , MessageContent(..)
+    , ResponseContentPart(..)
     , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -61,11 +67,24 @@ import qualified Data.Text.Encoding as TextEncoding
 data CompletedClaudeTurn = CompletedClaudeTurn
     { sessionId :: !Text
     , assistantText :: !(Maybe Text)
-    , events :: ![LoopEvent]
+    -- | Every canonical top-level record in wire order. Completion replays
+    -- whatever 'streamClaudeMessage' has not already exposed.
+    , liveEvents :: ![ClaudeLiveEvent]
     , tokenUsage :: !Usage
     , cumulativeModelUsage :: !(Maybe Usage)
-    , toolItems :: ![ResponseItem]
+    -- | Host transcript items for this turn in wire order: assistant text
+    -- interleaved with tool calls and outputs, always ending in at least
+    -- one assistant message.
+    , turnItems :: ![ResponseItem]
     } deriving (Eq, Show)
+
+-- | Kind of the most recent streamed delta since the last tool start. The
+-- renderer extends the current block for consecutive deltas of one kind, so
+-- separate wire blocks need an explicit paragraph break between them.
+data LiveDeltaKind
+    = LiveTextDelta
+    | LiveThinkingDelta
+    deriving (Eq, Show)
 
 data ClaudeEventState = ClaudeEventState
     { startedToolCalls :: !(Set Text)
@@ -74,31 +93,53 @@ data ClaudeEventState = ClaudeEventState
     , toolMessageIds :: !(Map.Map Text [Text])
     , warnedUnknownTypes :: !(Set Text)
     , nativeAgentCalls :: !(Map.Map Text ToolCall)
+    -- | Wire UUIDs of assistant records whose text or thinking is already
+    -- displayed.
+    , streamedMessageIds :: !(Set Text)
+    , lastDelta :: !(Maybe LiveDeltaKind)
+    -- | Set after displayed text was retracted: the attempt has been
+    -- discarded, so nothing more is exposed live and completion replays the
+    -- surviving records in order.
+    , replayAtCompletion :: !Bool
     } deriving (Eq, Show)
 
 emptyClaudeEventState :: ClaudeEventState
 emptyClaudeEventState =
     ClaudeEventState
-        Set.empty Map.empty Set.empty Map.empty Set.empty Map.empty
+        { startedToolCalls = Set.empty
+        , startedToolDetails = Map.empty
+        , finishedToolCalls = Set.empty
+        , toolMessageIds = Map.empty
+        , warnedUnknownTypes = Set.empty
+        , nativeAgentCalls = Map.empty
+        , streamedMessageIds = Set.empty
+        , lastDelta = Nothing
+        , replayAtCompletion = False
+        }
 
 claudeEventStateHasActivity :: ClaudeEventState -> Bool
 claudeEventStateHasActivity state =
     not (Set.null state.startedToolCalls)
 
--- | Expose completed top-level tool messages as soon as Claude Code emits
--- them. In particular, its @Task@ tool remains in flight while a native
--- subagent runs, so buffering this event until the final result leaves the UI
--- blank for the entire child-agent lifetime.
+-- | Expose completed top-level records as soon as Claude Code emits them.
+-- Claude Code writes one assistant record per content block and its final
+-- @result@ carries only the last text block, so text and thinking must be
+-- shown as they arrive or everything the model said before its last tool
+-- call is lost. Tools are exposed incrementally by stable call id; in
+-- particular the @Task@ tool remains in flight while a native subagent runs,
+-- so buffering it until the final result leaves the UI blank for the entire
+-- child-agent lifetime.
 streamClaudeMessage
     :: ClaudeEventState
     -> Message
     -> (ClaudeEventState, [LoopEvent])
 streamClaudeMessage state message
     | messageHasParentToolUseId message = (state, [])
+    | state.replayAtCompletion = (state, [])
     | otherwise =
-        let toolEvents = messageToolEvents message
+        let toolEvents = messageLiveEvents message
             (nextState, events) =
-                advanceToolEvents state toolEvents
+                advanceLiveEvents state toolEvents
             messageIds =
                 maybe [] (\identifier -> [identifier]) (messageUuid message)
             withIds =
@@ -129,10 +170,20 @@ streamClaudeProgress
 streamClaudeProgress state = \case
     QueryMessageObserved QueryTopLevel message ->
         let (next, events) = streamClaudeMessage state message
-        in (next, events <> nativeLifecycleEvents state events)
+        in (next, events <> nativeLifecycleEvents next.startedToolDetails events)
     QueryMessageObserved (QueryNested parent) message ->
         nestedNativeEvents state parent message
     QueryMessagesRetracted scope identifiers
+        | scope == Nothing || scope == Just QueryTopLevel
+        , any (`Set.member` state.streamedMessageIds) identifiers ->
+            -- Displayed text has no per-block retraction event. Discard the
+            -- whole attempt and replay the surviving records at completion.
+            ( emptyClaudeEventState
+                { warnedUnknownTypes = state.warnedUnknownTypes
+                , replayAtCompletion = True
+                }
+            , [ResponseAttemptDiscarded]
+            )
         | scope == Nothing || scope == Just QueryTopLevel ->
             let calls =
                     [ callId
@@ -161,8 +212,11 @@ streamClaudeProgress state = \case
     QueryMessagesRetracted _ _ ->
         (state, [])
 
-nativeLifecycleEvents :: ClaudeEventState -> [LoopEvent] -> [LoopEvent]
-nativeLifecycleEvents state = concatMap \case
+nativeLifecycleEvents
+    :: Map.Map Text ToolCall
+    -> [LoopEvent]
+    -> [LoopEvent]
+nativeLifecycleEvents startedToolDetails = concatMap \case
     ToolStarted call
         | isNativeAgentName call.name ->
             [NativeAgentStarted
@@ -171,7 +225,7 @@ nativeLifecycleEvents state = concatMap \case
                 (nativeAgentLabel call)
                 (nativeAgentModel call)]
     ToolFinished result
-        | Just call <- Map.lookup result.callId state.startedToolDetails
+        | Just call <- Map.lookup result.callId startedToolDetails
         , isNativeAgentName call.name ->
             [NativeAgentFinished
                 result.callId
@@ -190,7 +244,7 @@ nestedNativeEvents state parent message =
     case parent of
         Nothing -> (state, [])
         Just identifier ->
-            let tools = messageToolEvents message
+            let tools = messageLiveEvents message
                 (nextState, childLifecycle) =
                     foldl' (\(current, events) -> \case
                     ClaudeToolStarted call
@@ -308,41 +362,31 @@ unknownToolLikeType = \case
             ]
     _ -> Nothing
 
--- | Emit anything not already exposed by 'streamClaudeMessage'. Assistant
--- text remains completion-buffered because the SDK can supersede messages;
--- tool lifecycle events are safe to expose incrementally by stable call id.
+-- | Emit anything not already exposed by 'streamClaudeMessage', in wire
+-- order. After a discarded attempt this replays the whole surviving turn.
+-- When Claude Code produced no text blocks at all, the result record's text
+-- is the only reply and is exposed here.
 remainingClaudeEvents
     :: ClaudeEventState
     -> CompletedClaudeTurn
     -> [LoopEvent]
 remainingClaudeEvents state completed =
-    reverse eventsRev <> textEvents
+    events
+        <> nativeLifecycleEvents next.startedToolDetails events
+        <> resultText
   where
-    (_, eventsRev) = foldl' step (state, []) completed.events
-    textEvents =
-        [event | event@TextDelta{} <- completed.events]
-    step (current, events) event = case event of
-        ToolStarted call
-            | Set.member call.callId current.startedToolCalls ->
-                (current, events)
-            | otherwise ->
-                ( current
-                    { startedToolCalls =
-                        Set.insert call.callId current.startedToolCalls
-                    }
-                , event : events
-                )
-        ToolFinished result
-            | Set.member result.callId current.finishedToolCalls ->
-                (current, events)
-            | otherwise ->
-                ( current
-                    { finishedToolCalls =
-                        Set.insert result.callId current.finishedToolCalls
-                    }
-                , event : events
-                )
-        _ -> (current, events)
+    (next, events) =
+        advanceLiveEvents
+            state { replayAtCompletion = False }
+            completed.liveEvents
+    resultText =
+        [ TextDelta text
+        | not (any isTextEvent completed.liveEvents)
+        , Just text <- [completed.assistantText]
+        ]
+    isTextEvent = \case
+        ClaudeText{} -> True
+        _ -> False
 
 interpretClaudeTurn
     :: [Message]
@@ -353,25 +397,21 @@ interpretClaudeTurn messages result = do
             filter (not . messageHasParentToolUseId) messages
     validateSubscriptionSource visibleMessages
     let
-        bufferedAssistantText =
-            Text.concat
-                [ text
-                | MessageAssistant assistant <- visibleMessages
-                , assistant.error == Nothing
-                , TextBlock{text} <- assistant.content
-                ]
+        liveEvents = concatMap messageLiveEvents visibleMessages
+        -- Claude Code's result text is only the last text block; the
+        -- canonical records carry everything the model said this turn.
         assistantText =
             firstNonEmptyText
-                [ maybe "" id result.result
-                , bufferedAssistantText
+                [ Text.intercalate
+                    "\n\n"
+                    [text | ClaudeText _ text <- liveEvents]
+                , fromMaybe "" result.result
                 ]
-        toolEvents =
-            canonicalToolEvents
-                (concatMap messageToolEvents visibleMessages)
-        toolItems = canonicalToolItems visibleMessages
-        events =
-            toolEvents
-                <> maybe [] (pure . TextDelta) assistantText
+        canonicalItems = canonicalTurnItems visibleMessages
+        turnItems
+            | any isAssistantItem canonicalItems = canonicalItems
+            | otherwise =
+                canonicalItems <> [assistantMessageItem assistantText]
         cumulative =
             case Map.elems result.modelUsage of
                 [] -> Nothing
@@ -381,10 +421,10 @@ interpretClaudeTurn messages result = do
     pure CompletedClaudeTurn
         { sessionId = result.sessionId
         , assistantText
-        , events
+        , liveEvents
         , tokenUsage = result.usage
         , cumulativeModelUsage = cumulative
-        , toolItems
+        , turnItems
         }
 
 validateSubscriptionSource :: [Message] -> Either Text ()
@@ -419,15 +459,21 @@ validateSubscriptionSource messages =
                     Nothing -> found)
             Nothing
 
-data ClaudeToolEvent
+-- | One displayable unit of a canonical Claude record. Text and thinking
+-- carry their record's wire UUID so completion can skip records that were
+-- already streamed live.
+data ClaudeLiveEvent
     = ClaudeToolStarted !ToolCall
     | ClaudeToolFinished !ToolCallResult
+    | ClaudeText !(Maybe Text) !Text
+    | ClaudeThinking !(Maybe Text) !Text
+    deriving (Eq, Show)
 
-messageToolEvents :: Message -> [ClaudeToolEvent]
-messageToolEvents = \case
+messageLiveEvents :: Message -> [ClaudeLiveEvent]
+messageLiveEvents = \case
     MessageAssistant assistant
         | assistant.error == Nothing ->
-            concatMap assistantBlockEvents assistant.content
+            concatMap (assistantBlockEvents assistant.uuid) assistant.content
     MessageUser user ->
         concatMap userBlockEvents user.content
     MessageStreamEvent stream ->
@@ -435,40 +481,81 @@ messageToolEvents = \case
     _ ->
         []
 
-messageToolItems :: Message -> [ResponseItem]
-messageToolItems = \case
+-- | One transcript-relevant unit of a canonical record.
+data TurnUnit
+    = TurnText !Text
+    | TurnItem !ResponseItem
+
+messageTurnUnits :: Message -> [TurnUnit]
+messageTurnUnits = \case
     MessageAssistant assistant
         | assistant.error == Nothing ->
-            concatMap assistantBlockItems assistant.content
+            concatMap assistantBlockUnits assistant.content
     MessageUser user ->
-        concatMap userBlockItems user.content
+        concatMap userBlockUnits user.content
     _ -> []
   where
-    assistantBlockItems = \case
+    assistantBlockUnits = \case
+        TextBlock{text}
+            | Text.null (Text.strip text) -> []
+            | otherwise -> [TurnText text]
         ToolUseBlock{toolUseId, name, input} ->
-            [functionCallItem toolUseId name input]
+            [TurnItem (functionCallItem toolUseId name input)]
         ServerToolUseBlock{toolUseId, name, input} ->
-            [functionCallItem toolUseId name input]
+            [TurnItem (functionCallItem toolUseId name input)]
         _ -> []
-    userBlockItems = \case
+    userBlockUnits = \case
         ToolResultBlock{toolUseId, content, isError} ->
-            [functionOutputItem toolUseId content isError]
+            [TurnItem (functionOutputItem toolUseId content isError)]
         ServerToolResultBlock{toolUseId, content} ->
-            [functionOutputItem toolUseId content Nothing]
+            [TurnItem (functionOutputItem toolUseId content Nothing)]
         _ -> []
 
-canonicalToolItems :: [Message] -> [ResponseItem]
-canonicalToolItems messages =
-    filter keepItem items
+-- | Transcript items in wire order. Text between tool calls becomes its own
+-- assistant message so a replayed transcript keeps the order the user saw
+-- live; consecutive text blocks merge with the same paragraph break the
+-- live view inserts. Outputs without a visible call are dropped.
+canonicalTurnItems :: [Message] -> [ResponseItem]
+canonicalTurnItems messages =
+    go Nothing (filter keepUnit units)
   where
-    items = concatMap messageToolItems messages
+    units = concatMap messageTurnUnits messages
     started =
         Set.fromList
-            [call.callId | FunctionCallItem call <- items]
-    keepItem = \case
-        FunctionCallOutputItem output ->
+            [call.callId | TurnItem (FunctionCallItem call) <- units]
+    keepUnit = \case
+        TurnItem (FunctionCallOutputItem output) ->
             Set.member output.callId started
         _ -> True
+    go pending [] = flush pending []
+    go pending (TurnText text : rest) =
+        go (Just (maybe text (\previous -> previous <> "\n\n" <> text) pending)) rest
+    go pending (TurnItem item : rest) =
+        flush pending (item : go Nothing rest)
+    flush pending rest =
+        maybe rest (\text -> assistantMessageItem (Just text) : rest) pending
+
+isAssistantItem :: ResponseItem -> Bool
+isAssistantItem = \case
+    MessageItem message -> message.role == RoleAssistant
+    _ -> False
+
+assistantMessageItem :: Maybe Text -> ResponseItem
+assistantMessageItem assistantText =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts
+            [ OutputTextPart
+                { text = fromMaybe "" assistantText
+                , annotations = Nothing
+                , logprobs = Nothing
+                }
+            ]
+        , role = RoleAssistant
+        , status = Just ItemCompleted
+        , phase = Nothing
+        , passthrough = Nothing
+        }
 
 functionCallItem :: Text -> Text -> RawJson -> ResponseItem
 functionCallItem callId name input =
@@ -483,6 +570,10 @@ functionCallItem callId name input =
         , status = Just ItemCompleted
         }
 
+-- | Persist the text projection rather than the wire JSON: structured
+-- results (tool references, image reads carrying base64 payloads) are
+-- replayed into the transcript view and imported into later prompts as
+-- plain text.
 functionOutputItem
     :: Text
     -> Maybe ToolResultContent
@@ -498,7 +589,7 @@ functionOutputItem callId content isError =
         , output =
             maybe
                 (rawJsonFromEncoding Aeson.null_)
-                (.raw)
+                (rawJsonFromEncoding . Aeson.text . renderResultContent)
                 content
         , status =
             Just $
@@ -507,7 +598,7 @@ functionOutputItem callId content isError =
                     else ItemCompleted
         }
 
-streamEventToolEvents :: StreamEvent -> [ClaudeToolEvent]
+streamEventToolEvents :: StreamEvent -> [ClaudeLiveEvent]
 streamEventToolEvents StreamEvent{streamToolUse = Just toolUse} =
     [ ClaudeToolStarted ToolCall
         { callId = toolUse.toolUseId
@@ -519,8 +610,14 @@ streamEventToolEvents StreamEvent{streamToolUse = Just toolUse} =
     ]
 streamEventToolEvents _ = []
 
-assistantBlockEvents :: ContentBlock -> [ClaudeToolEvent]
-assistantBlockEvents = \case
+assistantBlockEvents :: Maybe Text -> ContentBlock -> [ClaudeLiveEvent]
+assistantBlockEvents messageId = \case
+    TextBlock{text}
+        | Text.null (Text.strip text) -> []
+        | otherwise -> [ClaudeText messageId text]
+    ThinkingBlock{thinking}
+        | Text.null (Text.strip thinking) -> []
+        | otherwise -> [ClaudeThinking messageId thinking]
     ToolUseBlock{toolUseId, name, input} ->
         [ ClaudeToolStarted ToolCall
             { callId = toolUseId
@@ -542,7 +639,7 @@ assistantBlockEvents = \case
     _ ->
         []
 
-userBlockEvents :: ContentBlock -> [ClaudeToolEvent]
+userBlockEvents :: ContentBlock -> [ClaudeLiveEvent]
 userBlockEvents = \case
     ToolResultBlock{toolUseId, content, isError} ->
         let rawOutput = maybe "" renderResultContent content
@@ -568,26 +665,58 @@ userBlockEvents = \case
     _ ->
         []
 
-canonicalToolEvents :: [ClaudeToolEvent] -> [LoopEvent]
-canonicalToolEvents toolEvents =
-    events
-  where
-    (_, events) = advanceToolEvents emptyClaudeEventState toolEvents
-
-advanceToolEvents
+-- | Project a batch of live events (one record while streaming, the whole
+-- turn at completion) onto loop events, skipping what is already displayed.
+-- Text and thinking are skipped per record, judged against the state before
+-- the batch, so every block of a multi-block record is emitted together.
+advanceLiveEvents
     :: ClaudeEventState
-    -> [ClaudeToolEvent]
+    -> [ClaudeLiveEvent]
     -> (ClaudeEventState, [LoopEvent])
-advanceToolEvents initialState toolEvents =
+advanceLiveEvents initialState toolEvents =
     let (state, eventsRev) =
             foldl' step (initialState, []) toolEvents
     in (state, reverse eventsRev)
   where
+    alreadyStreamed :: Maybe Text -> Bool
+    alreadyStreamed =
+        maybe False (`Set.member` initialState.streamedMessageIds)
+
+    markStreamed :: Maybe Text -> ClaudeEventState -> ClaudeEventState
+    markStreamed messageId state =
+        case messageId of
+            Nothing -> state
+            Just identifier ->
+                state
+                    { streamedMessageIds =
+                        Set.insert identifier state.streamedMessageIds
+                    }
+
+    paragraph :: LiveDeltaKind -> ClaudeEventState -> Text -> Text
+    paragraph kind state text
+        | state.lastDelta == Just kind = "\n\n" <> text
+        | otherwise = text
+
     step
         :: (ClaudeEventState, [LoopEvent])
-        -> ClaudeToolEvent
+        -> ClaudeLiveEvent
         -> (ClaudeEventState, [LoopEvent])
     step (state, events) = \case
+        ClaudeText messageId text
+            | alreadyStreamed messageId -> (state, events)
+            | otherwise ->
+                ( (markStreamed messageId state)
+                    { lastDelta = Just LiveTextDelta }
+                , TextDelta (paragraph LiveTextDelta state text) : events
+                )
+        ClaudeThinking messageId thinking
+            | alreadyStreamed messageId -> (state, events)
+            | otherwise ->
+                ( (markStreamed messageId state)
+                    { lastDelta = Just LiveThinkingDelta }
+                , ReasoningDelta (paragraph LiveThinkingDelta state thinking)
+                    : events
+                )
         ClaudeToolStarted call
             | Just previous <- Map.lookup
                 call.callId
@@ -613,6 +742,7 @@ advanceToolEvents initialState toolEvents =
                             call.callId
                             call
                             state.startedToolDetails
+                    , lastDelta = Nothing
                     }
                 , ToolStarted call : events
                 )

@@ -23,7 +23,10 @@ module Agent.ToolDispatch
     , decodeToolArguments
     ) where
 
-import Agent.Dialect (grokBuildCanonicalToolName)
+import Agent.Dialect
+    ( claudeCodeCanonicalToolName
+    , grokBuildCanonicalToolName
+    )
 import Agent.Json.Decode (Decoder)
 import qualified Agent.Json.Decode as Json
 import Control.Applicative ((<|>))
@@ -214,6 +217,7 @@ findHandler name handlers =
 canonicalToolName :: Text -> Text
 canonicalToolName name
     | grokName /= name = grokName
+    | claudeName /= name = claudeName
     | Just rest <- Text.stripPrefix "collaboration." name =
         canonicalToolName rest
     | Just rest <- Text.stripPrefix "collaboration" name
@@ -227,6 +231,7 @@ canonicalToolName name
     | otherwise = name
   where
     grokName = grokBuildCanonicalToolName name
+    claudeName = claudeCodeCanonicalToolName name
 
 -- | Project current public Grok Build parameter names back onto the stable
 -- internal handler contract. Keep this beside 'canonicalToolName' so every

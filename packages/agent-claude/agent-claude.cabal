@@ -72,6 +72,7 @@ test-suite agent-claude-test
     build-depends:    base >= 4.14 && < 5
                     , agent-claude
                     , agent-core
+                    , agent-json
                     , agent-responses
                     , agent-responses-types
                     , claude-agent-sdk-haskell

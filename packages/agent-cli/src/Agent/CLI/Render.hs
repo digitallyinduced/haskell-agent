@@ -121,7 +121,9 @@ import Agent.TUI.Presentation
     , parseSearchReplaceDiff
     , summarizeToolCall
     , summarizeToolCallRelative
+    , toolCallDiff
     , toolDetail
+    , toolVerb
     , workspaceRelativeDisplayPath
     )
 import Agent.ToolDispatch
@@ -828,7 +830,21 @@ toolChrome name = case canonicalToolName name of
     "skill_update" -> ToolChrome "Updated skill" ToolDetailMuted
     "skill_archive" -> ToolChrome "Archived skill" ToolDetailMuted
     "skill_rollback" -> ToolChrome "Restored skill" ToolDetailMuted
-    _ -> ToolChrome name ToolDetailMuted
+    "Write" -> ToolChrome "Wrote" ToolDetailPath
+    "Glob" -> ToolChrome "Globbed" ToolDetailMuted
+    "WebFetch" -> ToolChrome "Fetched" ToolDetailMuted
+    "WebSearch" -> ToolChrome "Searched web" ToolDetailMuted
+    "ToolSearch" -> ToolChrome "Searched tools" ToolDetailMuted
+    "Agent" -> ToolChrome "Spawned agent" ToolDetailMuted
+    "Task" -> ToolChrome "Spawned agent" ToolDetailMuted
+    "NotebookEdit" -> ToolChrome "Edited" ToolDetailPath
+    "Monitor" -> ToolChrome "Monitored" ToolDetailCommand
+    "Skill" -> ToolChrome "Ran skill" ToolDetailMuted
+    "EnterWorktree" -> ToolChrome "Entered worktree" ToolDetailMuted
+    "ExitWorktree" -> ToolChrome "Exited worktree" ToolDetailMuted
+    "SendMessage" -> ToolChrome "Sent message to" ToolDetailMuted
+    "ListAgents" -> ToolChrome "Listed agents" ToolDetailMuted
+    _ -> ToolChrome (toolVerb name) ToolDetailMuted
 
 isTodoTool :: Text -> Bool
 isTodoTool name =
@@ -839,10 +855,8 @@ formatToolBody color = formatToolBodyRelative color ""
 
 formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
 formatToolBodyRelative color workspace call = case canonicalToolName call.name of
-    "search_replace" ->
-        formatSearchReplaceDiffRelative color workspace call.arguments
     "exec" -> roleToolCommand color call.arguments
-    _ -> ""
+    _ -> maybe "" (paintDiffRelative color workspace) (toolCallDiff call)
 
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text
@@ -850,8 +864,12 @@ formatSearchReplaceDiff color = formatSearchReplaceDiffRelative color ""
 
 formatSearchReplaceDiffRelative :: Bool -> Text -> Text -> Text
 formatSearchReplaceDiffRelative color workspace arguments =
+    paintDiffRelative color workspace (parseSearchReplaceDiff arguments)
+
+paintDiffRelative :: Bool -> Text -> SearchReplaceDiff -> Text
+paintDiffRelative color workspace diff =
     let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
-            parseSearchReplaceDiff arguments
+            diff
         header = case diffAction of
             Just SearchReplaceCreate ->
                 roleMuted color "  create "
@@ -859,7 +877,10 @@ formatSearchReplaceDiffRelative color workspace arguments =
             Just SearchReplaceDelete ->
                 roleMuted color "  delete "
                     <> renderToolPath color workspace diffPath
-            _ -> ""
+            Just SearchReplaceWrite ->
+                roleMuted color "  write "
+                    <> renderToolPath color workspace diffPath
+            Nothing -> ""
         shown = map paintLine diffLines
         more =
             if diffHiddenLines == 0

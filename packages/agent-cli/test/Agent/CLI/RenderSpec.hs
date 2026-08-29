@@ -270,6 +270,26 @@ spec = do
             formatToolStarted False (functionToolCall "c5" "custom_tool" "{\"x\":1}")
                 `shouldBe` "◆ custom_tool"
 
+        it "renders Claude Code built-ins with host chrome" do
+            formatToolStarted False (functionToolCall "c10" "Bash" "{\"command\":\"git status\"}")
+                `shouldBe` "◆ $ git status"
+            formatToolStarted False (functionToolCall "c11" "Read" "{\"file_path\":\"src/A.hs\"}")
+                `shouldBe` "◆ Read src/A.hs"
+            formatToolStarted False (functionToolCall "c12" "Edit" "{\"file_path\":\"src/A.hs\"}")
+                `shouldBe` "◆ Edited src/A.hs"
+            formatToolStarted False
+                (functionToolCall "c13" "Write" "{\"file_path\":\"src/B.hs\",\"content\":\"x\"}")
+                `shouldBe` "◆ Wrote src/B.hs"
+            formatToolStarted False
+                (functionToolCall "c14" "WebFetch" "{\"url\":\"https://example.com\"}")
+                `shouldBe` "◆ Fetched https://example.com"
+            formatToolStarted False
+                (functionToolCall "c15" "mcp__playwright__browser_click" "{}")
+                `shouldBe` "◆ playwright: browser_click"
+            formatToolBody False
+                (functionToolCall "c13" "Write" "{\"file_path\":\"src/B.hs\",\"content\":\"x\"}")
+                `shouldBe` "  write src/B.hs\n  +x"
+
         it "keeps todo_write and update_plan on their wire names" do
             formatToolStarted False
                 (functionToolCall
