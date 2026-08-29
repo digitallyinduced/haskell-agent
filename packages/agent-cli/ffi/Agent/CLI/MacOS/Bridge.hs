@@ -59,7 +59,12 @@ import qualified Agent.OpenAI.Auth as OpenAIAuth
 import qualified Agent.OpenAI.Auth.Types as OpenAIAuthTypes
 import qualified Agent.XAI.Auth as XAIAuth
 import qualified Agent.OpenRouter.Usage as OpenRouter
-import Agent.CLI.ModelConfig (loadModelCatalogAt)
+import Agent.CLI.ModelConfig
+    ( CatalogModel(..)
+    , ModelCatalog
+    , catalogModelById
+    , loadModelCatalogAt
+    )
 import Agent.CLI.Database.Store
     ( applicableDatabaseScopes
     , deriveDatabaseScopes
@@ -1837,9 +1842,10 @@ loadNativeModelCatalog store root request = do
                                 target.targetDialect
                             pure $ Right $ Aeson.object
                                 [ "options" Aeson..=
-                                    map modelOptionJSON picker.pickerAll
+                                    map (modelOptionJSON catalog)
+                                        picker.pickerAll
                                 , "current" Aeson..=
-                                    fmap modelOptionJSON
+                                    fmap (modelOptionJSON catalog)
                                         (selectedOption picker)
                                 ]
 
@@ -1873,9 +1879,11 @@ sessionModelTarget meta =
         , targetDialect = meta.metaDialect
         }
 
-modelOptionJSON :: ModelOption -> Aeson.Value
-modelOptionJSON option =
+modelOptionJSON :: ModelCatalog -> ModelOption -> Aeson.Value
+modelOptionJSON catalog option =
     let target = option.modelTarget
+        configured =
+            catalogModelById catalog target.targetModelId
     in Aeson.object
         [ "id" Aeson..= target.targetModelId
         , "provider" Aeson..= providerSlug target.targetProvider
@@ -1883,6 +1891,10 @@ modelOptionJSON option =
         , "wireModel" Aeson..= target.targetWireModelId
         , "dialect" Aeson..= dialectSlug target.targetDialect
         , "label" Aeson..= option.modelLabel
+        , "supportedReasoningEfforts" Aeson..=
+            (configured >>= (.catalogModelReasoningEfforts))
+        , "defaultReasoningEffort" Aeson..=
+            (configured >>= (.catalogModelDefaultReasoningEffort))
         ]
 
 parseParams :: Aeson.FromJSON value => BridgeRequest -> Either Text value
