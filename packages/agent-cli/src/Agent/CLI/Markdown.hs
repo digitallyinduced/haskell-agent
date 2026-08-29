@@ -35,7 +35,7 @@ import Agent.TUI.TextWidth
     , graphemeClusters
     )
 import Data.Char (isAlphaNum, isAscii, isSpace)
-import Data.List (transpose)
+import Data.List (intersperse, transpose)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Console.ANSI
@@ -88,8 +88,8 @@ renderBlocks = go
   where
     go [] = []
     go (line : rest)
-        | Just (rows, after) <- Block.takeTableRows (line : rest) =
-            renderTable rows ++ go after
+        | Just (table, after) <- Block.takeTableRows (line : rest) =
+            renderTable table ++ go after
         | Just (level, title) <- Block.headingParts line =
             -- Hide the markdown `#` markers (grok pretty mode); color the title.
             renderInlineWith (headingPrefixStyle level) (parseInline title)
@@ -142,23 +142,22 @@ listMarkerStyle =
 quoteStyle :: [SGR]
 quoteStyle = [terminalMuted]
 
-renderTable :: [[Text]] -> [Text]
-renderTable [] = []
-renderTable rows@(headerCells : bodyCells) =
-    let widths = columnWidths rows
-        top = md [terminalMuted] (boxLine '┌' '┬' '┐' '─' widths)
-        mid = md [terminalMuted] (boxLine '├' '┼' '┤' '─' widths)
-        bot = md [terminalMuted] (boxLine '└' '┴' '┘' '─' widths)
-        headerRow = styleTableRow True widths headerCells
-        bodyRows = map (styleTableRow False widths) bodyCells
-    in [top, headerRow, mid] ++ bodyRows ++ [bot]
-
-boxLine :: Char -> Char -> Char -> Char -> [Int] -> Text
-boxLine left mid right fill widths =
-    Text.singleton left
-        <> Text.intercalate (Text.singleton mid)
-            [ Text.replicate (w + 2) (Text.singleton fill) | w <- widths ]
-        <> Text.singleton right
+renderTable :: Block.MarkdownTable -> [Text]
+renderTable table = case table.tableRows of
+    [] -> []
+    (headerCells : bodyCells) ->
+        let columnCount = length headerCells
+            normalize cells = take columnCount (cells <> repeat "")
+            normalizedHeader = normalize headerCells
+            normalizedBody = map normalize bodyCells
+            normalizedRows = normalizedHeader : normalizedBody
+            widths = columnWidths normalizedRows
+            alignments = table.tableAlignments
+            rule = md [terminalMuted] $ Text.intercalate "  "
+                [Text.replicate (width + 2) "─" | width <- widths]
+            headerRow = styleTableRow True alignments widths normalizedHeader
+            bodyRows = map (styleTableRow False alignments widths) normalizedBody
+        in headerRow : rule : intersperse rule bodyRows
 
 columnWidths :: [[Text]] -> [Int]
 columnWidths rows =
@@ -170,23 +169,35 @@ columnWidths rows =
             . inlinePlainText
             . parseInline
 
-styleTableRow :: Bool -> [Int] -> [Text] -> Text
-styleTableRow isHeader widths cells =
-    let cellText w c =
+styleTableRow :: Bool -> [Block.TableAlignment] -> [Int] -> [Text] -> Text
+styleTableRow isHeader alignments widths cells =
+    let cellText alignment w c =
             let inlines = parseInline c
                 visible = inlinePlainText inlines
                 width' = terminalDisplayWidth visible
                 padding = max 0 (w - width')
+                (leftPadding, rightPadding) = alignmentPadding alignment padding
                 base
-                    | isHeader = [SetConsoleIntensity BoldIntensity]
+                    | isHeader =
+                        [SetConsoleIntensity BoldIntensity, terminalYellow]
                     | otherwise = []
             in " "
+                <> Text.replicate leftPadding " "
                 <> renderInlineWith base inlines
-                <> Text.replicate padding " "
+                <> Text.replicate rightPadding " "
                 <> " "
-        parts = zipWith cellText widths (cells ++ repeat "")
-        bar = md [terminalMuted] "│"
-    in bar <> Text.intercalate bar (take (length widths) parts) <> bar
+        parts = zipWith3 cellText
+            (alignments <> repeat Block.AlignDefault)
+            widths
+            (cells <> repeat "")
+    in Text.intercalate "  " (take (length widths) parts)
+
+alignmentPadding :: Block.TableAlignment -> Int -> (Int, Int)
+alignmentPadding alignment padding = case alignment of
+    Block.AlignRight -> (padding, 0)
+    Block.AlignCenter -> (padding `div` 2, padding - padding `div` 2)
+    Block.AlignLeft -> (0, padding)
+    Block.AlignDefault -> (0, padding)
 
 terminalDisplayWidth :: Text -> Int
 terminalDisplayWidth =

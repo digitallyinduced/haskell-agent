@@ -28,6 +28,7 @@ import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_)
 import Data.IORef (newIORef, readIORef)
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
@@ -85,6 +86,18 @@ spec = do
                 recorded =
                     recordRenderTurnRate (addUTCTime 2 startedAt) turn started
             stateLastTokensPerSecond recorded `shouldBe` Just 40
+
+        it "does not estimate a completed rate without provider usage" do
+            let startedAt = UTCTime (fromGregorian 2026 1 2) 0
+                started =
+                    countGenerationChars "abcdefghijklmnop" $
+                        beginRenderTurn startedAt $
+                            emptyRenderState
+                                { stateLastTokensPerSecond = Just 42 }
+                turn = emptyTurnOutput "r1" [] (Just "abcdefghijklmnop")
+                recorded =
+                    recordRenderTurnRate (addUTCTime 2 startedAt) turn started
+            stateLastTokensPerSecond recorded `shouldBe` Nothing
 
         it "keeps the turn timer when a generation restarts" do
             let startedAt = UTCTime (fromGregorian 2026 1 2) 0
@@ -146,6 +159,39 @@ spec = do
             statePrintedText state2 `shouldBe` False
             first <> second `shouldSatisfy` Text.isInfixOf "hello"
             first <> second `shouldSatisfy` Text.isInfixOf "world"
+
+        it "streams tables without optional outer pipes" do
+            let input =
+                    "Name | Footprint\n\
+                    \--- | ---:\n\
+                    \WebKit | 27.7 GiB\n\
+                    \Control Center | 4.6 GiB\n\
+                    \after\n"
+                (_state, output) = streamMarkdown input emptyRenderState
+            output `shouldSatisfy` Text.isInfixOf "Name"
+            output `shouldSatisfy` Text.isInfixOf "Control Center"
+            output `shouldSatisfy` Text.isInfixOf "─"
+            output `shouldSatisfy` (not . Text.isInfixOf "|")
+
+        it "streams ordinary prose before its newline" do
+            let (state1, first) = streamMarkdown "hello" emptyRenderState
+                (_state2, second) = streamMarkdown " world" state1
+            first `shouldBe` ""
+            first <> second `shouldSatisfy` Text.isInfixOf "hello world"
+
+        it "keeps lowercase multiword table headers reclassifiable" do
+            let (state1, first) =
+                    streamMarkdown "first name " emptyRenderState
+                (_state2, second) =
+                    streamMarkdown
+                        "| age\n--- | ---:\nalice smith | 42\nafter\n"
+                        state1
+                output = first <> second
+            first `shouldBe` ""
+            output `shouldSatisfy` Text.isInfixOf "first name"
+            output `shouldSatisfy` Text.isInfixOf "alice smith"
+            output `shouldSatisfy` Text.isInfixOf "─"
+            output `shouldSatisfy` (not . Text.isInfixOf "|")
 
     describe "summarizeToolCall" do
         it "uses English verbs and argument highlights" do
@@ -240,7 +286,7 @@ spec = do
             formatActivityLine False "⠋" "Thinking…" 1.2 Nothing
                 `shouldBe` "⠋ Thinking…  1.2s"
             formatActivityLine False "⠋" "Writing…" 1.2 (Just 42)
-                `shouldBe` "⠋ Writing…  1.2s · 42 tok/s"
+                `shouldBe` "⠋ Writing…  1.2s · 42 ◈/s"
 
     describe "formatToolStarted" do
         it "renders English verbs for known tools" do
@@ -268,6 +314,26 @@ spec = do
         it "keeps unknown tool names" do
             formatToolStarted False (functionToolCall "c5" "custom_tool" "{\"x\":1}")
                 `shouldBe` "◆ custom_tool"
+
+        it "renders Claude Code built-ins with host chrome" do
+            formatToolStarted False (functionToolCall "c10" "Bash" "{\"command\":\"git status\"}")
+                `shouldBe` "◆ $ git status"
+            formatToolStarted False (functionToolCall "c11" "Read" "{\"file_path\":\"src/A.hs\"}")
+                `shouldBe` "◆ Read src/A.hs"
+            formatToolStarted False (functionToolCall "c12" "Edit" "{\"file_path\":\"src/A.hs\"}")
+                `shouldBe` "◆ Edited src/A.hs"
+            formatToolStarted False
+                (functionToolCall "c13" "Write" "{\"file_path\":\"src/B.hs\",\"content\":\"x\"}")
+                `shouldBe` "◆ Wrote src/B.hs"
+            formatToolStarted False
+                (functionToolCall "c14" "WebFetch" "{\"url\":\"https://example.com\"}")
+                `shouldBe` "◆ Fetched https://example.com"
+            formatToolStarted False
+                (functionToolCall "c15" "mcp__playwright__browser_click" "{}")
+                `shouldBe` "◆ playwright: browser_click"
+            formatToolBody False
+                (functionToolCall "c13" "Write" "{\"file_path\":\"src/B.hs\",\"content\":\"x\"}")
+                `shouldBe` "  write src/B.hs\n  +x"
 
         it "keeps todo_write and update_plan on their wire names" do
             formatToolStarted False
@@ -431,6 +497,23 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "Retry the message."
 
     describe "renderEvent" do
+        it "prints canonical streamed tool metadata once" do
+            withRenderConfig False False \config handle path -> do
+                let early = functionToolCall "c1" "shell_command" ""
+                    canonical =
+                        functionToolCall
+                            "c1"
+                            "shell_command"
+                            "{\"command\":\"git status\"}"
+                renderEvent config (ToolStarted early)
+                renderEvent config (ToolUpdated canonical)
+                renderEvent config (ToolStarted canonical)
+                hClose handle
+                body <- Text.readFile path
+                Text.count "◆ $ git status" body `shouldBe` 1
+                calls <- stateToolCalls <$> readIORef config.renderState
+                calls `shouldBe` Map.singleton "c1" canonical
+
         it "keeps concurrent tool lines intact" do
             withRenderConfig False False \config handle path -> do
                 let events =
@@ -680,6 +763,7 @@ spec = do
                         \and **bold *italic* `code`**\n"
                     , "```haskell\nmain = pure ()\n```\n"
                     , "| Key | Value |\n| --- | --- |\n| snake_case | `code` |\n"
+                    , "Key | Value\n--- | ---:\nsnake_case | `code`\n"
                     ]
             forM_ samples \source -> do
                 let expected = stripTerminalControls

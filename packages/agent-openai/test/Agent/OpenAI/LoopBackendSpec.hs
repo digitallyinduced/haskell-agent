@@ -19,6 +19,7 @@ import Agent.Responses.LoopBackend
     ( responseNeedsLoopContinuation
     , streamOutputObserved
     )
+import Agent.Responses.Request (stripReplayedItemStatus)
 import Agent.Responses.Types
 import Agent.ToolDispatch
 import Agent.Tools.FileSystem.ReadFile (readFileToolWithSpeculation)
@@ -527,13 +528,15 @@ spec = do
             second `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "done"))
 
             requests <- readIORef seen
+            -- Replayed provider items lose their lifecycle status on the wire.
             map inputItems requests `shouldBe`
                 [ turnInputsToItems [UserMessage "read it"]
-                , turnInputsToItems [UserMessage "read it"]
-                    <> [functionCallItem "c1" "read_file"
-                        "{\"target_file\":\"README.md\"}"]
-                    <> turnInputsToItems
-                        [CompletedTool (functionResult "c1" "file contents")]
+                , map stripReplayedItemStatus
+                    (turnInputsToItems [UserMessage "read it"]
+                        <> [functionCallItem "c1" "read_file"
+                            "{\"target_file\":\"README.md\"}"]
+                        <> turnInputsToItems
+                            [CompletedTool (functionResult "c1" "file contents")])
                 ]
             readIORef transcript `shouldReturn`
                 ( turnInputsToItems [UserMessage "read it"]
@@ -587,9 +590,10 @@ spec = do
             map reasoningEffort requests `shouldBe` [Just "low", Just "high"]
             map inputItems requests `shouldBe`
                 [ turnInputsToItems [UserMessage "one"]
-                , turnInputsToItems [UserMessage "one"]
-                    <> [assistantItem "one"]
-                    <> turnInputsToItems [UserMessage "two"]
+                , map stripReplayedItemStatus
+                    (turnInputsToItems [UserMessage "one"]
+                        <> [assistantItem "one"]
+                        <> turnInputsToItems [UserMessage "two"])
                 ]
 
     describe "openAiBackendWith" do
@@ -783,6 +787,7 @@ spec = do
                         retainToolSpeculation runtime [call]
                         takeToolSpeculation runtime call
                             `shouldReturn` Just (Right "1→done")
+
 
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []
@@ -982,6 +987,155 @@ spec = do
             readIORef attempts `shouldReturn` 1
             observedEvents <- readIORef events
             reverse observedEvents `shouldBe` [TextDelta "partial"]
+
+        it "blocks credential failover after hidden output was streamed" do
+            transcript <- newIORef []
+            events <- newIORef []
+            let exhausted = ProviderError UsageLimitReached
+                    "usage exhausted" (Just 120)
+                send _request _previous onEvent = do
+                    onEvent ResponseOutputItemAddedEvent
+                        { item = functionCallItem "fc-1" "shell" "{}"
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left exhausted)
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe` Left (ProviderError
+                (UnknownErrorType "replay_unsafe")
+                ( "provider failed after model output; refusing to replay: "
+                    <> Text.pack (show exhausted)
+                )
+                Nothing)
+            recorded <- reverse <$> readIORef events
+            [() | ToolStarted started <- recorded, started.callId == "fc-1"]
+                `shouldBe` [()]
+            filter (not . isToolStartedEvent) recorded `shouldBe`
+                [ActivityUpdated "Writing shell call…"]
+
+        it "resubmits after a mid-response socket drop behind a restart boundary" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    if attempt == 1
+                        then do
+                            onEvent (deltaEvent EventOutputTextDelta "partial")
+                            pure (Left (ConnectionError
+                                "WebSocket closed by server (1012): "))
+                        else do
+                            onEvent (deltaEvent EventOutputTextDelta "complete")
+                            pure (Right
+                                (testResponse "resp-replayed"
+                                    [assistantItem "complete"]))
+                backend = openAiBackendWithRetryPolicies
+                    (constantDelay 0 <> limitRetries 3)
+                    (constantDelay 0 <> limitRetries 5)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-replayed" [] (Just "complete"))
+            readIORef attempts `shouldReturn` 2
+            reverse <$> readIORef events `shouldReturn`
+                [ TextDelta "partial"
+                , ActivityUpdated
+                    "Connection lost mid-response (WebSocket closed by server (1012): ); reconnecting in 0s (attempt 1)…"
+                , ResponseRestarted
+                    "Connection interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+                , ActivityUpdated "Reconnecting to Codex (attempt 1)…"
+                , TextDelta "complete"
+                ]
+
+        it "discards a hidden partial attempt before reconnecting" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    if attempt == 1
+                        then do
+                            onEvent ResponseOutputItemAddedEvent
+                                { item = functionCallItem "fc-1" "shell" "{}"
+                                , outputIndex = Just 0
+                                , sequenceNumber = Nothing
+                                }
+                            pure (Left (ProviderError
+                                WebSocketConnectionLimitReached
+                                "too many websocket connections"
+                                Nothing))
+                        else pure (Right
+                            (testResponse "resp-replayed" [assistantItem "ok"]))
+                backend = openAiBackendWithRetryPolicies
+                    (constantDelay 0 <> limitRetries 3)
+                    (constantDelay 0 <> limitRetries 5)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-replayed" [] (Just "ok"))
+            readIORef attempts `shouldReturn` 2
+            recorded <- reverse <$> readIORef events
+            [() | ToolStarted started <- recorded, started.callId == "fc-1"]
+                `shouldBe` [()]
+            filter (not . isToolStartedEvent) recorded `shouldBe`
+                [ ActivityUpdated "Writing shell call…"
+                , ActivityUpdated
+                    "Connection lost mid-response (Codex connection limit reached); reconnecting in 0s (attempt 1)…"
+                , ResponseAttemptDiscarded
+                , ActivityUpdated "Reconnecting to Codex (attempt 1)…"
+                ]
+
+        it "reports the transport failure once the reconnect policy is exhausted" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    onEvent (deltaEvent EventOutputTextDelta "partial")
+                    pure (Left (ConnectionError "socket closed"))
+                backend = openAiBackendWithRetryPolicies
+                    (constantDelay 0 <> limitRetries 3)
+                    (constantDelay 0 <> limitRetries 2)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            -- Not replay-unsafe: the transport fallback may still replay it.
+            result `shouldBe` Left (ConnectionError "socket closed")
+            readIORef attempts `shouldReturn` 3
+            recorded <- reverse <$> readIORef events
+            length (filter (== TextDelta "partial") recorded) `shouldBe` 3
+            length [() | ResponseRestarted _ <- recorded] `shouldBe` 2
+            last recorded `shouldBe` TextDelta "partial"
+
+        it "does not reconnect before any output streamed" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let send _request _previous _onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    pure (Left (ConnectionError "socket closed"))
+                backend = openAiBackendWithRetryPolicies
+                    (constantDelay 0 <> limitRetries 3)
+                    (constantDelay 0 <> limitRetries 5)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (const (pure ()))
+            -- Pre-output failures belong to the connection-recovery sender and
+            -- the transport fallback, which replay without a boundary.
+            result `shouldBe` Left (ConnectionError "socket closed")
+            readIORef attempts `shouldReturn` 1
 
     describe "openAiBackendWithConnectionRecovery" do
         it "keeps auxiliary requests on the healthy reusable connection" do
@@ -1221,7 +1375,7 @@ spec = do
             readIORef healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1
 
-        it "does not replay after loop-visible output was already streamed" do
+        it "reconnects behind a restart boundary after loop-visible output streamed" do
             freshCalls <- newIORef (0 :: Int)
             healthy <- newIORef True
             transcript <- newIORef []
@@ -1236,10 +1390,20 @@ spec = do
                     healthy sendCurrent sendFresh (pure baseParams)
             result <- submitWithState transcript streamingBackend Nothing [UserMessage "one"]
                 (modifyIORef' events . (:))
-            result `shouldBe` Left (ConnectionError "socket closed")
-            reverse <$> readIORef events `shouldReturn` [TextDelta "partial"]
+            -- The dead socket committed nothing, so the backend closes the
+            -- partial attempt with a visible boundary and resubmits the same
+            -- request; the sender then dials a fresh connection.
+            result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            reverse <$> readIORef events `shouldReturn`
+                [ TextDelta "partial"
+                , ActivityUpdated
+                    "Connection lost mid-response (socket closed); reconnecting in 1s (attempt 1)…"
+                , ResponseRestarted
+                    "Connection interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+                , ActivityUpdated "Reconnecting to Codex (attempt 1)…"
+                ]
             readIORef healthy `shouldReturn` False
-            readIORef freshCalls `shouldReturn` 0
+            readIORef freshCalls `shouldReturn` 1
 
         it "does not treat provider errors as a dead connection" do
             freshCalls <- newIORef (0 :: Int)
@@ -1401,15 +1565,46 @@ spec = do
             readIORef primaryCalls `shouldReturn` 1
             readIORef fallbackCalls `shouldReturn` 2
 
-        it "does not replay a failed turn after model output was exposed" do
+        it "replays over the fallback behind a restart boundary after visible output" do
             fallbackActive <- newIORef False
             fallbackCalls <- newIORef (0 :: Int)
             transcript <- newIORef []
+            events <- newIORef []
             let primary = Backend \_state _previous _inputs onEvent -> do
                     onEvent (TextDelta "partial")
                     pure (Left (ConnectionError "socket closed"))
-                fallback = Backend \state _previous _inputs _onEvent -> do
+                fallback = Backend \state _previous _inputs onEvent -> do
                     modifyIORef' fallbackCalls (+ 1)
+                    onEvent (TextDelta "replayed")
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "replayed")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (\event -> modifyIORef' events (<> [event]))
+            fmap (.assistantText) result `shouldBe` Right (Just "replayed")
+            readIORef fallbackActive `shouldReturn` True
+            readIORef fallbackCalls `shouldReturn` 1
+            readIORef events `shouldReturn`
+                [ TextDelta "partial"
+                , ResponseRestarted
+                    "Connection interrupted the response; retrying over the HTTP transport. The new attempt may repeat partial output shown above."
+                , TextDelta "replayed"
+                ]
+
+        it "does not repeat a restart boundary the primary already emitted" do
+            fallbackActive <- newIORef False
+            transcript <- newIORef []
+            events <- newIORef []
+            let primary = Backend \_state _previous _inputs onEvent -> do
+                    onEvent (TextDelta "partial")
+                    onEvent (ResponseRestarted "inner restart")
+                    pure (Left (ConnectionError "socket closed"))
+                fallback = Backend \state _previous _inputs _onEvent ->
                     pure $ Right BackendResult
                         { backendOutput =
                             emptyTurnOutput "resp-http" [] (Just "ok")
@@ -1419,12 +1614,12 @@ spec = do
                     openAiBackendWithTransportFallback
                         fallbackActive primary fallback
             result <- submitWithState transcript backend Nothing
-                [UserMessage "one"] (const (pure ()))
-            result `shouldBe` Left (ConnectionError "socket closed")
-            readIORef fallbackActive `shouldReturn` True
-            readIORef fallbackCalls `shouldReturn` 0
+                [UserMessage "one"] (\event -> modifyIORef' events (<> [event]))
+            fmap (.assistantText) result `shouldBe` Right (Just "ok")
+            readIORef events `shouldReturn`
+                [TextDelta "partial", ResponseRestarted "inner restart"]
 
-        it "does not replay after a non-visible output item was received" do
+        it "replays over the fallback transport after only hidden output streamed" do
             fallbackActive <- newIORef False
             primaryCalls <- newIORef (0 :: Int)
             fallbackCalls <- newIORef (0 :: Int)
@@ -1439,8 +1634,9 @@ spec = do
                     modifyIORef' primaryCalls (+ 1)
                     onEvent outputEvent
                     pure (Left connectionFailure)
-                primary = openAiBackendWithRetryPolicy
+                primary = openAiBackendWithRetryPolicies
                     (constantDelay 0 <> limitRetries 3)
+                    (limitRetries 0)
                     sendPrimary
                     (pure baseParams)
                 fallback = Backend \state _previous _inputs _onEvent -> do
@@ -1455,11 +1651,48 @@ spec = do
                         fallbackActive primary fallback
             result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
-            result `shouldBe` Left
-                (replayUnsafeModelFailure connectionFailure)
-            readIORef fallbackActive `shouldReturn` False
+            -- The dead socket committed nothing, so the hidden partial item
+            -- does not block the replay; only visible deltas would.
+            fmap (.assistantText) result `shouldBe` Right (Just "duplicate")
+            readIORef fallbackActive `shouldReturn` True
             readIORef primaryCalls `shouldReturn` 1
-            readIORef fallbackCalls `shouldReturn` 0
+            readIORef fallbackCalls `shouldReturn` 1
+
+        it "closes an announced tool block before replaying over the fallback" do
+            fallbackActive <- newIORef False
+            events <- newIORef []
+            transcript <- newIORef []
+            let call = functionToolCall "fc-1" "shell" "{}"
+                sendPrimary _request _previous onEvent = do
+                    onEvent ResponseOutputItemAddedEvent
+                        { item = functionCallItem "fc-1" "shell" "{}"
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left (ConnectionError "socket closed"))
+                primary = openAiBackendWithRetryPolicies
+                    (constantDelay 0 <> limitRetries 3)
+                    (limitRetries 0)
+                    sendPrimary
+                    (pure baseParams)
+                fallback = Backend \state _previous _inputs onEvent -> do
+                    onEvent (TextDelta "replayed")
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "replayed")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (\event -> modifyIORef' events (<> [event]))
+            fmap (.assistantText) result `shouldBe` Right (Just "replayed")
+            recorded <- readIORef events
+            [() | ToolStarted started <- recorded, started.callId == call.callId]
+                `shouldBe` [()]
+            dropWhile (/= ResponseAttemptDiscarded) recorded
+                `shouldBe` [ResponseAttemptDiscarded, TextDelta "replayed"]
 
         it "falls back immediately after a websocket connection-limit error" do
             fallbackActive <- newIORef False
@@ -1549,11 +1782,15 @@ spec = do
 -- Fixtures
 --------------------------------------------------------------------------------
 
-
 observeArguments :: ToolSpeculationRuntime -> LoopEvent -> IO ()
 observeArguments runtime = \case
     ToolArgumentEvent event -> observeToolArgumentEvent runtime event
     _ -> pure ()
+
+isToolStartedEvent :: LoopEvent -> Bool
+isToolStartedEvent = \case
+    ToolStarted _ -> True
+    _ -> False
 
 submitWithState
     :: IORef [ResponseItem]
@@ -1885,14 +2122,6 @@ replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
 replayUnsafeAuxiliaryFailure failure =
     ProviderError (UnknownErrorType "replay_unsafe")
         ( "provider failed after auxiliary response output; refusing to replay: "
-            <> Text.pack (show failure)
-        )
-        Nothing
-
-replayUnsafeModelFailure :: ApiError -> ApiError
-replayUnsafeModelFailure failure =
-    ProviderError (UnknownErrorType "replay_unsafe")
-        ( "provider failed after model output; refusing to replay: "
             <> Text.pack (show failure)
         )
         Nothing

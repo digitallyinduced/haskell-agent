@@ -107,6 +107,10 @@ toStoredResponseItem = \case
             , storedCustomToolCallOutputExtraFields =
                 emptyOpaqueObject
             }
+    ComputerCallItem item ->
+        storedTypedKnownItem "computer_call" item
+    ComputerCallOutputItem item ->
+        storedTypedKnownItem "computer_call_output" item
     ReasoningItemValue reasoning ->
         StoredReasoningItem StoredReasoning
             { storedReasoningProviderItemId = reasoning.itemId
@@ -571,6 +575,8 @@ isPromotedKnownItem :: ResponseItemType -> Bool
 isPromotedKnownItem = \case
     ItemAgentMessage -> True
     ItemAdditionalTools -> True
+    ItemComputerCall -> True
+    ItemComputerCallOutput -> True
     ItemLocalShellCall -> True
     ItemToolSearchCall -> True
     ItemToolSearchOutput -> True

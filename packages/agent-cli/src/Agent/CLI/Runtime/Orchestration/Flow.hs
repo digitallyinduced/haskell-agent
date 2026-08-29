@@ -42,7 +42,7 @@ import Agent.CLI.Options
     ( isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
-                 optPromptFile, optResume, optCwd),
+                 optPromptFile, optResume, optCwd, optCodeMode),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -145,7 +145,7 @@ import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createWorktree, worktreeRoot )
+import Agent.CLI.Worktree ( createManagedWorktree )
 import Agent.Cancel ( requestCancel )
 import Agent.Claude ()
 import Agent.Dialect ()
@@ -286,6 +286,11 @@ runAgentWithRuntime processRuntime runMode options = do
                 go fullscreenInputs sessionState
                     (restartSessionOptions current sessionId)
                     Nothing
+            RunEnableCodeMode sessionId ->
+                let nextOptions =
+                        (restartSessionOptions current sessionId)
+                            { optCodeMode = True }
+                in go fullscreenInputs sessionState nextOptions Nothing
             RunProviderStartFailed apiError ->
                 case transition of
                     Just failed
@@ -699,7 +704,7 @@ prepareAgentIterationTracked
                                 Just _ -> pure ()
                                 Nothing ->
                                     putTextLn stderrHandle "Creating worktree…"
-                            createWorktree source (worktreeRoot home)
+                            createManagedWorktree home source
                                 >>= either
                                     (\err -> do
                                         mapM_ releaseSessionLock resumeLock

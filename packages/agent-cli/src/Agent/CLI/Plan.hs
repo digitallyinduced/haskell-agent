@@ -12,6 +12,7 @@ module Agent.CLI.Plan
     , renderPlanEnterFrame
     , renderPlanExitFrame
     , extractProposedPlan
+    , resumedPlanNeedsApproval
     , stripProposedPlan
     , renderPlanMarkdown
     , parsePlanDecisionAnswer
@@ -51,7 +52,7 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
 import Data.Char (toLower)
 import Data.IORef (IORef)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -234,6 +235,8 @@ readChangeNotes interrupt color = do
             readChangeNotes interrupt color
         ReplChooseAccount _ ->
             readChangeNotes interrupt color
+        ReplRemovePendingImage _ _ ->
+            readChangeNotes interrupt color
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
@@ -276,6 +279,8 @@ askQuestion interrupt resolveColor question options = do
                         ReplChooseEffort _ ->
                             askQuestion interrupt resolveColor question []
                         ReplChooseAccount _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplRemovePendingImage _ _ ->
                             askQuestion interrupt resolveColor question []
                         ReplText text
                             | Text.null (Text.strip text) -> pure Nothing
@@ -347,6 +352,16 @@ extractProposedPlan text =
   where
     openTag = "<proposed_plan>"
     closeTag = "</proposed_plan>"
+
+-- | Whether a resumed transcript ends with a plan that still needs the
+-- user's decision.  Codex presents its plan in assistant text rather than
+-- through an explicit exit tool, so this is the durable signal available
+-- when rebuilding the in-memory plan-mode state on resume.
+resumedPlanNeedsApproval :: [Maybe Text] -> Bool
+resumedPlanNeedsApproval assistantTexts =
+    case reverse [text | Just text <- assistantTexts] of
+        lastText : _ -> isJust (extractProposedPlan lastText)
+        _ -> False
 
 -- | Remove proposed_plan tags for display after the approval UI shows the body.
 stripProposedPlan :: Text -> Text

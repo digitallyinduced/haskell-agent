@@ -5,6 +5,12 @@ module Agent.CLI.Session.Runner.Execution
     , runSession
     ) where
 import Agent.CLI.CodeModeRuntime
+import Agent.CLI.Compaction
+    ( AutomaticCompactionBoundary(..)
+    , CompactOutcome(..)
+    , CompactionInstall(CompactionInstalled)
+    )
+import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.CLI.Session.Runner.Types
     ( AgentStepCache(..)
     , SessionRunnerContinuation(..)
@@ -16,7 +22,12 @@ import Agent.CLI.SessionTitle
 import Agent.Concurrent
 import Agent.CLI.ManagedTurn
 import Agent.CLI.GatewayBridge
+import Agent.CLI.Notification
+    ( AttentionRequest(PermissionRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Approval
+import Agent.CLI.Permission (promptRootAccess)
 import Agent.CLI.Recap
 import Agent.CLI.CancelWatch
 import Agent.CLI.Clipboard
@@ -69,7 +80,7 @@ import Agent.OsPath
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception.Safe (catchAny)
+import Control.Exception.Safe (catchAny, uninterruptibleMask_)
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -99,6 +110,27 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
       withIoLock action = withMVar ioLock (const action)
+      requestRootAccess root =
+          withMVar ioLock \_ ->
+              case promptRequest of
+                  Just request
+                      | isJust request.managedTurnBridgeDirectory ->
+                          requestManagedRootAccess request root
+                  _ -> case fullscreen of
+                      Just runtime -> do
+                          notifyAttention stderrHandle PermissionRequested
+                          maybe False (== 0)
+                              <$> requestFullscreenChoiceWithBody
+                                  runtime
+                                  "Filesystem access requested"
+                                  ("Allow access to " <> toText root
+                                      <> " for this session?")
+                                  0
+                                  [ ("Allow directory for this session", "")
+                                  , ("Deny", "")
+                                  ]
+                      Nothing ->
+                          withStdinPaused escPaused (promptRootAccess useColor root)
       reportSessionError message =
           case fullscreen of
               Just runtime ->
@@ -112,6 +144,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
       startupWindowTitle
       withIoLock
       writeWindowTitle
+  setToolRootAccessRequest toolEnv (Just requestRootAccess)
   let setWindowTitle = windowTitle.windowTitleSet
       beginWindowTitleBusy = windowTitle.windowTitleBeginBusy
       endWindowTitleBusy = windowTitle.windowTitleEndBusy
@@ -645,7 +678,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , loopTools = toolRegistry
             , loopDispatch =
                 defaultLoopDispatch
-                    { toolDispatchFinalizeOutput = finalizeToolOutput toolEnv }
+                    { toolDispatchFinalizeOutput = \call output ->
+                        if call.callKind == ComputerCallKind
+                            then pure output
+                            else finalizeToolOutput toolEnv call output
+                    }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->
@@ -736,18 +773,19 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 today <- utctDay <$> getCurrentTime
                 let enabledTools = activeShellTools ghciEnabled bashEnabled
                     enabledNames = map (.appToolName) enabledTools
-                    instructionText = case codexCatalogSession of
-                        Just catalog ->
-                            catalog.catalogInstructionsFor
-                                enabledNames sessionTmp
-                        Nothing ->
-                            systemPromptForTools
-                                dialect
-                                enabledNames
-                                cwd
-                                sessionTmp
-                                today
-                                (isOneShot options)
+                    instructionText =
+                        appendMcpInstructions mcpInstructions case codexCatalogSession of
+                            Just catalog ->
+                                catalog.catalogInstructionsFor
+                                    enabledNames sessionTmp
+                            Nothing ->
+                                systemPromptForTools
+                                    dialect
+                                    enabledNames
+                                    cwd
+                                    sessionTmp
+                                    today
+                                    (isOneShot options)
                     toolSchemas = schemasFromAppTools dialect enabledTools
                 modifyIORef' paramsRef
                     (setRequestInstructionsAndTools
@@ -804,6 +842,53 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 reportSessionError
                     ("failed to reload generated context: "
                         <> formatException err)
+        -- The durable replace, pending input, and in-memory publication form
+        -- one checkpoint transaction. Keeping pending input in the replacement
+        -- means a process death before the continuation cannot lose the user's
+        -- request. Do not allow cancellation after PostgreSQL commits but
+        -- before the boundary becomes visible to turn cleanup.
+        commitAutomaticCompaction outcome pendingInputs = do
+            let durableHistory =
+                    outcome.compactHistory <> turnInputsToItems pendingInputs
+            uninterruptibleMask_ do
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef -> do
+                        now <- getCurrentTime
+                        handle <- ensureSession slotRef
+                        let checkpointTurn = SessionTurn
+                                { turnAt = now
+                                , turnUserText = ""
+                                , turnAssistantText = Nothing
+                                , turnError = Nothing
+                                , turnResponseId = Nothing
+                                , turnEffect = TranscriptReplace
+                                , turnItems = durableHistory
+                                , turnUsage = Nothing
+                                }
+                        (updated, _) <-
+                            appendTurnWithMetaUpdateIndexed
+                                handle
+                                checkpointTurn
+                                \meta -> meta { metaLastResponseId = Nothing }
+                        writeIORef slotRef (PersistenceActive updated)
+                let boundary = AutomaticCompactionBoundary
+                        { automaticCompactionHistory = durableHistory
+                        -- These inputs are already part of the checkpoint.
+                        -- A failure/retry must not append or submit them again.
+                        , automaticCompactionPendingInputs = []
+                        }
+                writeIORef automaticCompactionRef (Just boundary)
+                _ <-
+                    replaceLiveConversation
+                        conversationRef
+                        Nothing
+                        durableHistory
+                pure ()
+            -- Reloading skills/project state may perform arbitrary I/O and is
+            -- not part of the atomic persistence critical section.
+            reloadGeneratedContextSafely
+            pure CompactionInstalled
         compactRunnerWithContext focus = do
             result <- compactRunner focus
             case result of
@@ -812,6 +897,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure result
         env = SessionEnv
             { sessionLoop = config
+            , sessionModelInfo = modelInfo
             , sessionBtwBackend = btwBackend
             , sessionQueueRecap = writeChan recapRequests
             , sessionCompact = compactRunnerWithContext
@@ -823,6 +909,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
             , sessionConversation = conversationRef
+            , sessionAutomaticCompaction = automaticCompactionRef
             , sessionParams = paramsRef
             , sessionPolicy = policyRef
             , sessionPersist = persist
@@ -836,6 +923,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionHome = home
             , sessionMcpRegistrations = mcpRegistrations
             , sessionMcpWarnings = mcpWarnings
+            , sessionMcpFleet = mcpFleet
             , sessionSetTempDir = setSessionTempDir
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
@@ -876,7 +964,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    writeIORef generatedContextReloadRef reloadGeneratedContextSafely
+    writeIORef automaticCompactionHookRef commitAutomaticCompaction
     writeIORef startup.startupRestartEffort \level -> do
         setSessionEffortText env level
         writeIORef restartEffortRef (Just level)

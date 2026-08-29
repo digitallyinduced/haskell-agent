@@ -35,14 +35,16 @@ module Agent.TUI.Model
     , uiNextDeadlineMillis
     , uiNeedsTick
     , uiTokensPerSecond
+    , uiTokensPerSecondEstimated
     , warningNotice
     , advanceUiTime
     , blockCodeLanguage
     ) where
 
 import Agent.TUI.Presentation
-    ( formatSearchReplaceDiffRelative
+    ( formatToolDiffRelative
     , formatToolOutputRelative
+    , todoListFromToolArguments
     , todoListFromToolOutput
     , toolCallInput
     , toolCallTitleRelative
@@ -262,6 +264,8 @@ reduceUi event state = case event of
             , uiGenerating = False
             , uiGenerationChars = 0
             , uiGenerationMillis = 0
+            , uiGenerationLastDeltaMillis = 0
+            , uiResponseMillis = 0
             , uiLastTokensPerSecond = Nothing
             }
     UiSetFollow follow ->
@@ -308,29 +312,38 @@ reduceUi event state = case event of
 
 resetGeneration :: UiState -> UiState
 resetGeneration state =
+    -- The live character estimate starts with the first visible delta. The
+    -- provider response clock starts here because provider output-token usage
+    -- can also include hidden reasoning generated before that first delta.
     state
-        { uiGenerating = True
+        { uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0
+        , uiGenerationLastDeltaMillis = 0
+        , uiResponseMillis = 0
         }
 
 appendGenerationChars :: Text -> UiState -> UiState
 appendGenerationChars delta state =
     state
-        { uiGenerationChars =
+        { uiGenerating = True
+        , uiGenerationChars =
             state.uiGenerationChars + Text.length delta
+        , uiGenerationLastDeltaMillis = state.uiGenerationMillis
         }
 
 snapshotGenerationRate :: TokenUsage -> UiState -> UiState
 snapshotGenerationRate usage state =
-    state
+    let
+        generationMillis = state.uiGenerationLastDeltaMillis
+        responseMillis = state.uiResponseMillis
+    in state
         { uiGenerating = False
+        , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
             generationTokensPerSecond
                 usage.outputTokens
-                state.uiGenerationChars
-                state.uiGenerationMillis
-                <|> state.uiLastTokensPerSecond
+                responseMillis
         }
 
 reduceLoop :: LoopEvent -> UiState -> UiState
@@ -355,13 +368,11 @@ reduceLoop event state = case event of
         appendOrExtend BlockThinking "Thought" delta BlockStreaming $
             appendGenerationChars delta state
                 { uiActivity = "Thinking…"
-                , uiGenerating = True
                 }
     TextDelta delta ->
         appendOrExtend BlockAssistant "Assistant" delta BlockStreaming $
             appendGenerationChars delta state
                 { uiActivity = "Writing…"
-                , uiGenerating = True
                 }
     ActivityUpdated activity ->
         state { uiActivity = activity }
@@ -383,6 +394,16 @@ reduceLoop event state = case event of
                 , uiToolCalls = Map.empty
                 }
     ToolStarted call
+        | Map.member call.callId state.uiToolCalls ->
+            -- A streaming backend may announce the call before execution;
+            -- the core loop announces it again once the response is complete.
+            -- Refresh the canonical metadata without adding another block.
+            updateToolCall call
+                state
+                    { uiRunning = True
+                    , uiGenerating = False
+                    , uiAwaitingInput = False
+                    }
         | isTodoTool call.name ->
             state
                 { uiRunning = True
@@ -400,12 +421,7 @@ reduceLoop event state = case event of
                 kind = toolBlockKind call.name
                 title = toolCallTitleRelative state.uiWorkspaceRoot call
                 blockIndex = Seq.length state.uiBlocks
-                body = case canonicalToolName call.name of
-                    "search_replace" ->
-                        formatSearchReplaceDiffRelative
-                            state.uiWorkspaceRoot
-                            call.arguments
-                    _ -> ""
+                body = formatToolDiffRelative state.uiWorkspaceRoot call
                 detail = toolCallInput call
             in appendBlock kind title body detail
                 BlockRunning (Just call.callId)
@@ -421,6 +437,8 @@ reduceLoop event state = case event of
                             state.uiToolCalls
                     }
     ToolUpdated call ->
+        updateToolCall call state
+    ToolArgumentsUpdated call ->
         updateToolCall call state
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
@@ -441,7 +459,9 @@ reduceLoop event state = case event of
                     Just (_, call)
                         | isTodoTool call.name ->
                             fromMaybe state.uiTodos
-                                (todoListFromToolOutput result.output)
+                                (todoListFromToolOutput result.output
+                                    <|> todoListFromToolArguments
+                                        call.arguments)
                     _ -> state.uiTodos
             next =
                 state
@@ -663,12 +683,7 @@ updateToolCall call state =
         Just (blockIndex, previous) ->
             let title =
                     toolCallTitleRelative state.uiWorkspaceRoot call
-                body = case canonicalToolName call.name of
-                    "search_replace" ->
-                        formatSearchReplaceDiffRelative
-                            state.uiWorkspaceRoot
-                            call.arguments
-                    _ -> ""
+                body = formatToolDiffRelative state.uiWorkspaceRoot call
                 blocks
                     | isTodoTool previous.name = state.uiBlocks
                     | otherwise =
@@ -757,7 +772,8 @@ updateToolOutput callId output state =
 
 finalizeTurn :: BlockState -> UiState -> UiState
 finalizeTurn terminalState state =
-    state
+    let generationMillis = state.uiGenerationLastDeltaMillis
+    in state
         { uiBlocks =
             Seq.mapWithIndex
                 (\index block ->
@@ -769,12 +785,9 @@ finalizeTurn terminalState state =
                 state.uiBlocks
         , uiRunning = False
         , uiGenerating = False
+        , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
             state.uiLastTokensPerSecond
-                <|> generationTokensPerSecond
-                    0
-                    state.uiGenerationChars
-                    state.uiGenerationMillis
         , uiActivity =
             if terminalState == BlockComplete
                 then "Finished"
@@ -929,7 +942,7 @@ toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName
     | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci", "exec"] =
         BlockShell
-    | name `elem` ["search_replace", "apply_patch"] =
+    | name `elem` ["search_replace", "apply_patch", "Write", "NotebookEdit"] =
         BlockEdit
     | name `elem` ["todo_write", "update_plan"] =
         BlockTodo

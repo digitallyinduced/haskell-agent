@@ -16,6 +16,7 @@ module Agent.Json.Decode
     , defaultKey
     , discriminatedObject
     , validateRawJson
+    , withOwnedRawJson
     ) where
 
 import Agent.Json (RawJson)
@@ -23,7 +24,12 @@ import Agent.Json.Internal (RawJson(..))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (join)
 import qualified Data.ByteString as BS
-import Data.Hermes as Hermes hiding (decodeEither)
+import Data.Hermes as Hermes hiding
+    ( decodeEither
+    , withRawByteString
+    , withRawJsonByteString
+    )
+import qualified Data.Hermes as HermesRaw (withRawJsonByteString)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -108,6 +114,23 @@ validateRawJson bytes = do
     () <- decodeEither validateValue bytes
     let owned = BS.copy bytes
     owned `seq` pure (RawJson owned)
+
+-- | Run a decoder continuation with an owned copy of the current value's
+-- complete JSON bytes.
+--
+-- Hermes hands out a zero-copy view into simdjson's padded input buffer, and
+-- that buffer is released as soon as the enclosing parse returns. A result
+-- that captures the view lazily and is forced later therefore reads freed
+-- memory. Copying before the continuation runs keeps every downstream use
+-- valid, including re-decoding the bytes with 'decodeEither'. The aliasing
+-- Hermes combinators are deliberately not re-exported from this module.
+withOwnedRawJson
+    :: (BS.ByteString -> Hermes.Decoder a)
+    -> Hermes.Decoder a
+withOwnedRawJson continuation =
+    HermesRaw.withRawJsonByteString \view ->
+        let owned = BS.copy view
+        in owned `seq` continuation owned
 
 validateValue :: Hermes.Decoder ()
 validateValue =

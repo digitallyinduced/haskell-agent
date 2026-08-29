@@ -158,6 +158,36 @@ spec = do
                 expectationFailure
                     ("expected input array, got " <> show other)
 
+    -- Responses Lite rejects @input[N].status@ on replayed reasoning items
+    -- and Codex never sends the field on replayed transcript items, while
+    -- items such as local shell calls keep the status Codex does send.
+    it "strips provider lifecycle status from replayed input items" do
+        let reasoning = ReasoningItemValue ReasoningItem
+                { itemId = Just "rs-1"
+                , summary = []
+                , content = Nothing
+                , encryptedContent = Just "opaque"
+                , status = Just ItemCompleted
+                }
+            shell = LocalShellCallItem LocalShellCall
+                { itemId = Just "lsh-1"
+                , callId = Just "call-1"
+                , status = Just ItemCompleted
+                , action = Nothing
+                }
+            request = withInputItems [reasoning, shell] sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) -> do
+                map (field "status") (toList items)
+                    `shouldBe` [Nothing, Just (Aeson.String "completed")]
+                map (field "encrypted_content") (toList items)
+                    `shouldBe` [Just (Aeson.String "opaque"), Nothing]
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
     it "does not request server-managed compaction by default" do
         contextManagement defaultCodexWsOptions `shouldBe` Nothing
 
@@ -489,7 +519,7 @@ spec = do
         readIORef invalidations `shouldReturn`
             ["WebSocket response incomplete"]
 
-    it "recovers assembled tool calls when the socket dies after output_item.done" do
+    it "reports the transport failure when the socket dies after output_item.done" do
         remaining <- newIORef
             [ Right $ lifecycleFrame "response.created"
                 (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
@@ -518,13 +548,15 @@ spec = do
         result <- receiveWsResponseWithActions
             (Just "gpt-test") actions (const (pure ()))
 
+        -- Nothing committed: the connection-recovery wrappers resubmit the
+        -- request instead of treating the partial assembly as a response.
         case result of
-            Right response -> do
-                response.responseId `shouldBe` "resp-test"
-                [name | FunctionCallItem FunctionCall { name } <- response.output]
-                    `shouldBe` ["shell_command"]
-            other -> expectationFailure ("expected recovered response, got " <> show other)
-        readIORef completeCount `shouldReturn` 1
+            Left err ->
+                err `shouldBe` ConnectionError "WebSocket receive idle timeout"
+            Right response ->
+                expectationFailure
+                    ("expected a transport failure, got " <> show response)
+        readIORef completeCount `shouldReturn` 0
         readIORef invalidations `shouldReturn` []
 
 testPartialTerminalResponse
@@ -632,6 +664,11 @@ withParallelToolCalls
     :: Maybe Bool -> ResponseCreateParams -> ResponseCreateParams
 withParallelToolCalls nextValue ResponseCreateParams { parallelToolCalls = _, .. } =
     ResponseCreateParams { parallelToolCalls = nextValue, .. }
+
+withInputItems
+    :: [ResponseItem] -> ResponseCreateParams -> ResponseCreateParams
+withInputItems items ResponseCreateParams { input = _, .. } =
+    ResponseCreateParams { input = Just (ResponseInputItems items), .. }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =

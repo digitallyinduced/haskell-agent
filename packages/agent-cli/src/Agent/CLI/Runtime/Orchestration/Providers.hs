@@ -212,6 +212,7 @@ import qualified Agent.XAI.Request as XAIRequest ( mapModel )
 import qualified Agent.XAI.Usage as XAIUsage ()
 
 runAgentProviders
+    modelSwitchScope
     loaded
     sessionRequest
     activeAccountIdRef
@@ -227,7 +228,7 @@ runAgentProviders
     cwd
     dialect
     fullscreen
-    generatedContextReloadRef
+    automaticCompactionHookRef
     home
     initialPrevious
     model
@@ -471,7 +472,11 @@ runAgentProviders
                                             (readIORef paramsRef)
                                             contextTokensRef
                                             recordCompactionUsage
-                                            (readIORef generatedContextReloadRef >>= id)
+                                            (\outcome inputs ->
+                                                readIORef
+                                                    automaticCompactionHookRef
+                                                    >>= \hook ->
+                                                        hook outcome inputs)
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
@@ -509,7 +514,8 @@ runAgentProviders
                                                 resetCodexTurnState turnState
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        home projectRoot transition persist noticingBackend
+                                        modelSwitchScope home projectRoot
+                                        transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
                                     runSession
@@ -619,7 +625,8 @@ runAgentProviders
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                home projectRoot transition persist backend
+                                modelSwitchScope home projectRoot
+                                transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable
@@ -648,6 +655,7 @@ runAgentProviders
                                     (unsafeToFilePath cwd))
                                     { permission
                                     , safeMode = True
+                                    , transport = claudeAuth.transport
                                     }
                             compactRunner _ =
                                 pure $ Left
@@ -693,7 +701,8 @@ runAgentProviders
                             \backend -> do
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        home projectRoot transition persist backend
+                                        modelSwitchScope home projectRoot
+                                        transition persist backend
                                 result <- runSession
                                     (sessionRequest
                                         startupUnavailable
@@ -805,7 +814,8 @@ runAgentProviders
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                home projectRoot transition persist backend
+                                modelSwitchScope home projectRoot
+                                transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable

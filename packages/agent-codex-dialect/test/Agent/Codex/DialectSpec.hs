@@ -16,7 +16,10 @@ import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.ToolDispatch
     ( ToolArgumentStreamEvent(..)
     , ToolCallStreamRef(..)
+    , ToolCallResult(..)
+    , ToolDispatchConfig(..)
     , customToolCall
+    , dispatchToolCall
     , functionToolCall
     )
 import Agent.Tools.Speculation
@@ -30,6 +33,7 @@ import Agent.Tools.Speculation
 import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Types
     ( AppTool(..)
+    , appToolHandlers
     , defaultToolEnv
     , mkToolRegistry
     , toolSchedulingPlanFor

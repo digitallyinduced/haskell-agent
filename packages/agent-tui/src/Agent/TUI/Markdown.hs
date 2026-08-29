@@ -179,8 +179,8 @@ renderLines
     -> [Widget n]
 renderLines _ [] = []
 renderLines linkName lines_
-    | Just (rows, rest) <- Block.takeTableRows lines_ =
-        tableWidget rows : renderLines linkName rest
+    | Just (table, rest) <- Block.takeTableRows lines_ =
+        tableWidget table : renderLines linkName rest
 renderLines linkName (line : rest)
     | Just (_, heading) <- Block.headingPartsWith (== ' ') line =
         padTop (Pad 1)
@@ -316,9 +316,17 @@ renderCodeRow paddingAttr horizontalPadding fragments =
 -- | Render a table against the width Brick actually gives it. Natural column
 -- widths are only preferences: short columns keep their size while verbose
 -- columns share the remaining space and wrap inside it.
-tableWidget :: [[Text]] -> Widget n
-tableWidget [] = emptyWidget
-tableWidget rows@(headerCells : _) =
+tableWidget :: Block.MarkdownTable -> Widget n
+tableWidget table = case table.tableRows of
+  [] -> emptyWidget
+  rows@(headerCells : _) -> tableRowsWidget table rows headerCells
+
+tableRowsWidget
+    :: Block.MarkdownTable
+    -> [[Text]]
+    -> [Text]
+    -> Widget n
+tableRowsWidget table rows headerCells =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
         borderAttr <- B.lookupAttrName Theme.mutedAttr
@@ -336,8 +344,9 @@ tableWidget rows@(headerCells : _) =
                         cells)
                 (zip [0 :: Int ..] normalizedRows)
         let availableWidth = max 1 context.availWidth
+            columnGap = 2
             gridMinimumWidth =
-                columnCount + 1 + sum minimumWidths
+                columnGap * max 0 (columnCount - 1) + sum minimumWidths
             paddedGridMinimumWidth =
                 gridMinimumWidth + 2 * columnCount
             gridFits = availableWidth >= gridMinimumWidth
@@ -346,31 +355,30 @@ tableWidget rows@(headerCells : _) =
                     then 1
                     else 0
             chromeWidth =
-                columnCount + 1
+                columnGap * max 0 (columnCount - 1)
                     + 2 * horizontalPadding * columnCount
             contentBudget = max 0 (availableWidth - chromeWidth)
             widths =
                 fitColumnWidths
                     contentBudget minimumWidths naturalWidths
-            top = tableRule borderAttr horizontalPadding '┌' '┬' '┐' widths
-            divider =
-                tableRule borderAttr horizontalPadding '├' '┼' '┤' widths
-            bottom =
-                tableRule borderAttr horizontalPadding '└' '┴' '┘' widths
+            divider = tableRule borderAttr horizontalPadding columnGap widths
             renderedRows =
                 case styledRows of
                     [] -> []
                     header : body ->
                         renderTableRow
-                            borderAttr headerAttr horizontalPadding widths header
+                            headerAttr horizontalPadding columnGap
+                            table.tableAlignments widths header
                             : divider
-                            : map
-                                (renderTableRow
-                                    borderAttr bodyAttr horizontalPadding widths)
-                                body
+                            : List.intersperse divider
+                                (map
+                                    (renderTableRow
+                                        bodyAttr horizontalPadding columnGap
+                                        table.tableAlignments widths)
+                                    body)
             image =
                 if gridFits
-                    then V.vertCat (top : renderedRows <> [bottom])
+                    then V.vertCat renderedRows
                     else compactTableImage
                         availableWidth borderAttr styledRows
             boundedImage
@@ -477,47 +485,38 @@ renderStyledLine fragments =
         | (attr, text) <- fragments
         ]
 
-tableRule
-    :: V.Attr
-    -> Int
-    -> Char
-    -> Char
-    -> Char
-    -> [Int]
-    -> V.Image
-tableRule attr horizontalPadding left middle right widths =
+tableRule :: V.Attr -> Int -> Int -> [Int] -> V.Image
+tableRule attr horizontalPadding columnGap widths =
     V.text' attr $
-        Text.singleton left
-            <> Text.intercalate
-                (Text.singleton middle)
-                [ Text.replicate
-                    (width + 2 * horizontalPadding)
-                    "─"
-                | width <- widths
-                ]
-            <> Text.singleton right
+        Text.intercalate (Text.replicate columnGap " ")
+            [ Text.replicate
+                (width + 2 * horizontalPadding)
+                "─"
+            | width <- widths
+            ]
 
 renderTableRow
     :: V.Attr
-    -> V.Attr
     -> Int
+    -> Int
+    -> [Block.TableAlignment]
     -> [Int]
     -> [[(V.Attr, Text)]]
     -> V.Image
-renderTableRow borderAttr paddingAttr horizontalPadding widths cells =
+renderTableRow paddingAttr horizontalPadding columnGap alignments widths cells =
     V.vertCat
         [ V.horizCat $
-            V.char borderAttr '│'
-                : concat
-                    [ [ renderTableCell
-                            paddingAttr horizontalPadding width fragments
-                      , V.char borderAttr '│'
-                      ]
-                    | (width, fragments) <- zip widths rowFragments
-                    ]
+            List.intersperse gap
+                [ renderTableCell
+                    paddingAttr alignment horizontalPadding width fragments
+                | (alignment, width, fragments) <-
+                    zip3 normalizedAlignments widths rowFragments
+                ]
         | rowFragments <- physicalRows
         ]
   where
+    gap = V.charFill paddingAttr ' ' columnGap 1
+    normalizedAlignments = alignments <> repeat Block.AlignDefault
     wrappedCells =
         zipWith
             (\width spans -> wrapStyledWords (max 1 width) spans)
@@ -532,18 +531,23 @@ renderTableRow borderAttr paddingAttr horizontalPadding widths cells =
 
 renderTableCell
     :: V.Attr
+    -> Block.TableAlignment
     -> Int
     -> Int
     -> [(V.Attr, Text)]
     -> V.Image
-renderTableCell paddingAttr horizontalPadding width fragments =
+renderTableCell paddingAttr alignment horizontalPadding width fragments =
     V.horizCat
         [ blank horizontalPadding
+        , blank leftPadding
         , content
-        , blank (max 0 (width - fragmentsDisplayWidth fragments))
+        , blank rightPadding
         , blank horizontalPadding
         ]
   where
+    (leftPadding, rightPadding) =
+        tableAlignmentPadding alignment $
+            max 0 (width - fragmentsDisplayWidth fragments)
     content =
         V.horizCat
             [ terminalTextImage attr text
@@ -552,6 +556,13 @@ renderTableCell paddingAttr horizontalPadding width fragments =
     blank count
         | count <= 0 = V.emptyImage
         | otherwise = V.charFill paddingAttr ' ' count 1
+
+tableAlignmentPadding :: Block.TableAlignment -> Int -> (Int, Int)
+tableAlignmentPadding alignment padding = case alignment of
+    Block.AlignRight -> (padding, 0)
+    Block.AlignCenter -> (padding `div` 2, padding - padding `div` 2)
+    Block.AlignLeft -> (0, padding)
+    Block.AlignDefault -> (0, padding)
 
 fragmentsDisplayWidth :: [(V.Attr, Text)] -> Int
 fragmentsDisplayWidth =

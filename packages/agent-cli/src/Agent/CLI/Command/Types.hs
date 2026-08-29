@@ -23,8 +23,10 @@ data ReplAction
       -- ^ Original user-visible text and the model-visible expansion.
     | ReplShowEffort
     | ReplSetEffort ReasoningEffort
+    | ReplToggleFast
     | ReplShowModel
     | ReplSetModel Text
+    | ReplEnableCodeMode
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
@@ -46,6 +48,7 @@ data ReplAction
     | ReplPaste !Bool !Text
     | ReplClearAttachments
     | ReplShowAttachments
+    | ReplRemoveAttachment !Int
     | ReplCopyLast
     | ReplCopyCode Int
     | ReplCopyDiff
@@ -56,6 +59,7 @@ data ReplAction
     | ReplShowAgentLimit
     | ReplSetAgentLimit Int
     | ReplMcp
+    | ReplMcpPrompt Text Text [(Text, Text)]
     | ReplGoalStatus
     | ReplGoalPause
     | ReplGoalResume

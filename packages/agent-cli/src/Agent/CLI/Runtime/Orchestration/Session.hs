@@ -16,7 +16,8 @@ import Agent.CLI.CodeModeRuntime
       codeModeSessionRuntimeFor,
       loadCodexCatalogModelInfo )
 import Agent.CLI.Command ()
-import Agent.CLI.Compaction ()
+import Agent.CLI.Compaction
+    ( CompactionInstall(CompactionNotInstalled) )
 import Agent.CLI.Config ()
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
@@ -36,13 +37,16 @@ import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ( catalogContextWindowForTransport )
 import Agent.CLI.Models ()
 import Agent.CLI.Options
-    ( isOneShot, CliOptions(optShowRawReasoning, optCompactThreshold) )
+    ( isOneShot
+    , CliOptions(optCodeMode, optShowRawReasoning, optCompactThreshold)
+    )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
-import Agent.CLI.Project ()
+import Agent.CLI.Project ( ModelSwitchScope(..) )
 import Agent.CLI.Prompt
     ( codexEnvironmentContext,
       subscriptionSubagentModelGuidance,
+      appendMcpInstructions,
       systemPromptForCatalogModel,
       systemPromptForTools )
 import Agent.CLI.PromptHooks ()
@@ -91,16 +95,17 @@ import Agent.CLI.Session.History
       replaceLiveConversation )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
+    ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policy, allTools,
                      suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
+                     mcpInstructions, mcpFleet,
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
                      conversationRef, needsInitialContext, persist,
-                     startupWindowTitle,
+                     startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
-                     generatedContextReloadRef, skillsRef, skillInvocationsRef,
+                     automaticCompactionHookRef, skillsRef, skillInvocationsRef,
                      escPaused, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
                      accountRef, accountIdRef, selectionRef, accountLabel,
@@ -122,6 +127,7 @@ import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
                       subagentOptions, subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
+                      subagentAllowedRoots, subagentRootAccessRequest,
                       subagentParams, subagentMcpTools, subagentRegistry,
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
@@ -169,7 +175,9 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
 import Agent.Tools.Types
-    ( AppTool(appToolName), ToolEnv(toolSkillRoots, toolSessionTmp) )
+    ( AppTool(appToolName)
+    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
+    )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ()
 import Control.Concurrent.Async ( waitSTM, withAsync )
@@ -200,7 +208,7 @@ import System.OsPath ()
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
-import qualified Agent.MCP as MCP ()
+import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter ()
@@ -312,9 +320,11 @@ runAgentSession
                         ("Failed to initialize MCP tools: " <> Text.unpack err)
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
-        -- Catalog models: per-model instructions template and, when the
-        -- catalog selects code_mode_only, the exec/wait tool surface. The
-        -- offline lookup never blocks startup on the network.
+        mcpInstructions <- MCP.mcpFleetInstructions mcpFleet
+        -- Catalog models provide the per-model instructions template. Code
+        -- mode is opt-in even when the catalog selects code_mode_only; normal
+        -- provider tool calling remains the default. The offline lookup never
+        -- blocks startup on the network.
         codexModelInfo <-
             loadCodexCatalogModelInfo
                 stateDirectory
@@ -322,14 +332,15 @@ runAgentSession
                 dialect
                 (Just loaded.loadedTokenProvider)
                 model
-        codeModeRuntime <-
-            codeModeSessionRuntimeFor codexModelInfo tools >>= \case
+        codeModeRuntime <- if options.optCodeMode
+            then codeModeSessionRuntimeFor codexModelInfo tools >>= \case
                 Left err -> do
                     reportStartupWarning startup
                         ("code mode unavailable; falling back to direct tools: "
                             <> err)
                     pure Nothing
                 Right runtime -> pure runtime
+            else pure Nothing
         writeIORef codeModeCloseRef
             (maybe (pure ()) (.codeModeClose) codeModeRuntime)
         let catalogSession = codexModelInfo <&> \info ->
@@ -343,24 +354,27 @@ runAgentSession
                     , catalogEnvironmentContext =
                         codexEnvironmentContext cwd today Nothing Nothing
                     }
-            instructions = case catalogSession of
-                Just catalog ->
-                    catalog.catalogInstructionsFor
-                        (map (.appToolName) tools)
-                        (Just sessionTmp)
-                Nothing ->
-                    systemPromptForTools
-                        dialect
-                        (map (.appToolName) tools)
-                        cwd
-                        (Just sessionTmp)
-                        today
-                        (isOneShot options)
+            instructions =
+                appendMcpInstructions mcpInstructions case catalogSession of
+                    Just catalog ->
+                        catalog.catalogInstructionsFor
+                            (map (.appToolName) tools)
+                            (Just sessionTmp)
+                    Nothing ->
+                        systemPromptForTools
+                            dialect
+                            (map (.appToolName) tools)
+                            cwd
+                            (Just sessionTmp)
+                            today
+                            (isOneShot options)
             wireSchemas = case codeModeRuntime of
                 Just codeMode ->
                     schemasFromAppToolsCodeMode
                         dialect
-                        codeMode.codeModeWireTools
+                        ( codeMode.codeModeWireTools
+                            <> codeMode.codeModeDirectTools
+                        )
                 Nothing -> schemasFromAppTools dialect tools
             environmentContextBlock =
                 (.catalogEnvironmentContext) <$> catalogSession
@@ -380,7 +394,10 @@ runAgentSession
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
-        generatedContextReloadRef <- newIORef (pure ())
+        automaticCompactionRef <- newIORef Nothing
+        automaticCompactionHookRef <-
+            newIORef
+                (\_outcome _inputs -> pure CompactionNotInstalled)
         let currentModelContextWindow mapTransportModel = do
                 currentParams <- readIORef paramsRef
                 pure $
@@ -404,6 +421,8 @@ runAgentSession
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentSkillRoots = toolEnv.toolSkillRoots
+                , subagentAllowedRoots = toolEnv.toolAllowedRoots
+                , subagentRootAccessRequest = toolEnv.toolRootAccessRequest
                 , subagentParams = paramsRef
                 , subagentMcpTools = mcpTools
                 , subagentRegistry = registry
@@ -516,6 +535,7 @@ runAgentSession
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
+                                , modelInfo = codexModelInfo
                                 , connectionId =
                                     inferredTarget.targetConnectionId
                                 , options
@@ -528,6 +548,8 @@ runAgentSession
                                 , mcpRegistrations =
                                     mcpFleet.mcpFleetRegistrations
                                 , mcpWarnings = mcpFleet.mcpFleetWarnings
+                                , mcpInstructions
+                                , mcpFleet = Just mcpFleet
                                 , ghciEnabledRef
                                 , bashEnabledRef
                                 , toolEnv
@@ -541,6 +563,7 @@ runAgentSession
                                 , startupUnavailable
                                 , paramsRef
                                 , conversationRef
+                                , automaticCompactionRef
                                 , needsInitialContext =
                                     resumeNeedsFreshContext
                                         || (null initialTurns
@@ -553,7 +576,7 @@ runAgentSession
                                 , tokenProvider = sessionTokenProvider
                                 , openAiPool = sessionOpenAiPool
                                 , startupContext
-                                , generatedContextReloadRef
+                                , automaticCompactionHookRef
                                 , skillsRef
                                 , skillInvocationsRef
                                 , escPaused
@@ -596,6 +619,9 @@ runAgentSession
                         | otherwise = action Nothing
                 withStartupAvailability \startupUnavailable ->
                     runAgentProviders
+                        (if startup.startupBackground
+                            then SessionLocalSwitch
+                            else TopLevelSwitch)
                         loaded
                         sessionRequest
                         activeAccountIdRef
@@ -611,7 +637,7 @@ runAgentSession
                         cwd
                         dialect
                         fullscreen
-                        generatedContextReloadRef
+                        automaticCompactionHookRef
                         home
                         initialPrevious
                         model

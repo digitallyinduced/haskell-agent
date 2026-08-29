@@ -84,6 +84,46 @@ spec = do
                 request = buildRemoteCompactionRequest params [user "hello"]
             request.parallelToolCalls `shouldBe` Just False
 
+        -- The compaction request replays the transcript; Responses Lite
+        -- rejects @input[N].status@ on reasoning items and Codex never sends
+        -- the field, so the wire projection drops it and keeps the rest.
+        it "omits provider lifecycle status from replayed compaction history" do
+            let params = defaultResponseCreateParams
+                    { model = Just "gpt-5.6-sol"
+                    , store = Just False
+                    }
+                reasoning = ReasoningItemValue ReasoningItem
+                    { itemId = Just "rs-1"
+                    , summary = []
+                    , content = Nothing
+                    , encryptedContent = Just "opaque"
+                    , status = Just ItemCompleted
+                    }
+                assistant = MessageItem ResponseMessage
+                    { messageId = Just "msg-1"
+                    , content = MessageContentParts
+                        [OutputTextPart "done" Nothing Nothing]
+                    , role = RoleAssistant
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                request = buildRemoteCompactionRequest params
+                    [user "hello", reasoning, assistant]
+                encodedStatus item = case Aeson.toJSON item of
+                    Aeson.Object fields -> KeyMap.lookup "status" fields
+                    _ -> Nothing
+            map encodedStatus (requestItems request)
+                `shouldBe` [Nothing, Nothing, Nothing, Nothing]
+            case requestItems request of
+                [_, ReasoningItemValue replayed, MessageItem replayedMessage, _] -> do
+                    replayed.encryptedContent `shouldBe` Just "opaque"
+                    replayed.itemId `shouldBe` Just "rs-1"
+                    replayedMessage.messageId `shouldBe` Just "msg-1"
+                other ->
+                    expectationFailure
+                        ("unexpected compaction input: " <> show other)
+
         it "includes request-level fields in request token estimates" do
             let params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { instructions = Just (Text.replicate 1_000 "i")
@@ -108,6 +148,66 @@ spec = do
                     [MessageItem message] ->
                         Text.length (userOnly message) < 4_000
                     _ -> True
+
+        it "handles a large item history with incremental token accounting" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { instructions = Just (Text.replicate 2_000 "i")
+                    , tools = Just []
+                    }
+                history =
+                    [ user ("item-" <> Text.pack (show index))
+                    | index <- [1 :: Int .. 2_050]
+                    ]
+                contextWindow = 12_000
+                trimmed =
+                    trimRemoteCompactionRequestToFit
+                        contextWindow
+                        params
+                        history
+                request = buildRemoteCompactionRequest params trimmed
+            estimateResponseCreateParamsTokens request
+                `shouldSatisfy` (<= contextWindow)
+            length trimmed `shouldSatisfy` (< length history)
+            last trimmed `shouldBe` last history
+
+        it "does not drop typed context checkpoints while trimming" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { tools = Just []
+                    }
+                typedContextCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "context"
+                        , encryptedContent =
+                            Just (Text.replicate 1_000 "opaque")
+                        }
+                trimmed =
+                    trimRemoteCompactionRequestToFit
+                        20
+                        params
+                        [ user (Text.replicate 5_000 "old")
+                        , checkpoint "compaction"
+                        , typedContextCheckpoint
+                        ]
+            trimmed `shouldSatisfy` elem (checkpoint "compaction")
+            trimmed `shouldSatisfy` elem typedContextCheckpoint
+
+        it "rewrites the newest boundary after dropping older oversized items" do
+            let history =
+                    [ user (Text.replicate 20_000 "old")
+                    , user (Text.replicate 20_000 "new")
+                    ]
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        200
+                        Nothing
+                        history
+            estimateItemsTokens (trimmed <> [compactionTriggerItem])
+                `shouldSatisfy` (<= 200)
+            trimmed `shouldSatisfy` \items ->
+                case reverse items of
+                    MessageItem message : _ ->
+                        Text.length (userOnly message) < 20_000
+                    _ -> False
 
         it "accounts for large tool schemas when trimming remote requests" do
             let schemaText = Text.replicate 20_000 "s"
@@ -659,6 +759,32 @@ spec = do
                         [call, output, recent]
             trimmed `shouldBe` [output, recent]
 
+        it "drops a typed computer output with its oversized call" do
+            let call = ComputerCallItem ComputerCall
+                    { computerCallItemId = Just "item-1"
+                    , computerCallId = "computer-1"
+                    , computerActions =
+                        [ TypeAction (Text.replicate 20_000 "x") ]
+                    , pendingSafetyChecks = []
+                    , computerCallStatus = Nothing
+                    , computerCallExtra = KeyMap.empty
+                    }
+                output = ComputerCallOutputItem ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "computer-1"
+                    , screenshotDataUrl = "data:image/png;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Just ItemCompleted
+                    , computerOutputExtra = KeyMap.empty
+                    }
+                recent = user "recent"
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        200
+                        Nothing
+                        [call, output, recent]
+            trimmed `shouldBe` [recent]
+
         it "drops paired tagged outputs with their oversized calls" do
             let call = KnownResponseItem ItemShellCall TaggedObject
                     { tag = "shell_call"
@@ -1041,9 +1167,20 @@ spec = do
             compactTranscriptAtLastCheckpoint history
                 `shouldBe` [latest, user "recent"]
 
+        it "recognizes context-compaction checkpoints as transcript boundaries" do
+            let history =
+                    [ user "old"
+                    , contextCheckpoint
+                    , assistant "middle"
+                    , user "recent"
+                    ]
+            compactTranscriptAtLastCheckpoint history
+                `shouldBe` [contextCheckpoint, assistant "middle", user "recent"]
+
     describe "hasCompactionCheckpoint" do
         it "recognizes typed and locally generated compaction checkpoints" do
             hasCompactionCheckpoint [checkpoint "remote"] `shouldBe` True
+            hasCompactionCheckpoint [contextCheckpoint] `shouldBe` True
             hasCompactionCheckpoint
                 (buildLocalCompactedHistory 1 [user "old"] "local summary")
                 `shouldBe` True
@@ -1178,4 +1315,8 @@ spec = do
     checkpoint name = CompactionItemValue CompactionItem
         { itemId = Nothing
         , encryptedContent = Nothing
+        }
+    contextCheckpoint = ContextCompactionItemValue ContextCompactionItem
+        { itemId = Just "context"
+        , encryptedContent = Just "opaque"
         }

@@ -21,12 +21,14 @@ import Agent.CLI.Command
       ReplAction(ReplCommandError, ReplQuit, ReplReload, ReplPrompt,
                  ReplExpandedPrompt, ReplInvokeSkill, ReplSkills, ReplShowShell,
                  ReplSetShell, ReplPaste, ReplShowAttachments, ReplClearAttachments,
-                 ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp,
+                 ReplRemoveAttachment,
+                 ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp, ReplMcpPrompt,
                  ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopyLast,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
-                 ReplSetModel, ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
+                 ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
+                 ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplBtw, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplLogin, ReplUsage, ReplReloadAuth,
@@ -48,7 +50,8 @@ import Agent.CLI.Input
       submissionPromptText,
       ReplLine(ReplText, ReplEof, ReplQuitInterrupt, ReplCycleMode,
                ReplClipboardPaste, ReplClipboardPasteOrText, ReplChooseModel,
-               ReplChooseEffort, ReplChooseAccount, ReplPasted) )
+               ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage,
+               ReplPasted) )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -98,7 +101,8 @@ import Agent.CLI.Runtime.Repl.Selection
 import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
 import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunRestart, RunSwitchProvider, RunReload, RunQuit) )
+    ( RunResult(RunEnableCodeMode, RunRestart, RunSwitchProvider, RunReload,
+                RunQuit) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReplace),
@@ -216,7 +220,7 @@ import System.OsPath ()
 import System.Posix.Files ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
-import qualified Agent.MCP as MCP ()
+import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter ()
@@ -316,6 +320,12 @@ handleReplLine
         handleSelectionInput env (continueWith keptDraft) action
     action@(ReplChooseAccount keptDraft) ->
         handleSelectionInput env (continueWith keptDraft) action
+    ReplRemovePendingImage keptDraft index ->
+        handleAttachmentAction
+            env
+            finishTurn
+            (continueWith keptDraft)
+            (ReplRemoveAttachment index)
     ReplPasted pasted ->
         submitLine slashCatalog skillInvocations
             continue stdoutColor True pasted
@@ -451,6 +461,7 @@ handleReplLine
                     action@ReplPaste{} -> handleAttachmentAction env finishTurn continue action
                     action@ReplShowAttachments -> handleAttachmentAction env finishTurn continue action
                     action@ReplClearAttachments -> handleAttachmentAction env finishTurn continue action
+                    action@ReplRemoveAttachment{} -> handleAttachmentAction env finishTurn continue action
                     ReplShowAgentLimit -> do
                         limit <- env.sessionConcurrentLimit
                         let message =
@@ -494,6 +505,22 @@ handleReplLine
                             then requestMcpRestart
                                 fullscreen persist
                             else continue
+                    ReplMcpPrompt server name arguments -> do
+                        outcome <- case env.sessionMcpFleet of
+                            Nothing -> pure (Left "no MCP servers are configured")
+                            Just fleet ->
+                                MCP.mcpFleetGetPrompt fleet server name arguments
+                        case outcome of
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr (roleError color err)
+                                continue
+                            Right result ->
+                                submitExpandedTurn
+                                    continue
+                                    color
+                                    ("/mcp prompt " <> server <> " " <> name)
+                                    (MCP.renderMcpPromptResult result)
                     action@ReplGoalStatus -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplGoalPause -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplGoalResume -> handleWorkflowAction env submitExpandedTurn color continue action
@@ -544,8 +571,11 @@ handleReplLine
                         continue
                     action@ReplShowEffort -> handleSelectionAction env continue action
                     action@ReplSetEffort{} -> handleSelectionAction env continue action
+                    action@ReplToggleFast -> handleSelectionAction env continue action
                     action@ReplShowModel -> handleSelectionAction env continue action
                     action@ReplSetModel{} -> handleSelectionAction env continue action
+                    ReplEnableCodeMode ->
+                        requestCodeModeRestart fullscreen persist
                     ReplToggleAlwaysApprove
                         | provider == ClaudeCodeProvider -> do
                             let message =
@@ -834,6 +864,28 @@ requestMcpRestart fullscreen persist = do
             handle <- ensureSession slotRef
             report "restarting MCP servers…"
             pure (RunRestart handle.sessionMeta.metaId)
+
+requestCodeModeRestart
+    :: Maybe FullscreenRuntime
+    -> Persistence
+    -> IO RunResult
+requestCodeModeRestart fullscreen persist = do
+    color <- resolveColor stderr
+    let report message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+    case persist of
+        PersistenceDisabled -> do
+            report "code mode requires a persisted REPL session"
+            pure RunQuit
+        PersistenceEnabled slotRef -> do
+            handle <- ensureSession slotRef
+            report "enabling code mode…"
+            pure (RunEnableCodeMode handle.sessionMeta.metaId)
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
 enterPlanFromSlash env@SessionEnv

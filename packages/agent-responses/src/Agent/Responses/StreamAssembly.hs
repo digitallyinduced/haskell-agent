@@ -6,7 +6,6 @@ module Agent.Responses.StreamAssembly
     , emptyStreamAssemblyState
     , applyStreamEvent
     , finishStreamResponse
-    , finishAssembledIncomplete
     , buildStreamResponse
     , buildStreamResponseWithModel
     , assembleDoneResponse
@@ -156,19 +155,6 @@ finishStreamResponse modelHint state terminalEvent = do
             "Streamed response did not contain a response id"
             (Text.pack (show terminalEvent))
         else Right withModel
-
-finishAssembledIncomplete
-    :: Maybe Text
-    -> StreamAssemblyState
-    -> Either ApiError Response
-finishAssembledIncomplete modelHint state =
-    case mergeResponseFragments state.lifecycleResponses of
-        Nothing -> Left $ JsonDecodeError
-            "Streamed response did not contain a lifecycle response"
-            ""
-        Just response ->
-            finishStreamResponse modelHint state
-                (ResponseIncompleteEvent response Nothing)
 
 buildStreamResponse
     :: StreamAssemblyConfig

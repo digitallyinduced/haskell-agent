@@ -75,9 +75,9 @@ runPendingTurn
 runPendingTurn continuation presentation =
     runPendingTurnWithCooldownRetry continuation True presentation
 
--- | Retry a failed turn from its retained input checkpoint. The original
--- inputs are already present in the live transcript after a terminal failure;
--- submitting them again would duplicate the user message and attachments.
+-- | Retry a failed turn. Terminal failures and committed compactions retain
+-- their exact input checkpoint; pre-commit restart/provider failures must
+-- resubmit the original raw inputs instead.
 retryFailedTurn
     :: SessionContinuation
     -> SessionEnv
@@ -93,7 +93,7 @@ retryFailedTurn continuation env pending = do
     -- The failed turn already owns the persisted/displayed user prompt.
     -- Keep the retry turn's user text empty so session history does not show
     -- the same prompt twice.
-    result <- retryCheckpointedTurn env
+    result <- runPendingAttempt env pending
     finishTurnWithCooldownRetry
         continuation True env pending.pendingExitAfter result
 
@@ -119,9 +119,15 @@ runPendingTurnWithCooldownRetry
             ContinuePendingTurn ->
                 pure ()
     writeIORef env.sessionLastFailedTurn Nothing
-    result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
+    result <- runPendingAttempt env pending
     finishTurnWithCooldownRetry
         continuation allowCooldownRetry env pending.pendingExitAfter result
+
+runPendingAttempt :: SessionEnv -> PendingTurn -> IO TurnResult
+runPendingAttempt env pending
+    | pending.pendingCheckpointed = retryCheckpointedTurn env
+    | otherwise =
+        runOneTurn env pending.pendingPromptText pending.pendingInputs
 
 finishTurn
     :: SessionContinuation
@@ -188,7 +194,7 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                     (UiSystemMessage
                         ("restarting current turn with " <> level <> " effort"))
             Nothing -> pure ()
-        result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
+        result <- runPendingAttempt env pending
         finishTurnWithCooldownRetry
             continuation allowCooldownRetry env exitAfter result
     TurnProviderUnavailable apiError pending ->

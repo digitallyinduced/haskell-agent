@@ -49,8 +49,8 @@ data TaskOutputArgs = TaskOutputArgs
 
 taskOutputArgsDecoder :: Json.Decoder TaskOutputArgs
 taskOutputArgsDecoder = Json.object do
-        canonicalIds <- Json.atKeyOptional "task_ids" textList
-        legacyIds <- Json.atKeyOptional "task_id" textList
+        canonicalIds <- Json.optionalKey "task_ids" textList
+        legacyIds <- Json.optionalKey "task_id" textList
         taskIds <- maybe (maybe (fail "Missing parameter: task_ids") pure legacyIds) pure canonicalIds
         canonicalTimeout <- optionalInt "timeout_ms"
         legacyTimeout <- optionalInt "timeout"

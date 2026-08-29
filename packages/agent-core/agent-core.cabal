@@ -49,7 +49,6 @@ library
                     , Agent.Provider.Options
                     , Agent.ReasoningEffort
                     , Agent.Loop
-                    , Agent.MCP
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -90,15 +89,12 @@ library
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
+                    , Agent.Tools.ShowImage
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Speculation
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Loop.Internal
-                    , Agent.MCP.Client
-                    , Agent.MCP.Fleet
-                    , Agent.MCP.Supervisor
-                    , Agent.MCP.Types
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
@@ -126,7 +122,6 @@ library
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
                     , safe-exceptions
-                    , scientific
                     , stm
                     , template-haskell
                     , text
@@ -148,20 +143,6 @@ benchmark streaming-text-bench
                     , base >= 4.14 && < 5
                     , text
                     , text-builder >= 1.0 && < 1.1
-
-benchmark mcp-startup-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          McpStartup.hs
-    ghc-options:      -O2
-    build-depends:    agent-core
-                    , base >= 4.14 && < 5
-                    , bytestring
-                    , directory
-                    , safe-exceptions
-                    , text
-                    , unix
 
 benchmark tool-scheduling-bench
     import:           common-opts
@@ -239,7 +220,6 @@ test-suite agent-core-test
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
-                    , Agent.MCPSpec
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
@@ -266,6 +246,7 @@ test-suite agent-core-test
                     , Agent.Tools.PlanModeSpec
                     , Agent.Tools.SecretSpec
                     , Agent.Tools.SpeculationSpec
+                    , Agent.Tools.ShowImageSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5

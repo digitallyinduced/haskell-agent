@@ -1,8 +1,6 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( IncompleteTurnCheckpoint(..)
-    , applyPendingSessionTitles
-    , checkpointIncompleteTurn
+    ( applyPendingSessionTitles
     , grokFirstTurnPrefix
     , grokFrameLastUserInput
     , grokUserQuery
@@ -101,8 +99,10 @@ import Agent.CLI.TurnState
     , FieldUpdate(..)
     , PreparedTurn(..)
     , StartupUpdate(..)
+    , TurnAbort(..)
     , finishConversation
-    , inputOnlyTurnItems
+    , interruptedTurnItems
+    , rebasePreparedTurn
     , restoreStartupContext
     , turnInputsWithContext
     , turnNewItems
@@ -115,13 +115,13 @@ import Agent.Loop
     , LoopError(..)
     , LoopProgress(..)
     , LoopResult(..)
+    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
     , runLoopInputsDetailed
     )
 import Agent.Provider (Provider(..))
-import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -138,7 +138,7 @@ import Agent.Tools.PlanMode
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
-import Control.Exception.Safe (bracket_, onException, tryAny)
+import Control.Exception.Safe (bracket_, finally, onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
     , readIORef
@@ -183,12 +183,17 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- A newly submitted turn supersedes any older retry candidate. If this
     -- attempt fails, finishTurn installs its own PendingTurn afterwards.
     writeIORef env.sessionLastFailedTurn Nothing
+    -- Automatic compaction is scoped to one enclosing user turn. A committed
+    -- boundary from an earlier attempt is already represented by the live and
+    -- durable transcripts and must not affect this turn's suffix calculation.
+    writeIORef env.sessionAutomaticCompaction Nothing
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
         (withLiveTranscript env.sessionConversation \beforeItems ->
             runOneTurnBusy
                 includeTurnContext env beforeItems promptText inputs)
+        `finally` writeIORef env.sessionAutomaticCompaction Nothing
 
 runOneTurnBusy
     :: Bool
@@ -325,11 +330,17 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     rootTurnId <- beginSubagentTurn
     execution <- runLoopInputsDetailed config prev turnInputs
         `onException`
-            ( commitConversationPatch
-                (finishConversation prepared ConversationInterrupted)
+            ( readIORef env.sessionAutomaticCompaction >>= \boundary ->
+              commitConversationPatch
+                (finishConversation
+                    (rebasePreparedTurn boundary prepared)
+                    ConversationInterrupted)
                 >> restorePlanStateAfterIncomplete planMode initialPlanState
                 >> abortSubagentTurn rootTurnId
             )
+    automaticCompaction <- readIORef env.sessionAutomaticCompaction
+    let committedPrepared =
+            rebasePreparedTurn automaticCompaction prepared
     let result = execution.executionResult
     clearThinking render
     finishedAt <- getCurrentTime
@@ -340,8 +351,12 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
         persistIncomplete
-            :: [ResponseItem] -> Text -> Maybe TurnOutput -> IO ()
-        persistIncomplete retainedItems errorText maybeTurn = case persist of
+            :: [ResponseItem]
+            -> Text
+            -> Maybe TurnOutput
+            -> Maybe Text
+            -> IO ()
+        persistIncomplete retainedItems errorText maybeTurn displayAssistant = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
@@ -351,7 +366,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 let turn = SessionTurn
                         { turnAt = now
                         , turnUserText = promptText
-                        , turnAssistantText = maybeTurn >>= (.assistantText)
+                        , turnAssistantText =
+                            case displayAssistant of
+                                Just text -> Just text
+                                Nothing -> maybeTurn >>= (.assistantText)
                         , turnError = Just errorText
                         , turnResponseId = (.responseId) <$> maybeTurn
                         , turnEffect = TranscriptAppend
@@ -372,7 +390,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
         (Just level, _) -> do
             abortSubagentTurn rootTurnId
             commitConversationPatch
-                (finishConversation prepared ConversationRestarted)
+                (finishConversation committedPrepared ConversationRestarted)
             planState <- readIORef planMode.planStateRef
             case fullscreen of
                 Just runtime ->
@@ -380,7 +398,8 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 Nothing -> pure ()
             pure $ TurnRestartRequested level PendingTurn
                 { pendingPromptText = promptText
-                , pendingInputs = inputs
+                , pendingInputs = maybe inputs (const []) automaticCompaction
+                , pendingCheckpointed = isJust automaticCompaction
                 , pendingExitAfter = False
                 , pendingPlanState = planState
                 }
@@ -392,8 +411,14 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             -- turnInputs already contains any startup context consumed above.
             -- Checkpoint it instead of restoring it separately, which would
             -- duplicate the instructions on the next full-history request.
+            -- Completed model steps stay with it; only the sample that never
+            -- committed is dropped.
+            let retained =
+                    interruptedTurnItems
+                        committedPrepared execution TurnAbortedByUser
             commitConversationPatch
-                (finishConversation prepared ConversationCancelled)
+                (finishConversation committedPrepared
+                    (ConversationCancelled retained))
             model <- readIORef render.renderModelRef
             case fullscreen of
                 Just runtime -> do
@@ -408,7 +433,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         (formatLoopErrorColored color cancelled)
                     putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete (inputOnlyTurnItems prepared) "cancelled" Nothing
+            -- Text of the sample that never committed is display-only: it
+            -- reaches the durable turn but not the model transcript.
+            persistIncomplete retained "cancelled" Nothing
+                (uncommittedAssistantText execution)
             pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -418,7 +446,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     , isProviderUnavailable apiError -> do
                         commitConversationPatch
                             (finishConversation
-                                prepared
+                                committedPrepared
                                 ConversationProviderUnavailable)
                         case fullscreen of
                             Nothing -> pure ()
@@ -431,7 +459,8 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
                             { pendingPromptText = promptText
-                            , pendingInputs = inputs
+                            , pendingInputs = maybe inputs (const []) automaticCompaction
+                            , pendingCheckpointed = isJust automaticCompaction
                             , pendingExitAfter = False
                             , pendingPlanState = planState
                             }
@@ -440,8 +469,15 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     finishTerminal (isNothing fullscreen)
                         stdoutHandle terminal wallStarted finishedAt 1
                         (Just "Agent turn failed")
+                    let retained =
+                            interruptedTurnItems
+                                committedPrepared
+                                execution
+                                (TurnAbortedByFailure
+                                    (loopErrorAbortReason err))
                     commitConversationPatch
-                        (finishConversation prepared ConversationFailed)
+                        (finishConversation committedPrepared
+                            (ConversationFailed retained))
                     model <- readIORef render.renderModelRef
                     case fullscreen of
                         Just runtime ->
@@ -466,12 +502,14 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         atomicModifyIORef' usageRef \current ->
                             (addTokenUsage current turn.tokenUsage, ())
                     -- Keep the live and resumed model transcript aligned:
-                    -- terminal failures checkpoint only the prepared input.
-                    -- Partial assistant text, response id, usage, and the
-                    -- incomplete reason remain available in turn metadata.
-                    persistIncomplete (inputOnlyTurnItems prepared)
+                    -- the same retained items become the durable turn, so
+                    -- the fullscreen history shows what the live turn showed.
+                    -- Response id, usage, and the incomplete reason remain
+                    -- available in turn metadata.
+                    persistIncomplete retained
                         (formatLoopErrorPersistedAt finishedAt err)
                         maybeIncompleteTurn
+                        (uncommittedAssistantText execution)
                     planState <- readIORef planMode.planStateRef
                     pure $ TurnFailed PendingTurn
                         { pendingPromptText = promptText
@@ -480,6 +518,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         -- transcript. Do not retain a second potentially
                         -- large copy here.
                         , pendingInputs = []
+                        , pendingCheckpointed = True
                         , pendingExitAfter = False
                         , pendingPlanState = planState
                         }
@@ -491,7 +530,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             let assistantText =
                     fmap stripBracketedTimestamps loopResult.finalText
             commitConversationPatch
-                (finishConversation prepared
+                (finishConversation committedPrepared
                     (ConversationCompleted
                         loopResult.finalResponseId
                         loopResult.tokenUsage
@@ -529,10 +568,12 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     putTextLn stdoutHandle (renderAssistantText useColor text)
                 _ -> pure ()
             let newItems =
-                    turnNewItems beforeItems execution.executionState
+                    turnNewItems
+                        committedPrepared.preparedBeforeItems
+                        execution.executionState
                 effect =
                     if turnReplacesTranscript
-                        beforeItems
+                        committedPrepared.preparedBeforeItems
                         execution.executionState
                         then TranscriptReplace
                         else TranscriptAppend
@@ -729,24 +770,24 @@ isPendingPersistence = \case
     PersistencePending _ _ _ -> True
     PersistenceActive _ -> False
 
--- | Pure input-only checkpoint used to persist incomplete turns.
-data IncompleteTurnCheckpoint = IncompleteTurnCheckpoint
-    { checkpointTranscript :: ![ResponseItem]
-    , checkpointTurnItems :: ![ResponseItem]
-    , checkpointPreviousResponseId :: !(Maybe Text)
-    } deriving (Eq, Show)
+uncommittedAssistantText :: LoopExecution -> Maybe Text
+uncommittedAssistantText execution =
+    fmap stripBracketedTimestamps execution.executionUncommittedAssistantText
 
-checkpointIncompleteTurn
-    :: [ResponseItem]
-    -> [TurnInput]
-    -> IncompleteTurnCheckpoint
-checkpointIncompleteTurn beforeItems turnInputs =
-    let retainedItems = turnInputsToItems turnInputs
-    in IncompleteTurnCheckpoint
-        { checkpointTranscript = beforeItems <> retainedItems
-        , checkpointTurnItems = retainedItems
-        , checkpointPreviousResponseId = Nothing
-        }
+-- | Short reason recorded on the synthetic outputs of tool calls a failed
+-- turn never executed.
+loopErrorAbortReason :: LoopError -> Text
+loopErrorAbortReason = \case
+    LoopIncomplete turn -> case turn.completion of
+        TurnIncomplete reason _ ->
+            "the response was cut off (" <> reason <> ")"
+        TurnCompleted -> "the response was cut off"
+    LoopMaxTurns _ -> "the turn reached its maximum number of model steps"
+    LoopTransport _ -> "the provider request failed"
+    LoopTransportAfterOutput _ -> "the provider connection was interrupted"
+    LoopNoResponseId -> "the provider returned no response id"
+    LoopUnexpected _ -> "the agent hit an unexpected error"
+    LoopCancelled _ -> "the turn was cancelled"
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =

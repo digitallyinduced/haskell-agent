@@ -123,6 +123,7 @@ import Data.Aeson
     )
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.IORef (IORef)
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Map.Strict as Map
 import Data.List (sortOn)
@@ -192,15 +193,19 @@ telegramBridgeEnv
     -> TelegramChatKey
     -> Integer
     -> Maybe Integer
+    -> IORef (Maybe Integer)
+    -> Bool
     -> FilePath
     -> TelegramBridgeEnv
-telegramBridgeEnv runtime request key userId replyTo allowedRoot =
+telegramBridgeEnv runtime request key userId replyTo progressMessageId groupActivityEnabled allowedRoot =
     TelegramBridgeEnv
         { telegramBridgeClient = runtime.runtimeClient
         , telegramBridgeRequest = request
         , telegramBridgeChat = key
         , telegramBridgeUserId = userId
         , telegramBridgeReplyTo = replyTo
+        , telegramBridgeProgressMessageId = progressMessageId
+        , telegramBridgeGroupActivityEnabled = groupActivityEnabled
         , telegramBridgeAllowedRoot = allowedRoot
         , telegramBridgeModifyState = modifyState runtime
         , telegramBridgeGrantUser =

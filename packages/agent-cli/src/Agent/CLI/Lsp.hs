@@ -63,7 +63,8 @@ import Control.Concurrent.MVar
     , withMVar
     )
 import Control.Exception.Safe
-    ( finally
+    ( bracketOnError
+    , finally
     , mask
     , onException
     , tryAny
@@ -286,7 +287,10 @@ startLspClient workspace logDirectory name config = do
                                 )
                         Right client -> do
                             initialized <-
-                                initializeClient client
+                                bracketOnError
+                                    (pure client)
+                                    forceCloseLspClient
+                                    initializeClient
                             case initialized of
                                 Left err -> do
                                     forceCloseLspClient client

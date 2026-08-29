@@ -1,5 +1,6 @@
+-- | A fleet of MCP servers: concurrent startup, the tool catalog shared with
+-- the model, meta-tools for progressive discovery, and reconnection.
 module Agent.MCP.Fleet where
-
 
 import Agent.Json
     ( RawJson
@@ -8,7 +9,8 @@ import Agent.Json
     , rawJsonFromEncoding
     )
 import qualified Agent.Json.Decode as Json
-import Agent.Tools.IO (terminateProcessGroup)
+import Agent.MCP.Client
+import Agent.MCP.Types
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -16,14 +18,12 @@ import Agent.Tools.Types
     , ToolSchema(..)
     , withDefaultArgumentInterpreter
     )
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch (ToolCall(..), typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
-    ( Async
-    , asyncWithUnmask
-    , cancel
+    ( asyncWithUnmask
     , mapConcurrently
-    , waitCatch
+    , poll
     )
 import Control.Concurrent.QSem
     ( newQSem
@@ -31,89 +31,53 @@ import Control.Concurrent.QSem
     , waitQSem
     )
 import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
+    ( modifyMVar
     , modifyMVar_
     , newMVar
     , withMVar
     )
 import Control.Concurrent.STM
     ( STM
-    , TMVar
     , TVar
     , atomically
     , modifyTVar'
-    , newEmptyTMVar
-    , newEmptyTMVarIO
     , newTVarIO
-    , readTMVar
     , readTVar
     , readTVarIO
-    , takeTMVar
-    , tryPutTMVar
     , writeTVar
     )
 import Control.Exception.Safe
-    ( SomeException
-    , displayException
-    , bracket_
+    ( bracket_
     , finally
     , mask
+    , mask_
     , onException
     , throwIO
     , tryAny
     )
-import Control.Monad (forM, unless, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Data.Aeson
     ( Value(..)
     , object
     , (.=)
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.IORef
-    ( IORef
-    , atomicModifyIORef'
+    ( atomicModifyIORef'
     , newIORef
     , readIORef
     )
-import qualified Data.IntMap.Strict as IntMap
+import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
-import Data.List (find, sortOn)
 import Data.Maybe (catMaybes, isJust)
 import Data.Ord (Down(..))
-import Data.Scientific (floatingOrInteger)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Text.Encoding.Error (lenientDecode)
-import qualified Data.Vector as Vector
-import System.Environment (getEnvironment)
 import System.Directory (getCurrentDirectory)
-import System.IO
-    ( BufferMode(..)
-    , Handle
-    , hClose
-    , hFlush
-    , hSetBinaryMode
-    , hSetBuffering
-    )
-import System.Posix.Types (ProcessGroupID)
-import System.Process
-    ( CreateProcess(..)
-    , ProcessHandle
-    , StdStream(..)
-    , createProcess
-    , getPid
-    , proc
-    )
-import System.Timeout (timeout)
-import Agent.MCP.Types
-import Agent.MCP.Client hiding (rawObjectDecoder)
+
 resolveEffectiveCwds :: [McpServerConfig] -> IO [McpServerConfig]
 resolveEffectiveCwds configs = do
     current <- getCurrentDirectory
@@ -135,6 +99,85 @@ sameServerConfigs left right =
 
 mcpFleetTools :: McpFleet -> [AppTool]
 mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
+
+-- | Snapshot the metadata advertised by every Skills-over-MCP server.  The
+-- server name is deliberately retained alongside each URI: URIs are only
+-- unique within an MCP server.
+mcpFleetSkillRegistrations :: McpFleet -> IO [McpSkillRegistration]
+mcpFleetSkillRegistrations fleet = readTVarIO fleet.mcpFleetSkills
+
+mcpFleetGetSkill :: McpFleet -> Text -> Text -> IO (Either Text McpSkillEntry)
+mcpFleetGetSkill fleet server uri =
+    withFleetClient fleet server \client -> getMcpSkill client uri
+
+mcpFleetReadResource
+    :: McpFleet -> Text -> Text -> IO (Either Text [McpResourceContent])
+mcpFleetReadResource fleet server uri =
+    withFleetClient fleet server \client -> readMcpResource client uri
+
+mcpFleetListResources :: McpFleet -> Text -> IO (Either Text [McpResource])
+mcpFleetListResources fleet server =
+    withFleetClient fleet server \client ->
+        either (Left . renderMcpError) Right <$> listMcpResources client
+
+mcpFleetListResourceTemplates
+    :: McpFleet -> Text -> IO (Either Text [McpResourceTemplate])
+mcpFleetListResourceTemplates fleet server =
+    withFleetClient fleet server \client ->
+        either (Left . renderMcpError) Right <$> listMcpResourceTemplates client
+
+mcpFleetListPrompts :: McpFleet -> Text -> IO (Either Text [McpPrompt])
+mcpFleetListPrompts fleet server =
+    withFleetClient fleet server \client ->
+        either (Left . renderMcpError) Right <$> listMcpPrompts client
+
+mcpFleetGetPrompt
+    :: McpFleet -> Text -> Text -> [(Text, Text)] -> IO (Either Text McpPromptResult)
+mcpFleetGetPrompt fleet server name arguments =
+    withFleetClient fleet server \client ->
+        either (Left . renderMcpError) Right <$> getMcpPrompt client name arguments
+
+mcpFleetComplete
+    :: McpFleet
+    -> Text
+    -> McpCompletionRef
+    -> Text
+    -> Text
+    -> [(Text, Text)]
+    -> IO (Either Text McpCompletion)
+mcpFleetComplete fleet server ref argument partial context =
+    withFleetClient fleet server \client ->
+        either (Left . renderMcpError) Right
+            <$> completeMcpArgument client ref argument partial context
+
+-- | Identity, capabilities, and instructions of every initialized server.
+mcpFleetServerInfos :: McpFleet -> IO [(Text, McpServerInfo)]
+mcpFleetServerInfos fleet = do
+    clients <- readTVarIO fleet.mcpFleetClients
+    fmap catMaybes $ forM fleet.mcpFleetServerOrder \name ->
+        case Map.lookup name clients of
+            Nothing -> pure Nothing
+            Just client -> fmap (\info -> (name, info)) <$> mcpClientServerInfo client
+
+-- | Natural-language guidance servers provide for the model.
+mcpFleetInstructions :: McpFleet -> IO [(Text, Text)]
+mcpFleetInstructions fleet =
+    catMaybes . map instructionsOf <$> mcpFleetServerInfos fleet
+  where
+    instructionsOf :: (Text, McpServerInfo) -> Maybe (Text, Text)
+    instructionsOf (name, info) = case info.serverInfoInstructions of
+        Just instructions
+            | not (Text.null (Text.strip instructions)) ->
+                Just (name, Text.strip instructions)
+        _ -> Nothing
+
+withFleetClient
+    :: McpFleet -> Text -> (McpClient -> IO (Either Text a)) -> IO (Either Text a)
+withFleetClient fleet server action = do
+    clients <- readTVarIO fleet.mcpFleetClients
+    case Map.lookup server clients of
+        Nothing -> pure (Left ("unknown MCP server: " <> server))
+        Just client -> action client
 
 -- | Snapshot server status without triggering initialization or other I/O.
 mcpFleetStatuses :: McpFleet -> IO [McpServerStatus]
@@ -164,14 +207,21 @@ mcpFleetStatuses fleet = do
 startMcpFleet :: [McpServerConfig] -> IO McpFleet
 startMcpFleet = startMcpFleetWithProgress (const (pure ()))
 
--- | Start every server concurrently while reporting the configured names that
--- are still initializing. The callback is intended for startup UI and
--- deliberately receives no command arguments or environment values.
 startMcpFleetWithProgress
     :: ([Text] -> IO ())
     -> [McpServerConfig]
     -> IO McpFleet
-startMcpFleetWithProgress reportActive configs = mask \restore -> do
+startMcpFleetWithProgress = startMcpFleetWithProgressHooks defaultMcpHostHooks
+
+-- | Start every server concurrently while reporting the configured names that
+-- are still initializing. The callback is intended for startup UI and
+-- deliberately receives no command arguments or environment values.
+startMcpFleetWithProgressHooks
+    :: McpHostHooks
+    -> ([Text] -> IO ())
+    -> [McpServerConfig]
+    -> IO McpFleet
+startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
     validateServerNames configs
     closed <- newMVar False
     ownedClients <- newIORef []
@@ -184,6 +234,13 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
             `onException` closeOwnedClients ownedClients
     let (clients, registrations, warnings, failures) =
             foldr collectServerResult ([], [], [], Map.empty) results
+    skills <- fmap concat $ forM clients \client -> do
+        entries <- readTVarIO client.clientDiscoveredSkills
+        pure
+            [ McpSkillRegistration client.clientConfig.mcpServerName entry
+            | entry <- entries
+            ]
+    skillsVar <- newTVarIO skills
     catalog <- newTVarIO $
         Map.fromList
             [ (registration.mcpRegistrationTool.appToolName, McpCatalogEntry client tool)
@@ -205,6 +262,7 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
     let
         fleet = McpFleet
             { mcpFleetRegistrations = registrations
+            , mcpFleetSkills = skillsVar
             , mcpFleetWarnings = warnings
             , mcpFleetClients = clientsVar
             , mcpFleetServerOrder = map (.mcpServerName) configs
@@ -213,7 +271,9 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
             , mcpFleetReconnects = reconnects
             , mcpFleetWorkers = workers
             , mcpFleetClosed = closed
+            , mcpFleetHooks = hooks
             }
+    forM_ clients (attachFleetEvents fleet)
     pure fleet
   where
     startServerTracked ownedClients activeServers config = mask \restore -> do
@@ -277,7 +337,7 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
                 )
 
     startServer config = mask \restore -> do
-        client <- startMcpClient config
+        client <- startMcpClientWith hooks Nothing config
         flip onException (closeMcpClient client) $ restore do
             ensureMcpClientReady client >>= \case
                 Left err -> throwIO (userError (Text.unpack err))
@@ -309,20 +369,28 @@ validateServerNames = go Set.empty
         | otherwise =
             go (Set.insert config.mcpServerName seen) rest
 
--- | Spawn configured stdio clients with bounded concurrency, then initialize
--- and discover each server in tracked background workers. The fleet can be
--- used immediately through 'mcpFleetMetaTools'.
 startMcpFleetProgressive
     :: ([McpServerStatus] -> IO ())
     -> [McpServerConfig]
     -> IO McpFleet
-startMcpFleetProgressive reportStatuses configs = mask \restore -> do
+startMcpFleetProgressive = startMcpFleetProgressiveHooks defaultMcpHostHooks
+
+-- | Spawn configured stdio clients with bounded concurrency, then initialize
+-- and discover each server in tracked background workers. The fleet can be
+-- used immediately through 'mcpFleetMetaTools'.
+startMcpFleetProgressiveHooks
+    :: McpHostHooks
+    -> ([McpServerStatus] -> IO ())
+    -> [McpServerConfig]
+    -> IO McpFleet
+startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
     validateServerNames configs
     closed <- newMVar False
     workers <- newMVar []
     catalog <- newTVarIO Map.empty
     ownedClients <- newIORef []
     clientsVar <- newTVarIO Map.empty
+    skillsVar <- newTVarIO []
     reconnects <- Map.fromList <$> mapM
         (\config -> do
             lock <- newMVar ()
@@ -357,6 +425,7 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
             ]
         fleet = McpFleet
             { mcpFleetRegistrations = []
+            , mcpFleetSkills = skillsVar
             , mcpFleetWarnings = warnings
             , mcpFleetClients = clientsVar
             , mcpFleetServerOrder = map (.mcpServerName) configs
@@ -365,6 +434,7 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
             , mcpFleetReconnects = reconnects
             , mcpFleetWorkers = workers
             , mcpFleetClosed = closed
+            , mcpFleetHooks = hooks
             }
         initializeOne client = do
             void (reportFleetStatuses reportStatuses fleet)
@@ -372,7 +442,14 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
                 (publishCatalogEntries catalog client)
                 client >>= \case
                 Left _ -> pure ()
-                Right _ -> pure ()
+                Right _ -> do
+                    entries <- readTVarIO client.clientDiscoveredSkills
+                    atomically $ modifyTVar' skillsVar \current ->
+                        current
+                            <> [ McpSkillRegistration
+                                    client.clientConfig.mcpServerName entry
+                                | entry <- entries
+                                ]
             void (reportFleetStatuses reportStatuses fleet)
     atomically $
         writeTVar clientsVar $
@@ -380,6 +457,7 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
                 [ (client.clientConfig.mcpServerName, client)
                 | client <- clients
                 ]
+    forM_ clients (attachFleetEvents fleet)
     spawned <- newIORef []
     started <-
         (forM clients \client -> do
@@ -401,7 +479,7 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
             bracket_
                 (waitQSem semaphore)
                 (signalQSem semaphore)
-                (tryAny (restore (startMcpClient config)))
+                (tryAny (restore (startMcpClientWith hooks Nothing config)))
         case attempt of
             Left exception -> pure (Left exception)
             Right client -> do
@@ -413,18 +491,27 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
         atomicModifyIORef' ownedClients (\clients -> ([], clients))
             >>= mapM_ closeMcpClient
 
-    publishCatalogEntries catalog client tools =
-        modifyTVar' catalog \current ->
-            foldl
-                (\entries tool ->
-                    Map.insert
-                        (qualifiedMcpToolName
-                            client.clientConfig.mcpServerName
-                            tool.discoveredName)
-                        (McpCatalogEntry client tool)
-                        entries)
-                current
-                tools
+publishCatalogEntries
+    :: TVar (Map.Map Text McpCatalogEntry)
+    -> McpClient
+    -> [McpTool]
+    -> STM ()
+publishCatalogEntries catalog client tools =
+    modifyTVar' catalog \current ->
+        foldl'
+            (\entries tool ->
+                Map.insert
+                    (qualifiedMcpToolName
+                        client.clientConfig.mcpServerName
+                        tool.discoveredName)
+                    (McpCatalogEntry client tool)
+                    entries)
+            (withoutServer client.clientConfig.mcpServerName current)
+            tools
+
+withoutServer :: Text -> Map.Map Text McpCatalogEntry -> Map.Map Text McpCatalogEntry
+withoutServer serverName =
+    Map.filter ((/= serverName) . (.clientConfig.mcpServerName) . (.catalogClient))
 
 progressiveSpawnLimit :: Int
 progressiveSpawnLimit = 8
@@ -438,6 +525,56 @@ reportFleetStatuses report fleet = do
     void (tryAny (report statuses))
     pure statuses
 
+-- * Server events
+
+-- | Route a client's server-initiated notifications into fleet maintenance.
+-- Tool list changes refresh the catalog in a tracked worker.
+attachFleetEvents :: McpFleet -> McpClient -> IO ()
+attachFleetEvents fleet client =
+    setMcpClientEventHandler client \case
+        McpToolsListChanged ->
+            spawnFleetWorker fleet (refreshServerTools fleet client)
+        _ -> pure ()
+
+-- | Run fleet maintenance in the background. Finished workers are pruned on
+-- the next spawn; the rest are cancelled by 'closeMcpFleet'.
+spawnFleetWorker :: McpFleet -> IO () -> IO ()
+spawnFleetWorker fleet action =
+    withMVar fleet.mcpFleetClosed \closed ->
+        unless closed $ mask_ do
+            worker <- asyncWithUnmask \unmask -> unmask (void (tryAny action))
+            modifyMVar_ fleet.mcpFleetWorkers \current -> do
+                live <- fmap catMaybes $ forM current \existing ->
+                    poll existing >>= \case
+                        Nothing -> pure (Just existing)
+                        Just _ -> pure Nothing
+                pure (worker : live)
+
+-- | Re-list a server's tools after @notifications/tools/list_changed@ and
+-- replace its catalog entries. Statically registered tools keep working for
+-- as long as the server still offers them.
+refreshServerTools :: McpFleet -> McpClient -> IO ()
+refreshServerTools fleet client =
+    forM_ (Map.lookup serverName fleet.mcpFleetReconnects) \lock ->
+        withMVar lock \_ -> do
+            current <- Map.lookup serverName <$> readTVarIO fleet.mcpFleetClients
+            when (maybe False (sameClient client) current) do
+                tryAny (discoverMcpTools client) >>= \case
+                    Left _ -> pure ()
+                    Right (tools, warnings) -> atomically do
+                        publishCatalogEntries fleet.mcpFleetCatalog client tools
+                        readTVar client.clientLifecycle >>= \case
+                            ClientReady _ _ ->
+                                writeTVar client.clientLifecycle
+                                    (ClientReady tools warnings)
+                            _ -> pure ()
+  where
+    serverName = client.clientConfig.mcpServerName
+    sameClient :: McpClient -> McpClient -> Bool
+    sameClient left right = left.clientNextId == right.clientNextId
+
+-- * Meta-tools
+
 -- | Stable concise MCP tools backed by the fleet's background-populated
 -- catalog. These schemas do not change as servers become ready.
 mcpFleetMetaTools :: McpFleet -> [AppTool]
@@ -450,6 +587,15 @@ mcpFleetGrokMetaTools :: McpFleet -> [AppTool]
 mcpFleetGrokMetaTools fleet =
     [ grokSearchTool fleet
     , grokUseTool fleet
+    ]
+
+-- | Read-only tools for browsing and reading server resources. They are
+-- useful in every startup mode because resource links appear in tool
+-- results.
+mcpFleetResourceTools :: McpFleet -> [AppTool]
+mcpFleetResourceTools fleet =
+    [ mcpListResourcesTool fleet
+    , mcpReadResourceTool fleet
     ]
 
 mcpSearchTool :: McpFleet -> AppTool
@@ -482,7 +628,7 @@ mcpSearchTool fleet = withDefaultArgumentInterpreter AppTool
                             `Text.isInfixOf`
                                 Text.toCaseFold
                                     (name <> " "
-                                        <> entry.catalogTool.discoveredDescription))
+                                        <> describeTool entry.catalogTool))
                     query
                     && maybe True
                         (== entry.catalogClient.clientConfig.mcpServerName)
@@ -490,15 +636,18 @@ mcpSearchTool fleet = withDefaultArgumentInterpreter AppTool
             found = take limit (filter matches (Map.toAscList entries))
             payload = object
                 [ "tools" .=
-                    [ object
+                    [ object $
                         [ "name" .= name
                         , "server" .=
                             entry.catalogClient.clientConfig.mcpServerName
-                        , "description" .=
-                            entry.catalogTool.discoveredDescription
+                        , "description" .= describeTool entry.catalogTool
                         , "inputSchema" .=
                             entry.catalogTool.discoveredInputSchema
+                        , "readOnly" .= entry.catalogTool.discoveredReadOnly
                         ]
+                        <> [ "outputSchema" .= schema
+                           | Just schema <- [entry.catalogTool.discoveredOutputSchema]
+                           ]
                     | (name, entry) <- found
                     ]
                 , "servers" .= map statusJson statuses
@@ -548,7 +697,7 @@ grokSearchTool fleet = withDefaultArgumentInterpreter AppTool
                                     entry.catalogClient.clientConfig.mcpServerName
                             normalizedDescription =
                                 normalizeSearchText
-                                    entry.catalogTool.discoveredDescription
+                                    (describeTool entry.catalogTool)
                             haystack =
                                 normalizedName
                                     <> " "
@@ -585,7 +734,7 @@ grokSearchTool fleet = withDefaultArgumentInterpreter AppTool
                                         [ "tool_name" .= name
                                         , "description" .=
                                             truncateMcpDescription
-                                                entry.catalogTool.discoveredDescription
+                                                (describeTool entry.catalogTool)
                                         , "score" .= scoreEntry pair
                                         , "input_schema" .=
                                             entry.catalogTool.discoveredInputSchema
@@ -642,17 +791,22 @@ callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
     callDiscoveredTool entry.catalogClient entry.catalogTool arguments
         >>= \case
             Right result -> pure (Right result)
-            Left originalError -> do
-                failed <- readTVarIO entry.catalogClient.clientFailure
-                case failed of
-                    Nothing -> pure (Left originalError)
-                    Just _ ->
-                        -- Stable meta-tool handlers can transparently replace
-                        -- a failed stdio transport and retry the read-only
-                        -- call once. The per-server lock makes this
-                        -- single-flight across concurrent calls.
-                        reconnectCatalogEntry fleet qualifiedName entry
-                            >>= \case
+            Left originalError
+                | not (mcpToolRetrySafe entry.catalogTool) ->
+                    -- A failed mutation may have reached the server. Retrying
+                    -- it after reconnect could duplicate the side effect.
+                    pure (Left originalError)
+                | otherwise -> do
+                    failed <- readTVarIO entry.catalogClient.clientFailure
+                    case failed of
+                        Nothing -> pure (Left originalError)
+                        Just _ ->
+                            -- Read-only and idempotent calls are safe to retry
+                            -- once after a transport failure. The per-server
+                            -- lock makes this single-flight across concurrent
+                            -- calls.
+                            reconnectCatalogEntry fleet qualifiedName entry
+                                >>= \case
                                 Left reconnectError ->
                                     pure . Left $
                                         originalError
@@ -663,6 +817,28 @@ callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
                                         replacement.catalogClient
                                         replacement.catalogTool
                                         arguments
+
+callCatalogTool
+    :: McpFleet
+    -> Text
+    -> RawJson
+    -> IO (Either Text Text)
+callCatalogTool fleet name toolArguments = do
+    entries <- readTVarIO fleet.mcpFleetCatalog
+    case Map.lookup name entries of
+        Just entry ->
+            callCatalogEntryWithReconnect
+                fleet
+                name
+                entry
+                toolArguments
+        Nothing -> do
+            statuses <- mcpFleetStatuses fleet
+            pure . Left $
+                if any isConnecting statuses
+                    then
+                        "MCP tool is not available yet; one or more servers are still connecting"
+                    else "Unknown MCP tool: " <> name
 
 reconnectCatalogEntry
     :: McpFleet
@@ -684,14 +860,15 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                                     | replacement.catalogClient.clientFailure
                                         /= failedEntry.catalogClient.clientFailure ->
                                             pure (Right replacement)
-                                _ -> restart current
+                                _ -> restart
   where
     serverName =
         failedEntry.catalogClient.clientConfig.mcpServerName
     config = failedEntry.catalogClient.clientConfig
 
-    restart _ = do
-        started <- tryAny (startMcpClient config)
+    restart = do
+        eraHint <- mcpClientEra failedEntry.catalogClient
+        started <- tryAny (startMcpClientWith fleet.mcpFleetHooks eraHint config)
         case started of
             Left exception ->
                 pure . Left $
@@ -714,17 +891,12 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                         previousClient <- atomically do
                             clients <- readTVar fleet.mcpFleetClients
                             currentCatalog <- readTVar fleet.mcpFleetCatalog
-                            let withoutServer =
-                                    Map.filter
-                                        ((/= serverName)
-                                            . (.clientConfig.mcpServerName)
-                                            . (.catalogClient))
-                                        currentCatalog
                             writeTVar fleet.mcpFleetClients
                                 (Map.insert serverName replacementClient clients)
                             writeTVar fleet.mcpFleetCatalog
-                                (replacementEntries <> withoutServer)
+                                (replacementEntries <> withoutServer serverName currentCatalog)
                             pure (Map.lookup serverName clients)
+                        attachFleetEvents fleet replacementClient
                         mapM_ closeMcpClient previousClient
                         case Map.lookup qualifiedName replacementEntries of
                             Nothing ->
@@ -735,7 +907,7 @@ mcpCallTool :: McpFleet -> AppTool
 mcpCallTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "mcp_call"
     , appToolDescription =
-        "Call a currently available read-only MCP tool by its qualified server__tool name."
+        "Call a currently available MCP tool by its qualified server__tool name. Mutating tools require user approval."
     , appToolSchema = RawJsonFunctionSchema $ object
         [ "type" .= ("object" :: Text)
         , "properties" .= object
@@ -746,21 +918,11 @@ mcpCallTool fleet = withDefaultArgumentInterpreter AppTool
         , "additionalProperties" .= False
         ]
     , appToolHandler = typedTool "mcp_call" callArgumentsDecoder
-        \(name, toolArguments) -> do
-                entries <- readTVarIO fleet.mcpFleetCatalog
-                case Map.lookup name entries of
-                    Just entry ->
-                        callCatalogEntryWithReconnect
-                            fleet name entry toolArguments
-                    Nothing -> do
-                        statuses <- mcpFleetStatuses fleet
-                        pure . Left $
-                            if any isConnecting statuses
-                                then
-                                    "MCP tool is not available yet; one or more servers are still connecting"
-                                else "Unknown MCP tool: " <> name
-    , appToolApproval = AlwaysReadOnly
-    , appToolExecution = ParallelSafe
+        \(name, toolArguments) ->
+            callCatalogTool fleet name toolArguments
+    , appToolApproval =
+        ClassifyReadOnly (catalogCallIsReadOnly fleet callArgumentsDecoder)
+    , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     , appToolArgumentInterpreter = Nothing
     }
@@ -786,24 +948,134 @@ grokUseTool fleet = withDefaultArgumentInterpreter AppTool
         , "additionalProperties" .= False
         ]
     , appToolHandler = typedTool "use_tool" grokCallArgumentsDecoder
-        \(name, toolArguments) -> do
-                entries <- readTVarIO fleet.mcpFleetCatalog
-                case Map.lookup name entries of
-                    Just entry ->
-                        callCatalogEntryWithReconnect
-                            fleet name entry toolArguments
-                    Nothing -> do
-                        statuses <- mcpFleetStatuses fleet
-                        pure . Left $
-                            if any isConnecting statuses
-                                then
-                                    "MCP tool is not available yet; one or more servers are still connecting"
-                                else "Unknown MCP tool: " <> name
+        \(name, toolArguments) ->
+            callCatalogTool fleet name toolArguments
+    , appToolApproval =
+        ClassifyReadOnly (catalogCallIsReadOnly fleet grokCallArgumentsDecoder)
+    , appToolExecution = TurnSequential
+    , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
+    }
+
+mcpListResourcesTool :: McpFleet -> AppTool
+mcpListResourcesTool fleet = AppTool
+    { appToolName = "mcp_list_resources"
+    , appToolDescription =
+        "List the resources and resource templates an MCP server exposes. \
+        \Omit `server` to query every connected server."
+    , appToolSchema = RawJsonFunctionSchema $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object
+            [ "server" .= object ["type" .= ("string" :: Text)]
+            ]
+        , "additionalProperties" .= False
+        ]
+    , appToolHandler = typedTool "mcp_list_resources"
+        (Json.object (nonEmptyOptionalText "server"))
+        \server -> do
+            infos <- mcpFleetServerInfos fleet
+            let selected =
+                    [ name
+                    | (name, info) <- infos
+                    , maybe True (== name) server
+                    , isJust info.serverInfoCapabilities.capabilityResources
+                    ]
+            listings <- forM selected \name -> do
+                resources <- mcpFleetListResources fleet name
+                templates <- mcpFleetListResourceTemplates fleet name
+                pure $ object
+                    [ "server" .= name
+                    , "resources" .= either (const []) (map resourceJson) resources
+                    , "resourceTemplates" .=
+                        either (const []) (map templateJson) templates
+                    , "error" .= either Just (const Nothing) resources
+                    ]
+            pure (Right (compactJson (object ["servers" .= listings])))
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolArgumentInterpreter = Nothing
     }
+  where
+    resourceJson :: McpResource -> Value
+    resourceJson resource = object
+        [ "uri" .= resource.resourceUri
+        , "name" .= resource.resourceName
+        , "title" .= resource.resourceTitle
+        , "description" .= resource.resourceDescription
+        , "mimeType" .= resource.resourceMimeType
+        , "size" .= resource.resourceSize
+        ]
+    templateJson :: McpResourceTemplate -> Value
+    templateJson template = object
+        [ "uriTemplate" .= template.templateUri
+        , "name" .= template.templateName
+        , "title" .= template.templateTitle
+        , "description" .= template.templateDescription
+        , "mimeType" .= template.templateMimeType
+        ]
+
+mcpReadResourceTool :: McpFleet -> AppTool
+mcpReadResourceTool fleet = AppTool
+    { appToolName = "mcp_read_resource"
+    , appToolDescription =
+        "Read a resource from an MCP server by URI, for example one returned \
+        \by mcp_list_resources or referenced as a resource_link in a tool result."
+    , appToolSchema = RawJsonFunctionSchema $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object
+            [ "server" .= object ["type" .= ("string" :: Text)]
+            , "uri" .= object ["type" .= ("string" :: Text)]
+            ]
+        , "required" .= (["server", "uri"] :: [Text])
+        , "additionalProperties" .= False
+        ]
+    , appToolHandler = typedTool "mcp_read_resource" readArgumentsDecoder
+        \(server, uri) ->
+            mcpFleetReadResource fleet server uri >>= \case
+                Left err -> pure (Left err)
+                Right contents ->
+                    pure . Right . Text.intercalate "\n" $
+                        map renderResourceContent contents
+    , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
+    }
+  where
+    readArgumentsDecoder = Json.object do
+        server <- Text.strip <$> Json.atKey "server" Json.text
+        uri <- Text.strip <$> Json.atKey "uri" Json.text
+        when (Text.null server || Text.null uri) $
+            fail "mcp_read_resource requires server and uri"
+        pure (server, uri)
+    renderResourceContent :: McpResourceContent -> Text
+    renderResourceContent content =
+        case (content.mcpResourceText, content.mcpResourceBlob) of
+            (Just text, _) ->
+                "[" <> content.mcpResourceUri
+                    <> maybe "" (\value -> " (" <> value <> ")") content.mcpResourceMimeType
+                    <> "]\n" <> text
+            (Nothing, Just blob) ->
+                "[" <> content.mcpResourceUri
+                    <> maybe "" (\value -> " (" <> value <> ")") content.mcpResourceMimeType
+                    <> ": " <> Text.pack (show (Text.length blob))
+                    <> " base64 bytes; binary content is not shown]"
+            (Nothing, Nothing) -> "[" <> content.mcpResourceUri <> "]"
+
+catalogCallIsReadOnly
+    :: McpFleet
+    -> Json.Decoder (Text, RawJson)
+    -> ToolCall
+    -> IO Bool
+catalogCallIsReadOnly fleet decoder call =
+    case Json.decodeEither decoder (TextEncoding.encodeUtf8 call.arguments) of
+        Left _ -> pure False
+        Right (name, _) -> do
+            entries <- readTVarIO fleet.mcpFleetCatalog
+            pure $ maybe False
+                (.catalogTool.discoveredReadOnly)
+                (Map.lookup name entries)
 
 searchArgumentsDecoder :: Json.Decoder (Maybe Text, Maybe Text, Int)
 searchArgumentsDecoder = Json.object do
@@ -880,12 +1152,6 @@ grokCallArgumentsDecoder = Json.object do
             Right value -> pure value
             Left _ -> fail "use_tool tool_input must be an object"
     pure (name, arguments)
-
-rawObjectDecoder :: Json.Decoder RawJson
-rawObjectDecoder =
-    Json.getType >>= \case
-        Json.VObject -> rawJsonDecoder
-        _ -> fail "expected object"
 
 emptyObject :: RawJson
 emptyObject = rawJsonFromEncoding (Aeson.toEncoding (object []))

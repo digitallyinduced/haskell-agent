@@ -6,7 +6,9 @@ module Agent.CLI.Config
     , LspConfig(..)
     , LspServerConfig(..)
     , McpInitStrategy(..)
+    , McpOAuthConfig(..)
     , McpServerConfig(..)
+    , WorktreeConfig(..)
     , defaultHarnessConfig
     , harnessConfigPath
     , loadHarnessConfig
@@ -16,16 +18,19 @@ module Agent.CLI.Config
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.CLI.Json (decodeLazy)
+import Agent.MCP (McpProtocolPreference(..))
+import Agent.MCP.OAuth (validateClientIdMetadataUrl)
 import Agent.Json (RawJson, rawJsonDecoder)
 import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe (displayException, tryIO)
-import Control.Monad (unless, when)
+import Control.Monad (forM_, unless, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
@@ -56,18 +61,55 @@ defaultLspStartupTimeoutMilliseconds = 15000
 defaultLspShutdownTimeoutMilliseconds :: Int
 defaultLspShutdownTimeoutMilliseconds = 5000
 
--- | One local stdio MCP server. Environment values are intentionally kept
+-- | One local stdio or remote HTTP MCP server. Environment values are intentionally kept
 -- opaque: callers must not include them in diagnostics.
 data McpServerConfig = McpServerConfig
     { mcpEnabled :: !Bool
+    , mcpUrl :: !(Maybe Text)
     , mcpCommand :: !Text
     , mcpArgs :: ![Text]
     , mcpCwd :: !(Maybe Text)
     , mcpEnv :: !(Map Text Text)
     , mcpStartupTimeoutSeconds :: !Int
     , mcpRequestTimeoutSeconds :: !Int
+    , mcpOAuth :: !(Maybe McpOAuthConfig)
+    , mcpProtocol :: !McpProtocolPreference
+    -- ^ @auto@ probes for the 2026-07-28 protocol and falls back to the
+    -- legacy @initialize@ handshake; @modern@ and @legacy@ skip the probe.
     }
     deriving (Eq)
+
+-- | Optional OAuth client settings for a remote MCP server: pre-registered
+-- credentials, a Client ID Metadata Document URL, and default scopes. The
+-- client secret is redacted from 'Show' and must never be printed.
+data McpOAuthConfig = McpOAuthConfig
+    { mcpOAuthClientId :: !(Maybe Text)
+    , mcpOAuthClientSecret :: !(Maybe Text)
+    , mcpOAuthClientIdMetadataUrl :: !(Maybe Text)
+    , mcpOAuthScopes :: ![Text]
+    }
+    deriving (Eq)
+
+instance Show McpOAuthConfig where
+    show oauth =
+        "McpOAuthConfig { mcpOAuthClientId = "
+            <> show oauth.mcpOAuthClientId
+            <> ", mcpOAuthClientSecret = "
+            <> (if isJust oauth.mcpOAuthClientSecret then "<redacted>" else "Nothing")
+            <> ", mcpOAuthClientIdMetadataUrl = "
+            <> show oauth.mcpOAuthClientIdMetadataUrl
+            <> ", mcpOAuthScopes = "
+            <> show oauth.mcpOAuthScopes
+            <> " }"
+
+instance Aeson.ToJSON McpOAuthConfig where
+    toJSON oauth =
+        Aeson.object
+            [ "clientId" Aeson..= oauth.mcpOAuthClientId
+            , "clientSecret" Aeson..= oauth.mcpOAuthClientSecret
+            , "clientIdMetadataUrl" Aeson..= oauth.mcpOAuthClientIdMetadataUrl
+            , "scopes" Aeson..= oauth.mcpOAuthScopes
+            ]
 
 data McpInitStrategy
     = McpInitAuto
@@ -129,6 +171,13 @@ data LspConfig = LspConfig
     }
     deriving (Eq, Show)
 
+-- | Managed worktree creation policy. Repositories with remotes fetch by
+-- default, while local-only repositories continue to branch from @HEAD@.
+data WorktreeConfig = WorktreeConfig
+    { worktreeFetchLatestUpstream :: !Bool
+    }
+    deriving (Eq, Show)
+
 -- | Resolve the configured MCP startup policy for the current invocation.
 -- Interactive sessions favor prompt availability, while one-shot commands
 -- preserve deterministic startup unless explicitly overridden.
@@ -159,6 +208,8 @@ instance Show McpServerConfig where
     show server =
         "McpServerConfig { mcpEnabled = "
             <> show server.mcpEnabled
+            <> ", mcpUrl = "
+            <> show server.mcpUrl
             <> ", mcpCommand = "
             <> show server.mcpCommand
             <> ", mcpArgs = "
@@ -171,12 +222,17 @@ instance Show McpServerConfig where
             <> show server.mcpStartupTimeoutSeconds
             <> ", mcpRequestTimeoutSeconds = "
             <> show server.mcpRequestTimeoutSeconds
+            <> ", mcpOAuth = "
+            <> show server.mcpOAuth
+            <> ", mcpProtocol = "
+            <> show server.mcpProtocol
             <> " }"
 
 instance Aeson.ToJSON McpServerConfig where
     toJSON server =
         Aeson.object
             [ "enabled" Aeson..= server.mcpEnabled
+            , "url" Aeson..= server.mcpUrl
             , "command" Aeson..= server.mcpCommand
             , "args" Aeson..= server.mcpArgs
             , "cwd" Aeson..= server.mcpCwd
@@ -185,6 +241,8 @@ instance Aeson.ToJSON McpServerConfig where
                 Aeson..= server.mcpStartupTimeoutSeconds
             , "requestTimeoutSeconds"
                 Aeson..= server.mcpRequestTimeoutSeconds
+            , "oauth" Aeson..= server.mcpOAuth
+            , "protocol" Aeson..= protocolPreferenceText server.mcpProtocol
             ]
 
 instance Aeson.ToJSON WebFetchConfig where
@@ -222,12 +280,20 @@ instance Aeson.ToJSON LspConfig where
             , "servers" Aeson..= config.lspServers
             ]
 
+instance Aeson.ToJSON WorktreeConfig where
+    toJSON config =
+        Aeson.object
+            [ "fetchLatestUpstream"
+                Aeson..= config.worktreeFetchLatestUpstream
+            ]
+
 data HarnessConfig = HarnessConfig
     { configVersion :: !Int
     , configMcpInitStrategy :: !McpInitStrategy
     , configMcpServers :: !(Map Text McpServerConfig)
     , configWebFetch :: !WebFetchConfig
     , configLsp :: !LspConfig
+    , configWorktree :: !WorktreeConfig
     , configMaxConcurrentAgents :: !(Maybe Int)
     }
     deriving (Eq, Show)
@@ -240,6 +306,7 @@ instance Aeson.ToJSON HarnessConfig where
             , "mcpServers" Aeson..= config.configMcpServers
             , "webFetch" Aeson..= config.configWebFetch
             , "lsp" Aeson..= config.configLsp
+            , "worktree" Aeson..= config.configWorktree
             , "maxConcurrentAgents" Aeson..= config.configMaxConcurrentAgents
             ]
 
@@ -259,6 +326,9 @@ defaultHarnessConfig = HarnessConfig
         { lspEnabled = False
         , lspServers = Map.empty
         }
+    , configWorktree = WorktreeConfig
+        { worktreeFetchLatestUpstream = True
+        }
     , configMaxConcurrentAgents = Nothing
     }
 
@@ -267,7 +337,8 @@ mcpServerConfigDecoder =
     Hermes.object $
         McpServerConfig
             <$> defaultKey True "enabled" Hermes.bool
-            <*> Hermes.atKey "command" Hermes.text
+            <*> optionalKey "url" Hermes.text
+            <*> defaultKey "" "command" Hermes.text
             <*> defaultKey [] "args" (Hermes.list Hermes.text)
             <*> optionalKey "cwd" Hermes.text
             <*> defaultKey Map.empty "env" textMapDecoder
@@ -275,6 +346,36 @@ mcpServerConfigDecoder =
                 "startupTimeoutSeconds" Hermes.int
             <*> defaultKey defaultMcpRequestTimeoutSeconds
                 "requestTimeoutSeconds" Hermes.int
+            <*> optionalKey "oauth" mcpOAuthConfigDecoder
+            <*> defaultKey McpProtocolAuto "protocol" protocolPreferenceDecoder
+
+protocolPreferenceDecoder :: Hermes.Decoder McpProtocolPreference
+protocolPreferenceDecoder =
+    Hermes.text >>= \case
+        "auto" -> pure McpProtocolAuto
+        "modern" -> pure McpProtocolModern
+        "legacy" -> pure McpProtocolLegacy
+        other ->
+            fail
+                (Text.unpack
+                    ("unknown MCP protocol preference: "
+                        <> other
+                        <> " (expected auto, modern, or legacy)"))
+
+protocolPreferenceText :: McpProtocolPreference -> Text
+protocolPreferenceText = \case
+    McpProtocolAuto -> "auto"
+    McpProtocolModern -> "modern"
+    McpProtocolLegacy -> "legacy"
+
+mcpOAuthConfigDecoder :: Hermes.Decoder McpOAuthConfig
+mcpOAuthConfigDecoder =
+    Hermes.object $
+        McpOAuthConfig
+            <$> optionalKey "clientId" Hermes.text
+            <*> optionalKey "clientSecret" Hermes.text
+            <*> optionalKey "clientIdMetadataUrl" Hermes.text
+            <*> defaultKey [] "scopes" (Hermes.list Hermes.text)
 
 webFetchConfigDecoder :: Hermes.Decoder WebFetchConfig
 webFetchConfigDecoder =
@@ -327,6 +428,12 @@ lspConfigDecoder =
             <*> defaultKey Map.empty "servers"
                 (Hermes.objectAsMap pure lspServerConfigDecoder)
 
+worktreeConfigDecoder :: Hermes.Decoder WorktreeConfig
+worktreeConfigDecoder =
+    Hermes.object $
+        WorktreeConfig
+            <$> defaultKey True "fetchLatestUpstream" Hermes.bool
+
 harnessConfigDecoder :: Hermes.Decoder HarnessConfig
 harnessConfigDecoder =
     Hermes.object $
@@ -340,6 +447,8 @@ harnessConfigDecoder =
                 "webFetch" webFetchConfigDecoder
             <*> defaultKey defaultHarnessConfig.configLsp
                 "lsp" lspConfigDecoder
+            <*> defaultKey defaultHarnessConfig.configWorktree
+                "worktree" worktreeConfigDecoder
             <*> optionalKey "maxConcurrentAgents" Hermes.int
 
 textMapDecoder :: Hermes.Decoder (Map Text Text)
@@ -439,8 +548,10 @@ validateHarnessConfig config = do
     validateServer label server = do
         when (Text.null (Text.strip label)) $
             Left "MCP server label must not be empty"
-        when (Text.null (Text.strip server.mcpCommand)) $
-            Left ("MCP server " <> quote label <> " has an empty command")
+        let hasUrl = maybe False (not . Text.null . Text.strip) server.mcpUrl
+            hasCommand = not (Text.null (Text.strip server.mcpCommand))
+        when (hasUrl == hasCommand) $
+            Left ("MCP server " <> quote label <> " must configure exactly one of url or command")
         when (server.mcpStartupTimeoutSeconds < 1) $
             Left
                 ( "MCP server "
@@ -453,7 +564,35 @@ validateHarnessConfig config = do
                     <> quote label
                     <> " requestTimeoutSeconds must be positive"
                 )
+        forM_ server.mcpOAuth (validateOAuth label hasUrl)
         pure server
+
+    validateOAuth label hasUrl oauth = do
+        unless hasUrl $
+            Left ("MCP server " <> quote label <> " oauth requires url")
+        when (maybe False (Text.null . Text.strip) oauth.mcpOAuthClientId) $
+            Left ("MCP server " <> quote label <> " oauth.clientId must not be empty")
+        when (isJust oauth.mcpOAuthClientSecret && isNothing oauth.mcpOAuthClientId) $
+            Left
+                ( "MCP server "
+                    <> quote label
+                    <> " oauth.clientSecret requires oauth.clientId"
+                )
+        forM_ oauth.mcpOAuthClientIdMetadataUrl \url ->
+            case validateClientIdMetadataUrl url of
+                Left _ ->
+                    Left
+                        ( "MCP server "
+                            <> quote label
+                            <> " oauth.clientIdMetadataUrl must be an https URL with a path"
+                        )
+                Right () -> Right ()
+        when (any (Text.null . Text.strip) oauth.mcpOAuthScopes) $
+            Left
+                ( "MCP server "
+                    <> quote label
+                    <> " oauth.scopes must not contain empty entries"
+                )
 
     validateMaxConcurrentAgents = \case
         Nothing -> pure ()

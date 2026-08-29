@@ -16,6 +16,7 @@ module Agent.Telegram.Types.State
     , insertPendingAction
     , enqueuePendingAction
     , deletePendingAction
+    , pendingReplyTarget
     , telegramStateDecoder
     ) where
 
@@ -126,6 +127,7 @@ data TelegramState = TelegramState
     , allowedUserIds :: !(Set Integer)
     , seenTelegramUsers :: !(Map Integer TelegramUser)
     , seenUsersByChat :: !(Map Integer (Set Integer))
+    , latestInboundMessageIds :: !(Map TelegramChatKey Integer)
     } deriving (Eq, Show)
 
 instance ToJSON TelegramState where
@@ -177,6 +179,10 @@ instance ToJSON TelegramState where
             [ TelegramSeenChatUsers chatId (sort (Set.toList userIds))
             | (chatId, userIds) <- Map.toAscList state.seenUsersByChat
             ]
+        , "latestInboundMessages" .=
+            [ TelegramLatestInboundMessage key messageId
+            | (key, messageId) <- Map.toAscList state.latestInboundMessageIds
+            ]
         ]
 
 telegramStateDecoder :: Hermes.Decoder TelegramState
@@ -227,6 +233,9 @@ telegramStateDecoder = Hermes.object do
         storedSeenByChat <-
             defaultField "seenUsersByChat" []
                 (Hermes.list telegramSeenChatUsersDecoder)
+        storedLatestInbound <-
+            defaultField "latestInboundMessages" []
+                (Hermes.list telegramLatestInboundMessageDecoder)
         let bindings =
                 foldr
                     (\binding ->
@@ -283,7 +292,29 @@ telegramStateDecoder = Hermes.object do
                     [ (seen.seenChatId, Set.fromList seen.seenChatUserIds)
                     | seen <- storedSeenByChat
                     ]
+            , latestInboundMessageIds =
+                Map.fromList
+                    [ (latest.latestInboundChat, latest.latestInboundMessageId)
+                    | latest <- storedLatestInbound
+                    ]
             }
+
+data TelegramLatestInboundMessage = TelegramLatestInboundMessage
+    { latestInboundChat :: !TelegramChatKey
+    , latestInboundMessageId :: !Integer
+    } deriving (Eq, Show)
+
+instance ToJSON TelegramLatestInboundMessage where
+    toJSON latest = object
+        [ "chat" .= latest.latestInboundChat
+        , "messageId" .= latest.latestInboundMessageId
+        ]
+
+telegramLatestInboundMessageDecoder :: Hermes.Decoder TelegramLatestInboundMessage
+telegramLatestInboundMessageDecoder = Hermes.object $
+    TelegramLatestInboundMessage
+        <$> Hermes.atKey "chat" telegramChatKeyDecoder
+        <*> Hermes.atKey "messageId" integerDecoder
 
 data TelegramSeenChatUsers = TelegramSeenChatUsers
     { seenChatId :: !Integer
@@ -349,6 +380,7 @@ data TelegramPendingReply = TelegramPendingReply
     { pendingUpdateId :: !Integer
     , pendingChat :: !TelegramChatKey
     , pendingReplyToMessageId :: !(Maybe Integer)
+    , pendingEditMessageId :: !(Maybe Integer)
     , pendingText :: !Text
     } deriving (Eq, Show)
 
@@ -357,6 +389,7 @@ instance ToJSON TelegramPendingReply where
         [ "updateId" .= pending.pendingUpdateId
         , "chat" .= pending.pendingChat
         , "replyToMessageId" .= pending.pendingReplyToMessageId
+        , "editMessageId" .= pending.pendingEditMessageId
         , "text" .= pending.pendingText
         ]
 
@@ -366,6 +399,7 @@ telegramPendingReplyDecoder = Hermes.object $
             <$> Hermes.atKey "updateId" integerDecoder
             <*> Hermes.atKey "chat" telegramChatKeyDecoder
             <*> Hermes.optionalKey "replyToMessageId" integerDecoder
+            <*> Hermes.optionalKey "editMessageId" integerDecoder
             <*> Hermes.atKey "text" Hermes.text
 
 data TelegramPendingMediaTurn = TelegramPendingMediaTurn
@@ -606,6 +640,18 @@ deletePendingAction action state =
                 state.pendingQueues
         }
 
+-- | Use Telegram's visible reply chrome only when a newer inbound message is
+-- visible in the same conversation. A response to the latest message reads
+-- naturally as the next ordinary chat message.
+pendingReplyTarget :: TelegramPendingReply -> TelegramState -> Maybe Integer
+pendingReplyTarget pending state = do
+    target <- pending.pendingReplyToMessageId
+    case Map.lookup pending.pendingChat state.latestInboundMessageIds of
+        Just latest | latest <= target -> Nothing
+        -- Missing recency is possible for work restored from older state.
+        -- Keep the target conservatively rather than misattribute the reply.
+        _ -> Just target
+
 emptyTelegramState :: TelegramState
 emptyTelegramState = TelegramState
     { telegramStateVersion = 2
@@ -622,4 +668,5 @@ emptyTelegramState = TelegramState
     , allowedUserIds = Set.empty
     , seenTelegramUsers = Map.empty
     , seenUsersByChat = Map.empty
+    , latestInboundMessageIds = Map.empty
     }

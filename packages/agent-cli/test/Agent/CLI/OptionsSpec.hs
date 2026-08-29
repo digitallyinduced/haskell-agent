@@ -258,6 +258,24 @@ spec = do
             parseArgs ["--no-bash", "--bash"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
 
+        it "keeps computer use opt-in" do
+            defaultCliOptions.optComputerUse `shouldBe` False
+            parseArgs ["--computer-use"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optComputerUse = True })
+            parseArgs ["--computer-use", "--no-computer-use"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optComputerUse = False })
+
+        it "uses conventional tool calling by default" do
+            defaultCliOptions.optCodeMode `shouldBe` False
+            parseArgs ["--code-mode"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeMode = True })
+            parseArgs ["--code-mode", "--no-code-mode"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeMode = False })
+
         it "keeps ghci disabled by default and enables it explicitly" do
             parseArgs []
                 `shouldBe` Right (RunAgent defaultCliOptions)

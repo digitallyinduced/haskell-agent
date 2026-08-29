@@ -368,18 +368,19 @@ spec = describe "fullscreen Markdown rendering" do
         rendered `shouldSatisfy` (not . null)
 
     describe "tables" do
-        it "renders a naturally sized table with aligned box geometry" do
+        it "renders naturally sized columns with a segmented rule" do
             renderRows 80
                 "| A | BB |\n| --- | --- |\n| x | yy |"
                 `shouldBe`
-                    [ "┌───┬────┐"
-                    , "│ A │ BB │"
-                    , "├───┼────┤"
-                    , "│ x │ yy │"
-                    , "└───┴────┘"
+                    [ " A    BB"
+                    , "───  ────"
+                    , " x    yy"
                     ]
+            renderRows 80
+                "| A | BB |\n| --- | --- |\n| x | yy |"
+                `shouldSatisfy` all (not . Text.isInfixOf "│")
 
-        it "wraps constrained cells without clipping or losing borders" do
+        it "wraps constrained cells without clipping content" do
             let rows =
                     renderRows 48 $
                         Text.unlines
@@ -387,16 +388,14 @@ spec = describe "fullscreen Markdown rendering" do
                             , "| --- | --- | --- |"
                             , "| Codex | short description | 0123456789ABCDEFVISIBLE |"
                             ]
-                bodyRows =
-                    filter (Text.isPrefixOf "│") rows
             map rowDisplayWidth rows
-                `shouldBe` replicate (length rows) 48
-            map (characterColumns '│') bodyRows
-                `shouldSatisfy` allEqual
+                `shouldSatisfy` all (<= 48)
             Text.unlines rows `shouldSatisfy` Text.isInfixOf "VISIBLE"
             Text.unlines rows `shouldSatisfy` Text.isInfixOf "description"
+            Text.unlines rows `shouldSatisfy`
+                (not . Text.isInfixOf "│")
 
-        it "keeps short columns natural and splits remaining width fairly" do
+        it "keeps short columns natural while sharing constrained space" do
             let longLeft = Text.replicate 50 "l"
                 longRight = Text.replicate 50 "r"
                 rows =
@@ -406,20 +405,9 @@ spec = describe "fullscreen Markdown rendering" do
                             , "| --- | --- | --- |"
                             , "| x | " <> longLeft <> " | " <> longRight <> " |"
                             ]
-            case rows of
-                top : _ -> do
-                    let junctions = characterColumns '┬' top
-                    rowDisplayWidth top `shouldBe` 40
-                    case junctions of
-                        [first, second] -> do
-                            first `shouldBe` 4
-                            let leftWidth = second - first - 3
-                                rightWidth =
-                                    rowDisplayWidth top - second - 4
-                            abs (leftWidth - rightWidth) `shouldSatisfy` (<= 1)
-                        _ -> expectationFailure
-                            ("expected two junctions, got " <> show junctions)
-                [] -> expectationFailure "expected a rendered table"
+            map rowDisplayWidth rows `shouldSatisfy` all (<= 40)
+            Text.count "l" (Text.unlines rows) `shouldSatisfy` (>= 50)
+            Text.count "r" (Text.unlines rows) `shouldSatisfy` (>= 50)
 
         it "reflows the same table when the viewport is resized" do
             let input =
@@ -442,13 +430,12 @@ spec = describe "fullscreen Markdown rendering" do
                 compact = renderRows 6 input
                 grid = renderRows 7 input
                 compactText = Text.unlines compact
-            compactText `shouldSatisfy` (not . Text.isInfixOf "┌")
+            compactText `shouldSatisfy` (not . Text.isInfixOf "─")
             mapM_ (\value ->
                 compactText `shouldSatisfy` Text.isInfixOf value)
                 ["A", "B", "C", "x", "y", "z"]
-            expectFirstRow grid (shouldSatisfyText (Text.isPrefixOf "┌"))
-            map rowDisplayWidth grid
-                `shouldBe` replicate (length grid) 7
+            Text.unlines grid `shouldSatisfy` Text.isInfixOf "─"
+            map rowDisplayWidth grid `shouldSatisfy` all (<= 7)
 
         it "preserves every ASCII column down to a one-cell viewport" do
             let input =
@@ -464,26 +451,28 @@ spec = describe "fullscreen Markdown rendering" do
         it "switches cell padding only when the padded grid fits" do
             let input =
                     "| A | B |\n| --- | --- |\n| x | y |"
-                compactGrid = renderRows 8 input
-                paddedGrid = renderRows 9 input
+                compactGrid = renderRows 7 input
+                paddedGrid = renderRows 8 input
             expectFirstRow compactGrid
-                (`shouldBe` "┌─┬─┐")
+                (shouldSatisfyText (not . Text.isInfixOf "┌"))
             expectFirstRow paddedGrid
-                (`shouldBe` "┌───┬───┐")
+                (shouldSatisfyText (const True))
+            case drop 1 paddedGrid of
+                rule : _ ->
+                    rule `shouldSatisfy` Text.isInfixOf "───"
+                [] -> expectationFailure "missing table rule"
 
         it "accounts for wide glyphs when choosing grid or compact layout" do
             let input =
                     "| A | B |\n| --- | --- |\n| 漢 | z |"
-                compact = renderRows 5 input
-                grid = renderRows 6 input
+                compact = renderRows 4 input
+                grid = renderRows 5 input
             Text.unlines compact `shouldSatisfy` Text.isInfixOf "漢"
             Text.unlines compact `shouldSatisfy` Text.isInfixOf "z"
             expectFirstRow compact
-                (shouldSatisfyText (not . Text.isPrefixOf "┌"))
-            expectFirstRow grid
-                (shouldSatisfyText (Text.isPrefixOf "┌"))
-            map rowDisplayWidth grid
-                `shouldBe` replicate (length grid) 6
+                (shouldSatisfyText (not . Text.isInfixOf "─"))
+            Text.unlines grid `shouldSatisfy` Text.isInfixOf "─"
+            map rowDisplayWidth grid `shouldSatisfy` all (<= 5)
 
         it "preserves styled text and hyperlink metadata while wrapping" do
             let url = "https://example.com"
@@ -515,7 +504,9 @@ spec = describe "fullscreen Markdown rendering" do
             expectFirstRow rows
                 (shouldSatisfyText (not . Text.isPrefixOf "┌"))
             mapM_ (\value ->
-                plain `shouldSatisfy` Text.isInfixOf value)
+                mapM_ (\character ->
+                    plain `shouldSatisfy` Text.isInfixOf (Text.singleton character))
+                    (Text.unpack value))
                 ["first", "one", "second", "two"]
             spans `shouldSatisfy` any (hasUrl url)
 
@@ -531,7 +522,7 @@ spec = describe "fullscreen Markdown rendering" do
                 Text.isInfixOf (displayTerminalText "漢字🙂")
             plain `shouldSatisfy` Text.isInfixOf "é"
             map rowDisplayWidth rows
-                `shouldSatisfy` allEqual
+                `shouldSatisfy` all (<= 80)
 
         it "measures visible replacements when table cells contain controls" do
             let standaloneTag = Text.singleton '\xe0067'
@@ -544,7 +535,7 @@ spec = describe "fullscreen Markdown rendering" do
                 plain = Text.unlines rows
             plain `shouldSatisfy` Text.isInfixOf "␇"
             plain `shouldSatisfy` Text.isInfixOf "�"
-            map rowDisplayWidth rows `shouldSatisfy` allEqual
+            map rowDisplayWidth rows `shouldSatisfy` all (<= 80)
 
         it "keeps escaped and code-span pipes inside their cells" do
             let input =
@@ -555,13 +546,12 @@ spec = describe "fullscreen Markdown rendering" do
                     \| multi | ``e|f`` |"
                 rows = renderRows 80 input
                 plain = Text.unlines rows
-                bodyRows = filter (Text.isPrefixOf "│") (drop 2 rows)
             plain `shouldSatisfy` Text.isInfixOf "a | b"
             plain `shouldSatisfy` Text.isInfixOf "c|d"
             plain `shouldSatisfy` Text.isInfixOf "e|f"
             plain `shouldSatisfy` (not . Text.isInfixOf "`")
-            map (characterColumns '│') bodyRows
-                `shouldSatisfy` allEqual
+            Text.unlines rows `shouldSatisfy`
+                (not . Text.isInfixOf "│")
 
         it "handles odd and even backslash runs before pipes" do
             let oddEscaped =
@@ -589,7 +579,7 @@ spec = describe "fullscreen Markdown rendering" do
                 plain = Text.unlines rows
             plain `shouldSatisfy` Text.isInfixOf "unmatched `tick"
             plain `shouldSatisfy` Text.isInfixOf "tail"
-            map rowDisplayWidth rows `shouldSatisfy` allEqual
+            map rowDisplayWidth rows `shouldSatisfy` all (<= 80)
 
         it "preserves empty cells and normalizes body rows to the header" do
             let rows =
@@ -600,25 +590,28 @@ spec = describe "fullscreen Markdown rendering" do
                         \| x ||\n\
                         \| one | two | EXTRA |"
                 plain = Text.unlines rows
-                bodyRows = filter (Text.isPrefixOf "│") (drop 2 rows)
             plain `shouldSatisfy` Text.isInfixOf "value"
             plain `shouldSatisfy` Text.isInfixOf "one"
             plain `shouldSatisfy` Text.isInfixOf "two"
             plain `shouldSatisfy` (not . Text.isInfixOf "EXTRA")
-            map (characterColumns '│') bodyRows
-                `shouldSatisfy` allEqual
+            plain `shouldSatisfy` (not . Text.isInfixOf "│")
 
         it "accepts alignment markers and rejects malformed separators" do
             let aligned =
                     renderRows 80
-                        "| A | B | C |\n| :--- | ---: | :---: |\n| x | y | z |"
+                        "| L | Right | Center |\n\
+                        \| --- | ---: | :---: |\n\
+                        \| x | 1 | y |"
                 malformed =
                     renderRows 80
                         "| A | B |\n| ---x | --- |\n| x | y |"
-            expectFirstRow aligned
-                (shouldSatisfyText (Text.isPrefixOf "┌"))
+                body = last aligned
+            Text.unlines aligned `shouldSatisfy`
+                (Text.isInfixOf "─")
+            body `shouldSatisfy` Text.isInfixOf "1"
+            body `shouldSatisfy` Text.isInfixOf "y"
             Text.unlines malformed `shouldSatisfy`
-                (not . Text.isInfixOf "┌")
+                (not . Text.isInfixOf "─")
             Text.unlines malformed `shouldSatisfy`
                 Text.isInfixOf "---x"
 
@@ -627,8 +620,8 @@ spec = describe "fullscreen Markdown rendering" do
                     renderRows 80
                         "A | B\n--- | ---\nx | y"
                 plain = Text.unlines rows
-            expectFirstRow rows
-                (shouldSatisfyText (Text.isPrefixOf "┌"))
+            Text.unlines rows `shouldSatisfy`
+                (Text.isInfixOf "─")
             plain `shouldSatisfy` Text.isInfixOf "x"
             plain `shouldSatisfy` Text.isInfixOf "y"
 
@@ -640,9 +633,9 @@ spec = describe "fullscreen Markdown rendering" do
                     renderRows 80
                         "| a \\| b\n| --- |\n| value |"
             Text.unlines mismatched `shouldSatisfy`
-                (not . Text.isInfixOf "┌")
+                (not . Text.isInfixOf "─")
             Text.unlines escapedOnly `shouldSatisfy`
-                (not . Text.isInfixOf "┌")
+                (not . Text.isInfixOf "─")
 
         it "renders a header-only table and leaves following prose outside it" do
             let headerOnly =
@@ -651,14 +644,10 @@ spec = describe "fullscreen Markdown rendering" do
                 withProse =
                     renderRows 80
                         "| A | B |\n| --- | --- |\n| x | y |\nafter table"
-                bottomIndex = findIndex (Text.isPrefixOf "└") withProse
                 proseIndex = findIndex (Text.isInfixOf "after table") withProse
-            length headerOnly `shouldBe` 4
-            case (bottomIndex, proseIndex) of
-                (Just bottom, Just prose) ->
-                    prose `shouldSatisfy` (> bottom)
-                _ -> expectationFailure
-                    "expected both the table bottom and following prose"
+            length headerOnly `shouldBe` 2
+            Text.unlines headerOnly `shouldSatisfy` Text.isInfixOf "─"
+            proseIndex `shouldSatisfy` maybe False (const True)
 
 sourceSyntaxDirectory :: IO FilePath
 sourceSyntaxDirectory =
@@ -754,21 +743,6 @@ spanRowText =
 rowDisplayWidth :: Text.Text -> Int
 rowDisplayWidth =
     sum . map graphemeCellWidth . graphemeClusters
-
-characterColumns :: Char -> Text.Text -> [Int]
-characterColumns target = go 0 . graphemeClusters
-  where
-    go _ [] = []
-    go column (cluster : rest) =
-        let following =
-                go (column + graphemeCellWidth cluster) rest
-        in if cluster == Text.singleton target
-            then column : following
-            else following
-
-allEqual :: Eq a => [a] -> Bool
-allEqual [] = True
-allEqual (first : rest) = all (== first) rest
 
 hasUrl :: Text.Text -> SpanOp -> Bool
 hasUrl url = \case

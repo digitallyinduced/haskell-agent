@@ -1,4 +1,8 @@
-module Agent.OpenAI.Auth.Refresh (refreshAccessTokenHTTP) where
+module Agent.OpenAI.Auth.Refresh
+    ( RefreshResponse(..)
+    , decodeRefreshResponse
+    , refreshAccessTokenHTTP
+    ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
 import qualified Agent.Json.Decode as Json
@@ -52,13 +56,8 @@ refreshAccessTokenHTTP oauthClientId state = do
                         <> Text.decodeUtf8With Text.lenientDecode
                             (LBS.toStrict (LBS.take 500 (getResponseBody response))))
                     Nothing
-                else case Json.decodeEither refreshResponseDecoder
-                        (LBS.toStrict (getResponseBody response)) of
-                    Left err ->
-                        pure $ Left $ ProviderError AuthenticationError
-                            ("Failed to parse token refresh response: "
-                                <> Json.jsonErrorMessage err)
-                            Nothing
+                else case decodeRefreshResponse (getResponseBody response) of
+                    Left err -> pure (Left err)
                     Right RefreshResponse{..} -> do
                         let newRefreshToken =
                                 fromMaybe state.refreshToken refreshToken
@@ -78,11 +77,23 @@ data RefreshResponse = RefreshResponse
     { accessToken :: !Text
     , refreshToken :: !(Maybe Text)
     , idToken :: !(Maybe Text)
-    }
+    } deriving (Eq, Show)
+
+-- | Parse a token endpoint body. The optional tokens may be absent or an
+-- explicit @null@; either keeps the previously stored value.
+decodeRefreshResponse :: LBS.ByteString -> Either ApiError RefreshResponse
+decodeRefreshResponse body =
+    case Json.decodeEither refreshResponseDecoder (LBS.toStrict body) of
+        Left err ->
+            Left $ ProviderError AuthenticationError
+                ("Failed to parse token refresh response: "
+                    <> Json.jsonErrorMessage err)
+                Nothing
+        Right response -> Right response
 
 refreshResponseDecoder :: Json.Decoder RefreshResponse
 refreshResponseDecoder = Json.object $
     RefreshResponse
         <$> Json.atKey "access_token" Json.text
-        <*> Json.atKeyOptional "refresh_token" Json.text
-        <*> Json.atKeyOptional "id_token" Json.text
+        <*> Json.optionalKey "refresh_token" Json.text
+        <*> Json.optionalKey "id_token" Json.text

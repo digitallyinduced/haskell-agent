@@ -15,6 +15,8 @@ module Agent.OpenAI.LoopBackend
     , openAiBackendWith
     , openAiBackendWithReasoningVisibility
     , openAiBackendWithRetryPolicy
+    , openAiBackendWithRetryPolicies
+    , connectionReplayPolicy
     , openAiBackendWithConnectionRecovery
     , openAiBackendWithTransportFallback
     , withCodexTurnStateScope
@@ -44,8 +46,8 @@ import Agent.Loop
     )
 import Agent.ToolDispatch
     ( ToolArgumentStreamEvent(..)
-    , ToolCall
     , functionToolCall
+    , ToolCallStreamRef(..)
     )
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
@@ -77,12 +79,6 @@ import Agent.Responses.LoopBackend
     , withRequestInput
     )
 import Agent.Responses.Types
-import Agent.ToolDispatch
-    ( ToolArgumentStreamEvent(..)
-    , ToolCall
-    , functionToolCall
-    , ToolCallStreamRef(..)
-    )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (onException)
 import Control.Monad (forM_, when)
@@ -482,12 +478,17 @@ isReplayUnsafeError = \case
     _ -> False
 
 -- | Prefer a WebSocket backend, then switch this agent session permanently to
--- a fallback transport when the socket dies before exposing model output.
+-- a fallback transport once the socket has failed.
 --
 -- Independent agent sessions need their own WebSocket connections. The Codex
 -- endpoint can accept the upgrade and then close a fresh connection before its
--- first response frame. Replaying the same logical turn over the stateless HTTP
--- backend is safe while no text or reasoning delta has reached the caller.
+-- first response frame, and a live socket can die mid-response after the
+-- WebSocket backend exhausted its own reconnect attempts. A dead socket commits
+-- nothing on the server, so the same logical turn is replayed over the
+-- stateless HTTP backend. Text or reasoning that already reached the caller is
+-- closed with a visible restart boundary first; an announced tool block that
+-- never ran is discarded. This mirrors Codex, which retries the sampling
+-- request over WebSocket and then falls back to HTTPS for the session.
 openAiBackendWithTransportFallback
     :: IORef Bool
     -> Backend
@@ -502,25 +503,46 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
   where
     tryPrimary state previousResponseId inputs onEvent = do
         emittedModelOutput <- newIORef False
+        announcedToolCall <- newIORef False
+        let resetAttempt = do
+                writeIORef emittedModelOutput False
+                writeIORef announcedToolCall False
         result <- primary.submitTurn state previousResponseId inputs \event -> do
-            if isModelOutput event
-                then writeIORef emittedModelOutput True
-                else pure ()
+            case event of
+                -- The primary already closed that attempt; only activity from
+                -- its newest attempt still needs a boundary before a replay.
+                ResponseRestarted _ -> resetAttempt
+                ResponseAttemptDiscarded -> resetAttempt
+                _ -> do
+                    when (isModelOutput event) $
+                        writeIORef emittedModelOutput True
+                    when (isToolAnnouncement event) $
+                        writeIORef announcedToolCall True
             onEvent event
         case result of
             Left err
                 | isOpenAiWebSocketTransportFailure err -> do
                     writeIORef fallbackActive True
                     emitted <- readIORef emittedModelOutput
+                    announced <- readIORef announcedToolCall
                     if emitted
-                        then pure result
-                        else fallback.submitTurn
-                            state previousResponseId inputs onEvent
+                        then onEvent (ResponseRestarted fallbackRestartMessage)
+                        else
+                            -- A tool block the dead socket announced must not
+                            -- linger as running next to the replayed attempt.
+                            when announced (onEvent ResponseAttemptDiscarded)
+                    fallback.submitTurn
+                        state previousResponseId inputs onEvent
             _ -> pure result
 
     isModelOutput = \case
         TextDelta {} -> True
         ReasoningDelta {} -> True
+        _ -> False
+
+    isToolAnnouncement = \case
+        ToolStarted {} -> True
+        ToolUpdated {} -> True
         _ -> False
 
 -- | Errors that indicate the Codex Responses WebSocket transport is
@@ -576,13 +598,21 @@ openAiBackendWithReasoningVisibility
     -> IO ResponseCreateParams
     -> Backend
 openAiBackendWithReasoningVisibility showRawReasoning =
-    openAiBackendWithRetryPolicyAndFeatures
+    openAiBackendWithRetryPolicyAndReasoningVisibility
         showRawReasoning
         transientStreamingResultPolicy
 
--- | Streaming retries are replay-safe only until the loop has observed output.
--- Server error events themselves are not loop-visible, so transient Codex
--- failures can wait and retry without printing an error or duplicating output.
+-- | Transient server errors are retried only until the loop has observed
+-- output. Server error events themselves are not loop-visible, so transient
+-- Codex failures can wait and retry without printing an error or duplicating
+-- output.
+--
+-- A connection that dies mid-response is different: the dead socket committed
+-- nothing on either side, so the same request is resubmitted even after
+-- output streamed. Partial text or reasoning stays visible behind a restart
+-- boundary and hidden activity is discarded, then the transport (a
+-- reconnecting sender or a per-request dial) opens a fresh connection. Codex
+-- retries its sampling request the same way before falling back to HTTPS.
 openAiBackendWithRetryPolicy
     :: RetryPolicyM IO
     -> (ResponseCreateParams
@@ -591,10 +621,24 @@ openAiBackendWithRetryPolicy
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendWithRetryPolicy =
-    openAiBackendWithRetryPolicyAndFeatures False
+openAiBackendWithRetryPolicy transientPolicy =
+    openAiBackendWithRetryPolicies transientPolicy connectionReplayPolicy
 
-openAiBackendWithRetryPolicyAndFeatures
+-- | 'openAiBackendWithRetryPolicy' with an explicit reconnect policy for
+-- mid-response connection failures.
+openAiBackendWithRetryPolicies
+    :: RetryPolicyM IO
+    -> RetryPolicyM IO
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithRetryPolicies =
+    openAiBackendWithRetryPoliciesAndReasoningVisibility False
+
+openAiBackendWithRetryPolicyAndReasoningVisibility
     :: Bool
     -> RetryPolicyM IO
     -> (ResponseCreateParams
@@ -603,56 +647,70 @@ openAiBackendWithRetryPolicyAndFeatures
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendWithRetryPolicyAndFeatures
-        showRawReasoning retryPolicy send getParams =
+openAiBackendWithRetryPolicyAndReasoningVisibility
+        showRawReasoning transientPolicy =
+    openAiBackendWithRetryPoliciesAndReasoningVisibility
+        showRawReasoning
+        transientPolicy
+        connectionReplayPolicy
+
+openAiBackendWithRetryPoliciesAndReasoningVisibility
+    :: Bool
+    -> RetryPolicyM IO
+    -> RetryPolicyM IO
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithRetryPoliciesAndReasoningVisibility
+        showRawReasoning transientPolicy reconnectPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
-        let submit = do
-                baseParams <- sanitizeCodexRequest <$> getParams
-                let newItems = turnInputsToItems inputs
-                    deltaRequest = withRequestInput baseParams newItems
-                    -- Live and resumed transcripts already apply compaction
-                    -- snapshots as full replacements. Remote v2 intentionally
-                    -- keeps retained messages before its opaque checkpoint, so
-                    -- replay the complete replacement instead of trimming that
-                    -- retained prefix.
-                    fullRequest =
-                        withRequestInput baseParams (history <> newItems)
-                    (initialRequest, initialPrevious) =
-                        case previousResponseId of
-                            Nothing | not (null history) ->
-                                (fullRequest, Nothing)
-                            _ -> (deltaRequest, previousResponseId)
-                result <-
-                    sendRetrying
-                        onLoopEvent initialRequest initialPrevious
-                recovered <- case result of
-                    Left err
-                        | isJust initialPrevious
-                        , isResponseChainCompatibilityError err
-                        , not (null history) ->
-                            sendRetrying onLoopEvent fullRequest Nothing
-                        | otherwise -> pure (Left err)
-                    Right response -> pure (Right response)
-                case recovered of
-                    Left err ->
-                        pure (Left err)
-                    Right response -> do
-                        mapM_
-                            (onLoopEvent . ToolArgumentEvent)
-                            (responseToolCallCompletions response.output)
-                        pure $ Right BackendResult
-                            { backendOutput = responseToTurnOutput response
-                            , backendState =
-                                history <> newItems <> response.output
-                            }
-        submit
+        baseParams <- sanitizeCodexRequest <$> getParams
+        let newItems = turnInputsToItems inputs
+            deltaRequest = withRequestInput baseParams newItems
+            -- Live and resumed transcripts already apply compaction snapshots
+            -- as full replacements. Remote v2 intentionally keeps retained
+            -- messages before its opaque checkpoint, so replay the complete
+            -- replacement instead of trimming that retained prefix.
+            fullRequest = withRequestInput baseParams (history <> newItems)
+            (initialRequest, initialPrevious) =
+                case previousResponseId of
+                    Nothing | not (null history) -> (fullRequest, Nothing)
+                    _ -> (deltaRequest, previousResponseId)
+        result <- sendRetrying onLoopEvent initialRequest initialPrevious
+        recovered <- case result of
+            Left err
+                | isJust initialPrevious
+                , isResponseChainCompatibilityError err
+                , not (null history) ->
+                    sendRetrying onLoopEvent fullRequest Nothing
+                | otherwise -> pure (Left err)
+            Right response -> pure (Right response)
+        case recovered of
+            Left err -> pure (Left err)
+            Right response -> do
+                -- Some transports (notably the HTTP fallback) do not emit
+                -- the streamed completion event.  The completed response is
+                -- authoritative, so always close any tool argument streams
+                -- that are present in the final output.
+                mapM_
+                    (onLoopEvent . ToolArgumentEvent)
+                    (responseToolCallCompletions response.output)
+                pure $ Right BackendResult
+                    { backendOutput = responseToTurnOutput response
+                    , backendState = history <> newItems <> response.output
+                    }
   where
     sendRetrying onLoopEvent request previousResponseId = do
         emittedRawOutput <- newIORef False
         emittedVisibleOutput <- newIORef False
-        go emittedRawOutput emittedVisibleOutput defaultRetryStatus
+        go emittedRawOutput emittedVisibleOutput
+            defaultRetryStatus defaultRetryStatus
       where
-        go emittedRawOutput emittedVisibleOutput retryStatus = do
+        go emittedRawOutput emittedVisibleOutput transientStatus
+                reconnectStatus = do
             -- One projector per attempt: argument-progress counters must
             -- describe a single provider sample, not the whole retry chain.
             projectEvent <-
@@ -671,9 +729,42 @@ openAiBackendWithRetryPolicyAndFeatures
             emitted <- readIORef emittedRawOutput
             case result of
                 Left apiError
+                    -- A pre-output connection failure is handled by the
+                    -- connection-recovery sender and the transport fallback;
+                    -- only a socket that died mid-response is retried here.
+                    | emitted
+                    , isReconnectableTransportFailure apiError ->
+                        applyPolicy reconnectPolicy reconnectStatus >>= \case
+                            Nothing -> settle apiError result
+                            Just nextStatus -> do
+                                visible <- readIORef emittedVisibleOutput
+                                let delayMicros =
+                                        fromMaybe 0 nextStatus.rsPreviousDelay
+                                    attempt = nextStatus.rsIterNumber
+                                onLoopEvent $ ActivityUpdated $
+                                    formatReconnectScheduled
+                                        apiError attempt delayMicros
+                                threadDelay delayMicros
+                                -- Close the interrupted attempt in every
+                                -- renderer before the replay streams. Visible
+                                -- partial output stays on screen marked as
+                                -- failed; hidden activity such as an announced
+                                -- tool call is removed.
+                                if visible
+                                    then onLoopEvent
+                                        (ResponseRestarted
+                                            connectionRestartMessage)
+                                    else onLoopEvent ResponseAttemptDiscarded
+                                onLoopEvent $ ActivityUpdated $
+                                    "Reconnecting to Codex (attempt "
+                                        <> Text.pack (show attempt) <> ")…"
+                                writeIORef emittedRawOutput False
+                                writeIORef emittedVisibleOutput False
+                                go emittedRawOutput emittedVisibleOutput
+                                    transientStatus nextStatus
                     | not emitted
                     , isInlineRetryableProviderResponseError apiError ->
-                        applyPolicy retryPolicy retryStatus >>= \case
+                        applyPolicy transientPolicy transientStatus >>= \case
                             Nothing -> pure result
                             Just nextStatus -> do
                                 let delayMicros =
@@ -685,13 +776,19 @@ openAiBackendWithRetryPolicyAndFeatures
                                 onLoopEvent $ ActivityUpdated $
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
-                                go emittedRawOutput emittedVisibleOutput nextStatus
-                    | emitted -> do
-                        visible <- readIORef emittedVisibleOutput
-                        pure $ if visible
-                            then result
-                            else Left (replayUnsafeError "model output" apiError)
+                                go emittedRawOutput emittedVisibleOutput
+                                    nextStatus reconnectStatus
+                    | emitted -> settle apiError result
                 _ -> pure result
+          where
+            -- The transport fallback may still replay a dropped connection
+            -- after this backend gives up; every other failure after output
+            -- is terminal because the provider may have committed the sample.
+            settle apiError result = do
+                visible <- readIORef emittedVisibleOutput
+                pure $ if visible || isReconnectableTransportFailure apiError
+                    then result
+                    else Left (replayUnsafeError "model output" apiError)
 
     isVisibleModelOutput = \case
         TextDelta{} -> True
@@ -758,17 +855,6 @@ responseEventToToolArgumentEvent = \case
                     }
     _ -> Nothing
 
-responseToolCalls :: [ResponseItem] -> [ToolCall]
-responseToolCalls =
-    mapMaybe \case
-        FunctionCallItem call ->
-            Just $
-                functionToolCall
-                    call.callId
-                    call.name
-                    call.arguments
-        _ -> Nothing
-
 responseToolCallCompletions
     :: [ResponseItem]
     -> [ToolArgumentStreamEvent]
@@ -795,6 +881,49 @@ responseCallRefs itemId outputIndex =
     maybe [] (pure . ToolCallStreamItem) itemId
         <> maybe [] (pure . ToolCallStreamOutput) outputIndex
 
+-- | Reconnect attempts after a socket died mid-response: 200ms, 400ms, 800ms,
+-- 1.6s and 3.2s, matching Codex's @stream_max_retries@ default of five with
+-- its 200ms exponential backoff. The transport fallback takes over afterwards.
+connectionReplayPolicy :: RetryPolicyM IO
+connectionReplayPolicy =
+    exponentialBackoff 200_000 <> limitRetries 5
+
+-- | Failures that mean the current WebSocket is gone, not that the request was
+-- rejected. A dropped socket commits nothing on either side, so the request
+-- may be resubmitted on a fresh connection even after output streamed.
+isReconnectableTransportFailure :: ApiError -> Bool
+isReconnectableTransportFailure = \case
+    ConnectionError{} -> True
+    ProviderError WebSocketConnectionLimitReached _ _ -> True
+    _ -> False
+
+connectionRestartMessage :: Text
+connectionRestartMessage =
+    "Connection interrupted the response; restarting automatically. "
+        <> "The new attempt may repeat partial output shown above."
+
+fallbackRestartMessage :: Text
+fallbackRestartMessage =
+    "Connection interrupted the response; retrying over the HTTP transport. "
+        <> "The new attempt may repeat partial output shown above."
+
+formatReconnectScheduled :: ApiError -> Int -> Int -> Text
+formatReconnectScheduled apiError attempt delayMicros =
+    "Connection lost mid-response ("
+        <> transportFailureReason apiError
+        <> "); reconnecting in "
+        <> Text.pack (show (ceilingSeconds delayMicros))
+        <> "s (attempt "
+        <> Text.pack (show attempt)
+        <> ")…"
+
+transportFailureReason :: ApiError -> Text
+transportFailureReason = \case
+    ConnectionError reason -> reason
+    ProviderError WebSocketConnectionLimitReached _ _ ->
+        "Codex connection limit reached"
+    other -> Text.pack (show other)
+
 -- | OpenAI's default event projection: reasoning summaries are visible, while
 -- raw chain-of-thought deltas are suppressed.
 streamEventToLoopEvent :: ResponseStreamEvent -> Maybe LoopEvent
@@ -816,18 +945,19 @@ formatRetryScheduled :: ApiError -> Int -> Int -> Text
 formatRetryScheduled apiError attempt delayMicros =
     retryReason apiError
         <> "; retrying in "
-        <> Text.pack (show delaySeconds)
+        <> Text.pack (show (ceilingSeconds delayMicros))
         <> "s (attempt "
         <> Text.pack (show attempt)
         <> ")…"
   where
-    delaySeconds
-        | delayMicros <= 0 = 0
-        | otherwise = (delayMicros + 999_999) `div` 1_000_000
-
     retryReason = \case
         ProviderError OverloadedError _ _ -> "Codex is overloaded"
         ProviderError ServiceUnavailableError _ _ -> "Codex is unavailable"
         ProviderError WebSocketConnectionLimitReached _ _ ->
             "Codex connection limit reached"
         _ -> "Codex server error"
+
+ceilingSeconds :: Int -> Int
+ceilingSeconds delayMicros
+    | delayMicros <= 0 = 0
+    | otherwise = (delayMicros + 999_999) `div` 1_000_000

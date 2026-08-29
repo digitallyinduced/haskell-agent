@@ -81,7 +81,10 @@ setRequestModel
     -> ResponseCreateParams
 setRequestModel provider modelName params
     | oldLite == newLite =
-        setModelField modelName params
+        setModelField modelName
+            (if params.model == Just modelName
+                then params
+                else clearServiceTier params)
     | newLite =
         let instructionText = fromMaybe "" params.instructions
             toolSchemas = fromMaybe [] params.tools
@@ -97,6 +100,10 @@ setRequestModel provider modelName params
                     , reasoning = setReasoningContext
                         (Just "all_turns")
                         reasoning
+                    , serviceTier =
+                        if params.model == Just modelName
+                            then serviceTier
+                            else Nothing
                     , text = Just (toResponsesLiteTextConfig text)
                     , tools = Nothing
                     , ..
@@ -115,6 +122,10 @@ setRequestModel provider modelName params
                             else Just (ResponseInputItems suffix)
                     , parallelToolCalls = Just True
                     , reasoning = setReasoningContext Nothing reasoning
+                    , serviceTier =
+                        if params.model == Just modelName
+                            then serviceTier
+                            else Nothing
                     , text = fromResponsesLiteTextConfig text
                     , tools = Just toolSchemas
                     , ..
@@ -353,6 +364,10 @@ responseInputItems = \case
 setModelField :: Text -> ResponseCreateParams -> ResponseCreateParams
 setModelField modelName ResponseCreateParams{..} =
     ResponseCreateParams { model = Just modelName, .. }
+
+clearServiceTier :: ResponseCreateParams -> ResponseCreateParams
+clearServiceTier ResponseCreateParams{..} =
+    ResponseCreateParams { serviceTier = Nothing, .. }
 
 setReasoningContext
     :: Maybe Text

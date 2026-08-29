@@ -4,6 +4,7 @@ module Agent.CLI.Options
     , ApprovalPolicy(..)
     , CliOptions(..)
     , Command(..)
+    , McpCommand(..)
     , ScreenMode(..)
     , StorageCommand(..)
     , defaultCliOptions
@@ -40,12 +41,18 @@ data Command
     = ShowHelp
     | ShowVersion
     | Login
+    | Mcp McpCommand
     | ListSessions
     | ShowSession Text
     | WaitSession Text
     | ImportSession (Maybe OsPath)
     | Storage StorageCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data McpCommand
+    = McpLogin Text [Text]
+    | McpLogout Text
     deriving (Eq, Show)
 
 -- | Administrative commands for the harness-managed PostgreSQL server.
@@ -123,6 +130,10 @@ data CliOptions = CliOptions
       -- ^ Expose the persistent run_ghci tool (default: False).
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: True).
+    , optComputerUse :: !Bool
+      -- ^ Allow the model to control the local macOS desktop (default: False).
+    , optCodeMode :: !Bool
+      -- ^ Honor catalog-selected JavaScript code mode (default: False).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -150,6 +161,8 @@ defaultCliOptions = CliOptions
     , optSkills = True
     , optGhci = False
     , optBash = True
+    , optComputerUse = False
+    , optCodeMode = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -224,6 +237,9 @@ commandParser =
             <> Options.command "sessions"
                 (Options.info sessionsParser
                     (Options.progDesc "Administer persisted sessions"))
+            <> Options.command "mcp"
+                (Options.info mcpParser
+                    (Options.progDesc "Authorize remote MCP servers"))
             <> Options.command "storage"
                 (Options.info storageParser
                     (Options.progDesc "Administer managed PostgreSQL storage"))
@@ -282,6 +298,25 @@ storageParser =
         Options.command name
             (Options.info (pure (Storage command))
                 (Options.progDesc description))
+
+mcpParser :: Options.Parser Command
+mcpParser = Mcp <$> Options.hsubparser
+    ( Options.command "login"
+        (Options.info
+            (McpLogin
+                <$> (Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+                <*> Options.many
+                    (Text.pack
+                        <$> Options.strOption
+                            (Options.long "scope"
+                                <> Options.metavar "SCOPE"
+                                <> Options.help "Additional OAuth scope to request (repeatable; unioned with granted scopes)")))
+            (Options.progDesc "Authorize an MCP server with OAuth PKCE"))
+    <> Options.command "logout"
+        (Options.info
+            (McpLogout . Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+            (Options.progDesc "Remove saved MCP OAuth credentials"))
+    )
 
 type OptionUpdate = CliOptions -> CliOptions
 
@@ -360,6 +395,14 @@ optionUpdateParser = asum
         (\value options -> options { optBash = value })
     , boolFlagUpdate "no-bash" False "Disable shell execution tools"
         (\value options -> options { optBash = value })
+    , boolFlagUpdate "computer-use" True "Enable local macOS computer use"
+        (\value options -> options { optComputerUse = value })
+    , boolFlagUpdate "no-computer-use" False "Disable local computer use"
+        (\value options -> options { optComputerUse = value })
+    , boolFlagUpdate "code-mode" True "Enable catalog-selected code mode"
+        (\value options -> options { optCodeMode = value })
+    , boolFlagUpdate "no-code-mode" False "Use conventional tool calling"
+        (\value options -> options { optCodeMode = value })
     , screenFlagUpdate "fullscreen" ScreenFullscreen
         "Use the retained full-screen TUI"
     , screenFlagUpdate "minimal" ScreenMinimal
@@ -501,6 +544,8 @@ usage = unlines
     , "       agent-cli login"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
+    , "       agent-cli mcp login <url> [--scope SCOPE]..."
+    , "       agent-cli mcp logout <url>"
     , "       agent-cli storage <status|start|stop|migrate|doctor>"
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
@@ -520,6 +565,8 @@ usage = unlines
     , "      --no-ghci           Disable the persistent GHCi tool (default)"
     , "      --bash              Enable explicit shell execution tools (default)"
     , "      --no-bash           Disable explicit shell execution tools"
+    , "      --computer-use      Enable local macOS desktop control (opt-in)"
+    , "      --no-computer-use   Disable local desktop control (default)"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

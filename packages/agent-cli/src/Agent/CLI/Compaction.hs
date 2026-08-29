@@ -1,6 +1,8 @@
 -- | Run provider compaction and rewrite the local transcript.
 module Agent.CLI.Compaction
-    ( CompactOutcome(..)
+    ( AutomaticCompactionBoundary(..)
+    , CompactOutcome(..)
+    , CompactionInstall(..)
     , OpenAiCompactionSender
     , codexAutoCompactTokenLimit
     , autoCompactOpenAiBackend
@@ -24,7 +26,7 @@ module Agent.CLI.Compaction
     , reportedOccupancy
     ) where
 
-import Agent.CLI.Error (formatApiError, formatException)
+import Agent.CLI.Error (formatApiError)
 import Agent.CLI.Compaction.Continuation
     ( boundCompletedToolContinuations
     )
@@ -87,7 +89,7 @@ import Control.Monad.Trans.Except
     , throwE
     )
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (catchAny, mask, onException)
+import Control.Exception.Safe (mask, onException)
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
@@ -323,22 +325,10 @@ installCompactOutcome
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-installCompactOutcome previous transcript contextTokens runCompact focus =
-    mask \restore -> do
-        result <- restore (runCompact focus)
-        case result of
-            Left _ -> pure ()
-            Right outcome -> do
-                writeIORef previous Nothing
-                writeIORef transcript outcome.compactHistory
-                case contextTokens of
-                    Nothing -> pure ()
-                    Just ref ->
-                        writeIORef ref $ Just $
-                            estimatedOccupancy
-                                outcome.compactAfterTokens
-                                (length outcome.compactHistory)
-        pure result
+installCompactOutcome previous transcript =
+    installCompactionOutcome \outcome -> do
+        writeIORef previous Nothing
+        writeIORef transcript outcome.compactHistory
 
 installLiveCompactOutcome
     :: IORef LiveConversation
@@ -346,14 +336,24 @@ installLiveCompactOutcome
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-installLiveCompactOutcome conversationRef contextTokens runCompact focus =
+installLiveCompactOutcome conversationRef =
+    installCompactionOutcome \outcome -> do
+        writeLivePreviousResponseId conversationRef Nothing
+        writeLiveTranscript conversationRef outcome.compactHistory
+
+installCompactionOutcome
+    :: (CompactOutcome -> IO ())
+    -> Maybe (IORef (Maybe OccupancySnapshot))
+    -> (Maybe Text -> IO (Either Text CompactOutcome))
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+installCompactionOutcome installState contextTokens runCompact focus =
     mask \restore -> do
         result <- restore (runCompact focus)
         case result of
             Left _ -> pure ()
             Right outcome -> do
-                writeLivePreviousResponseId conversationRef Nothing
-                writeLiveTranscript conversationRef outcome.compactHistory
+                installState outcome
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->
@@ -630,11 +630,20 @@ isPortableLocalSummaryItem = \case
     -- OpenAI checkpoints are opaque provider protocol items. Preserve them
     -- for focused OpenAI summaries, but never replay them through
     -- xAI/OpenRouter or user-configured Responses endpoints.
+    CompactionItemValue{} -> False
+    ContextCompactionItemValue{} -> False
+    CompactionTriggerItemValue{} -> False
     KnownResponseItem ItemCompaction _ -> False
+    KnownResponseItem ItemContextCompaction _ -> False
     KnownResponseItem ItemCompactionTrigger _ -> False
     UnknownResponseItem tagged ->
         Text.toLower (Text.strip tagged.tag)
-            `notElem` ["compaction", "compaction_summary", "compaction_trigger"]
+            `notElem`
+                [ "compaction"
+                , "compaction_summary"
+                , "context_compaction"
+                , "compaction_trigger"
+                ]
     _ -> True
 
 autoCompactOpenAiBackend
@@ -683,19 +692,20 @@ autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
         send
         recordUsage
         getParams
-        (pure ())
+        (\_outcome _inputs -> pure CompactionNotInstalled)
         contextTokensRef
         backend
 
--- | Variant that runs a best-effort hook after a compacted continuation is
--- accepted. The root CLI uses it to queue fresh generated project/skill
--- context for the next turn.
+-- | Variant that commits a successful compaction before submitting its
+-- continuation. The root CLI uses the hook as a first-class persistence
+-- boundary: once it returns, the compacted transcript must survive a failed
+-- or cancelled continuation.
 autoCompactOpenAiBackendWithSenderAndHook
     :: Maybe Int
     -> OpenAiCompactionSender
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
-    -> IO ()
+    -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
@@ -708,6 +718,7 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
             contextTokensRef $
             autoCompactOpenAiBackendWithLimit
                 getLimit
+                True
                 compactAction
                 recordUsage
                 estimateProjectedRequest
@@ -848,13 +859,14 @@ autoCompactOpenAiBackendWith
 autoCompactOpenAiBackendWith compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
+        False
         (\_history _inputs ->
             (CompactAttempt emptyTokenUsage
                 <$> fmap (either (Left . textCompactionError) Right)
                     compactAction))
         (const (pure ()))
         estimateProjectedFromCache
-        (pure ())
+        (\_outcome _inputs -> pure CompactionNotInstalled)
   where
     textCompactionError message =
         ProviderError ApiErrorType message Nothing
@@ -867,23 +879,25 @@ autoCompactOpenAiBackendWithApi
 autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
+        False
         (\_history _inputs ->
             CompactAttempt emptyTokenUsage <$> compactAction)
         (const (pure ()))
         estimateProjectedFromCache
-        (pure ())
+        (\_outcome _inputs -> pure CompactionNotInstalled)
 
 autoCompactOpenAiBackendWithLimit
     :: IO Int
+    -> Bool
     -> ([ResponseItem] -> [TurnInput] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
     -> (Maybe OccupancySnapshot -> [ResponseItem] -> [TurnInput] -> IO Int)
-    -> IO ()
+    -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
-autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
-        estimateProjected
+autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
+        recordUsage estimateProjected
         onCompacted
         contextTokensRef
         (Backend submit) =
@@ -894,7 +908,8 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
         let shouldCompact =
                 not (null history)
                     && projectedTokens >= tokenLimit
-        if shouldCompact && not (any isCompletedTool inputs)
+        if shouldCompact
+            && (absorbCompletedTools || not (any isCompletedTool inputs))
             then compactThenSubmit
                 tokenLimit
                 contextState history inputs onEvent
@@ -911,7 +926,15 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
 
     compactThenSubmit tokenLimit oldTokens oldHistory inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
-        runCompaction oldHistory inputs >>= \case
+        -- Tool results complete protocol units that are already represented by
+        -- calls in oldHistory. Put those results behind their calls before
+        -- requesting the checkpoint; replaying them after the checkpoint
+        -- would create orphaned or duplicated tool output.
+        let (completedTools, continuationInputs) =
+                partitionCompletedTools inputs
+            compactionHistory =
+                oldHistory <> turnInputsToItems completedTools
+        runCompaction compactionHistory continuationInputs >>= \case
                 Left err ->
                     pure (Left (automaticCompactionError err))
                 Right outcome
@@ -929,29 +952,49 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                             restore
                             rollback
                             outcome
-                            inputs
+                            continuationInputs
                             onEvent
-                            `onException` rollback
+
+    partitionCompletedTools =
+        foldr
+            (\input (completed, pending) ->
+                if isCompletedTool input
+                    then (input : completed, pending)
+                    else (completed, input : pending))
+            ([], [])
 
     installSubmitAndTrack restore rollback outcome inputs onEvent = do
         let compactedHistory = outcome.compactHistory
+            pendingItems = turnInputsToItems inputs
+            durableHistory = compactedHistory <> pendingItems
             compactSnapshot =
                 Just $
                     estimatedOccupancy
-                        outcome.compactAfterTokens
-                        (length compactedHistory)
+                        ( outcome.compactAfterTokens
+                            + estimateItemsTokens pendingItems
+                        )
+                        (length durableHistory)
         writeIORef contextTokensRef compactSnapshot
-        result <- restore (submit compactedHistory Nothing inputs onEvent)
+        -- Match Codex's compaction lifecycle: install and durably record the
+        -- checkpoint before issuing the model continuation. Root sessions put
+        -- pending inputs in that checkpoint too, so a crash in this gap cannot
+        -- lose the user's request. Lightweight wrappers defer installation and
+        -- keep passing the inputs normally.
+        installation <-
+            onCompacted outcome inputs `onException` rollback
+        let (continuationHistory, continuationInputs, rollbackIfDeferred) =
+                case installation of
+                    CompactionInstalled -> (durableHistory, [], pure ())
+                    CompactionNotInstalled -> (compactedHistory, inputs, rollback)
+        result <-
+            restore
+                (submit continuationHistory Nothing continuationInputs onEvent)
+                `onException` rollbackIfDeferred
         case result of
-            Left _ -> rollback
+            Left _ -> rollbackIfDeferred
             Right backendResult -> do
                 writeIORef contextTokensRef $
                     occupancySnapshot backendResult <|> compactSnapshot
-                onCompacted `catchAny` \err ->
-                    onEvent $
-                        WarningRaised
-                            ("failed to reload generated context after compaction: "
-                                <> formatException err)
         pure result
 
     submitAndTrack oldTokens history previous inputs onEvent = do

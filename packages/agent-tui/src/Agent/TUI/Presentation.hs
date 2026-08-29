@@ -7,14 +7,17 @@ module Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     , formatSearchReplaceDiff
     , formatSearchReplaceDiffRelative
+    , formatToolDiffRelative
     , formatTodoList
     , formatToolOutput
     , formatToolOutputRelative
     , liveTodoPanelLines
     , parseSearchReplaceDiff
+    , parseWriteFileDiff
     , parseTodoList
     , permissionToolCallPrompt
     , permissionToolCallPromptRelative
+    , todoListFromToolArguments
     , todoListFromToolOutput
     , summarizeToolCall
     , summarizeToolCallRelative
@@ -25,8 +28,10 @@ module Agent.TUI.Presentation
     , toolCallInput
     , toolCallTitle
     , toolCallTitleRelative
+    , toolCallDiff
     , toolDetail
     , toolPathArgument
+    , toolVerb
     , workspaceRelativeDisplayPath
     ) where
 
@@ -111,9 +116,17 @@ toolCallInput call = case canonicalToolName call.name of
     "exec" -> call.arguments
     _ -> ""
 
+-- Computer-call arguments can contain secrets in @type@ and @keypress@
+-- actions. Keep approval/activity chrome structural: report action kinds and
+-- text lengths, never the text or complete JSON payload.
+computerActionDetail :: Text -> Text
+computerActionDetail _ = "computer action"
+
 data SearchReplaceAction
     = SearchReplaceCreate
     | SearchReplaceDelete
+    -- | Whole-file write where the previous contents are unknown.
+    | SearchReplaceWrite
     deriving (Eq, Show)
 
 data SearchReplaceLine
@@ -149,18 +162,51 @@ parseSearchReplaceDiff arguments =
         , diffHiddenLines = length raw - length shown
         }
 
+-- | Preview for Claude Code's @Write@ tool: the new file contents as added
+-- lines. Whether the path already exists is unknown here, so the header
+-- says @write@ rather than @create@.
+parseWriteFileDiff :: Text -> SearchReplaceDiff
+parseWriteFileDiff arguments =
+    let path = jsonTextFieldDefault "file_path" arguments
+        content = jsonTextFieldDefault "content" arguments
+        raw = map SearchReplaceAdded (Text.lines content)
+        shown = take 20 raw
+    in SearchReplaceDiff
+        { diffPath = path
+        , diffAction = Just SearchReplaceWrite
+        , diffLines = shown
+        , diffHiddenLines = length raw - length shown
+        }
+
+-- | Diff preview carried by a tool call's arguments, when the tool has one.
+toolCallDiff :: ToolCall -> Maybe SearchReplaceDiff
+toolCallDiff call = case canonicalToolName call.name of
+    "search_replace" -> Just (parseSearchReplaceDiff call.arguments)
+    "Write" -> Just (parseWriteFileDiff call.arguments)
+    _ -> Nothing
+
 formatSearchReplaceDiff :: Text -> Text
 formatSearchReplaceDiff = formatSearchReplaceDiffRelative ""
 
 formatSearchReplaceDiffRelative :: Text -> Text -> Text
 formatSearchReplaceDiffRelative workspace arguments =
+    formatDiffRelative workspace (parseSearchReplaceDiff arguments)
+
+-- | Diff body for a tool block; empty when the tool carries no diff.
+formatToolDiffRelative :: Text -> ToolCall -> Text
+formatToolDiffRelative workspace call =
+    maybe "" (formatDiffRelative workspace) (toolCallDiff call)
+
+formatDiffRelative :: Text -> SearchReplaceDiff -> Text
+formatDiffRelative workspace diff =
     let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
-            parseSearchReplaceDiff arguments
+            diff
         displayedPath = workspaceRelativeDisplayPath workspace diffPath
         header = case diffAction of
             Just SearchReplaceCreate -> "  create " <> displayedPath
             Just SearchReplaceDelete -> "  delete " <> displayedPath
-            _ -> ""
+            Just SearchReplaceWrite -> "  write " <> displayedPath
+            Nothing -> ""
         shown = map formatLine diffLines
         more
             | diffHiddenLines == 0 = []
@@ -174,6 +220,7 @@ formatSearchReplaceDiffRelative workspace arguments =
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
+    "computer" -> "Screenshot captured"
     "exec" -> completedExecOutput output
     name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
@@ -239,10 +286,12 @@ workspaceRelativeDisplayPath workspace path =
 toolPathArgument :: ToolCall -> Maybe Text
 toolPathArgument call =
     nonEmptyPath $ case canonicalToolName call.name of
-        "read_file" -> jsonTextFieldDefault "target_file" call.arguments
+        "read_file" -> readFilePath call.arguments
         "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
         "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
         "apply_patch" -> fromMaybe "" (firstPatchPath call.arguments)
+        "Write" -> jsonTextFieldDefault "file_path" call.arguments
+        "NotebookEdit" -> jsonTextFieldDefault "notebook_path" call.arguments
         _ -> ""
   where
     nonEmptyPath text =
@@ -309,6 +358,36 @@ todoListFromToolOutput output =
     in if stripped == "No tasks currently tracked."
         then Just []
         else if null parsed then Nothing else Just parsed
+
+-- | Checklist carried by a @todo_write@-shaped argument payload. Claude
+-- Code's @TodoWrite@ answers with prose, so its list is only visible here.
+todoListFromToolArguments :: Text -> Maybe [TodoDisplayLine]
+todoListFromToolArguments arguments =
+    case decodeMaybe todosDecoder arguments of
+        Just (Just todos) -> Just (mapMaybe id todos)
+        _ -> Nothing
+  where
+    todosDecoder =
+        Hermes.object $
+            Hermes.atKeyOptional "todos" (Hermes.list todoDecoder)
+    todoDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object do
+                    content <- Hermes.atKeyOptional "content" Hermes.text
+                    status <- Hermes.atKeyOptional "status" Hermes.text
+                    pure do
+                        text <- Text.strip <$> content
+                        if Text.null text
+                            then Nothing
+                            else Just TodoDisplayLine
+                                { todoLineStatus =
+                                    fromMaybe
+                                        TodoDisplayPending
+                                        (status >>= parseTodoStatusMarker)
+                                , todoLineText = text
+                                }
+            _ -> pure Nothing
 
 parseTodoList :: Text -> [TodoDisplayLine]
 parseTodoList output =
@@ -439,6 +518,7 @@ firstPlanStepFromArguments arguments =
 
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of
+    "computer" -> "Control computer"
     "read_file" -> "Read"
     "list_dir" -> "Listed"
     "grep" -> "Searched"
@@ -475,11 +555,40 @@ toolVerb name = case canonicalToolName name of
     "skill_archive" -> "Archived skill"
     "skill_rollback" -> "Restored skill"
     "conversation_search" -> "Searched conversations"
-    other -> other
+    -- Claude Code built-ins without a host equivalent keep their wire names
+    -- as identity; the equivalents are mapped by 'canonicalToolName'.
+    "Write" -> "Wrote"
+    "Glob" -> "Globbed"
+    "WebFetch" -> "Fetched"
+    "WebSearch" -> "Searched web"
+    "ToolSearch" -> "Searched tools"
+    "Agent" -> "Spawned agent"
+    "Task" -> "Spawned agent"
+    "NotebookEdit" -> "Edited"
+    "Monitor" -> "Monitored"
+    "Skill" -> "Ran skill"
+    "EnterWorktree" -> "Entered worktree"
+    "ExitWorktree" -> "Exited worktree"
+    "SendMessage" -> "Sent message to"
+    "ListAgents" -> "Listed agents"
+    other -> mcpToolDisplayName other
+
+-- | Claude Code names MCP tools @mcp__server__tool@; show @server: tool@.
+mcpToolDisplayName :: Text -> Text
+mcpToolDisplayName name =
+    case Text.stripPrefix "mcp__" name of
+        Just rest
+            | (server, tool) <- Text.breakOn "__" rest
+            , not (Text.null server)
+            , Just toolName <- Text.stripPrefix "__" tool
+            , not (Text.null toolName) ->
+                server <> ": " <> toolName
+        _ -> name
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case canonicalToolName call.name of
-    "read_file" -> jsonTextFieldDefault "target_file" call.arguments
+    "computer" -> computerActionDetail call.arguments
+    "read_file" -> readFilePath call.arguments
     "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
     "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
     "grep" -> jsonTextFieldDefault "pattern" call.arguments
@@ -520,7 +629,28 @@ toolDetail call = case canonicalToolName call.name of
     "skill_rollback" -> skillIdentity call.arguments
     "conversation_search" ->
         firstLine (jsonTextFieldDefault "query" call.arguments)
+    "get_task_output" -> jsonTextFieldDefault "task_id" call.arguments
+    "kill_task" -> jsonTextFieldDefault "task_id" call.arguments
+    "Write" -> jsonTextFieldDefault "file_path" call.arguments
+    "Glob" -> jsonTextFieldDefault "pattern" call.arguments
+    "WebFetch" -> jsonTextFieldDefault "url" call.arguments
+    "WebSearch" -> firstLine (jsonTextFieldDefault "query" call.arguments)
+    "ToolSearch" -> firstLine (jsonTextFieldDefault "query" call.arguments)
+    "Agent" -> firstLine (jsonTextFieldDefault "description" call.arguments)
+    "Task" -> firstLine (jsonTextFieldDefault "description" call.arguments)
+    "NotebookEdit" -> jsonTextFieldDefault "notebook_path" call.arguments
+    "Monitor" -> firstLine (jsonTextFieldDefault "command" call.arguments)
+    "Skill" -> firstLine (jsonTextFieldDefault "skill" call.arguments)
+    "SendMessage" -> jsonTextFieldDefault "to" call.arguments
     _ -> ""
+
+-- | Host @read_file@ takes @target_file@; Claude Code's @Read@ shares the
+-- canonical name but passes @file_path@.
+readFilePath :: Text -> Text
+readFilePath arguments =
+    case nonEmptyJsonText "target_file" arguments of
+        Just path -> path
+        Nothing -> jsonTextFieldDefault "file_path" arguments
 
 skillIdentity :: Text -> Text
 skillIdentity arguments =

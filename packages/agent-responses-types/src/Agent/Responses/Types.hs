@@ -44,10 +44,19 @@ module Agent.Responses.Types
     , FunctionCallOutput(..)
     , CustomToolCall(..)
     , CustomToolCallOutput(..)
+    , ComputerAction(..)
+    , ComputerPoint(..)
+    , SafetyCheck(..)
+    , ComputerCall(..)
+    , computerCallDecoder
+    , ComputerCallOutput(..)
+    , computerCallOutputDecoder
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
     , ItemReference(..)
     , TaggedObject(..)
+    , ResponseMetadata(..)
+    , EnvironmentVariables(..)
 
       -- * Tools
     , ResponseTool(..)

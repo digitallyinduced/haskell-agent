@@ -212,6 +212,8 @@ handleEffortControlClick applyUiEvent = do
                                 "Changing effort will restart the current turn."
                             , choiceIndex = initial
                             , choiceRows = [(effort, "") | effort <- efforts]
+                            , choiceSearch = False
+                            , choiceQuery = ""
                             , choiceCloseOnTurnEnd = True
                             }
                         , appChoiceReply = Just choose
@@ -350,8 +352,8 @@ handleComposerKey
                 EscapeDismissSlashMenu ->
                     modify' \current ->
                         current { appSlashDismissed = True }
-                EscapeClearDraft ->
-                    cancelOrClear
+                EscapePreserveDraft ->
+                    pure ()
         V.EvKey V.KBackTab []
             | ui.uiAwaitingInput ->
                 submitRaw (ReplCycleMode ui.uiDraft)

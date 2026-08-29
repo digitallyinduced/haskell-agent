@@ -44,7 +44,7 @@ spec = describe "custom PostgreSQL SQL normalization" do
                 , customExecutionWarning = Nothing
                 }
 
-    it "returns typed catalogs and JSON text only at the query boundary" $
+    it "returns typed catalogs and labeled query text" $
         withSystemTempDirectory "ha" \stateDirectory -> do
             let
                 config = defaultManagedPostgresConfig stateDirectory ""
@@ -125,9 +125,12 @@ spec = describe "custom PostgreSQL SQL normalization" do
                                                             (\queryResult ->
                                                                 not
                                                                     queryResult.customQueryTruncated
-                                                                    && "\"title\": \"one\""
+                                                                    && "title: one"
                                                                         `Text.isInfixOf`
-                                                                            queryResult.customQueryRows)
+                                                                            queryResult.customQueryOutput
+                                                                    && not
+                                                                        ("{\"" `Text.isInfixOf`
+                                                                            queryResult.customQueryOutput))
                                                     pure ()
                         )
                         (closeStore store)

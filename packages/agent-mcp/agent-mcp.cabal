@@ -1,0 +1,109 @@
+cabal-version:      3.0
+name:               agent-mcp
+version:            0.1.0.0
+synopsis:           Model Context Protocol client for the universal agent harness
+description:        MCP protocol clients, fleet supervision, OAuth, and elicitation support.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+extra-source-files: README.md
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+                      , PackageImports
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.MCP
+                    , Agent.MCP.Client
+                    , Agent.MCP.Elicitation
+                    , Agent.MCP.Fleet
+                    , Agent.MCP.Supervisor
+                    , Agent.MCP.Types
+                    , Agent.MCP.OAuth
+    hs-source-dirs:   src
+    autogen-modules:  Paths_agent_mcp
+    other-modules:    Paths_agent_mcp
+    build-depends:    base >= 4.14 && < 5
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
+                    , agent-process >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , directory
+                    , filelock
+                    , filepath
+                    , http-client
+                    , http-client-tls
+                    , http-types
+                    , process
+                    , safe-exceptions
+                    , scientific
+                    , stm
+                    , text
+                    , time
+                    , unix
+                    , vector
+
+test-suite agent-mcp-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.MCPSpec
+                    , Agent.MCP.OAuthSpec
+    build-depends:    base >= 4.14 && < 5
+                    , agent-core
+                    , agent-json
+                    , agent-mcp
+                    , aeson
+                    , async
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , hspec
+                    , QuickCheck >= 2.14 && < 2.16
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
+                    , unix
+
+benchmark mcp-startup-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          McpStartup.hs
+    ghc-options:      -O2
+    build-depends:    agent-mcp
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , safe-exceptions
+                    , text
+                    , unix

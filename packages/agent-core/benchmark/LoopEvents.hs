@@ -320,6 +320,7 @@ eventWeight = \case
     TurnFinished _ -> 1
     ToolStarted call -> Text.length call.callId
     ToolUpdated call -> Text.length call.callId
+    ToolArgumentsUpdated call -> Text.length call.callId
     ToolRetracted callId -> Text.length callId
     ResponseAttemptDiscarded -> 1
     NativeAgentStarted identifier parent label model ->

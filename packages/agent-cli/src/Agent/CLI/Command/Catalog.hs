@@ -10,6 +10,7 @@ slashCommands =
     [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one" True
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model" True
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
+    , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
@@ -37,13 +38,14 @@ slashCommands =
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
     , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
-    , cmd "mcp" ["mcps"] "/mcp" "Manage local MCP servers" False
+    , cmd "mcp" ["mcps"] "/mcp [prompt <server> <name> [key=value…]]" "Manage MCP servers or run a server prompt" False
     , grokToolCmd "scheduler_create" "loop" [] "/loop [interval] <prompt>" "Run a prompt on a recurring interval" True
     , grokToolCmd "update_goal" "goal" [] "/goal <objective> [--budget N] | status | pause | resume | clear" "Set, manage, or check an autonomous goal" True
     , grokToolCmd "workflow" "workflow" [] "/workflow runs | <name> [input]" "Launch a named workflow or list workflow runs" True
     , grokToolCmd "workflow" "deep-research" [] "/deep-research <query>" "Run bounded background research, cross-check evidence, and write a cited report" True
     , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
     , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
+    , cmd "codemod" ["code-mode"] "/codemod" "Enable JavaScript code mode for this session" False
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     , cmd "quit" ["exit"] "/quit" "Exit the current session" False
     ]
@@ -63,3 +65,6 @@ slashCommands =
             { slashDialects = Just [GrokBuildDialect]
             , slashRequiredTools = [requiredTool]
             }
+    codexCmd name aliases usage summary takesArguments =
+        (cmd name aliases usage summary takesArguments)
+            { slashDialects = Just [CodexDialect] }

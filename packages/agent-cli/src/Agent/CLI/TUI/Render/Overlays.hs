@@ -79,7 +79,8 @@ import Agent.CLI.TUI.Types
                   textTitle),
       ResumeOverlay(resumeOverlayBrowser),
       ChoiceOverlay(choicePresentation, choiceIndex, choiceRows,
-                    choiceTitle, choiceBody),
+                    choiceTitle, choiceBody, choiceSearch, choiceQuery),
+      choiceVisibleRows,
       ChoicePresentation(ChoiceOnboarding, ChoiceDialog),
       AgentHover(agentHoverTarget, agentHoverPaneUpperLeft,
                  agentHoverPaneWidth, agentHoverUpperLeft),
@@ -354,6 +355,9 @@ drawFooter state =
             if state.appUi.uiRunning
                 then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
                 else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
+        (_, Nothing, Just choice, _)
+            | choice.choiceSearch ->
+                "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
         (_, Nothing, Just _, _) ->
             if state.appUi.uiRunning
                 then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
@@ -604,9 +608,70 @@ resumeFooter browser =
                     )
 
 drawChoice :: AppState -> ChoiceOverlay -> Widget Name
-drawChoice appState choice = case choice.choicePresentation of
-    ChoiceDialog -> drawDialogChoice appState choice
-    ChoiceOnboarding -> drawOnboardingChoice appState choice
+drawChoice appState choice
+    | choice.choiceSearch = drawFilterChoice appState choice
+    | otherwise = case choice.choicePresentation of
+        ChoiceDialog -> drawDialogChoice appState choice
+        ChoiceOnboarding -> drawOnboardingChoice appState choice
+
+drawFilterChoice :: AppState -> ChoiceOverlay -> Widget Name
+drawFilterChoice appState choice =
+    centerLayer $
+        hLimitPercent 82 $
+            vLimitPercent 78 $
+                overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                    withBorderStyle unicodeRounded $
+                        borderWithLabel
+                            (waitingOverlayLabel appState choice.choiceTitle) $
+                            padAll 1 $
+                                vBox
+                                    [ filterChoiceQuery choice
+                                    , Border.hBorder
+                                    , filterChoiceRows appState choice
+                                    , Border.hBorder
+                                    , withAttr Theme.footerAttr $
+                                        terminalTxt
+                                            "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
+                                    ]
+
+filterChoiceQuery :: ChoiceOverlay -> Widget Name
+filterChoiceQuery choice =
+    let prefix = "search: "
+        query = if Text.null choice.choiceQuery
+            then withAttr Theme.mutedAttr (txt "(type to filter)")
+            else terminalTxt choice.choiceQuery
+        content = hBox
+            [ terminalTxt prefix
+            , query
+            , terminalTxt " "
+            ]
+        cursorColumn =
+            terminalTextWidth prefix
+                + terminalTextWidth choice.choiceQuery
+    in showCursor OverlayCursor (Location (cursorColumn, 0)) content
+
+filterChoiceRows :: AppState -> ChoiceOverlay -> Widget Name
+filterChoiceRows appState choice =
+    case visible of
+        [] ->
+            padTop (Pad 1) $
+                withAttr Theme.mutedAttr (txt "  No matches")
+        _ ->
+            vBox $
+                [ choiceRow
+                    appState
+                    choice.choiceIndex
+                    visibleIndex
+                    originalIndex
+                    row
+                | (visibleIndex, (originalIndex, row)) <-
+                    zip [start ..] rows
+                ]
+  where
+    visible = choiceVisibleRows choice
+    count = length visible
+    start = max 0 (min choice.choiceIndex (max 0 (count - 14)))
+    rows = take 14 (drop start visible)
 
 drawDialogChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawDialogChoice appState choice =
@@ -628,18 +693,22 @@ drawDialogChoice appState choice =
                                                         MarkdownLink
                                                         choice.choiceBody
                                     , vBox $
-                                        zipWith
-                                            (choiceRow
-                                                appState
-                                                choice.choiceIndex)
-                                            [start ..]
-                                            rows
+                                        [ choiceRow
+                                            appState
+                                            choice.choiceIndex
+                                            visibleIndex
+                                            originalIndex
+                                            row
+                                        | (visibleIndex, (originalIndex, row)) <-
+                                            zip [start ..] rows
+                                        ]
                                     ]
   where
-    count = length choice.choiceRows
+    visible = choiceVisibleRows choice
+    count = length visible
     start =
         max 0 (min choice.choiceIndex (max 0 (count - 14)))
-    rows = take 14 (drop start choice.choiceRows)
+    rows = take 14 (drop start visible)
 
 drawOnboardingChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawOnboardingChoice appState choice =
@@ -830,10 +899,16 @@ normalizeTextOverlayInsertion = \case
     TextInputSecret -> Text.takeWhile \character ->
         character /= '\n' && character /= '\r'
 
-choiceRow :: AppState -> Int -> Int -> (Text, Text) -> Widget Name
-choiceRow appState selected index (label, detail) =
-    let prefix = if selected == index then "› " else "  "
-        name = ChoiceRow index
+choiceRow
+    :: AppState
+    -> Int
+    -> Int
+    -> Int
+    -> (Text, Text)
+    -> Widget Name
+choiceRow appState selected visibleIndex originalIndex (label, detail) =
+    let prefix = if selected == visibleIndex then "› " else "  "
+        name = ChoiceRow originalIndex
         row =
             Widget Greedy Fixed do
                 context <- getContext
@@ -850,7 +925,7 @@ choiceRow appState selected index (label, detail) =
                             (terminalTxt shownDetail)
                         ]
         styled =
-            if selected == index
+            if selected == visibleIndex
                 then withAttr Theme.selectedAttr row
                 else row
         interactive = case Composer.controlInteractionAttr appState name of

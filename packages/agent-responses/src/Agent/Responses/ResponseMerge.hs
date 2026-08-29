@@ -138,6 +138,12 @@ responseItemIdentities = \case
         optionalIdentity "id" value.itemId <> [("call_id", value.callId)]
     CustomToolCallOutputItem value ->
         optionalIdentity "id" value.itemId <> [("call_id", value.callId)]
+    ComputerCallItem value ->
+        optionalIdentity "id" value.computerCallItemId
+            <> [("call_id", value.computerCallId)]
+    ComputerCallOutputItem value ->
+        optionalIdentity "id" value.computerOutputItemId
+            <> [("call_id", value.computerOutputCallId)]
     ReasoningItemValue value -> optionalIdentity "id" value.itemId
     ItemReferenceValue value -> [("id", value.itemId)]
     AgentMessageItem value -> optionalIdentity "id" value.messageId
@@ -166,6 +172,8 @@ responseItemKind = \case
     FunctionCallOutputItem{} -> "function_call_output"
     CustomToolCallItem{} -> "custom_tool_call"
     CustomToolCallOutputItem{} -> "custom_tool_call_output"
+    ComputerCallItem{} -> "computer_call"
+    ComputerCallOutputItem{} -> "computer_call_output"
     ReasoningItemValue{} -> "reasoning"
     ItemReferenceValue{} -> "item_reference"
     AgentMessageItem{} -> "agent_message"

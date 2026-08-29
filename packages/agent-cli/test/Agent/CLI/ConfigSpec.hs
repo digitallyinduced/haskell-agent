@@ -2,6 +2,7 @@ module Agent.CLI.ConfigSpec (spec) where
 
 import Agent.CLI.Config
 import Control.Exception.Safe (bracket)
+import Agent.MCP (McpProtocolPreference(..))
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
@@ -59,23 +60,94 @@ spec = describe "Agent.CLI.Config" do
                     Map.lookup "alpha" config.configMcpServers
                         `shouldBe` Just McpServerConfig
                             { mcpEnabled = False
+                            , mcpUrl = Nothing
                             , mcpCommand = "a"
                             , mcpArgs = ["one"]
                             , mcpCwd = Just "/tmp"
                             , mcpEnv = Map.fromList [("TOKEN", "secret")]
                             , mcpStartupTimeoutSeconds = 12
                             , mcpRequestTimeoutSeconds = 34
+                            , mcpOAuth = Nothing
+                            , mcpProtocol = McpProtocolAuto
                             }
                     Map.lookup "zeta" config.configMcpServers
                         `shouldBe` Just McpServerConfig
                             { mcpEnabled = True
+                            , mcpUrl = Nothing
                             , mcpCommand = "z"
                             , mcpArgs = []
                             , mcpCwd = Nothing
                             , mcpEnv = Map.empty
                             , mcpStartupTimeoutSeconds = 30
                             , mcpRequestTimeoutSeconds = 60
+                            , mcpOAuth = Nothing
+                            , mcpProtocol = McpProtocolAuto
                             }
+
+    it "loads remote MCP servers by URL" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\"}}}"
+            result <- loadHarnessConfig home
+            fmap (Map.lookup "remote" . (.configMcpServers)) result
+                `shouldSatisfy` \case
+                    Right (Just server) -> server.mcpUrl == Just "https://example.test/mcp"
+                    _ -> False
+
+    it "loads the optional per-server oauth object" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\",\"oauth\":{\"clientId\":\"cid\",\"clientSecret\":\"top-secret\",\"clientIdMetadataUrl\":\"https://app.example/client.json\",\"scopes\":[\"files:read\"]}}}}"
+            result <- loadHarnessConfig home
+            case result of
+                Left err -> expectationFailure (Text.unpack err)
+                Right config -> do
+                    let oauth = Map.lookup "remote" config.configMcpServers >>= (.mcpOAuth)
+                    oauth `shouldBe` Just McpOAuthConfig
+                        { mcpOAuthClientId = Just "cid"
+                        , mcpOAuthClientSecret = Just "top-secret"
+                        , mcpOAuthClientIdMetadataUrl = Just "https://app.example/client.json"
+                        , mcpOAuthScopes = ["files:read"]
+                        }
+                    show oauth `shouldSatisfy` (not . Text.isInfixOf "top-secret" . Text.pack)
+                    show config `shouldSatisfy` (not . Text.isInfixOf "top-secret" . Text.pack)
+                    saveHarnessConfig home config `shouldReturn` Right ()
+                    loadHarnessConfig home `shouldReturn` Right config
+
+    it "treats a missing oauth object and partial oauth keys as optional" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\",\"oauth\":{\"scopes\":[\"a\",\"b\"]}}}}"
+            result <- loadHarnessConfig home
+            fmap (\config -> Map.lookup "remote" config.configMcpServers >>= (.mcpOAuth)) result
+                `shouldBe` Right (Just (McpOAuthConfig Nothing Nothing Nothing ["a", "b"]))
+
+    it "validates the oauth object" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\",\"oauth\":{\"clientSecret\":\"s\"}}}}"
+            loadHarnessConfig home
+                `shouldReturn` Left "MCP server 'remote' oauth.clientSecret requires oauth.clientId"
+
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\",\"oauth\":{\"clientIdMetadataUrl\":\"http://app.example/client.json\"}}}}"
+            loadHarnessConfig home
+                `shouldReturn` Left "MCP server 'remote' oauth.clientIdMetadataUrl must be an https URL with a path"
+
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\",\"oauth\":{\"clientIdMetadataUrl\":\"https://app.example\"}}}}"
+            loadHarnessConfig home
+                `shouldReturn` Left "MCP server 'remote' oauth.clientIdMetadataUrl must be an https URL with a path"
+
+            writeConfig home
+                "{\"mcpServers\":{\"local\":{\"command\":\"srv\",\"oauth\":{\"clientId\":\"c\"}}}}"
+            loadHarnessConfig home
+                `shouldReturn` Left "MCP server 'local' oauth requires url"
+
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\",\"oauth\":{\"clientId\":\" \"}}}}"
+            loadHarnessConfig home
+                `shouldReturn` Left "MCP server 'remote' oauth.clientId must not be empty"
 
     it "loads the MCP initialization strategy" $
         withTempDir "agent-config-" \home -> do
@@ -91,6 +163,26 @@ spec = describe "Agent.CLI.Config" do
             result <- loadHarnessConfig home
             fmap (.configMaxConcurrentAgents) result
                 `shouldBe` Right (Just 48)
+
+    it "fetches the latest upstream for managed worktrees by default" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"worktree\":{}}"
+            result <- loadHarnessConfig home
+            fmap (.configWorktree) result
+                `shouldBe` Right WorktreeConfig
+                    { worktreeFetchLatestUpstream = True
+                    }
+
+    it "loads the managed worktree fetch opt-out" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"worktree\":{\"fetchLatestUpstream\":false}}"
+            result <- loadHarnessConfig home
+            fmap (.configWorktree) result
+                `shouldBe` Right WorktreeConfig
+                    { worktreeFetchLatestUpstream = False
+                    }
 
     it "decodes LSP maps and retains opaque JSON options" $
         withTempDir "agent-config-" \home -> do
@@ -168,7 +260,7 @@ spec = describe "Agent.CLI.Config" do
             writeConfig home
                 "{\"mcpServers\":{\"broken\":{\"command\":\" \"}}}"
             loadHarnessConfig home
-                `shouldReturn` Left "MCP server 'broken' has an empty command"
+                `shouldReturn` Left "MCP server 'broken' must configure exactly one of url or command"
 
             writeConfig home
                 "{\"mcpServers\":{\"broken\":{\"command\":\"ok\",\"startupTimeoutSeconds\":0}}}"
@@ -190,15 +282,21 @@ spec = describe "Agent.CLI.Config" do
         withTempDir "agent-config-" \home -> do
             let server = McpServerConfig
                     { mcpEnabled = True
+                    , mcpUrl = Nothing
                     , mcpCommand = "nix"
                     , mcpArgs = ["run", "/tmp/seo-mcp"]
                     , mcpCwd = Just "/tmp"
                     , mcpEnv = Map.fromList [("TOKEN", "secret")]
                     , mcpStartupTimeoutSeconds = 90
                     , mcpRequestTimeoutSeconds = 45
+                    , mcpOAuth = Nothing
+                    , mcpProtocol = McpProtocolAuto
                     }
                 config = defaultHarnessConfig
                     { configMcpServers = Map.singleton "seo-mcp" server
+                    , configWorktree = WorktreeConfig
+                        { worktreeFetchLatestUpstream = True
+                        }
                     , configMaxConcurrentAgents = Just 48
                     }
             saveHarnessConfig home config `shouldReturn` Right ()
@@ -212,17 +310,20 @@ spec = describe "Agent.CLI.Config" do
                     { configMcpServers =
                         Map.singleton "broken" McpServerConfig
                             { mcpEnabled = True
+                            , mcpUrl = Nothing
                             , mcpCommand = ""
                             , mcpArgs = []
                             , mcpCwd = Nothing
                             , mcpEnv = Map.empty
                             , mcpStartupTimeoutSeconds = 30
                             , mcpRequestTimeoutSeconds = 60
+                            , mcpOAuth = Nothing
+                            , mcpProtocol = McpProtocolAuto
                             }
                     }
             saveHarnessConfig home broken
                 `shouldReturn`
-                    Left "MCP server 'broken' has an empty command"
+                    Left "MCP server 'broken' must configure exactly one of url or command"
 
 writeConfig :: OsPath -> LBS.ByteString -> IO ()
 writeConfig home bytes = do

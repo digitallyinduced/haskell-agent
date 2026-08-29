@@ -15,6 +15,8 @@ import Agent.Responses.Types.Common
     , optionalAtKey
     , RawJson
     , rawJsonDecoder
+    , ResponseMetadata
+    , responseMetadataDecoder
     )
 import Agent.Responses.Types.Items
     ( ResponseInput
@@ -135,7 +137,7 @@ data Response = Response
     , error                :: !(Maybe ResponseError)
     , incompleteDetails    :: !(Maybe IncompleteDetails)
     , instructions         :: !(Maybe ResponseInput)
-    , metadata             :: !(Maybe RawJson)
+    , metadata             :: !(Maybe ResponseMetadata)
     , model                :: !Text
     , object               :: !Text
     , output               :: ![ResponseItem]
@@ -286,7 +288,7 @@ responseDecoder = Hermes.object $
         <*> optionalAtKey "error" responseErrorDecoder
         <*> optionalAtKey "incomplete_details" incompleteDetailsDecoder
         <*> optionalAtKey "instructions" responseInputDecoder
-        <*> optionalAtKey "metadata" rawJsonDecoder
+        <*> optionalAtKey "metadata" responseMetadataDecoder
         <*> (maybe "" id <$> optionalAtKey "model" Hermes.text)
         <*> (maybe "response" id <$> optionalAtKey "object" Hermes.text)
         <*> (maybe [] id <$> optionalAtKey

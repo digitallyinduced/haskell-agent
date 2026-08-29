@@ -153,12 +153,12 @@ spec = describe "Agent.CLI.Project" do
                 projectModelFor OpenAIProvider updated
                     `shouldBe` Just "gpt-project"
 
-        it "writes the last model to both the checkout and user home" $
+        it "writes a top-level model switch to the checkout and user home" $
             withTempDir "agent-project-" \project ->
                 withTempDir "agent-home-" \home -> do
                     saveProjectAutoApprove home True
                     saveProjectAutoApprove project False
-                    saveRememberedModel home project
+                    persistModelSwitch TopLevelSwitch home project
                         (target XAIProvider "xai"
                             "grok-4.6" "grok-4.6" GrokBuildDialect)
 
@@ -174,6 +174,18 @@ spec = describe "Agent.CLI.Project" do
                     userSettings.settingsLastModel
                         `shouldBe` projectSettings.settingsLastModel
                     userSettingsPath home `shouldBe` projectSettingsPath home
+
+        it "keeps a delegated model switch out of checkout and user settings" $
+            withTempDir "agent-project-" \project ->
+                withTempDir "agent-home-" \home -> do
+                    persistModelSwitch SessionLocalSwitch home project
+                        (target OpenAIProvider "openai"
+                            "gpt-5.6-luna" "gpt-5.6-luna" CodexDialect)
+
+                    doesFileExist (projectSettingsPath project)
+                        `shouldReturn` False
+                    doesFileExist (userSettingsPath home)
+                        `shouldReturn` False
 
         it "replaces the remembered provider/model without resetting approval" $
             withTempDir "agent-project-" \root -> do

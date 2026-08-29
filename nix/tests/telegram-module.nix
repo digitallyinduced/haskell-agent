@@ -52,6 +52,10 @@ let
           startupTimeoutSeconds = 12;
           requestTimeoutSeconds = 34;
         };
+        mcpServers.remote = {
+          url = "https://example.test/mcp";
+          startupTimeoutSeconds = 20;
+        };
       };
 
       secondary = {
@@ -224,6 +228,15 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
             env: { CREDENTIAL_FILE: "/run/keys/example" },
             requestTimeoutSeconds: 34,
             startupTimeoutSeconds: 12
+          },
+          remote: {
+            args: [],
+            cwd: null,
+            enabled: true,
+            env: {},
+            requestTimeoutSeconds: 60,
+            startupTimeoutSeconds: 20,
+            url: "https://example.test/mcp"
           }
         }
       }

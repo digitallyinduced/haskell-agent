@@ -67,6 +67,71 @@ spec = describe "tool presentation" do
         formatToolOutputRelative workspace readCall absolute
             `shouldBe` absolute
 
+    it "keeps computer-call secrets out of approval chrome" do
+        let call =
+                functionToolCall
+                    "computer-call"
+                    "computer"
+                    "{\"actions\":[{\"type\":\"click\",\"x\":10,\"y\":20},{\"type\":\"type\",\"text\":\"password\"}]}"
+        summarizeToolCall call
+            `shouldBe` "Control computer computer action"
+        permissionToolCallPrompt call
+            `shouldSatisfy` (not . Text.isInfixOf "password")
+
+    it "summarizes Claude Code built-in tools with host chrome" do
+        summarizeToolCall
+            (functionToolCall "b" "Bash"
+                "{\"command\":\"git status\\nls\",\"description\":\"Show status\"}")
+            `shouldBe` "$ git status"
+        summarizeToolCall
+            (functionToolCall "r" "Read" "{\"file_path\":\"src/Main.hs\"}")
+            `shouldBe` "Read src/Main.hs"
+        summarizeToolCall
+            (functionToolCall "e" "Edit"
+                "{\"file_path\":\"src/Main.hs\",\"old_string\":\"a\",\"new_string\":\"b\"}")
+            `shouldBe` "Edited src/Main.hs"
+        summarizeToolCall
+            (functionToolCall "w" "Write"
+                "{\"file_path\":\"src/New.hs\",\"content\":\"main = pure ()\"}")
+            `shouldBe` "Wrote src/New.hs"
+        summarizeToolCall
+            (functionToolCall "g" "Glob" "{\"pattern\":\"**/*.hs\"}")
+            `shouldBe` "Globbed **/*.hs"
+        summarizeToolCall
+            (functionToolCall "s" "Grep" "{\"pattern\":\"TODO\",\"path\":\"src\"}")
+            `shouldBe` "Searched TODO"
+        summarizeToolCall
+            (functionToolCall "f" "WebFetch"
+                "{\"url\":\"https://example.com\",\"prompt\":\"summarize\"}")
+            `shouldBe` "Fetched https://example.com"
+        summarizeToolCall
+            (functionToolCall "t" "ToolSearch" "{\"query\":\"select:WebFetch\"}")
+            `shouldBe` "Searched tools select:WebFetch"
+        summarizeToolCall
+            (functionToolCall "a" "Agent"
+                "{\"description\":\"Find flaky tests\",\"prompt\":\"...\"}")
+            `shouldBe` "Spawned agent Find flaky tests"
+        summarizeToolCall
+            (functionToolCall "m" "mcp__playwright__browser_click" "{}")
+            `shouldBe` "playwright: browser_click"
+        toolPathArgument
+            (functionToolCall "r" "Read" "{\"file_path\":\"/tmp/a.hs\"}")
+            `shouldBe` Just "/tmp/a.hs"
+        formatToolDiffRelative ""
+            (functionToolCall "w" "Write"
+                "{\"file_path\":\"src/New.hs\",\"content\":\"main = pure ()\\n\"}")
+            `shouldBe` "  write src/New.hs\n  +main = pure ()"
+        todoListFromToolArguments
+            "{\"todos\":[{\"content\":\"Find repos\",\"status\":\"in_progress\",\
+            \\"activeForm\":\"Finding repos\"},{\"content\":\"Fix\",\"status\":\"pending\"}]}"
+            `shouldBe`
+                Just
+                    [ TodoDisplayLine TodoDisplayInProgress "Find repos"
+                    , TodoDisplayLine TodoDisplayPending "Fix"
+                    ]
+        todoListFromToolArguments "{\"todos\":[]}" `shouldBe` Just []
+        todoListFromToolArguments "Todos have been modified" `shouldBe` Nothing
+
     it "extracts tool details from function and custom calls" do
         toolDetail
             (functionToolCall "read" "read_file"

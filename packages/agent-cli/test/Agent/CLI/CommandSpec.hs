@@ -52,6 +52,15 @@ spec = do
             parseReplLine "/effort" `shouldBe` ReplShowEffort
             parseReplLine "  /Effort  " `shouldBe` ReplShowEffort
 
+        it "toggles Fast mode with /fast" do
+            let catalog = mkSlashCatalog True CodexDialect [] [] []
+            parseReplLineWithCatalog catalog "/fast"
+                `shouldBe` ReplToggleFast
+            parseReplLineWithCatalog catalog "/FAST"
+                `shouldBe` ReplToggleFast
+            parseReplLineWithCatalog catalog "/fast on"
+                `shouldBe` ReplCommandError "usage: /fast"
+
         it "sets a valid effort level" do
             parseReplLine "/effort none" `shouldBe` ReplSetEffort EffortNone
             parseReplLine "/effort high" `shouldBe` ReplSetEffort EffortHigh
@@ -75,6 +84,12 @@ spec = do
             parseReplLine "/shell fish"
                 `shouldBe` ReplCommandError
                     "usage: /shell [ghci|bash|both|none]"
+
+        it "parses runtime code-mode enablement" do
+            parseReplLine "/codemod" `shouldBe` ReplEnableCodeMode
+            parseReplLine "/code-mode" `shouldBe` ReplEnableCodeMode
+            parseReplLine "/codemod now"
+                `shouldBe` ReplCommandError "usage: /codemod"
 
         it "rejects extra args on /always-approve" do
             parseReplLine "/always-approve now"
@@ -220,7 +235,7 @@ spec = do
             parseReplLine "/MCP" `shouldBe` ReplMcp
             parseReplLine "/mcps" `shouldBe` ReplMcp
             parseReplLine "/mcp now"
-                `shouldBe` ReplCommandError "usage: /mcp"
+                `shouldBe` ReplCommandError "usage: /mcp [prompt <server> <prompt> [key=value ...]]"
 
         it "lists slash commands with /help" do
             parseReplLine "/help" `shouldBe` ReplHelp Nothing
@@ -286,6 +301,7 @@ spec = do
                     [ "help"
                     , "model"
                     , "effort"
+                    , "fast"
                     , "plan"
                     , "btw"
                     , "recap"
@@ -320,6 +336,7 @@ spec = do
                     , "deep-research"
                     , "skills"
                     , "shell"
+                    , "codemod"
                     , "always-approve"
                     , "quit"
                     ]
@@ -357,7 +374,7 @@ spec = do
             slashCompletionCandidates "troffe/" "h" `shouldBe` ["high"]
             slashCompletionCandidates "troffe/" "m" `shouldBe` ["medium", "max"]
             slashCompletionCandidates "troffe/" "n" `shouldBe` ["none"]
-            let grokCatalog = mkSlashCatalog GrokBuildDialect [] [] []
+            let grokCatalog = mkSlashCatalog False GrokBuildDialect [] [] []
             slashCompletionCandidatesWithCatalog
                 grokCatalog
                 "troffe/"
@@ -397,7 +414,7 @@ spec = do
                     map
                         (("/" <>) . (.slashName))
                         defaultSlashCatalog.slashCatalogCommands
-            displays "/mo" 3 `shouldBe` ["/model"]
+            displays "/mo" 3 `shouldBe` ["/model", "/codemod"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 
@@ -442,8 +459,18 @@ spec = do
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
 
     describe "capability-gated slash catalog" do
+        it "only exposes Fast mode for models advertising priority" do
+            let unavailable = mkSlashCatalog False CodexDialect [] [] []
+                available = mkSlashCatalog True CodexDialect [] [] []
+            lookupSlashCommandIn unavailable "/fast" `shouldBe` Nothing
+            lookupSlashCommandIn available "/fast"
+                `shouldSatisfy` maybe False (const True)
+            parseReplLineWithCatalog unavailable "/fast"
+                `shouldBe` ReplCommandError
+                    "unknown command: /fast (try /help)"
+
         let grokCatalog tools =
-                mkSlashCatalog GrokBuildDialect tools [] ["grok-4.6"]
+                mkSlashCatalog False GrokBuildDialect tools [] ["grok-4.6"]
             allCoreTools =
                 [ "scheduler_create"
                 , "update_goal"
@@ -457,7 +484,7 @@ spec = do
                     ReplCommandError "unknown command: /loop (try /help)"
             parseReplLineWithCatalog
                 (mkSlashCatalog
-                    CodexDialect allCoreTools [] [])
+                    False CodexDialect allCoreTools [] [])
                 "/loop 5m check ci"
                 `shouldBe`
                     ReplCommandError "unknown command: /loop (try /help)"

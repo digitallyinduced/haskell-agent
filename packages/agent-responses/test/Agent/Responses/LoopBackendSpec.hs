@@ -22,14 +22,22 @@ import Agent.Responses.LoopBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
+    , responseItemToToolCall
+    , toolResultToItem
     , withRequestInput
     )
 import Agent.Responses.Types
     ( MessageContent(..)
+    , ComputerAction(..)
+    , ComputerCall(..)
+    , ComputerCallOutput(..)
     , CustomToolCall(..)
+    , CustomToolCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , InternalChatMetadata(..)
+    , ItemStatus(..)
+    , LocalShellCall(..)
     , ReasoningItem(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
@@ -43,10 +51,13 @@ import Agent.Responses.Types
     , defaultResponseCreateParams
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson.Key as Key
 import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..), ToolCallResult(..))
 import Test.Hspec
 
 spec :: Spec
@@ -56,6 +67,44 @@ spec = do
 
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
+    it "round-trips native computer calls through structured screenshot output" do
+        let call = ComputerCall
+                { computerCallItemId = Just "item-1"
+                , computerCallId = "call-1"
+                , computerActions = [ClickAction 20 30 "left", TypeAction "secret"]
+                , pendingSafetyChecks = []
+                , computerCallStatus = Nothing
+                , computerCallExtra = KeyMap.empty
+                }
+        case responseItemToToolCall (ComputerCallItem call) of
+            Just projected -> do
+                projected.callId `shouldBe` "call-1"
+                projected.name `shouldBe` "computer"
+                projected.callKind `shouldBe` ComputerCallKind
+                projected.argumentsEncrypted `shouldBe` True
+            Nothing -> expectationFailure "computer call was not projected"
+        let outputValue = ComputerCallOutput
+                { computerOutputItemId = Nothing
+                , computerOutputCallId = "ignored"
+                , screenshotDataUrl = "data:image/png;base64,AA=="
+                , acknowledgedChecks = []
+                , computerOutputStatus = Nothing
+                , computerOutputExtra = KeyMap.empty
+                }
+            encodedJson = Aeson.toJSON outputValue
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                outputValue
+        (jsonField "output" encodedJson >>= jsonField "detail")
+            `shouldBe` Just (Aeson.String "original")
+        case toolResultToItem ToolCallResult
+                { callId = "call-1"
+                , output = encoded
+                , callKind = ComputerCallKind
+                } of
+            ComputerCallOutputItem output -> do
+                output.computerOutputCallId `shouldBe` "call-1"
+                output.screenshotDataUrl `shouldBe` "data:image/png;base64,AA=="
+            other -> expectationFailure ("unexpected output: " <> show other)
     it "encodes file attachments as input_file parts" do
         let image = ImageAttachment "image/png" "png-bytes"
             file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
@@ -329,18 +378,176 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             request = withRequestInput defaultResponseCreateParams items
         request.input `shouldBe` Just (ResponseInputItems items)
 
--- | Streamed tool-call arguments map to no visible loop delta of their own.
--- Without the projected activity below, a model writing a large call — or
--- degenerating into a repetition loop inside one — looks like endless silent
--- reasoning until the provider's output-token cap fails the turn.
+    -- Responses Lite rejects a replayed reasoning item's lifecycle status as
+    -- an unknown parameter (@input[N].status@), and Codex never sends the
+    -- field on replayed messages, calls, outputs, or reasoning. Items whose
+    -- status Codex does send on input keep it.
+    it "drops provider lifecycle status from replayed transcript items" do
+        let reasoning = ReasoningItemValue ReasoningItem
+                { itemId = Just "rs-1"
+                , summary = []
+                , content = Nothing
+                , encryptedContent = Just "opaque"
+                , status = Just ItemCompleted
+                }
+            assistant = MessageItem ResponseMessage
+                { messageId = Just "msg-1"
+                , content = MessageContentParts
+                    [OutputTextPart "done" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Just ItemCompleted
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            call = FunctionCallItem FunctionCall
+                { itemId = Just "fc-1"
+                , callId = "call-1"
+                , name = "shell"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "call-1"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Nothing
+                , output = rawJsonFromEncoding
+                    (Aeson.toEncoding ("ok" :: Text.Text))
+                , status = Just ItemIncomplete
+                }
+            customOutput = CustomToolCallOutputItem CustomToolCallOutput
+                { itemId = Nothing
+                , callId = "call-2"
+                , name = Nothing
+                , output = rawJsonFromEncoding
+                    (Aeson.toEncoding ("ok" :: Text.Text))
+                , status = Just ItemCompleted
+                }
+            customCall = CustomToolCallItem CustomToolCall
+                { itemId = Just "ctc-1"
+                , callId = "call-2"
+                , name = "apply_patch"
+                , namespace = Nothing
+                , input = "*** Begin Patch"
+                , status = Just ItemCompleted
+                }
+            shell = LocalShellCallItem LocalShellCall
+                { itemId = Just "lsh-1"
+                , callId = Just "call-3"
+                , status = Just ItemCompleted
+                , action = Nothing
+                }
+            history =
+                turnInputsToItems [UserMessage "hello"]
+                    <> [reasoning, assistant, call, output]
+                    <> [customCall, customOutput, shell]
+            request = withRequestInput defaultResponseCreateParams history
+        map encodedStatus (requestInputItems request)
+            `shouldBe`
+                [ Nothing
+                , Nothing
+                , Nothing
+                , Nothing
+                , Nothing
+                , Just (Aeson.String "completed")
+                , Nothing
+                , Just (Aeson.String "completed")
+                ]
+        -- Everything else on the replayed items survives untouched.
+        map encodedField (requestInputItems request) !! 1
+            `shouldBe` Just (Aeson.String "opaque")
+
+-- | Streamed tool calls are announced immediately. Shell argument deltas
+-- repaint that call with the partial command, while other tools retain coarse
+-- activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
-    it "announces a streamed function call by name" do
+    it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
-        events `shouldBe` [ActivityUpdated "Writing shell_command call…"]
+        events `shouldBe`
+            [ ToolStarted
+                (functionToolCall "call-1" "shell_command" "")
+            ]
 
-    it "reports argument progress at chunk boundaries" do
+    it "repaints a streamed shell call with its partial command" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        first <- projectEvent
+            (argumentsDelta "fc-1" "{\"command\":\"git sta")
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"git sta\"}")
+            ]
+        second <- projectEvent (argumentsDelta "fc-1" "tus\"}")
+        second `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"git status\"}")
+            ]
+
+    it "replaces streamed tool metadata with the canonical done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        events <- projectEvent
+            (functionCallDone
+                "fc-1"
+                "call-1"
+                "shell_command"
+                "{\"command\":\"git status\"}")
+        events `shouldBe`
+            [ ToolUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"git status\"}")
+            ]
+
+    it "publishes a streamed custom tool call immediately" do
+        projectEvent <- newStreamEventToLoopEvents False
+        events <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        events `shouldBe`
+            [ ToolStarted ToolCall
+                { callId = "call-9"
+                , name = "apply_patch"
+                , arguments = ""
+                , callKind = CustomCallKind
+                , argumentsEncrypted = False
+                }
+            , ActivityUpdated "Writing apply_patch call…"
+            ]
+
+    it "updates a streamed custom tool from its done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        events <- projectEvent
+            (customToolCallDone
+                "ct-1"
+                "call-9"
+                "apply_patch"
+                "*** Begin Patch")
+        events `shouldBe`
+            [ ToolUpdated ToolCall
+                { callId = "call-9"
+                , name = "apply_patch"
+                , arguments = "*** Begin Patch"
+                , callKind = CustomCallKind
+                , argumentsEncrypted = False
+                }
+            ]
+
+    it "does not replace a shell preview with coarse argument activity" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
         quiet <- projectEvent
@@ -348,27 +555,23 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         quiet `shouldBe` []
         loud <- projectEvent
             (argumentsDelta "fc-1" (Text.replicate 9900 "y"))
-        loud `shouldBe`
-            [ActivityUpdated "Writing shell_command call… (10k chars)"]
+        loud `shouldBe` []
 
     it "warns once per runaway argument window" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
         let bigDelta = Text.replicate 60000 "z"
         first <- projectEvent (argumentsDelta "fc-1" bigDelta)
-        first `shouldBe`
-            [ActivityUpdated "Writing shell_command call… (60k chars)"]
+        first `shouldBe` []
         second <- projectEvent (argumentsDelta "fc-1" bigDelta)
         second `shouldBe`
-            [ ActivityUpdated "Writing shell_command call… (120k chars)"
-            , WarningRaised
+            [ WarningRaised
                 ("The model has streamed 120k chars of shell_command "
                     <> "arguments in one response; it may be stuck in a "
                     <> "repetition loop.")
             ]
         third <- projectEvent (argumentsDelta "fc-1" bigDelta)
-        third `shouldBe`
-            [ActivityUpdated "Writing shell_command call… (180k chars)"]
+        third `shouldBe` []
 
     it "counts custom tool input as argument streaming" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -391,6 +594,15 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
             }
         events `shouldBe` [TextDelta "hi"]
 
+functionToolCall :: Text.Text -> Text.Text -> Text.Text -> ToolCall
+functionToolCall functionCallId functionName functionArguments = ToolCall
+    { callId = functionCallId
+    , name = functionName
+    , arguments = functionArguments
+    , callKind = FunctionCallKind
+    , argumentsEncrypted = False
+    }
+
 functionCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 functionCallAdded functionItemId functionCallId functionName =
     ResponseOutputItemAddedEvent
@@ -410,6 +622,30 @@ functionCallAdded functionItemId functionCallId functionName =
 
         }
 
+functionCallDone
+    :: Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> ResponseStreamEvent
+functionCallDone functionItemId functionCallId functionName functionArguments =
+    ResponseOutputItemDoneEvent
+        { item = FunctionCallItem FunctionCall
+            { itemId = Just functionItemId
+            , callId = functionCallId
+            , name = functionName
+            , namespace = Nothing
+            , provider = Nothing
+            , arguments = functionArguments
+            , encryptedFunctionArgs = Nothing
+            , status = Nothing
+
+            }
+        , outputIndex = Just 0
+        , sequenceNumber = Just 2
+
+        }
+
 customToolCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 customToolCallAdded customItemId customCallId customName =
     ResponseOutputItemAddedEvent
@@ -424,6 +660,28 @@ customToolCallAdded customItemId customCallId customName =
             }
         , outputIndex = Just 0
         , sequenceNumber = Just 1
+
+        }
+
+customToolCallDone
+    :: Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> ResponseStreamEvent
+customToolCallDone customItemId customCallId customName customInput =
+    ResponseOutputItemDoneEvent
+        { item = CustomToolCallItem CustomToolCall
+            { itemId = Just customItemId
+            , callId = customCallId
+            , name = customName
+            , namespace = Nothing
+            , input = customInput
+            , status = Nothing
+
+            }
+        , outputIndex = Just 0
+        , sequenceNumber = Just 2
 
         }
 
@@ -450,6 +708,21 @@ customInputDelta deltaItemId deltaCallId deltaText =
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update on
 -- 'ResponseCreateParams' is ambiguous here. Rebuild from the constructor.
+requestInputItems :: ResponseCreateParams -> [ResponseItem]
+requestInputItems request = case request.input of
+    Just (ResponseInputItems items) -> items
+    _ -> []
+
+encodedStatus :: ResponseItem -> Maybe Aeson.Value
+encodedStatus item = case Aeson.toJSON item of
+    Aeson.Object fields -> KeyMap.lookup "status" fields
+    _ -> Nothing
+
+encodedField :: ResponseItem -> Maybe Aeson.Value
+encodedField item = case Aeson.toJSON item of
+    Aeson.Object fields -> KeyMap.lookup "encrypted_content" fields
+    _ -> Nothing
+
 paramsWithInputItems :: [ResponseItem] -> ResponseCreateParams
 paramsWithInputItems items = case defaultResponseCreateParams of
     ResponseCreateParams{..} ->

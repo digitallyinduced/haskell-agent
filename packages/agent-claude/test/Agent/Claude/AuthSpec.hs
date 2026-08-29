@@ -3,6 +3,7 @@
 module Agent.Claude.AuthSpec (spec) where
 
 import Agent.Claude.Auth
+import Agent.Claude.Transport
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.Text as Text
@@ -34,6 +35,7 @@ spec = do
                         { executable = "/bin/claude"
                         , accountLabel = "person@example.com"
                         , subscriptionType = Just "max"
+                        , transport = ClaudeCodeLocalSubscription
                         }
 
         it "rejects API-key and third-party provider authentication" do
@@ -65,6 +67,7 @@ spec = do
                         { executable = "/bin/claude"
                         , accountLabel = "Claude Code (pro)"
                         , subscriptionType = Just "pro"
+                        , transport = ClaudeCodeLocalSubscription
                         }
 
         it "uses Claude's orgName metadata when no email is present" do
@@ -76,6 +79,7 @@ spec = do
                         { executable = "/bin/claude"
                         , accountLabel = "Example Org"
                         , subscriptionType = Just "team"
+                        , transport = ClaudeCodeLocalSubscription
                         }
 
     describe "loadClaudeCodeAuth" do
@@ -118,7 +122,46 @@ spec = do
                                 { executable
                                 , accountLabel = "auth@example.com"
                                 , subscriptionType = Just "max"
+                                , transport = ClaudeCodeLocalSubscription
                                 }
+
+        it "uses gateway credentials without requiring a local Claude login" $
+            withScratchDirectory "agent-claude-gateway-auth" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable "#!/bin/sh\nexit 77\n"
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [ ("CLAUDE_CODE_EXECUTABLE", Just executable)
+                    , ("HASKELL_AGENT_GATEWAY_URL", Just "https://gateway.example/")
+                    , ("HASKELL_AGENT_GATEWAY_TOKEN", Just "gateway-secret")
+                    ]
+                    do
+                        result <- loadClaudeCodeAuth
+                        result `shouldBe`
+                            Right ClaudeCodeAuth
+                                { executable
+                                , accountLabel = "Claude via gateway"
+                                , subscriptionType = Nothing
+                                , transport =
+                                    ClaudeCodeGateway
+                                        { gatewayBaseUrl = "https://gateway.example/"
+                                        , gatewayToken = "gateway-secret"
+                                        }
+                                }
+                        show result `shouldNotContain` "gateway-secret"
+
+        it "rejects partially configured gateway credentials" $
+            withEnvironmentVariables
+                [ ("HASKELL_AGENT_GATEWAY_URL", Just "https://gateway.example")
+                , ("HASKELL_AGENT_GATEWAY_TOKEN", Nothing)
+                ]
+                do
+                    loadClaudeCodeAuth `shouldReturn`
+                        Left
+                            "Claude gateway mode requires both HASKELL_AGENT_GATEWAY_URL and HASKELL_AGENT_GATEWAY_TOKEN."
 
 isLeftContaining :: Text.Text -> Either Text.Text a -> Bool
 isLeftContaining needle = \case

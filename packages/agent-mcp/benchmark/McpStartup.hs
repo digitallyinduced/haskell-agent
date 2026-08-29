@@ -5,6 +5,7 @@ import Agent.MCP
     , McpFleetLease(..)
     , McpInitState(..)
     , McpServerConfig(..)
+    , McpProtocolPreference(..)
     , McpServerStatus(..)
     , acquireMcpFleet
     , closeMcpFleet
@@ -178,12 +179,14 @@ middle values = values !! (length values `div` 2)
 fakeConfig :: FilePath -> Int -> Int -> McpServerConfig
 fakeConfig script delayMillis index = McpServerConfig
     { mcpServerName = "fake-" <> Text.pack (show index)
+    , mcpServerUrl = Nothing
     , mcpServerCommand = script
     , mcpServerArgs = [show (fromIntegral delayMillis / 1000 :: Double)]
     , mcpServerCwd = Nothing
     , mcpServerEnv = []
     , mcpServerStartupTimeoutSeconds = 30
     , mcpServerRequestTimeoutSeconds = 30
+    , mcpServerProtocol = McpProtocolAuto
     }
 
 withFakeServer :: (FilePath -> IO a) -> IO a

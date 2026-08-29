@@ -56,7 +56,10 @@ import Agent.CLI.Resume
       groupResumeEntries,
       resumeRelativeAge )
 import Agent.CLI.Secret ()
-import Agent.CLI.Status ( formatTokensPerSecond, formatUsageWithRate )
+import Agent.CLI.Status
+    ( formatEstimatedTokensPerSecond
+    , formatUsageWithRate
+    )
 import Agent.CLI.Style ( motionGlyphSet )
 import Agent.CLI.TUI.History
     ( HistoryWindow(historyWindowTurns, historyWindowTotalTurns,
@@ -100,7 +103,7 @@ import Agent.CLI.TUI.Types
       Name(ChoiceRow, ConversationViewport, ConversationViewportExtent,
            ConversationImage, AgentRow, AgentPane,
            AgentPopover, ConversationChunkCache, ConversationReserve,
-           QuickStartWorktree, QuickStartResume, QuickStartCommands,
+           ComposerImageRemove, QuickStartWorktree, QuickStartResume, QuickStartCommands,
            QuickStartModel, CodeBlockCache, ConversationBlock,
            ConversationBlockCache, ConversationBodyCache, CodeCopy, PermissionRow, ResumeViewport,
            ResumeSearchCursor, ResumeRow, OverlayViewport, MarkdownLink,
@@ -136,7 +139,8 @@ import Agent.TUI.Model
               uiCompletionRemainingMillis, uiRunning, uiElapsedMillis, uiFocus,
               uiSelectedBlock, uiPermission, uiFollow, uiRetryCountdown,
               uiNotice, uiBranch, uiCwd, uiPrompt),
-      uiTokensPerSecond )
+      uiTokensPerSecond,
+      uiTokensPerSecondEstimated )
 import Agent.TUI.Motion
     ( backgroundIndicator,
       foregroundIndicator,
@@ -438,14 +442,14 @@ padImageBottom attr width amount image
 
 imagePreviewLayers :: Bool -> [TuiImagePreview] -> [Widget Name]
 imagePreviewLayers native previews =
-    case takeLast 3 previews of
+    case takeLast 3 (zip [0 ..] previews) of
         [] -> []
         shown -> [centerLayer (drawImagePreviews native shown)]
   where
     takeLast count values =
         drop (max 0 (length values - count)) values
 
-drawImagePreviews :: Bool -> [TuiImagePreview] -> Widget Name
+drawImagePreviews :: Bool -> [(Int, TuiImagePreview)] -> Widget Name
 drawImagePreviews native previews =
     Widget Fixed Fixed do
         context <- getContext
@@ -472,17 +476,18 @@ drawImagePreviews native previews =
   where
     previewGap = 2
 
-    drawPreview maxWidth maxHeight preview =
+    drawPreview maxWidth maxHeight (index, preview) =
         hLimit maxWidth $
             vBox
                 [ hCenter $
                     if native
                         then nativeImagePlaceholder maxWidth maxHeight preview
                         else renderTuiImagePreview maxWidth maxHeight preview
-                , hCenter $
-                    withAttr Theme.mutedAttr $
-                        terminalTxt $
-                            "[image] "
+                , clickable (ComposerImageRemove index) $
+                    hCenter $
+                        withAttr Theme.mutedAttr $
+                            terminalTxt $
+                                "[image] "
                                 <> preview.previewMime
                                 <> " · "
                                 <> Text.pack (show preview.previewSourceWidth)
@@ -490,6 +495,7 @@ drawImagePreviews native previews =
                                 <> Text.pack (show preview.previewSourceHeight)
                                 <> " · "
                                 <> formatImageSize preview.previewBytes
+                                <> "  [× remove]"
                 ]
 
     nativeImagePlaceholder maxWidth maxHeight preview =
@@ -534,9 +540,7 @@ drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
         terminalTxt
-            (formatUsageWithRate
-                state.appUi.uiPrompt.promptUsage
-                (uiTokensPerSecond state.appUi))
+            (formatUiUsageWithRate state.appUi)
 
 drawLiveTodos :: UiState -> Widget Name
 drawLiveTodos ui =
@@ -637,12 +641,26 @@ drawPromptActivity state
             <> formatElapsed (fromIntegral ui.uiElapsedMillis / 1000)
     right
         | ui.uiRunning =
-            formatUsageWithRate
-                ui.uiPrompt.promptUsage
-                (uiTokensPerSecond ui)
+            formatUiUsageWithRate ui
         | ui.uiCompletionRemainingMillis > 0 =
-            maybe "" formatTokensPerSecond (uiTokensPerSecond ui)
+            maybe
+                ""
+                (formatEstimatedTokensPerSecond
+                    (uiTokensPerSecondEstimated ui))
+                (uiTokensPerSecond ui)
         | otherwise = ""
+
+formatUiUsageWithRate :: UiState -> Text
+formatUiUsageWithRate ui =
+    Text.intercalate " · " $
+        filter (not . Text.null)
+            [ formatUsageWithRate ui.uiPrompt.promptUsage Nothing
+            , maybe
+                ""
+                (formatEstimatedTokensPerSecond
+                    (uiTokensPerSecondEstimated ui))
+                (uiTokensPerSecond ui)
+            ]
 
 -- | Describe the child agents which keep the session alive after the root
 -- agent has finished. Prefer their current running step so the status line

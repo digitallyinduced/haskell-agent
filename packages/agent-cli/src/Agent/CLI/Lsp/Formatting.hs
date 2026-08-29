@@ -15,7 +15,6 @@ import Agent.Json.Decode
     )
 import Agent.Json.Decode qualified as Hermes
 import Control.Applicative ((<|>))
-import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -93,12 +92,12 @@ hoverDecoder =
         Hermes.VArray ->
             Text.intercalate "\n\n" <$> Hermes.list hoverDecoder
         Hermes.VObject ->
-            Hermes.withRawJsonByteString \bytes ->
+            Hermes.withOwnedRawJson \bytes ->
                 pure $
                     either
                         (const (Text.decodeUtf8With lenientDecode bytes))
                         (fromMaybe (Text.decodeUtf8With lenientDecode bytes))
-                        (decodeEither hoverObjectDecoder (BS.copy bytes))
+                        (decodeEither hoverObjectDecoder bytes)
         _ ->
             rawTextDecoder
 
@@ -149,7 +148,7 @@ symbolLinesDecoder depth =
 
 rawTextDecoder :: Hermes.Decoder Text
 rawTextDecoder =
-    Hermes.withRawJsonByteString $
+    Hermes.withOwnedRawJson $
         pure . Text.decodeUtf8With lenientDecode
 
 decodeRawJson :: Hermes.Decoder a -> RawJson -> Either Text a

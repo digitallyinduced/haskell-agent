@@ -75,22 +75,25 @@ import qualified Data.Text as Text
 -- callers with a live session should use 'mkSlashCatalog'.
 defaultSlashCatalog :: SlashCatalog
 defaultSlashCatalog =
-    mkSlashCatalog CodexDialect [] [] []
+    mkSlashCatalog False CodexDialect [] [] []
 
 mkSlashCatalog
-    :: DialectId
+    :: Bool
+    -> DialectId
     -> [Text]
     -> [SkillCommand]
     -> [Text]
     -> SlashCatalog
-mkSlashCatalog dialect toolNames skills modelIds =
+mkSlashCatalog fastMode dialect toolNames skills modelIds =
     let tools =
             Set.fromList
                 (map (Text.toLower . Text.strip) toolNames)
         commands =
             filter
-                (commandAvailable dialect tools)
-                (map (commandForDialect dialect) slashCommands)
+                (\command -> command.slashName /= "fast" || fastMode)
+                (filter
+                    (commandAvailable dialect tools)
+                    (map (commandForDialect dialect) slashCommands))
     in SlashCatalog
         { slashCatalogDialect = dialect
         , slashCatalogToolNames = tools
@@ -210,6 +213,10 @@ parseSlash catalog raw line = case Text.words line of
         Just spec -> case spec.slashName of
             "help" -> parseHelpCommand catalog args
             "effort" -> parseEffortCommand args
+            "fast" ->
+                if null args
+                    then ReplToggleFast
+                    else ReplCommandError "usage: /fast"
             "model" -> parseModelCommand args
             "plan" ->
                 let description =
@@ -320,10 +327,13 @@ parseSlash catalog raw line = case Text.words line of
                     then ReplShowTerminal
                     else ReplCommandError "usage: /terminal"
             "agents" -> parseAgentsCommand args
-            "mcp" ->
-                if null args
-                    then ReplMcp
-                    else ReplCommandError "usage: /mcp"
+            "mcp" -> case args of
+                [] -> ReplMcp
+                ("prompt" : server : name : rest) ->
+                    ReplMcpPrompt server name (map parsePromptArgument rest)
+                _ ->
+                    ReplCommandError
+                        "usage: /mcp [prompt <server> <prompt> [key=value ...]]"
             "loop" ->
                 parseLoopCommand raw
                     (Text.strip (Text.drop (Text.length command) line))
@@ -341,6 +351,10 @@ parseSlash catalog raw line = case Text.words line of
                 ["reload"] -> ReplSkills True
                 _ -> ReplCommandError "usage: /skills [reload]"
             "shell" -> parseShellCommand args
+            "codemod" ->
+                if null args
+                    then ReplEnableCodeMode
+                    else ReplCommandError "usage: /codemod"
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove
@@ -991,3 +1005,10 @@ subsequencePositions needle haystack =
     go index wanted@(n:ns) (h:hs)
         | n == h = (index :) <$> go (index + 1) ns hs
         | otherwise = go (index + 1) wanted hs
+
+-- | Split a @key=value@ prompt argument; a bare word is a key with an empty
+-- value.
+parsePromptArgument :: Text -> (Text, Text)
+parsePromptArgument argument =
+    let (key, value) = Text.breakOn "=" argument
+    in (key, Text.drop 1 value)

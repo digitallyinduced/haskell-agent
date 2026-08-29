@@ -27,6 +27,12 @@ import Agent.CLI.AgentSessions
     ( closeSessionThreadManager, newSessionThreadManager )
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
+import Agent.CLI.McpOAuth
+    ( LoginOptions(..)
+    , defaultLoginOptions
+    , loginMcpWith
+    , logoutMcp
+    )
 import Agent.CLI.McpStatus
     ( formatMcpModelNotice
     , formatMcpModelNoticeFor
@@ -35,6 +41,7 @@ import Agent.CLI.McpStatus
 import Agent.CLI.Options
     ( CliOptions
     , Command(..)
+    , McpCommand(..)
     , parseArgs
     , usage
     )
@@ -75,6 +82,7 @@ import System.Exit ( die )
 import System.IO ( stderr )
 
 import qualified Agent.MCP as MCP
+import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
@@ -133,6 +141,8 @@ devMainResume resumeId = do
             color <- resolveColor stderr
             runLoginManager color
             pure DevQuit
+        Right (Mcp (McpLogin url scopes)) -> loginMcpWithScopes scopes url >> pure DevQuit
+        Right (Mcp (McpLogout url)) -> logoutMcp url >> pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
         Right (WaitSession sessionId) -> runWaitSession sessionId >> pure DevQuit
@@ -155,6 +165,8 @@ run = do
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
+        Right (Mcp (McpLogin url scopes)) -> loginMcpWithScopes scopes url
+        Right (Mcp (McpLogout url)) -> logoutMcp url
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
         Right (WaitSession sessionId) -> runWaitSession sessionId
@@ -176,13 +188,18 @@ runAgentWithRestarts options =
         (do
             home <- getHomeDirectory
             let root = sessionsRoot home
-            mcpSupervisor <- MCP.newMcpSupervisor
+            elicitationRef <- newIORef Nothing
+            mcpSupervisor <-
+                MCP.newMcpSupervisorWith
+                    MCP.defaultMcpHostHooks
+                        { MCP.mcpHostElicit = readIORef elicitationRef }
             sessionThreads <-
                 newSessionThreadManager root
                     `onException` MCP.closeMcpSupervisor mcpSupervisor
             let processRuntime = AgentProcessRuntime
                     { processMcpSupervisor = mcpSupervisor
                     , processSessionThreads = sessionThreads
+                    , processMcpElicitation = elicitationRef
                     }
             withRestoredCurrentDirectory
                 (runAgentWithRuntime processRuntime foregroundRunMode options)
@@ -190,3 +207,7 @@ runAgentWithRestarts options =
                     (closeSessionThreadManager sessionThreads
                         `finally` MCP.closeMcpSupervisor mcpSupervisor))
         (pure DevQuit)
+
+loginMcpWithScopes :: [Text] -> Text -> IO ()
+loginMcpWithScopes scopes =
+    loginMcpWith defaultLoginOptions { loginAdditionalScopes = scopes }

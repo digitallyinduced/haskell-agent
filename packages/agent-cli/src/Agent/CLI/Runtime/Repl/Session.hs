@@ -108,7 +108,7 @@ import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth ()
 import Agent.CLI.Startup.Format ()
 import Agent.CLI.StartupContext ()
-import Agent.CLI.Status ( formatTokenUsage )
+import Agent.CLI.Status ( formatTokenUsageOrZero )
 import Agent.CLI.Style
     ( cliWindowTitle, glyphOk, glyphSession, roleError, roleMuted )
 import Agent.CLI.Subagents.Runtime ()
@@ -121,7 +121,7 @@ import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createWorktree, worktreeRoot )
+import Agent.CLI.Worktree ( createManagedWorktree )
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect ( dialectId, dialectSlug )
@@ -427,11 +427,7 @@ handleSessionAction
         let toolNames =
                 Set.toAscList
                     slashCatalog.slashCatalogToolNames
-            usageText =
-                let formatted = formatTokenUsage usage
-                in if Text.null formatted
-                    then "0 in · 0 out"
-                    else formatted
+            usageText = formatTokenUsageOrZero usage
             message = Text.unlines $
                 [ "session: "
                     <> fromMaybe "(not persisted)" sessionId
@@ -517,7 +513,7 @@ handleSessionAction
                                                             finishAfk message
     ReplWorktree -> do
         result <- withReplActivity "Creating worktree…" $
-            createWorktree cwd (worktreeRoot env.sessionHome)
+            createManagedWorktree env.sessionHome cwd
         case result of
             Left err -> do
                 color <- resolveColor stderr

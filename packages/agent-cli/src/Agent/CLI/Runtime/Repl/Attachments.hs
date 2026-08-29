@@ -8,7 +8,8 @@ import Agent.CLI.Clipboard
     ( formatImageSize, loadImagesFromPastedText, nonEmptyClipboardImages,
       readClipboardImagesForPaste, readClipboardImagesImageFirst )
 import Agent.CLI.Command
-    ( ReplAction(ReplPaste, ReplShowAttachments, ReplClearAttachments) )
+    ( ReplAction(ReplPaste, ReplShowAttachments, ReplClearAttachments,
+                 ReplRemoveAttachment) )
 import Agent.CLI.Input
     ( ReplLine(ReplClipboardPaste, ReplClipboardPasteOrText) )
 import Agent.CLI.ProviderTransition ( TurnResult )
@@ -16,6 +17,7 @@ import Agent.CLI.Render ( resetRenderPrintedText )
 import Agent.CLI.Runtime.Types ( RunResult )
 import Agent.CLI.Session.Attachments
     ( putImagePreview, queueAttachedImages, queueClipboardImages )
+import Agent.CLI.SessionState (removeImageAttachmentAt)
 import Agent.CLI.Session.History
     ( modifyLiveAttachments, readLiveAttachments )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
@@ -226,6 +228,19 @@ handleAttachmentAction
             Text.putStrLn
                 (roleMuted color
                     (glyphOk <> "attachments cleared"))
+        continue
+    ReplRemoveAttachment index -> do
+        removed <- modifyLiveAttachments conversationRef
+            (removeImageAttachmentAt index)
+        syncFullscreenImagePreviews
+        color <- resolveColor stdout
+        let message =
+                if removed
+                    then "attachment removed"
+                    else "attachment is no longer available"
+        displayInfo message $
+            Text.putStrLn
+                (roleMuted color (glyphOk <> message))
         continue
     _ -> error "handleAttachmentAction: unsupported action"
   where

@@ -39,6 +39,7 @@ import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ()
+import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.CLI.Models ( catalogModelIds )
 import Agent.CLI.Options ()
 import Agent.CLI.PendingInputs ()
@@ -250,17 +251,20 @@ replWithDraft env@SessionEnv
             map skillInvocationCommand
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
     activeToolNames <- readActiveToolNames
+    params <- readIORef paramsRef
     let slashCatalog =
             mkSlashCatalog
-                (dialectId dialect)
-                activeToolNames
-                skillCommands
+                (maybe False (\info ->
+                    info.slug == currentModel params
+                        && modelServiceTierForRequest info (Just "priority")
+                            == Just "priority")
+                    env.sessionModelInfo)
+                (dialectId dialect) activeToolNames skillCommands
                 (catalogModelIds catalog)
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
         planPending = planState == PlanPending
-    params <- readIORef paramsRef
     policy <- readIORef policyRef
     pendingAttachments <- readLiveAttachments conversationRef
     let idleMode = replModeFromState planState policy

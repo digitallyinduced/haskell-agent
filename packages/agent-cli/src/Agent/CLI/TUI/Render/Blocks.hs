@@ -355,7 +355,7 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
-                accentBlock
+                accentBlockWithSections
                     state
                     target
                     ui
@@ -365,7 +365,8 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
-                    (visibleBody block)
+                    (bodySections (visibleBody block)
+                        <> toolImageSections state target block)
             BlockTodo ->
                 accentBlockWithSections
                     state
@@ -388,6 +389,7 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block <> block.blockTitle)
                     block.blockDetail
                     (visibleShellBody block)
+                    (toolImageSections state target block)
             BlockEdit ->
                 accentBlock
                     state
@@ -468,7 +470,7 @@ submittedUserMessage state target block =
             vBox $
                 nativePlaceholder index preview
                     <> [ withAttr Theme.userMutedAttr $
-                            terminalTxt (imageSummary preview)
+                            terminalTxt (imagePreviewSummary preview)
                        ]
 
     nativePlaceholder index preview
@@ -481,15 +483,71 @@ submittedUserMessage state target block =
                         vLimit rows (fill ' ')
                ]
 
-    imageSummary preview =
-        "[image] "
-            <> preview.previewMime
-            <> " · "
-            <> Text.pack (show preview.previewSourceWidth)
-            <> "×"
-            <> Text.pack (show preview.previewSourceHeight)
-            <> " · "
-            <> formatImageSize preview.previewBytes
+imagePreviewSummary :: TuiImagePreview -> Text
+imagePreviewSummary preview =
+    "[image] "
+        <> preview.previewMime
+        <> " · "
+        <> Text.pack (show preview.previewSourceWidth)
+        <> "×"
+        <> Text.pack (show preview.previewSourceHeight)
+        <> " · "
+        <> formatImageSize preview.previewBytes
+
+-- | Images the agent displayed with @show_image@ while this tool call ran.
+-- Only the root conversation carries previews; child viewports show the
+-- textual tool result alone. Native terminals get a placeholder extent that
+-- the Kitty placement sync fills after each reflow; other terminals draw the
+-- sampled bitmap directly.
+toolImageSections :: AppState -> AgentTarget -> UiBlock -> [Widget Name]
+toolImageSections state target block =
+    case target of
+        AgentRoot ->
+            zipWith toolImage [0 ..] $
+                Map.findWithDefault
+                    []
+                    block.blockId
+                    state.appSubmittedImagePreviews
+        AgentChild _ -> []
+        AgentNative _ -> []
+  where
+    toolImage index preview =
+        vBox
+            [ imageWidget index preview
+            , withAttr Theme.mutedAttr $
+                terminalTxt (imagePreviewSummary preview)
+            ]
+
+    imageWidget index preview =
+        Widget Fixed Fixed do
+            context <- getContext
+            let maxColumns =
+                    max 1 (min toolImageMaxColumns context.availWidth)
+            render $
+                if state.appRuntime.runtimeNativeImagePreviews
+                    then
+                        let (columns, rows) =
+                                previewCellSize
+                                    maxColumns
+                                    toolImageMaxRows
+                                    preview
+                        in reportExtent
+                            (ConversationImage block.blockId index) $
+                            hLimit columns $
+                                vLimit rows (fill ' ')
+                    else
+                        renderTuiImagePreview
+                            maxColumns
+                            toolImageMaxRows
+                            preview
+
+-- | Agent-displayed images are the point of the call, so they get a larger
+-- canvas than the thumbnail attached to a submitted prompt.
+toolImageMaxColumns :: Int
+toolImageMaxColumns = 72
+
+toolImageMaxRows :: Int
+toolImageMaxRows = 24
 
 timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
 timestampedMessage timestampAttr timestamp body
@@ -581,10 +639,13 @@ accentBlock
     -> Text
     -> Widget Name
 accentBlock state target ui block waveElapsed accent title body =
-    accentBlockWithSections state target ui block waveElapsed accent title $
-        if Text.null (Text.strip body)
-            then []
-            else [terminalTxtWrap body]
+    accentBlockWithSections state target ui block waveElapsed accent title
+        (bodySections body)
+
+bodySections :: Text -> [Widget Name]
+bodySections body
+    | Text.null (Text.strip body) = []
+    | otherwise = [terminalTxtWrap body]
 
 accentMarkdownBlock
     :: AppState
@@ -616,6 +677,7 @@ accentCodeBlock
     -> Text
     -> Text
     -> Text
+    -> [Widget Name]
     -> Widget Name
 accentCodeBlock
     state
@@ -627,7 +689,8 @@ accentCodeBlock
     accent
     title
     code
-    body =
+    body
+    extraSections =
     accentBlockWithSections state target ui block waveElapsed accent title $
         [ codeWidgetWithSyntaxHighlighting
             syntaxHighlighter
@@ -635,9 +698,8 @@ accentCodeBlock
             code
         | not (Text.null (Text.strip code))
         ]
-            <> [ terminalTxtWrap body
-               | not (Text.null (Text.strip body))
-               ]
+            <> bodySections body
+            <> extraSections
 
 accentBlockWithSections
     :: AppState

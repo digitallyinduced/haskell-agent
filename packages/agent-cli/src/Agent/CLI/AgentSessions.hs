@@ -156,12 +156,13 @@ data SessionThreadManager = SessionThreadManager
     }
 
 data ManagedSessionProcess
-    = ManagedSessionStarting !(MVar ())
-    | ManagedSessionRunning !ProcessHandle
+    = ManagedSessionStarting !Int !(MVar ())
+    | ManagedSessionRunning !Int !ProcessHandle
 
 data SessionProcessState = SessionProcessState
     { sessionManagerLifecycle :: !SessionManagerLifecycle
     , sessionManagerProcesses :: !(Map Text ManagedSessionProcess)
+    , sessionManagerNextToken :: !Int
     }
 
 data SessionManagerLifecycle
@@ -270,11 +271,12 @@ sessionThreadStatus manager sessionId =
                 poll worker >>= \case
                     Nothing -> pure (state, "running")
                     Just (Right ()) ->
-                        terminalStatus state "completed"
+                        settle state ManagedSessionThreadCompleted "completed"
                     Just (Left err) ->
-                        terminalStatus
-                            state
-                            ("failed (" <> formatException err <> ")")
+                        let message = "failed (" <> formatException err <> ")"
+                        in settle state
+                            (ManagedSessionThreadFailed message)
+                            message
             Just ManagedSessionThreadCompleted ->
                 terminalStatus state "completed"
             Just (ManagedSessionThreadFailed err) ->
@@ -285,15 +287,26 @@ sessionThreadStatus manager sessionId =
             (sessionLockPath
                 (manager.threadManagerRoot
                     </> unsafeEncodeUtf (Text.unpack sessionId)))
-    terminalStatus state terminal = do
+    -- Persist the terminal outcome instead of deleting it, so repeated status
+    -- polls stay observable. The background worker itself records the same
+    -- terminal constructor on exit (launchSessionThread); deleting it here
+    -- destroyed that record, making a failed session report "idle" on the
+    -- second poll (and never report its failure at all when a poll landed
+    -- while the session lock was still held). A still-active lock only masks
+    -- the outcome as "running" for this poll; the retained record surfaces the
+    -- real status once the lock clears.
+    settle state record terminal = do
         locked <- lockIsActive
         pure
             ( state
                 { managedThreads =
-                    Map.delete sessionId state.managedThreads
+                    Map.insert sessionId record state.managedThreads
                 }
             , if locked then "running" else terminal
             )
+    terminalStatus state terminal = do
+        locked <- lockIsActive
+        pure (state, if locked then "running" else terminal)
 
 closeSessionThreadManager :: SessionThreadManager -> IO ()
 closeSessionThreadManager manager = do
@@ -325,6 +338,7 @@ newSessionProcessManagerWithLifetime lifetime root = do
     processes <- newMVar SessionProcessState
         { sessionManagerLifecycle = SessionManagerOpen
         , sessionManagerProcesses = Map.empty
+        , sessionManagerNextToken = 0
         }
     pure SessionProcessManager
         { managedRoot = root
@@ -380,34 +394,37 @@ launchSessionTurnInput
                 busy <- case Map.lookup sessionId state.sessionManagerProcesses of
                     Nothing -> pure False
                     Just ManagedSessionStarting{} -> pure True
-                    Just (ManagedSessionRunning managedHandle) ->
+                    Just (ManagedSessionRunning _ managedHandle) ->
                         (== Nothing) <$> getProcessExitCode managedHandle
                 if not (sessionManagerIsOpen state) || busy
-                    then pure (state, False)
-                    else pure
-                        ( state
-                            { sessionManagerProcesses =
-                                Map.insert
-                                    sessionId
-                                    (ManagedSessionStarting completion)
-                                    state.sessionManagerProcesses
-                            }
-                        , True
-                        )
-            if not reserved
-                then pure (Left ("session " <> sessionId
+                    then pure (state, Nothing)
+                    else
+                        let token = state.sessionManagerNextToken
+                        in pure
+                            ( state
+                                { sessionManagerProcesses =
+                                    Map.insert
+                                        sessionId
+                                        (ManagedSessionStarting token completion)
+                                        state.sessionManagerProcesses
+                                , sessionManagerNextToken = token + 1
+                                }
+                            , Just token
+                            )
+            case reserved of
+                Nothing -> pure (Left ("session " <> sessionId
                     <> " is already running or its process manager is closed"))
-                else (`finally` putMVar completion ()) do
+                Just token -> (`finally` putMVar completion ()) do
                     started <- try @_ @SomeException
                         (startManagedSession executable)
                     case started of
                         Left err -> do
-                            forgetSession manager sessionId
+                            forgetSession manager sessionId token
                             pure $ Left
                                 ("failed to start agent session: "
                                     <> formatException err)
                         Right (Left err) -> do
-                            forgetSession manager sessionId
+                            forgetSession manager sessionId token
                             pure (Left err)
                         Right (Right process) -> do
                             published <-
@@ -418,7 +435,7 @@ launchSessionTurnInput
                                             ( state
                                                 { sessionManagerProcesses =
                                                     Map.insert sessionId
-                                                        (ManagedSessionRunning process)
+                                                        (ManagedSessionRunning token process)
                                                         state.sessionManagerProcesses
                                                 }
                                             , True
@@ -445,7 +462,7 @@ launchSessionTurnInput
                                                                     "agent session timed out")
                                                             Just exitCode ->
                                                                 pure (Right exitCode)
-                                        forgetSession manager sessionId
+                                        forgetSession manager sessionId token
                                         pure case exitResult of
                                             Left err -> Left err
                                             Right ExitSuccess ->
@@ -586,13 +603,19 @@ launchManagedTurnBounded
         handle
         (ManagedRequestInput request)
 
-forgetSession :: SessionProcessManager -> Text -> IO ()
-forgetSession manager sessionId =
-    modifyMVar_ manager.managedProcesses
-        (\state -> pure state
-            { sessionManagerProcesses =
-                Map.delete sessionId state.sessionManagerProcesses
-            })
+forgetSession :: SessionProcessManager -> Text -> Int -> IO ()
+forgetSession manager sessionId token =
+    modifyMVar_ manager.managedProcesses \state ->
+        let matches = case Map.lookup sessionId state.sessionManagerProcesses of
+                Just (ManagedSessionStarting current _) -> current == token
+                Just (ManagedSessionRunning current _) -> current == token
+                Nothing -> False
+        in pure if matches
+            then state
+                { sessionManagerProcesses =
+                    Map.delete sessionId state.sessionManagerProcesses
+                }
+            else state
 
 gatewayOnlyEnv :: [String]
 gatewayOnlyEnv =
@@ -612,27 +635,20 @@ sessionProcessStatus manager sessionId =
                 pure (state, if locked then "running" else "idle")
             Just ManagedSessionStarting{} ->
                 pure (state, "running")
-            Just (ManagedSessionRunning managedHandle) ->
+            Just (ManagedSessionRunning _ managedHandle) ->
+                -- Keep the exited process record rather than deleting it on
+                -- read: getProcessExitCode returns a stable code once the
+                -- process has exited, so retaining the handle lets repeated
+                -- polls keep reporting "completed"/"failed" instead of
+                -- decaying to "idle" after the first read. Re-launch tolerates
+                -- a retained exited record (startSessionProcess treats a
+                -- Just exit code as not-running).
                 getProcessExitCode managedHandle >>= \case
                     Nothing -> pure (state, "running")
-                    Just ExitSuccess ->
-                        pure
-                            ( state
-                                { sessionManagerProcesses =
-                                    Map.delete sessionId
-                                        state.sessionManagerProcesses
-                                }
-                            , "completed"
-                            )
+                    Just ExitSuccess -> pure (state, "completed")
                     Just (ExitFailure code) ->
                         pure
-                            ( state
-                                { sessionManagerProcesses =
-                                    Map.delete sessionId
-                                        state.sessionManagerProcesses
-                                }
-                            , "failed (" <> Text.pack (show code) <> ")"
-                            )
+                            (state, "failed (" <> Text.pack (show code) <> ")")
 
 closeSessionProcessManager :: SessionProcessManager -> IO ()
 closeSessionProcessManager manager = do
@@ -667,11 +683,11 @@ closeSessionProcessManager manager = do
   where
     closeProcesses processes = do
         let waitStarting = \case
-                ManagedSessionStarting completion -> readMVar completion
-                ManagedSessionRunning _ -> pure ()
+                ManagedSessionStarting _ completion -> readMVar completion
+                ManagedSessionRunning _ _ -> pure ()
             closeRunning = \case
                 ManagedSessionStarting{} -> pure ()
-                ManagedSessionRunning managedHandle ->
+                ManagedSessionRunning _ managedHandle ->
                     getProcessExitCode managedHandle >>= \case
                         Just _ ->
                             void $ try @_ @SomeException

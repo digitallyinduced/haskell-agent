@@ -42,6 +42,7 @@ library
                     , Agent.Claude.LoopBackend
                     , Agent.Claude.Options
                     , Agent.Claude.ReasoningEffort
+                    , Agent.Claude.Transport
     other-modules:    Agent.Claude.Internal.Environment
                     , Agent.Claude.Internal.Messages
     build-depends:    base                  >= 4.14 && < 5
@@ -68,10 +69,12 @@ test-suite agent-claude-test
     main-is:          Spec.hs
     other-modules:    Agent.Claude.AuthSpec
                     , Agent.Claude.LoopBackendSpec
+                    , Agent.Claude.OptionsSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-claude
                     , agent-core
+                    , agent-json
                     , agent-responses
                     , agent-responses-types
                     , claude-agent-sdk-haskell

@@ -15,6 +15,7 @@ import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
+    , parametersObjectLoose
     )
 import Agent.ToolDispatch
     ( StreamedTool(..)
@@ -83,6 +84,7 @@ import Agent.Tools.Types
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     , jsonTool
+    , rawJsonAppToolWithExecution
     , withToolArgumentInterpreter
     , withToolResourceClaims
     )
@@ -139,19 +141,26 @@ shellCommandArgsDecoder = Json.object $
 shellCommandTool :: ToolEnv -> CodexShellSession -> AppTool
 shellCommandTool env session =
     withToolResourceClaims (shellCommandResourceClaims env) $
-    jsonTool "shell_command" shellDescription
-    [ PropertySchema "command" PropertyString True $ Just
-        "Shell script to run in the user's default shell."
-    , PropertySchema "workdir" PropertyString False $ Just
-        "Working directory for the command. Defaults to the turn cwd."
-    , PropertySchema "timeout_ms" PropertyInteger False $ Just
-        "Maximum foreground command runtime. Defaults to 10000 ms. Mutually exclusive with yield_time_ms."
-    , PropertySchema "yield_time_ms" PropertyInteger False $ Just
-        "Return a session_id if the command is still running after this many milliseconds. Mutually exclusive with timeout_ms."
-    ]
-    False
-    TurnSequential
-    (typedStreamingTool "shell_command" shellCommandArgsDecoder (runShell env session))
+    -- Strict OpenAI schemas require every declared property on the wire.
+    -- shell_command instead mirrors Codex's non-strict schema so workdir and
+    -- the timing controls can actually be omitted.
+    rawJsonAppToolWithExecution "shell_command" shellDescription
+        (parametersObjectLoose
+            [ PropertySchema "command" PropertyString True $ Just
+                "Shell script to run in the user's default shell."
+            , PropertySchema "workdir" PropertyString False $ Just
+                "Working directory for the command. Defaults to the turn cwd."
+            , PropertySchema "timeout_ms" PropertyInteger False $ Just
+                "Maximum foreground command runtime. Defaults to 10000 ms. Mutually exclusive with yield_time_ms."
+            , PropertySchema "yield_time_ms" PropertyInteger False $ Just
+                "Return a session_id if the command is still running after this many milliseconds. Mutually exclusive with timeout_ms."
+            ])
+        AlwaysPrompt
+        TurnSequential
+        (typedStreamingTool
+            "shell_command"
+            shellCommandArgsDecoder
+            (runShell env session))
 
 shellCommandResourceClaims
     :: ToolEnv
@@ -178,7 +187,7 @@ shellCommandResourceClaims env call =
 shellDescription :: Text
 shellDescription =
     "Runs a shell command and returns its output.\n\
-    \- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.\n\
+    \- `workdir` is optional; omit it to use the turn cwd. Do not use `cd` unless absolutely necessary.\n\
     \- For a long-running command, set `yield_time_ms`; if it is still running, use `write_stdin` with the returned session_id to poll or send input."
 
 runShell
@@ -439,6 +448,7 @@ decodeApplyPatchArguments :: ToolCall -> Either Text Text
 decodeApplyPatchArguments call = case call.callKind of
     CustomCallKind -> Right call.arguments
     FunctionCallKind -> decodeToolArguments applyPatchArgsDecoder call.arguments
+    ComputerCallKind -> Left "apply_patch does not accept computer calls"
 
 --------------------------------------------------------------------------------
 -- update_plan
@@ -537,7 +547,7 @@ intOrString = Json.withType \case
 
 firstPresentText :: [Text] -> Json.FieldsDecoder Text
 firstPresentText keys = do
-    values <- traverse (`Json.atKeyOptional` Json.text) keys
+    values <- traverse (`Json.optionalKey` Json.text) keys
     case [value | Just value <- values] of
         value : _ -> pure value
         [] -> fail "missing patch text"

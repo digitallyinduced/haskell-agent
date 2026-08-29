@@ -12,6 +12,7 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , backgroundActivityText
     , completionFlashTransitions
+    , completionRequiresRedraw
     , conversationScrollbarRenderer
     , choiceRowColumns
     , choiceClosesOnUiTransition
@@ -48,6 +49,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenFilterChoice
     , requestFullscreenOnboarding
     , requestFullscreenResume
     , requestFullscreenSecret
@@ -68,6 +70,8 @@ module Agent.CLI.TUI.App
     , withTrackedVtyBuilder
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , showFullscreenToolImage
+    , toolImageBlockId
     , applyStoredFullscreenWindowTitle
     , turnCompletionRequiresRedraw
     , syntaxLanguagesForBlocks

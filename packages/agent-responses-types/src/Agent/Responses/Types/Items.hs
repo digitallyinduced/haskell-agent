@@ -12,8 +12,16 @@ module Agent.Responses.Types.Items
     , FunctionCallOutput(..)
     , CustomToolCall(..)
     , CustomToolCallOutput(..)
+    , ComputerAction(..)
+    , ComputerPoint(..)
+    , SafetyCheck(..)
+    , ComputerCall(..)
+    , computerCallDecoder
+    , ComputerCallOutput(..)
+    , computerCallOutputDecoder
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
+    , reasoningSummaryPartDecoder
     , ItemReference(..)
     , ResponseAgentMessage(..)
     , InternalChatMetadata(..)
@@ -35,6 +43,7 @@ import Agent.Responses.Types.Content
 import Agent.Responses.Types.Items.Known
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Hermes as Hermes
 import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
@@ -93,6 +102,86 @@ instance ToJSON FunctionCall where
                 , optionalField "encrypted_function_args" encryptedFunctionArgs
                 , optionalField "status" status
                 ]
+
+data ComputerPoint = ComputerPoint { pointX :: !Int, pointY :: !Int }
+    deriving stock (Eq, Show)
+
+instance ToJSON ComputerPoint where
+    toJSON ComputerPoint{pointX, pointY} = object ["x" .= pointX, "y" .= pointY]
+
+data ComputerAction
+    = ScreenshotAction
+    | ClickAction { clickX :: !Int, clickY :: !Int, clickButton :: !Text }
+    | DoubleClickAction { doubleClickX :: !Int, doubleClickY :: !Int }
+    | TypeAction !Text
+    | KeypressAction ![Text]
+    | ScrollAction { scrollX :: !Int, scrollY :: !Int, scrollDx :: !Int, scrollDy :: !Int }
+    | MoveAction { moveX :: !Int, moveY :: !Int }
+    | WaitAction !Int
+    | DragAction ![ComputerPoint]
+    | UnknownComputerAction !TaggedObject
+    deriving stock (Eq, Show)
+
+instance ToJSON ComputerAction where
+    toJSON = \case
+        ScreenshotAction -> object ["type" .= ("screenshot" :: Text)]
+        ClickAction{clickX, clickY, clickButton} -> object
+            ["type" .= ("click" :: Text), "x" .= clickX, "y" .= clickY, "button" .= clickButton]
+        DoubleClickAction{doubleClickX, doubleClickY} -> object
+            ["type" .= ("double_click" :: Text), "x" .= doubleClickX, "y" .= doubleClickY]
+        TypeAction text -> object ["type" .= ("type" :: Text), "text" .= text]
+        KeypressAction keys -> object ["type" .= ("keypress" :: Text), "keys" .= keys]
+        ScrollAction{scrollX, scrollY, scrollDx, scrollDy} -> object
+            ["type" .= ("scroll" :: Text), "x" .= scrollX, "y" .= scrollY,
+             "scroll_x" .= scrollDx, "scroll_y" .= scrollDy]
+        MoveAction{moveX, moveY} -> object
+            ["type" .= ("move" :: Text), "x" .= moveX, "y" .= moveY]
+        WaitAction ms -> object ["type" .= ("wait" :: Text), "ms" .= ms]
+        DragAction path -> object ["type" .= ("drag" :: Text), "path" .= path]
+        UnknownComputerAction tagged -> toJSON tagged
+
+data SafetyCheck = SafetyCheck
+    { safetyCheckId :: !Text, safetyCheckCode :: !(Maybe Text)
+    , safetyCheckMessage :: !(Maybe Text), safetyCheckExtra :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON SafetyCheck where
+    toJSON SafetyCheck{safetyCheckId, safetyCheckCode, safetyCheckMessage} = objectWith
+        [Just (field "id" safetyCheckId), optionalField "code" safetyCheckCode,
+         optionalField "message" safetyCheckMessage]
+
+data ComputerCall = ComputerCall
+    { computerCallItemId :: !(Maybe Text), computerCallId :: !Text
+    , computerActions :: ![ComputerAction], pendingSafetyChecks :: ![SafetyCheck]
+    , computerCallStatus :: !(Maybe ItemStatus), computerCallExtra :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON ComputerCall where
+    toJSON ComputerCall{computerCallItemId, computerCallId, computerActions,
+            pendingSafetyChecks, computerCallStatus} = objectWith
+        [ Just (field "type" ("computer_call" :: Text))
+        , optionalField "id" computerCallItemId, Just (field "call_id" computerCallId)
+        , Just (field "actions" computerActions)
+        , optionalField "pending_safety_checks" (nonEmpty pendingSafetyChecks)
+        , optionalField "status" computerCallStatus ]
+      where nonEmpty [] = Nothing; nonEmpty xs = Just xs
+
+data ComputerCallOutput = ComputerCallOutput
+    { computerOutputItemId :: !(Maybe Text), computerOutputCallId :: !Text
+    , screenshotDataUrl :: !Text, acknowledgedChecks :: ![SafetyCheck]
+    , computerOutputStatus :: !(Maybe ItemStatus), computerOutputExtra :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON ComputerCallOutput where
+    toJSON ComputerCallOutput{computerOutputItemId, computerOutputCallId,
+            screenshotDataUrl, acknowledgedChecks, computerOutputStatus} = objectWith
+        [ Just (field "type" ("computer_call_output" :: Text))
+        , optionalField "id" computerOutputItemId, Just (field "call_id" computerOutputCallId)
+        , Just (field "output" (object ["type" .= ("computer_screenshot" :: Text),
+            "image_url" .= screenshotDataUrl, "detail" .= ("original" :: Text)]))
+        , optionalField "acknowledged_safety_checks" (nonEmpty acknowledgedChecks)
+        , optionalField "status" computerOutputStatus ]
+      where nonEmpty [] = Nothing; nonEmpty xs = Just xs
 
 
 data FunctionCallOutput = FunctionCallOutput
@@ -272,7 +361,7 @@ data LocalShellAction
         { command           :: ![Text]
         , timeoutMs         :: !(Maybe Integer)
         , workingDirectory  :: !(Maybe Text)
-        , env               :: !(Maybe RawJson)
+        , env               :: !(Maybe EnvironmentVariables)
         , user              :: !(Maybe Text)
 
         }
@@ -477,6 +566,8 @@ data ResponseItem
     | FunctionCallOutputItem !FunctionCallOutput
     | CustomToolCallItem !CustomToolCall
     | CustomToolCallOutputItem !CustomToolCallOutput
+    | ComputerCallItem !ComputerCall
+    | ComputerCallOutputItem !ComputerCallOutput
     | ReasoningItemValue !ReasoningItem
     | ItemReferenceValue !ItemReference
     | AgentMessageItem !ResponseAgentMessage
@@ -500,6 +591,8 @@ instance ToJSON ResponseItem where
         FunctionCallOutputItem value -> toJSON value
         CustomToolCallItem value -> toJSON value
         CustomToolCallOutputItem value -> toJSON value
+        ComputerCallItem value -> toJSON value
+        ComputerCallOutputItem value -> toJSON value
         ReasoningItemValue value -> toJSON value
         ItemReferenceValue value -> toJSON value
         AgentMessageItem value -> toJSON value
@@ -545,6 +638,9 @@ responseItemDecoder =
             ItemCustomToolCall -> CustomToolCallItem <$> customToolCallDecoder
             ItemCustomToolCallOutput ->
                 CustomToolCallOutputItem <$> customToolCallOutputDecoder
+            ItemComputerCall -> ComputerCallItem <$> computerCallDecoder
+            ItemComputerCallOutput ->
+                ComputerCallOutputItem <$> computerCallOutputDecoder
             ItemReasoning -> ReasoningItemValue <$> reasoningItemDecoder
             ItemReferenceType -> ItemReferenceValue <$> itemReferenceDecoder
             ItemAgentMessage ->
@@ -579,6 +675,63 @@ responseMessageDecoder = Hermes.object $
         <*> optionalAtKey
             "internal_chat_message_metadata_passthrough"
             internalChatMetadataDecoder
+
+computerPointDecoder :: Hermes.Decoder ComputerPoint
+computerPointDecoder = Hermes.object $
+    ComputerPoint <$> intAtKey "x" <*> intAtKey "y"
+
+computerActionDecoder :: Hermes.Decoder ComputerAction
+computerActionDecoder = Hermes.object do
+    wireType <- Hermes.atKey "type" Hermes.text
+    case wireType of
+        "screenshot" -> pure ScreenshotAction
+        "click" -> ClickAction <$> intAtKey "x" <*> intAtKey "y"
+            <*> (maybe "left" id <$> optionalAtKey "button" Hermes.text)
+        "double_click" -> DoubleClickAction <$> intAtKey "x" <*> intAtKey "y"
+        "type" -> TypeAction <$> Hermes.atKey "text" Hermes.text
+        "keypress" -> KeypressAction <$> Hermes.atKey "keys" (Hermes.list Hermes.text)
+        "scroll" -> ScrollAction <$> intAtKey "x" <*> intAtKey "y"
+            <*> optionalIntAtKeyWithDefault "scroll_x" 0
+            <*> optionalIntAtKeyWithDefault "scroll_y" 0
+        "move" -> MoveAction <$> intAtKey "x" <*> intAtKey "y"
+        "wait" -> WaitAction <$> optionalIntAtKeyWithDefault "ms" 1000
+        "drag" -> DragAction . maybe [] id
+            <$> optionalAtKey "path" (Hermes.list computerPointDecoder)
+        _ -> pure (UnknownComputerAction (TaggedObject wireType))
+
+safetyCheckDecoder :: Hermes.Decoder SafetyCheck
+safetyCheckDecoder = Hermes.object $
+    SafetyCheck <$> Hermes.atKey "id" Hermes.text
+        <*> optionalAtKey "code" Hermes.text
+        <*> optionalAtKey "message" Hermes.text
+        <*> pure KeyMap.empty
+
+computerCallDecoder :: Hermes.Decoder ComputerCall
+computerCallDecoder = Hermes.object $
+    ComputerCall <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> (maybe [] id <$> optionalAtKey "actions" (Hermes.list computerActionDecoder))
+        <*> (maybe [] id <$> optionalAtKey "pending_safety_checks" (Hermes.list safetyCheckDecoder))
+        <*> optionalAtKey "status" itemStatusDecoder
+        <*> pure KeyMap.empty
+
+computerScreenshotDataUrlDecoder :: Hermes.Decoder Text
+computerScreenshotDataUrlDecoder = Hermes.object $
+    maybe "" id <$> optionalAtKey "image_url" Hermes.text
+
+computerCallOutputDecoder :: Hermes.Decoder ComputerCallOutput
+computerCallOutputDecoder = Hermes.object $
+    ComputerCallOutput <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> (maybe "" id <$> optionalAtKey "output" computerScreenshotDataUrlDecoder)
+        <*> (maybe [] id <$> optionalAtKey "acknowledged_safety_checks" (Hermes.list safetyCheckDecoder))
+        <*> optionalAtKey "status" itemStatusDecoder
+        <*> pure KeyMap.empty
+
+intAtKey key = fromIntegral <$> Hermes.atKey key integerDecoder
+
+optionalIntAtKeyWithDefault key fallback =
+    maybe fallback fromIntegral <$> optionalAtKey key integerDecoder
 
 functionCallDecoder :: Hermes.Decoder FunctionCall
 functionCallDecoder = Hermes.object $
@@ -680,7 +833,7 @@ localShellActionDecoder =
                     (Hermes.list Hermes.text))
                 <*> optionalAtKey "timeout_ms" integerDecoder
                 <*> optionalAtKey "working_directory" Hermes.text
-                <*> optionalAtKey "env" rawJsonDecoder
+                <*> optionalAtKey "env" environmentVariablesDecoder
                 <*> optionalAtKey "user" Hermes.text
             _ -> pure $
                 LocalShellActionOther

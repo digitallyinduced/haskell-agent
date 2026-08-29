@@ -55,6 +55,7 @@ import Agent.Tools.Secret
     , closeSecretStore
     , newSecretStore
     )
+import Agent.Tools.ShowImage (ImageDisplayHooks, showImageTool)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
@@ -85,23 +86,28 @@ codingToolsFor
     -> ToolEnv
     -> Maybe PlanModeHooks
     -> Maybe SecretPromptHooks
+    -> Maybe ImageDisplayHooks
     -> Maybe MultiAgentContext
     -> IO CodingTools
-codingToolsFor dialect env planHooks secretHooks multi = do
+codingToolsFor dialect env planHooks secretHooks imageHooks multi = do
     typesRef <- newIORef Map.empty
     codingToolsForWithTypes
-        dialect env planHooks secretHooks multi typesRef
+        dialect env planHooks secretHooks imageHooks multi typesRef
 
+-- | Host-presented tools (@ask_secret@, @show_image@) are registered only
+-- when the host supplies the matching hooks, so headless and child sessions
+-- never advertise capabilities they cannot fulfil.
 codingToolsForWithTypes
     :: Dialect
     -> ToolEnv
     -> Maybe PlanModeHooks
     -> Maybe SecretPromptHooks
+    -> Maybe ImageDisplayHooks
     -> Maybe MultiAgentContext
     -> GrokSubagentSpecs
     -> IO CodingTools
 codingToolsForWithTypes
-        dialect env planHooks secretHooks multi typesRef = do
+        dialect env planHooks secretHooks imageHooks multi typesRef = do
     secretStore <- traverse (newSecretStore env) secretHooks
     let closeSecrets = mapM_ closeSecretStore secretStore
         analysisSpawner =
@@ -128,6 +134,7 @@ codingToolsForWithTypes
                             (Just "none")
                 _ -> Nothing
         secretTools = maybe [] (pure . askSecretTool) secretStore
+        imageTools = maybe [] (pure . showImageTool env) imageHooks
         finish tools includeArtifacts plan suspendGhci close agentTypes grokRuntime =
             CodingTools
                 { codingAppTools =
@@ -136,6 +143,7 @@ codingToolsForWithTypes
                             then artifactTools env analysisSpawner
                             else [])
                         <> secretTools
+                        <> imageTools
                 , codingPlanMode = plan
                 , codingSuspendGhci = suspendGhci
                 , codingClose = close `finally` closeSecrets
