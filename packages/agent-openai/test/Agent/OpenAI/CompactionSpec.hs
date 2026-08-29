@@ -84,6 +84,46 @@ spec = do
                 request = buildRemoteCompactionRequest params [user "hello"]
             request.parallelToolCalls `shouldBe` Just False
 
+        -- The compaction request replays the transcript; Responses Lite
+        -- rejects @input[N].status@ on reasoning items and Codex never sends
+        -- the field, so the wire projection drops it and keeps the rest.
+        it "omits provider lifecycle status from replayed compaction history" do
+            let params = defaultResponseCreateParams
+                    { model = Just "gpt-5.6-sol"
+                    , store = Just False
+                    }
+                reasoning = ReasoningItemValue ReasoningItem
+                    { itemId = Just "rs-1"
+                    , summary = []
+                    , content = Nothing
+                    , encryptedContent = Just "opaque"
+                    , status = Just ItemCompleted
+                    }
+                assistant = MessageItem ResponseMessage
+                    { messageId = Just "msg-1"
+                    , content = MessageContentParts
+                        [OutputTextPart "done" Nothing Nothing]
+                    , role = RoleAssistant
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                request = buildRemoteCompactionRequest params
+                    [user "hello", reasoning, assistant]
+                encodedStatus item = case Aeson.toJSON item of
+                    Aeson.Object fields -> KeyMap.lookup "status" fields
+                    _ -> Nothing
+            map encodedStatus (requestItems request)
+                `shouldBe` [Nothing, Nothing, Nothing, Nothing]
+            case requestItems request of
+                [_, ReasoningItemValue replayed, MessageItem replayedMessage, _] -> do
+                    replayed.encryptedContent `shouldBe` Just "opaque"
+                    replayed.itemId `shouldBe` Just "rs-1"
+                    replayedMessage.messageId `shouldBe` Just "msg-1"
+                other ->
+                    expectationFailure
+                        ("unexpected compaction input: " <> show other)
+
         it "includes request-level fields in request token estimates" do
             let params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { instructions = Just (Text.replicate 1_000 "i")

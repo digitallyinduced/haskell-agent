@@ -4,6 +4,7 @@ module Agent.OpenAI.Request
     ) where
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
+import Agent.Responses.Request (stripReplayedInputStatus)
 import Agent.Responses.Types
 
 -- | Keep Codex-incompatible fields out of the serialized request.
@@ -21,6 +22,12 @@ import Agent.Responses.Types
 -- Responses Lite also requires @parallel_tool_calls=false@. Compaction and
 -- other request rebuilds can flip that flag back to true, so restore the
 -- Lite contract here for both HTTP and WebSocket.
+--
+-- Replayed transcript items must not carry their provider lifecycle @status@
+-- either: Codex never sends it, and Responses Lite rejects it as an unknown
+-- parameter on reasoning items. 'withRequestInput' already drops it for every
+-- backend; repeating that here keeps the Codex wire contract independent of
+-- how a caller assembled the request.
 sanitizeCodexRequest :: ResponseCreateParams -> ResponseCreateParams
 sanitizeCodexRequest ResponseCreateParams
         { promptCacheRetention = _
@@ -30,7 +37,8 @@ sanitizeCodexRequest ResponseCreateParams
         } =
     ResponseCreateParams
         { promptCacheRetention = Nothing
-        , input = fmap stripContentItemKindsInput input
+        , input =
+            fmap (stripReplayedInputStatus . stripContentItemKindsInput) input
         , parallelToolCalls =
             if maybe False isCodexResponsesLiteModel model
                 then Just False

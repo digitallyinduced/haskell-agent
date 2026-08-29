@@ -44,6 +44,7 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
+import Agent.Responses.Request (stripReplayedItemStatus)
 import Agent.Responses.Types
 import Agent.Json (rawJsonFromEncoding)
 import Agent.ToolDispatch
@@ -124,7 +125,10 @@ tokenProviderStatelessResponsesBackend provider send =
 withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
 withRequestInput ResponseCreateParams{..} items =
     let prefix = requestInputPrefix input
-        normalizedItems = map normalizeRequestItem items
+        -- Replayed transcript items are provider output; drop their lifecycle
+        -- status before they become input (see 'stripReplayedItemStatus').
+        normalizedItems =
+            map (normalizeRequestItem . stripReplayedItemStatus) items
         requestItems
             | any isAdditionalTools prefix =
                 ensureReasoningHasFollowingItem

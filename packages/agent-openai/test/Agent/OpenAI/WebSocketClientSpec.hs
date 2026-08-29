@@ -158,6 +158,36 @@ spec = do
                 expectationFailure
                     ("expected input array, got " <> show other)
 
+    -- Responses Lite rejects @input[N].status@ on replayed reasoning items
+    -- and Codex never sends the field on replayed transcript items, while
+    -- items such as local shell calls keep the status Codex does send.
+    it "strips provider lifecycle status from replayed input items" do
+        let reasoning = ReasoningItemValue ReasoningItem
+                { itemId = Just "rs-1"
+                , summary = []
+                , content = Nothing
+                , encryptedContent = Just "opaque"
+                , status = Just ItemCompleted
+                }
+            shell = LocalShellCallItem LocalShellCall
+                { itemId = Just "lsh-1"
+                , callId = Just "call-1"
+                , status = Just ItemCompleted
+                , action = Nothing
+                }
+            request = withInputItems [reasoning, shell] sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) -> do
+                map (field "status") (toList items)
+                    `shouldBe` [Nothing, Just (Aeson.String "completed")]
+                map (field "encrypted_content") (toList items)
+                    `shouldBe` [Just (Aeson.String "opaque"), Nothing]
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
     it "does not request server-managed compaction by default" do
         contextManagement defaultCodexWsOptions `shouldBe` Nothing
 
@@ -632,6 +662,11 @@ withParallelToolCalls
     :: Maybe Bool -> ResponseCreateParams -> ResponseCreateParams
 withParallelToolCalls nextValue ResponseCreateParams { parallelToolCalls = _, .. } =
     ResponseCreateParams { parallelToolCalls = nextValue, .. }
+
+withInputItems
+    :: [ResponseItem] -> ResponseCreateParams -> ResponseCreateParams
+withInputItems items ResponseCreateParams { input = _, .. } =
+    ResponseCreateParams { input = Just (ResponseInputItems items), .. }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =
