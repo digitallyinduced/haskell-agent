@@ -1,5 +1,4 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
-{-# LANGUAGE FieldSelectors #-}
 
 module Agent.CLI.MacOS.Bridge () where
 
@@ -71,8 +70,7 @@ import Agent.CLI.Session
     , sessionsRoot
     )
 import Agent.CLI.SessionAdmin
-    ( accountSummariesJSON
-    , loadSessionPageJSON
+    ( loadSessionPageJSON
     , managedPostgresConfigForHome
     , sessionSummaryWithStatusJSON
     )
@@ -85,11 +83,6 @@ import Agent.Store.Postgres
     , closeStore
     , openStore
     , trustedPool
-    )
-import Agent.Store.Postgres.UsageCache
-    ( AccountUsageCacheEntry(..)
-    , loadAccountUsageCache
-    , upsertAccountUsageCache
     )
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
@@ -373,10 +366,6 @@ data AccountProviderRequest = AccountProviderRequest
     { accountProvider :: !Text
     }
 
-instance Aeson.FromJSON AccountProviderRequest where
-    parseJSON = Aeson.withObject "AccountProviderRequest" \object ->
-        AccountProviderRequest <$> object .: "provider"
-
 data AccountOAuthPollRequest = AccountOAuthPollRequest
     { oauthPollProvider :: !Text
     , oauthPollVerificationUrl :: !(Maybe Text)
@@ -387,46 +376,10 @@ data AccountOAuthPollRequest = AccountOAuthPollRequest
     , oauthPollExpiresInSeconds :: !(Maybe Int)
     }
 
-instance Aeson.FromJSON AccountOAuthPollRequest where
-    parseJSON = Aeson.withObject "AccountOAuthPollRequest" \object ->
-        AccountOAuthPollRequest
-            <$> object .: "provider"
-            <*> object .:? "verificationUrl"
-            <*> object .:? "userCode"
-            <*> object .:? "deviceAuthId"
-            <*> object .:? "deviceCode"
-            <*> object .:? "pollIntervalSeconds"
-            <*> object .:? "expiresInSeconds"
-
 data AccountAPIKeyRequest = AccountAPIKeyRequest
     { accountAPIKeyProvider :: !Text
     , accountAPIKey :: !Text
     }
-
-instance Aeson.FromJSON AccountAPIKeyRequest where
-    parseJSON = Aeson.withObject "AccountAPIKeyRequest" \object ->
-        AccountAPIKeyRequest
-            <$> object .: "provider"
-            <*> object .: "apiKey"
-
-data AccountEnabledRequest = AccountEnabledRequest
-    { accountEnabledManagedId :: !Text
-    , accountEnabledEnabled :: !Bool
-    }
-
-instance Aeson.FromJSON AccountEnabledRequest where
-    parseJSON = Aeson.withObject "AccountEnabledRequest" \object ->
-        AccountEnabledRequest
-            <$> object .: "managedID"
-            <*> object .: "enabled"
-
-data AccountDeleteRequest = AccountDeleteRequest
-    { accountDeleteManagedId :: !Text
-    }
-
-instance Aeson.FromJSON AccountDeleteRequest where
-    parseJSON = Aeson.withObject "AccountDeleteRequest" \object ->
-        AccountDeleteRequest <$> object .: "managedID"
 
 data EngineCommand
     = EngineRequest !BridgeRequest
@@ -579,7 +532,7 @@ ha_account_set_enabled
 ha_account_set_enabled idBytes (CSize idLength) enabled callback context
     | callback == nullFunPtr = pure 1
     | otherwise = do
-        managedId <- decodeInput idBytes (CSize idLength)
+        managedId <- decodeInput idBytes idLength
         _ <- forkIO do
             setManagedCredentialEnabled managedId (enabled /= 0)
                 >>= invokeStoreResult callback context
@@ -590,7 +543,7 @@ ha_account_delete
 ha_account_delete idBytes (CSize idLength) callback context
     | callback == nullFunPtr = pure 1
     | otherwise = do
-        managedId <- decodeInput idBytes (CSize idLength)
+        managedId <- decodeInput idBytes idLength
         _ <- forkIO do
             deleteManagedCredential managedId
                 >>= invokeStoreResult callback context
@@ -1281,53 +1234,6 @@ handleRequest config store root request = do
                             (failureEvent current.requestId)
                             (const (successEvent current.requestId True))
                             changed
-            "accounts.list" -> do
-                activeStore <- acquireStore config store
-                accounts <- cachedAccountSummaries activeStore
-                pure $ successEvent current.requestId
-                    accounts
-            "accounts.oauth.start" ->
-                case (parseParams current :: Either Text AccountProviderRequest) of
-                    Left err -> pure (failureEvent current.requestId err)
-                    Right request ->
-                        startAccountOAuth request >>= either
-                            (pure . failureEvent current.requestId)
-                            (pure . successEvent current.requestId)
-            "accounts.oauth.poll" ->
-                case (parseParams current :: Either Text AccountOAuthPollRequest) of
-                    Left err -> pure (failureEvent current.requestId err)
-                    Right request ->
-                        pollAccountOAuth request >>= either
-                            (pure . failureEvent current.requestId)
-                            (pure . successEvent current.requestId)
-            "accounts.apiKey.connect" ->
-                case (parseParams current :: Either Text AccountAPIKeyRequest) of
-                    Left err -> pure (failureEvent current.requestId err)
-                    Right request ->
-                        connectAccountAPIKey request >>= either
-                            (pure . failureEvent current.requestId)
-                            (pure . successEvent current.requestId)
-            "accounts.setEnabled" ->
-                case (parseParams current :: Either Text AccountEnabledRequest) of
-                    Left err -> pure (failureEvent current.requestId err)
-                    Right request -> do
-                        result <- setManagedCredentialEnabled
-                            request.accountEnabledManagedId
-                            request.accountEnabledEnabled
-                        pure $ either
-                            (failureEvent current.requestId)
-                            (const (successEvent current.requestId True))
-                            result
-            "accounts.delete" ->
-                case (parseParams current :: Either Text AccountDeleteRequest) of
-                    Left err -> pure (failureEvent current.requestId err)
-                    Right request -> do
-                        result <- deleteManagedCredential
-                            request.accountDeleteManagedId
-                        pure $ either
-                            (failureEvent current.requestId)
-                            (const (successEvent current.requestId True))
-                            result
             "turn.agents" ->
                 pure $ successEvent current.requestId ([] :: [Aeson.Value])
             "models.list" ->
@@ -1348,48 +1254,6 @@ handleRequest config store root request = do
             method ->
                 pure $ failureEvent current.requestId
                     ("unknown method: " <> method)
-
-cachedAccountSummaries :: Store -> IO [Aeson.Value]
-cachedAccountSummaries store = do
-    let pool = trustedPool store
-    cached <- loadAccountUsageCache pool accountCacheProvider accountCacheKey
-    now <- getCurrentTime
-    case cached of
-        Right (Just entry)
-            | Just accounts <- decodeAccountCache entry.accountUsageCachePayload -> do
-                if entry.accountUsageCacheExpiresAt <= now
-                    then void $ forkFinally
-                        (refreshAccountCache store)
-                        (const (pure ()))
-                    else pure ()
-                pure accounts
-        _ -> refreshAccountCache store
-
-refreshAccountCache :: Store -> IO [Aeson.Value]
-refreshAccountCache store = do
-    accounts <- accountSummariesJSON
-    fetchedAt <- getCurrentTime
-    let payload = TextEncoding.decodeUtf8 $
-            LBS.toStrict (Aeson.encode accounts)
-        entry = AccountUsageCacheEntry
-            { accountUsageCacheProvider = accountCacheProvider
-            , accountUsageCacheAccountId = accountCacheKey
-            , accountUsageCachePayload = payload
-            , accountUsageCacheFetchedAt = fetchedAt
-            , accountUsageCacheExpiresAt = addUTCTime 300 fetchedAt
-            }
-    void $ upsertAccountUsageCache (trustedPool store) entry
-    pure accounts
-
-decodeAccountCache :: Text -> Maybe [Aeson.Value]
-decodeAccountCache =
-    Aeson.decodeStrict' . TextEncoding.encodeUtf8
-
-accountCacheProvider :: Text
-accountCacheProvider = "macos-bridge"
-
-accountCacheKey :: Text
-accountCacheKey = "account-summaries-v1"
 
 loadNativeModelCatalog
     :: Store
