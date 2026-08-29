@@ -3,7 +3,7 @@ module Agent.CLI.Runtime.Orchestration.Restart
     , runFullscreenRestartLoop
     ) where
 
-import Agent.CLI.Options ( CliOptions )
+import Agent.CLI.Options ( CliOptions(optCodeMode) )
 import Agent.CLI.ProviderTransition
     ( ProviderTransition(..), TransitionCause(AutomaticFallback) )
 import Agent.CLI.Runtime.Types ( PreparedAgent(..), RunResult(..) )
@@ -59,6 +59,11 @@ runFullscreenRestartLoop callbacks runtime =
             Right result -> case result of
                 RunRestart sessionId -> do
                     let nextOptions = callbacks.restartOptions options sessionId
+                    retryStartup nextOptions Nothing
+                RunEnableCodeMode sessionId -> do
+                    let nextOptions =
+                            (callbacks.restartOptions options sessionId)
+                                { optCodeMode = True }
                     retryStartup nextOptions Nothing
                 RunSwitchProvider next -> do
                     let nextOptions =

@@ -351,6 +351,10 @@ parseSlash catalog raw line = case Text.words line of
                 ["reload"] -> ReplSkills True
                 _ -> ReplCommandError "usage: /skills [reload]"
             "shell" -> parseShellCommand args
+            "codemod" ->
+                if null args
+                    then ReplEnableCodeMode
+                    else ReplCommandError "usage: /codemod"
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove
