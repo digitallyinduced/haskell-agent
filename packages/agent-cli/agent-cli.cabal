@@ -170,6 +170,7 @@ library
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
                     , Agent.CLI.Input.Display
+                    , Agent.CLI.Input.Editor
                     , Agent.CLI.Input.Paste
                     , Agent.CLI.Input.History
                     , Agent.CLI.Input.KeyDecoder
