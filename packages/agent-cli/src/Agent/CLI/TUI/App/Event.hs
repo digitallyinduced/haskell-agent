@@ -846,7 +846,9 @@ handleEventInner event = case event of
     VtyEvent V.EvLostFocus ->
         noteTerminalFocusLost
     VtyEvent V.EvGainedFocus ->
-        noteTerminalFocusGained >> resolveConversationFollow
+        noteTerminalFocusGained
+            >> resolveConversationFollow
+            >> queueConversationReflow
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache

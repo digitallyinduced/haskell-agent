@@ -56,7 +56,7 @@ import Agent.CLI.TUI.App
 import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
-    , AppState
+    , AppState(appConversationReflowQueued)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
     , FullscreenRuntime(..)
@@ -774,12 +774,17 @@ spec = do
     describe "history replacement viewport" do
         it "shows the new durable tail immediately while focused" do
             timeout 2_000_000
-                (replacementLeavesDurableTailVisible ReplaceWhileFocused)
+                (fst <$> replacementAfterHistoryReplacement ReplaceWhileFocused)
                 `shouldReturn` Just True
 
         it "shows the new durable tail immediately when focus returns" do
             timeout 2_000_000
-                (replacementLeavesDurableTailVisible ReplaceWhileHidden)
+                (fst <$> replacementAfterHistoryReplacement ReplaceWhileHidden)
+                `shouldReturn` Just True
+
+        it "reflows native placements after focus returns" do
+            timeout 2_000_000
+                (snd <$> replacementAfterHistoryReplacement ReplaceWhileHidden)
                 `shouldReturn` Just True
 
         it "shows the durable tail without relying on a focus-gained event" do
@@ -1151,7 +1156,11 @@ data ReplacementScenario
     | ReplaceWhileHiddenNoFocus
 
 replacementLeavesDurableTailVisible :: ReplacementScenario -> IO Bool
-replacementLeavesDurableTailVisible scenario = do
+replacementLeavesDurableTailVisible scenario =
+    fst <$> replacementAfterHistoryReplacement scenario
+
+replacementAfterHistoryReplacement :: ReplacementScenario -> IO (Bool, Bool)
+replacementAfterHistoryReplacement scenario = do
     let liveTranscript =
             Text.unlines (replicate 200 "live transcript line")
     runtime <- newScriptRuntime
@@ -1213,8 +1222,11 @@ replacementLeavesDurableTailVisible scenario = do
                 , FullscreenScriptApp AppConversationReflow
                 , FullscreenScriptHalt
                 ]
-    rendered <- runFullscreenScript initialState script
-    pure $ encoded durableTail `ByteString.isInfixOf` rendered
+    (rendered, finalState) <- runFullscreenScriptWithState initialState script
+    pure
+        ( encoded durableTail `ByteString.isInfixOf` rendered
+        , finalState.appConversationReflowQueued
+        )
 
 unfocusedPasteRendersDraft :: IO Bool
 unfocusedPasteRendersDraft = do
@@ -1370,7 +1382,14 @@ runFullscreenScript
     :: AppState
     -> [FullscreenScriptEvent]
     -> IO ByteString.ByteString
-runFullscreenScript initialState script = do
+runFullscreenScript initialState script =
+    fst <$> runFullscreenScriptWithState initialState script
+
+runFullscreenScriptWithState
+    :: AppState
+    -> [FullscreenScriptEvent]
+    -> IO (ByteString.ByteString, AppState)
+runFullscreenScriptWithState initialState script = do
     let scriptedApp = App
             { appDraw = fullscreenApp.appDraw
             , appChooseCursor = fullscreenApp.appChooseCursor
@@ -1418,8 +1437,10 @@ runFullscreenScript initialState script = do
             , V.shutdown = pure ()
             , V.isShutdown = pure False
             }
-    _ <- customMain vty (pure vty) (Just events) scriptedApp initialState
-    readIORef outputBytes
+    finalState <-
+        customMain vty (pure vty) (Just events) scriptedApp initialState
+    rendered <- readIORef outputBytes
+    pure (rendered, finalState)
 
 markerBlock :: BlockId -> Text -> UiBlock
 markerBlock blockId body = UiBlock
