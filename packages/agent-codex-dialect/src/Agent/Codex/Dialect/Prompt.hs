@@ -21,7 +21,7 @@ codexSystemPrompt cwd today =
         , "- Edit files with apply_patch. Never call applypatch or apply-patch."
         , "- For every multi-step task, call update_plan before starting (unavailable in Plan Mode)."
         , "- Keep the checklist current: mark steps completed immediately after verification, keep exactly one step in_progress, and mark unfinished work cancelled or pending rather than claiming completion."
-        , "- Before your final response, update_plan so no stale in_progress step remains and every step is completed or explicitly cancelled."
+        , "- Before your final response, when update_plan is available, call it so no stale in_progress step remains and every step is completed or explicitly cancelled."
         , "- Evaluate Haskell with run_ghci (persistent GHCi; pure expressions auto-approve)."
         , "- Look up current public information with web_search."
         , "- Enter Plan Mode with enter_plan_mode; write its plan with write_plan; ask planning questions with ask_user_question."
