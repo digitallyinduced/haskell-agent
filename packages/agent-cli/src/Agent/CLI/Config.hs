@@ -37,12 +37,10 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import Data.Word (Word64)
-import Text.Read (readMaybe)
 
 harnessConfigSchemaVersion :: Int
 harnessConfigSchemaVersion = 1
@@ -357,9 +355,9 @@ loadHarnessConfig :: OsPath -> IO (Either Text HarnessConfig)
 loadHarnessConfig home =
     fmap (fmap snd) (loadHarnessConfigSnapshot home)
 
--- | Read one config and its monotonic revision under the same lock used by
--- every writer. A private content fingerprint advances the revision after an
--- out-of-band replacement without exposing secret-bearing config bytes.
+-- | Read one config and its content-derived revision under the same lock used
+-- by every writer. The token describes the exact validated bytes and is never
+-- computed from a separately replaceable sidecar.
 loadHarnessConfigSnapshot
     :: OsPath -> IO (Either Text (Word64, HarnessConfig))
 loadHarnessConfigSnapshot home =
@@ -372,9 +370,7 @@ loadHarnessConfigUnlocked home = do
     let path = harnessConfigPath home
     exists <- doesFileExist path
     if not exists
-        then do
-            revision <- syncMissingConfigRevision home
-            pure (Right (revision, defaultHarnessConfig))
+        then pure (Right (0, defaultHarnessConfig))
         else do
             bytesResult <-
                 tryIO (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
@@ -396,9 +392,9 @@ loadHarnessConfigUnlocked home = do
                         Right config ->
                             case validateHarnessConfig config of
                                 Left err -> pure (Left err)
-                                Right valid -> do
-                                    revision <- syncConfigRevision home bytes
-                                    pure (Right (revision, valid))
+                                Right valid ->
+                                    pure (Right
+                                        (configBytesRevision bytes, valid))
 
 -- | Persist the machine-wide harness configuration with owner-only
 -- permissions. The replacement is atomic so an interrupted edit cannot leave
@@ -443,7 +439,6 @@ writeHarnessConfigUnlocked home config =
                 createDirectoryIfMissing True directory
                 setFileMode (unsafeToFilePath directory) 0o700
                 writeLazyFileAtomically path 0o600 bytes
-                advanceConfigRevision home bytes
             case result of
                 Left exception ->
                     pure . Left $
@@ -452,7 +447,8 @@ writeHarnessConfigUnlocked home config =
                             <> ": "
                             <> Text.pack (displayException exception)
                         )
-                Right revision -> pure (Right revision)
+                Right () ->
+                    pure (Right (configBytesRevision bytes))
 
 harnessConfigLockPath :: OsPath -> OsPath
 harnessConfigLockPath home =
@@ -466,64 +462,6 @@ configBytesRevision =
   where
     step hash byte = (hash `xor` fromIntegral byte) * 1099511628211
 
-configRevisionPath :: OsPath -> OsPath
-configRevisionPath home =
-    home
-        </> unsafeEncodeUtf ".haskell-agent"
-        </> unsafeEncodeUtf "config.revision"
-
-syncConfigRevision :: OsPath -> LBS.ByteString -> IO Word64
-syncConfigRevision home bytes = do
-    let fingerprint = configBytesRevision bytes
-    readConfigRevision home >>= \case
-        Just (revision, storedFingerprint)
-            | storedFingerprint == fingerprint -> pure revision
-            | otherwise ->
-                writeConfigRevision home (revision + 1) fingerprint
-        Nothing -> writeConfigRevision home 1 fingerprint
-
-syncMissingConfigRevision :: OsPath -> IO Word64
-syncMissingConfigRevision home = do
-    let fingerprint = configBytesRevision (Aeson.encode defaultHarnessConfig)
-    readConfigRevision home >>= \case
-        Nothing -> pure 0
-        Just (revision, storedFingerprint)
-            | storedFingerprint == fingerprint -> pure revision
-            | otherwise ->
-                writeConfigRevision home (revision + 1) fingerprint
-
-advanceConfigRevision :: OsPath -> LBS.ByteString -> IO Word64
-advanceConfigRevision home bytes = do
-    current <- maybe 0 fst <$> readConfigRevision home
-    writeConfigRevision home (current + 1) (configBytesRevision bytes)
-
-readConfigRevision :: OsPath -> IO (Maybe (Word64, Word64))
-readConfigRevision home = do
-    let path = configRevisionPath home
-    exists <- doesFileExist path
-    if not exists
-        then pure Nothing
-        else do
-            result <- tryIO
-                (retryOnFileBusy (readFile (unsafeToFilePath path)))
-            pure $ either (const Nothing) parseRevision result
-  where
-    parseRevision value =
-        case words value of
-            [rawRevision, rawFingerprint] ->
-                (,) <$> readMaybe rawRevision <*> readMaybe rawFingerprint
-            _ -> Nothing
-
-writeConfigRevision :: OsPath -> Word64 -> Word64 -> IO Word64
-writeConfigRevision home revision fingerprint = do
-    let directory = home </> unsafeEncodeUtf ".haskell-agent"
-        path = configRevisionPath home
-        bytes = LBS.fromStrict . TextEncoding.encodeUtf8 . Text.pack $
-            show revision <> " " <> show fingerprint <> "\n"
-    createDirectoryIfMissing True directory
-    setFileMode (unsafeToFilePath directory) 0o700
-    writeLazyFileAtomically path 0o600 bytes
-    pure revision
 
 validateHarnessConfig :: HarnessConfig -> Either Text HarnessConfig
 validateHarnessConfig config = do

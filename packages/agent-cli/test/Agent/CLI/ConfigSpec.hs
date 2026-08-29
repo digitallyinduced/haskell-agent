@@ -199,7 +199,7 @@ spec = describe "Agent.CLI.Config" do
                 Right config ->
                     config.configMaxConcurrentAgents `shouldBe` Just 32
 
-    it "returns a monotonic revision for the exact locked snapshot" $
+    it "returns a stable content revision for the exact locked snapshot" $
         withTempDir "agent-config-" \home -> do
             Right (initialRevision, initial) <-
                 loadHarnessConfigSnapshot home
@@ -207,12 +207,31 @@ spec = describe "Agent.CLI.Config" do
             Right (firstRevision, firstConfig) <-
                 loadHarnessConfigSnapshot home
             saveHarnessConfig home firstConfig `shouldReturn` Right ()
-            Right (secondRevision, secondConfig) <-
+            Right (sameRevision, sameConfig) <-
+                loadHarnessConfigSnapshot home
+            saveHarnessConfig home
+                (firstConfig { configMaxConcurrentAgents = Just 7 })
+                `shouldReturn` Right ()
+            Right (changedRevision, changedConfig) <-
                 loadHarnessConfigSnapshot home
             initialRevision `shouldBe` 0
-            firstRevision `shouldSatisfy` (> initialRevision)
-            secondRevision `shouldSatisfy` (> firstRevision)
-            secondConfig `shouldBe` firstConfig
+            firstRevision `shouldNotBe` initialRevision
+            sameRevision `shouldBe` firstRevision
+            sameConfig `shouldBe` firstConfig
+            changedRevision `shouldNotBe` firstRevision
+            changedConfig.configMaxConcurrentAgents `shouldBe` Just 7
+
+    it "derives a new token after an out-of-band config replacement" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"maxConcurrentAgents\":2}"
+            Right (firstRevision, firstConfig) <-
+                loadHarnessConfigSnapshot home
+            writeConfig home "{\"maxConcurrentAgents\":3}"
+            Right (secondRevision, secondConfig) <-
+                loadHarnessConfigSnapshot home
+            firstConfig.configMaxConcurrentAgents `shouldBe` Just 2
+            secondConfig.configMaxConcurrentAgents `shouldBe` Just 3
+            secondRevision `shouldNotBe` firstRevision
 
 writeConfig :: OsPath -> LBS.ByteString -> IO ()
 writeConfig home bytes = do
