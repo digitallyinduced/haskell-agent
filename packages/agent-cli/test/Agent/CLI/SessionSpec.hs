@@ -688,6 +688,135 @@ spec = describe "Agent.CLI.Session" do
                 storedContentPartRoundTrip
 
     describe "PostgreSQL session persistence" do
+        it "forks turns, metadata, and only allowlisted durable artifacts" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                source0 <- createSession (testCreate pool root)
+                let sourceTurn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "branch from here"
+                        , turnAssistantText = Just "ready"
+                        , turnError = Nothing
+                        , turnResponseId = Just "response-parent"
+                        , turnItems = []
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 8
+                            , outputTokens = 3
+                            , cachedTokens = 1
+                            }
+                        , turnEffect = TranscriptAppend
+                        }
+                source <- appendTurnWithMetaUpdate source0 sourceTurn
+                    \meta -> meta
+                        { metaLastRecap = Just "recap"
+                        , metaLastTurnSummary = Just "summary"
+                        }
+                let planPath = source.sessionDir </> unsafeEncodeUtf "plan.md"
+                    agentsDir = source.sessionDir </> unsafeEncodeUtf "agents"
+                    childDir = agentsDir </> unsafeEncodeUtf "child"
+                    childPath = childDir </> unsafeEncodeUtf "meta.json"
+                    ignoredPath = source.sessionDir </> unsafeEncodeUtf "agent.log"
+                createDirectory agentsDir
+                createDirectory childDir
+                LBS.writeFile (toFilePath planPath) "plan"
+                LBS.writeFile (toFilePath childPath) "child"
+                LBS.writeFile (toFilePath ignoredPath) "runtime log"
+
+                forkSession root source [sourceTurn] (Just "Fork title") >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right forked -> do
+                        forked.sessionMeta.metaId
+                            `shouldNotBe` source.sessionMeta.metaId
+                        forked.sessionMeta.metaCreatedAt
+                            `shouldSatisfy` (>= source.sessionMeta.metaCreatedAt)
+                        forked.sessionMeta.metaUpdatedAt
+                            `shouldBe` forked.sessionMeta.metaCreatedAt
+                        forked.sessionMeta.metaTitle `shouldBe` "Fork title"
+                        forked.sessionMeta.metaTitleIsManual `shouldBe` True
+                        forked.sessionMeta.metaLastResponseId
+                            `shouldBe` Just "response-parent"
+                        forked.sessionMeta.metaLastRecap `shouldBe` Just "recap"
+                        forked.sessionMeta.metaLastTurnSummary
+                            `shouldBe` Just "summary"
+                        loadSession pool root forked.sessionMeta.metaId
+                            `shouldReturn`
+                                Right (forked.sessionMeta, [sourceTurn])
+                        doesFileExist
+                            (forked.sessionDir </> unsafeEncodeUtf "plan.md")
+                            `shouldReturn` True
+                        doesFileExist
+                            (forked.sessionDir
+                                </> unsafeEncodeUtf "agents"
+                                </> unsafeEncodeUtf "child"
+                                </> unsafeEncodeUtf "meta.json")
+                            `shouldReturn` True
+                        doesFileExist
+                            (forked.sessionDir </> unsafeEncodeUtf "agent.log")
+                            `shouldReturn` False
+                        let forkOnlyTurn = sourceTurn
+                                { turnUserText = "continue only on fork"
+                                , turnAssistantText = Just "fork response"
+                                , turnResponseId = Just "fork-response"
+                                , turnUsage = Nothing
+                                }
+                        forkedFinal <- appendTurn forked forkOnlyTurn
+                        loadSession pool root source.sessionMeta.metaId
+                            `shouldReturn`
+                                Right (source.sessionMeta, [sourceTurn])
+                        loadSession pool root forkedFinal.sessionMeta.metaId
+                            `shouldReturn`
+                                Right
+                                    ( forkedFinal.sessionMeta
+                                    , [sourceTurn, forkOnlyTurn]
+                                    )
+
+        it "rejects symlinked fork artifacts and cleans reserved state" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                source0 <- createSession (testCreate pool root)
+                let sourceTurn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "branch from here"
+                        , turnAssistantText = Just "ready"
+                        , turnError = Nothing
+                        , turnResponseId = Nothing
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        , turnEffect = TranscriptAppend
+                        }
+                source <- appendTurn source0 sourceTurn
+                let outside = source.sessionDir </> unsafeEncodeUtf "outside"
+                    planPath = source.sessionDir </> unsafeEncodeUtf "plan.md"
+                LBS.writeFile (toFilePath outside) "outside"
+                Directory.createFileLink
+                    (toFilePath outside)
+                    (toFilePath planPath)
+                before <- listDirectory root
+                beforeTemps <- listDirectory (sessionTempsRoot root)
+                forkSession root source [sourceTurn] Nothing >>= \case
+                    Left err ->
+                        err `shouldSatisfy`
+                            Text.isInfixOf "refusing to copy symbolic link"
+                    Right forked ->
+                        expectationFailure
+                            ("unexpected fork: " <> show forked.sessionMeta.metaId)
+                after <- listDirectory root
+                after `shouldMatchList` before
+                afterTemps <- listDirectory (sessionTempsRoot root)
+                afterTemps `shouldMatchList` beforeTemps
+
+        it "requires a substantive persisted turn before forking" $
+            withTempStore \store root -> do
+                source <- createSession (testCreate (trustedPool store) root)
+                forkSession root source [] Nothing >>= \case
+                    Left err ->
+                        err
+                            `shouldBe`
+                                "a session must contain at least one turn before it can be forked"
+                    Right forked ->
+                        expectationFailure
+                            ("unexpected fork: " <> show forked.sessionMeta.metaId)
+
         it "round-trips and clears ephemeral session activity" $
             withTempStore \store root -> do
                 let pool = trustedPool store

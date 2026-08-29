@@ -6,6 +6,7 @@
 -- | PostgreSQL write operations for harness sessions.
 module Agent.Store.Postgres.Session.Write
     ( createSession
+    , createSessionFromSnapshot
     , replaceSessionMetadata
     , appendSessionTurn
     , appendSessionTurnIndexed
@@ -60,6 +61,32 @@ createSession pool metadata =
                                 metadata.sessionMetadataCreatedAt
                             }
                         insertEventStatement
+                    pure True
+
+-- | Atomically create a session from an already-materialized transcript.
+--
+-- This is the neutral counterpart to 'importLegacySession': it records the
+-- ordinary session/turn events and final metadata projection, but no legacy
+-- import provenance. A conflicting session key leaves the existing session
+-- untouched and returns 'False'.
+createSessionFromSnapshot
+    :: StorePool
+    -> SessionMetadata
+    -> [SessionTurn]
+    -> IO (Either StoreError Bool)
+createSessionFromSnapshot pool metadata turns =
+    withSession pool $
+        Transactions.transaction Transactions.Serializable Transactions.Write do
+            let sessionKey = metadata.sessionMetadataKey
+            _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
+            exists <- Transaction.statement sessionKey sessionExistsStatement
+            if exists
+                then pure False
+                else do
+                    _ <- insertSessionSnapshot
+                        "session.snapshot_created"
+                        metadata
+                        turns
                     pure True
 
 replaceSessionMetadata
@@ -171,39 +198,53 @@ importLegacySession pool legacy =
             if exists
                 then pure False
                 else do
-                    sessionId <- Transaction.statement metadata insertSessionStatement
-                    _ <- Transaction.statement
-                        EventInsert
-                            { eventInsertSessionId = sessionId
-                            , eventInsertSequence = 0
-                            , eventInsertKind = "session.created"
-                            , eventInsertOccurredAt =
-                                metadata.sessionMetadataCreatedAt
-                            }
-                        insertEventStatement
-                    forM_ legacy.legacyTurns \turn -> do
-                        appended <- appendTurnTransaction turn metadata
-                        unless appended Transaction.condemn
-                    changed <- Transaction.statement metadata replaceProjectionStatement
-                    case changed of
-                        Nothing -> Transaction.condemn
-                        Just (internalId, sequence) -> do
-                            _ <- Transaction.statement
-                                EventInsert
-                                    { eventInsertSessionId = internalId
-                                    , eventInsertSequence = sequence
-                                    , eventInsertKind = "legacy.import_completed"
-                                    , eventInsertOccurredAt =
-                                        metadata.sessionMetadataUpdatedAt
-                                    }
-                                insertEventStatement
-                            pure ()
+                    sessionId <- insertSessionSnapshot
+                        "legacy.import_completed"
+                        metadata
+                        legacy.legacyTurns
                     Transaction.statement
                         ( legacy.legacySourcePath
                         , legacy.legacyContentHash
                         , sessionId
                         )
                         recordLegacyImportStatement
+
+-- | Insert a complete session while the caller owns its advisory lock and
+-- transaction. The final projection replacement preserves metadata that
+-- cannot be derived solely from replaying transcript turns.
+insertSessionSnapshot
+    :: Text
+    -> SessionMetadata
+    -> [SessionTurn]
+    -> Transaction.Transaction Text
+insertSessionSnapshot completionKind metadata turns = do
+    sessionId <- Transaction.statement metadata insertSessionStatement
+    _ <- Transaction.statement
+        EventInsert
+            { eventInsertSessionId = sessionId
+            , eventInsertSequence = 0
+            , eventInsertKind = "session.created"
+            , eventInsertOccurredAt =
+                metadata.sessionMetadataCreatedAt
+            }
+        insertEventStatement
+    forM_ turns \turn -> do
+        appended <- appendTurnTransaction turn metadata
+        unless appended Transaction.condemn
+    changed <- Transaction.statement metadata replaceProjectionStatement
+    case changed of
+        Nothing -> Transaction.condemn >> pure sessionId
+        Just (internalId, sequence) -> do
+            _ <- Transaction.statement
+                EventInsert
+                    { eventInsertSessionId = internalId
+                    , eventInsertSequence = sequence
+                    , eventInsertKind = completionKind
+                    , eventInsertOccurredAt =
+                        metadata.sessionMetadataUpdatedAt
+                    }
+                insertEventStatement
+            pure sessionId
 
 withSessionAdvisoryLock
     :: StorePool
