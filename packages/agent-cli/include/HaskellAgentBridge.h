@@ -25,6 +25,11 @@ typedef void (*ha_event_callback)(
     size_t length
 );
 
+/*
+ * Account list callbacks use status 0 for an item, 1 for end-of-list, and
+ * -1 for an error. Item strings include disabled managed credentials and
+ * externally discovered accounts.
+ */
 typedef void (*ha_account_list_callback)(
     void *context,
     int32_t status,
@@ -41,6 +46,10 @@ typedef void (*ha_account_list_callback)(
     const uint8_t *error, size_t error_length
 );
 
+/*
+ * Result callbacks use status 0 for success, 1 when OAuth polling remains
+ * pending, and -1 for an error.
+ */
 typedef void (*ha_account_result_callback)(
     void *context,
     int32_t status,
@@ -50,6 +59,7 @@ typedef void (*ha_account_result_callback)(
     size_t error_length
 );
 
+/* OAuth start callbacks use status 0 for a challenge and -1 for an error. */
 typedef void (*ha_account_oauth_start_callback)(
     void *context,
     int32_t status,
