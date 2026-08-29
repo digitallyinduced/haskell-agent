@@ -39,6 +39,7 @@ library
     hs-source-dirs:   src
     exposed-modules:  Claude.Agent.SDK
                     , Claude.Agent.SDK.Client
+                    , Claude.Agent.SDK.Capabilities
                     , Claude.Agent.SDK.Errors
                     , Claude.Agent.SDK.Internal.Transport.OutputBuffer
                     , Claude.Agent.SDK.Internal.MessageParser
@@ -49,6 +50,8 @@ library
                     , Claude.Agent.SDK.Internal.Process
                     , Claude.Agent.SDK.Internal.Query
                     , Claude.Agent.SDK.Internal.Transport.SubprocessCLI
+                    , Paths_claude_agent_sdk_haskell
+    autogen-modules:  Paths_claude_agent_sdk_haskell
     build-depends:    base                  >= 4.17 && < 5
                     , agent-process        >= 0.1 && < 0.2
                     , agent-json           >= 0.1 && < 0.2
@@ -82,7 +85,8 @@ test-suite claude-agent-sdk-haskell-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Claude.Agent.SDK.ClientSpec
+    other-modules:    Claude.Agent.SDK.CapabilitiesSpec
+                    , Claude.Agent.SDK.ClientSpec
                     , Claude.Agent.SDK.Internal.Transport.OutputBufferSpec
                     , Claude.Agent.SDK.MessageParserSpec
                     , Claude.Agent.SDK.QuerySpec

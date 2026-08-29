@@ -4,6 +4,9 @@ module Claude.Agent.SDK.Internal.Transport.SubprocessCLI
     , subprocessArguments
     ) where
 
+import Claude.Agent.SDK.Capabilities
+    ( claudeAgentSDKVersion
+    )
 import Claude.Agent.SDK.Errors
     ( ClaudeSDKError(..)
     )
@@ -670,7 +673,7 @@ prepareEnvironment options workingDirectory = do
     pure $
         setEnvironmentVariable
             "CLAUDE_AGENT_SDK_VERSION"
-            "0.1.0.0"
+            (Text.unpack claudeAgentSDKVersion)
             (setEnvironmentVariable
                 "CLAUDE_CODE_ENTRYPOINT"
                 "sdk-cli"
