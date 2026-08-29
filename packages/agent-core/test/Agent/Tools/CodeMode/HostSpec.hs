@@ -27,8 +27,8 @@ import Control.Concurrent
     , readMVar
     , threadDelay
     )
-import Control.Concurrent.Async (async, wait)
-import Control.Exception.Safe (bracket)
+import Control.Concurrent.Async (async, cancel, wait, withAsync)
+import Control.Exception.Safe (bracket, finally)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -38,6 +38,7 @@ import qualified Data.Text as Text
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import System.Directory (doesFileExist)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -125,6 +126,31 @@ spec = describe "code-mode Bun host" do
                         ]
                     ]
                 }
+
+    it "stops a cell and its nested tool when execution is cancelled" do
+        started <- newEmptyMVar
+        stopped <- newEmptyMVar
+        let handler _ _ =
+                finally
+                    (putMVar started () >> threadDelay maxBound >> pure (Right Null))
+                    (putMVar stopped ())
+            config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                handler
+        host <- newCodeModeHost config
+        withAsync
+            (execCodeCell
+                host
+                "await tools.slow({});"
+                ["slow"]
+                60000)
+            \running -> do
+                readMVar started
+                cancel running
+                timeout 1000000 (readMVar stopped) `shouldReturn` Just ()
+                terminateCodeCell host "1" `shouldReturn`
+                    Left (CodeModeUnknownCell "1")
+        closeCodeModeHost host
 
     it "keeps JavaScript globals isolated when reusing a pooled worker" do
         let config = defaultCodeModeConfig

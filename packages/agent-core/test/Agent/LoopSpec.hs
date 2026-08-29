@@ -1155,7 +1155,9 @@ spec = describe "runLoop" do
             ]
 
 
-    it "returns LoopCancelled when the cancel flag is set during tools" do
+    it "cancels an in-flight tool when the cancel flag is set" do
+        started <- newEmptyMVar
+        stopped <- newEmptyMVar
         submissions <- newIORef []
         backend <- scriptedBackend submissions
             [ Right $ emptyTurnOutput "resp-1"
@@ -1167,16 +1169,19 @@ spec = describe "runLoop" do
                 LoopConfig{loopCancel = c} -> c
             handlers =
                 [ noArgsTool "slow" do
-                    requestCancel cancel
-                    threadDelay 10000
-                    pure (Right "should-not-continue")
+                    Exception.finally
+                        (putMVar started ()
+                            >> threadDelay maxBound
+                            >> pure (Right "should-not-continue"))
+                        (putMVar stopped ())
                 ]
             config = config0 { loopTools = registryFromHandlers handlers }
-        result <- runLoop config Nothing "go"
-        case result of
-            Left (LoopCancelled results) ->
-                results `shouldNotBe` []
-            other -> expectationFailure ("expected LoopCancelled, got " <> show other)
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar started
+            requestCancel cancel
+            timeout 1000000 (wait running)
+                `shouldReturn` Just (Left (LoopCancelled []))
+            tryReadMVar stopped `shouldReturn` Just ()
 
     it "does not render a rejected tool when approval cancels the turn" do
         events <- newIORef []

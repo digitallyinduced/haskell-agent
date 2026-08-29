@@ -207,25 +207,35 @@ execCodeCellWithTools host source tools yieldMs = do
                                 then do
                                     stopCell cell
                                     pure (Left (activeCellLimitError host))
-                                else do
-                                    sent <- try @_ @SomeException $ sendLine cell $
-                                        encodeExecRequestWithStateAndImageDetail
-                                            "exec"
-                                            source
-                                            tools
-                                            storedValues
-                                            (host.hostConfig.imageDetailVisibility
-                                                == ImageDetailVisible)
-                                    case sent of
-                                        Left err -> do
-                                            void $ takeCell host identifier
-                                            stopCell cell
-                                            pure $ Left $ CodeModeProtocolError $
-                                                "failed to send execution request: "
-                                                    <> Text.pack
-                                                        (displayException err)
-                                        Right () ->
-                                            observeCell host cell yieldMs
+                                else
+                                    (do
+                                        sent <- try @_ @SomeException $ sendLine cell $
+                                            encodeExecRequestWithStateAndImageDetail
+                                                "exec"
+                                                source
+                                                tools
+                                                storedValues
+                                                (host.hostConfig.imageDetailVisibility
+                                                    == ImageDetailVisible)
+                                        case sent of
+                                            Left err -> do
+                                                void $ takeCell host identifier
+                                                stopCell cell
+                                                pure $ Left $ CodeModeProtocolError $
+                                                    "failed to send execution request: "
+                                                        <> Text.pack
+                                                            (displayException err)
+                                            Right () ->
+                                                observeCell host cell yieldMs)
+                                        `onException` abortCell host cell
+
+abortCell :: CodeModeHost -> Cell -> IO ()
+abortCell host cell =
+    takeCell host cell.cellIdentifier >>= \case
+        Nothing -> pure ()
+        Just ownedCell -> do
+            markCellClosed ownedCell
+            stopCell ownedCell
 
 activeCellLimit :: CodeModeHost -> Int
 activeCellLimit host = max 1 host.hostConfig.maxActiveCells
