@@ -376,7 +376,8 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
             <> err
 
 -- | Deliver progress updates in state-transition order without running the
--- callback under the state lock or blocking server startup on callback work.
+-- callback under the state lock or blocking individual server workers.
+-- The enclosing startup still waits for queued callbacks to drain.
 withProgressReporter
     :: (a -> IO ())
     -> ((a -> IO ()) -> IO b)
