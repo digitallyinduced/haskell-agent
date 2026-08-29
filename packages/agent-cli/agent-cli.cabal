@@ -247,6 +247,8 @@ executable agent-cli
 
 foreign-library haskell-agent-bridge
     import:           common-options
+    if !os(darwin)
+        buildable:    False
     type:             native-shared
     options:          standalone
     hs-source-dirs:   ffi
