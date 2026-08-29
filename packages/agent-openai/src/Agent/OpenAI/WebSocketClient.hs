@@ -2,6 +2,7 @@ module Agent.OpenAI.WebSocketClient
     ( withCodexWs
     , withCodexWsWithProvider
     , withCodexWsCredential
+    , withCodexWsCredentialUsingTurnState
     , withCodexWsRetrying
     , withCodexWsRetryingAfter
     , sendWsRequest
@@ -214,6 +215,18 @@ withCodexWsCredential credential action =
         (limitRetries 2 <> exponentialBackoff 500000)
         credential
         (\conn activeCredential -> Right <$> action conn activeCredential)
+
+-- | Open a disposable physical connection for an existing logical turn using
+-- one already-selected credential. Keeping credential selection outside this
+-- operation lets a streaming backend observe the completed attempt before
+-- deciding whether account failover may safely replay it.
+withCodexWsCredentialUsingTurnState
+    :: Credential
+    -> CodexTurnState
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+withCodexWsCredentialUsingTurnState =
+    runConnectionAttemptUsingTurnState
 
 -- | Run a replay-safe WebSocket action and automatically reacquire a
 -- credential after handshake or in-band account failures. The callback is

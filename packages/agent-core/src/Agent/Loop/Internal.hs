@@ -550,6 +550,11 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         case event of
                                             TextDelta _ -> writeIORef outputSeen True
                                             ReasoningDelta _ -> writeIORef outputSeen True
+                                            -- The backend rolled that attempt back,
+                                            -- so a later failure no longer interrupts
+                                            -- visible output.
+                                            ResponseAttemptDiscarded ->
+                                                writeIORef outputSeen False
                                             _ -> pure ()
                                         config.loopOnEvent event
                                 -- Race the model call against cancel so Ctrl-C / Esc
