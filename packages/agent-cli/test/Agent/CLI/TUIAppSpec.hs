@@ -6,10 +6,11 @@ import Agent.CLI.AgentViewport
     , AgentStepState(..)
     , AgentTarget(..)
     )
-import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
+    , applyMetaConsoleEdit
     , applyTextPromptEdit
     , advanceCompletionFlashes
     , agentEntryWindow
@@ -28,6 +29,7 @@ import Agent.CLI.TUI.App
     , fullscreenSurface
     , fullscreenApp
     , initialFullscreenAppState
+    , isMetaConsoleToggle
     , mergeConversationView
     , newFullscreenInputBuffer
     , newFullscreenRuntime
@@ -57,11 +59,13 @@ import Agent.CLI.TUI.App
 import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
-    , AppState(appConversationReflowQueued)
+    , AppState(appConversationReflowQueued, appMetaConsole, appUi)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , FullscreenInput(..)
     , FullscreenRuntime(..)
     , HistoryCommit(..)
+    , MetaConsoleOverlay(..)
     , Name(..)
     , TerminalFocus(..)
     , TextInputMode(..)
@@ -123,6 +127,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Output.Mock as VMock
+import qualified Agent.CLI.TUI.Composer as Composer
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -324,6 +329,61 @@ spec = do
                 typedAfter)
                 `shouldBe` Just
                     (Text.singleton regionalU <> regionalS <> "x", 3)
+
+    describe "Meta Console" do
+        it "recognizes Command/Meta+K and Alt+K without stealing plain K" do
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [V.MMeta])
+                `shouldBe` True
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [V.MAlt])
+                `shouldBe` True
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [])
+                `shouldBe` False
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [V.MCtrl])
+                `shouldBe` False
+
+        it "edits multi-code-point glyphs as one grapheme" do
+            let emoji = Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                overlay = MetaConsoleOverlay
+                    { metaConsoleDraft = "a" <> emoji <> "b"
+                    , metaConsoleCursor = 4
+                    }
+                edited =
+                    applyMetaConsoleEdit
+                        (V.EvKey V.KBS [])
+                        overlay
+            (fmap
+                (\current ->
+                    ( current.metaConsoleDraft
+                    , current.metaConsoleCursor
+                    ))
+                edited)
+                `shouldBe` Just ("ab", 1)
+
+        it "queues a private request during a turn without changing the composer draft" do
+            (state, inputs) <- runMetaConsoleSubmission True
+            state.appUi.uiDraft `shouldBe` "unfinished composer draft"
+            (() <$ state.appMetaConsole) `shouldBe` Nothing
+            map
+                (\input ->
+                    ( input.fullscreenInputLine
+                    , input.fullscreenInputQueued
+                    , input.fullscreenInputDisplay
+                    ))
+                inputs
+                `shouldBe`
+                    [ ( ReplMeta "connect my Grok account"
+                      , True
+                      , Nothing
+                      )
+                    ]
+
+        it "submits immediately at an idle REPL boundary" do
+            (_, inputs) <- runMetaConsoleSubmission False
+            map (.fullscreenInputQueued) inputs `shouldBe` [False]
 
     describe "choice overlay lifecycle" do
         it "closes a running-turn choice on success or cancellation" do
@@ -1198,6 +1258,35 @@ data ReplacementScenario
     = ReplaceWhileFocused
     | ReplaceWhileHidden
     | ReplaceWhileHiddenNoFocus
+
+runMetaConsoleSubmission :: Bool -> IO (AppState, [FullscreenInput])
+runMetaConsoleSubmission running = do
+    let draft = "unfinished composer draft"
+        baseUi = reduceUi (UiSetDraft draft (Text.length draft)) initialUiState
+        ui =
+            if running
+                then reduceUi (UiLoop TurnStarted) baseUi
+                else baseUi
+    runtime <- newScriptRuntime ui
+    let request = "connect my Grok account"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptVty
+                (V.EvKey (V.KChar 'k') [V.MMeta])
+            , FullscreenScriptVty
+                (V.EvPaste (encoded request))
+            , FullscreenScriptVty
+                (V.EvKey V.KEnter [])
+            , FullscreenScriptHalt
+            ]
+    (_, finalState) <-
+        runFullscreenScriptWithState initialState script
+    inputs <-
+        toList <$>
+            atomically
+                (Composer.readFullscreenInputs runtime.runtimeInput)
+    pure (finalState, inputs)
 
 replacementLeavesDurableTailVisible :: ReplacementScenario -> IO Bool
 replacementLeavesDurableTailVisible scenario =

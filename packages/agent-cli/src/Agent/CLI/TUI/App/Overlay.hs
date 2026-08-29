@@ -734,6 +734,105 @@ resolveTextPrompt confirmed = do
             }
     resumeNativeProgressIfRunning
 
+isMetaConsoleToggle :: V.Event -> Bool
+isMetaConsoleToggle = \case
+    V.EvKey (V.KChar 'k') modifiers ->
+        modifiers == [V.MMeta] || modifiers == [V.MAlt]
+    _ -> False
+
+openMetaConsole :: EventM Name AppState ()
+openMetaConsole = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    modify' \current ->
+        current
+            { appMetaConsole =
+                Just MetaConsoleOverlay
+                    { metaConsoleDraft = ""
+                    , metaConsoleCursor = 0
+                    }
+            , appAgentHover = Nothing
+            , appHoveredControl = Nothing
+            , appPressedControl = Nothing
+            }
+
+closeMetaConsole :: EventM Name AppState ()
+closeMetaConsole = do
+    modify' \state -> state { appMetaConsole = Nothing }
+    resumeNativeProgressIfRunning
+
+handleMetaConsoleKey :: V.Event -> EventM Name AppState ()
+handleMetaConsoleKey event
+    | isMetaConsoleToggle event =
+        closeMetaConsole
+    | otherwise = case event of
+        V.EvKey V.KEsc [] ->
+            closeMetaConsole
+        V.EvKey V.KEnter [] ->
+            submitMetaConsole
+        _ ->
+            modify' \state ->
+                state
+                    { appMetaConsole =
+                        (\overlay ->
+                            fromMaybe
+                                overlay
+                                (applyMetaConsoleEdit event overlay))
+                            <$> state.appMetaConsole
+                    }
+
+-- | Reuse the prompt editor so Meta Console cursor movement and deletion stay
+-- grapheme-safe without coupling its state to blocking text prompts.
+applyMetaConsoleEdit
+    :: V.Event
+    -> MetaConsoleOverlay
+    -> Maybe MetaConsoleOverlay
+applyMetaConsoleEdit event overlay = do
+    edited <-
+        applyTextPromptEdit
+            event
+            TextOverlay
+                { textTitle = ""
+                , textBody = ""
+                , textDraft = overlay.metaConsoleDraft
+                , textCursor = overlay.metaConsoleCursor
+                , textInputMode = TextInputPlain
+                }
+    pure MetaConsoleOverlay
+        { metaConsoleDraft = edited.textDraft
+        , metaConsoleCursor = edited.textCursor
+        }
+
+submitMetaConsole :: EventM Name AppState ()
+submitMetaConsole = do
+    state <- get
+    case (Text.strip . (.metaConsoleDraft)) <$> state.appMetaConsole of
+        Nothing ->
+            pure ()
+        Just request
+            | Text.null request ->
+                pure ()
+            | otherwise -> do
+                let queued = state.appUi.uiRunning
+                liftIO $ atomically $
+                    Composer.appendFullscreenInput
+                        state.appRuntime.runtimeInput
+                        FullscreenInput
+                            { fullscreenInputLine = ReplMeta request
+                            , fullscreenInputQueued = queued
+                            , fullscreenInputDisplay = Nothing
+                            }
+                if queued
+                    then
+                        applyLocalUiEvent $
+                            UiSetNotice $
+                                Just $
+                                    progressNotice
+                                        "Meta Console request queued for the next safe boundary."
+                    else
+                        applyLocalUiEvent (UiSetAwaitingInput False)
+                closeMetaConsole
+
 
 handleCtrlC :: EventM Name AppState CtrlCDecision
 handleCtrlC = do

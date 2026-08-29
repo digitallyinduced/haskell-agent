@@ -160,6 +160,7 @@ handlePromptControlClick applyUiEvent choice = do
         overlayOpen =
             maybe False (const True) state.appTextPrompt
                 || maybe False (const True) state.appChoice
+                || maybe False (const True) state.appMetaConsole
                 || maybe False (const True) ui.uiPermission
     if ui.uiAwaitingInput && not overlayOpen
         then do
@@ -187,6 +188,7 @@ handleEffortControlClick applyUiEvent = do
         overlayOpen =
             maybe False (const True) state.appTextPrompt
                 || maybe False (const True) state.appChoice
+                || maybe False (const True) state.appMetaConsole
                 || maybe False (const True) ui.uiPermission
     if ui.uiAwaitingInput
         then handlePromptControlClick applyUiEvent ReplChooseEffort
