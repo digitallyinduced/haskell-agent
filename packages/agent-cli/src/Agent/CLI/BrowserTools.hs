@@ -30,9 +30,11 @@ import Data.Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Object, Parser)
+import qualified Data.ByteString as BS
 import Data.Scientific (toRealFloat)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Network.URI
     ( URI(uriAuthority, uriScheme)
     , URIAuth(uriRegName, uriUserInfo)
@@ -182,16 +184,16 @@ newtype ClickArgs = ClickArgs Text
 instance FromJSON ClickArgs where
     parseJSON = objectArgs \input -> do
         selector <- reqText input "selector"
-        ClickArgs <$> validateNonBlank "selector" maxSelectorLength selector
+        ClickArgs <$> validateNonBlank "selector" maxSelectorBytes selector
 
 data TypeArgs = TypeArgs !Text !Text !Bool
 
 instance FromJSON TypeArgs where
     parseJSON = objectArgs \input -> do
         selector <- reqText input "selector"
-            >>= validateNonBlank "selector" maxSelectorLength
+            >>= validateNonBlank "selector" maxSelectorBytes
         text <- reqText input "text"
-            >>= validateLength "text" maxTextLength
+            >>= validateByteLength "text" maxTextBytes
         submit <- maybe False id <$> optBool input "submit"
         pure (TypeArgs selector text submit)
 
@@ -200,7 +202,7 @@ newtype KeyArgs = KeyArgs Text
 instance FromJSON KeyArgs where
     parseJSON = objectArgs \input -> do
         key <- reqText input "key"
-        KeyArgs <$> validateNonBlank "key" maxKeyLength key
+        KeyArgs <$> validateNonBlank "key" maxKeyBytes key
 
 data ScrollArgs = ScrollArgs !Double !Double
 
@@ -210,7 +212,7 @@ instance FromJSON ScrollArgs where
         deltaY <- requiredFiniteNumber input "delta_y"
         if abs deltaX > maxScrollDelta || abs deltaY > maxScrollDelta
             then failParser
-                "delta_x and delta_y must be between -100000 and 100000"
+                "delta_x and delta_y must be between -10000 and 10000"
             else if deltaX == 0 && deltaY == 0
                 then failParser
                     "at least one of delta_x and delta_y must be nonzero"
@@ -218,7 +220,7 @@ instance FromJSON ScrollArgs where
 
 validateHttpUrl :: Text -> Parser Text
 validateHttpUrl value = do
-    url <- validateNonBlank "url" maxUrlLength value
+    url <- validateNonBlank "url" maxUrlBytes value
     if Text.strip url /= url
         then invalid
         else case parseURI (Text.unpack url) of
@@ -239,14 +241,14 @@ validateNonBlank :: Text -> Int -> Text -> Parser Text
 validateNonBlank name limit value
     | Text.null (Text.strip value) =
         failParser (name <> " must not be empty")
-    | otherwise = validateLength name limit value
+    | otherwise = validateByteLength name limit value
 
-validateLength :: Text -> Int -> Text -> Parser Text
-validateLength name limit value
-    | Text.length value > limit =
+validateByteLength :: Text -> Int -> Text -> Parser Text
+validateByteLength name limit value
+    | BS.length (TextEncoding.encodeUtf8 value) > limit =
         failParser
             (name <> " must not exceed " <> Text.pack (show limit)
-                <> " characters")
+                <> " UTF-8 bytes")
     | otherwise = pure value
 
 requiredFiniteNumber :: Object -> Text -> Parser Double
@@ -263,11 +265,11 @@ requiredFiniteNumber input name =
 failParser :: Text -> Parser a
 failParser = fail . Text.unpack
 
-maxUrlLength, maxSelectorLength, maxTextLength, maxKeyLength :: Int
-maxUrlLength = 8192
-maxSelectorLength = 4096
-maxTextLength = 256 * 1024
-maxKeyLength = 128
+maxUrlBytes, maxSelectorBytes, maxTextBytes, maxKeyBytes :: Int
+maxUrlBytes = 8192
+maxSelectorBytes = 4096
+maxTextBytes = 64 * 1024
+maxKeyBytes = 128
 
 maxScrollDelta :: Double
-maxScrollDelta = 100000
+maxScrollDelta = 10000

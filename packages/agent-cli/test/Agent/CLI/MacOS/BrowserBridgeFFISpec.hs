@@ -110,11 +110,11 @@ spec = describe "native browser callback ABI" do
                 (BrowserType "#query" "Haskell λ" True)
                 `shouldReturn` Right "native ✓"
             readIORef observed `shouldReturn`
-                Just (4, "#query", "Haskell λ", 0, 0, 1)
+                Just (4, "#query", 6, "Haskell λ", 10, 0, 0, 1)
             invokeBrowserCommand host (BrowserScroll 12.5 (-800))
                 `shouldReturn` Right "native ✓"
             readIORef observed `shouldReturn`
-                Just (9, "", "", 12.5, -800, 0)
+                Just (9, "", 0, "", 0, 12.5, -800, 0)
 
     it "exposes tools only while a callback is registered" do
         registration <- newMVar Nothing
@@ -200,7 +200,8 @@ spec = describe "native browser callback ABI" do
             invokeBrowserCommand host BrowserSnapshot `shouldReturn`
                 Left "The browser view is not active."
 
-type ObservedCall = (CInt, Text, Text, CDouble, CDouble, CInt)
+type ObservedCall =
+    (CInt, Text, CSize, Text, CSize, CDouble, CDouble, CInt)
 
 recordingCallback
     :: IORef (Maybe ObservedCall)
@@ -211,7 +212,15 @@ recordingCallback observed _ command argument1 argument1Length
     first <- decodeBytes argument1 argument1Length
     second <- decodeBytes argument2 argument2Length
     writeIORef observed (Just
-        (command, first, second, deltaX, deltaY, flags))
+        ( command
+        , first
+        , argument1Length
+        , second
+        , argument2Length
+        , deltaX
+        , deltaY
+        , flags
+        ))
     writeResult ("native " <> BS.pack [0xe2, 0x9c, 0x93])
         output outputCapacity outputLength
 
