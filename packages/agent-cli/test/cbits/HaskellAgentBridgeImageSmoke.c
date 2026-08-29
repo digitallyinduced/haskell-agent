@@ -59,13 +59,23 @@ static void image_stage_callback(void *context, const uint8_t *bytes,
  */
 int ha_image_attachment_stage_smoke(void) {
     const uint8_t turn_id[] = "native-smoke-turn";
-    const uint8_t mime[] = "image/png";
-    const uint8_t bytes[] = {0x89, 0x50, 0x4e, 0x47};
-    const ha_image_attachment image = {
-        .mime = mime,
-        .mime_length = sizeof(mime) - 1,
-        .bytes = bytes,
-        .bytes_length = sizeof(bytes),
+    const uint8_t first_mime[] = "image/png";
+    const uint8_t first_bytes[] = {0x89, 0x50, 0x4e, 0x47};
+    const uint8_t second_mime[] = "image/jpeg";
+    const uint8_t second_bytes[] = {0xff, 0xd8, 0xff};
+    const ha_image_attachment images[] = {
+        {
+            .mime = first_mime,
+            .mime_length = sizeof(first_mime) - 1,
+            .bytes = first_bytes,
+            .bytes_length = sizeof(first_bytes),
+        },
+        {
+            .mime = second_mime,
+            .mime_length = sizeof(second_mime) - 1,
+            .bytes = second_bytes,
+            .bytes_length = sizeof(second_bytes),
+        },
     };
     if (ha_runtime_init() != 0) {
         return 10;
@@ -76,7 +86,7 @@ int ha_image_attachment_stage_smoke(void) {
         return 11;
     }
     int32_t status = ha_engine_stage_turn_images(
-        engine, turn_id, sizeof(turn_id) - 1, &image, 1);
+        engine, turn_id, sizeof(turn_id) - 1, images, 2);
     ha_engine_destroy(engine);
     ha_runtime_exit();
     return status;
