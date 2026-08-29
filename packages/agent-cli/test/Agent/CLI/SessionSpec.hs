@@ -1,6 +1,10 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.SessionLock
+    ( acquireSessionLock
+    , releaseSessionLock
+    )
 import Agent.CLI.Session.StoreCodec
     ( fromStoredResponseItem
     , toStoredResponseItem
@@ -771,26 +775,43 @@ spec = describe "Agent.CLI.Session" do
 
                 listed <- listSessions pool root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
-                renameSession
-                    pool
-                    root
-                    handle.sessionMeta.metaId
-                    "  Manual   title  " >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right renamed -> do
-                            renamed.metaTitle `shouldBe` "Manual title"
-                            renamed.metaTitleIsManual `shouldBe` True
+                bracket
+                    (acquireSessionLock
+                        handle.sessionDir
+                        handle.sessionMeta.metaId >>= \case
+                            Left err -> expectationFailure (Text.unpack err)
+                                >> fail "could not acquire session lock"
+                            Right lock -> pure lock)
+                    releaseSessionLock
+                    \_ -> do
+                        renameSession
+                            pool
+                            root
+                            handle.sessionMeta.metaId
+                            "  Manual   title  " >>= \case
+                                Left err ->
+                                    expectationFailure (Text.unpack err)
+                                Right renamed -> do
+                                    renamed.metaTitle `shouldBe` "Manual title"
+                                    renamed.metaTitleIsManual `shouldBe` True
+                        setSessionArchived
+                            pool
+                            root
+                            handle.sessionMeta.metaId
+                            True `shouldReturn` Right ()
                 loadSessionMeta pool root handle.sessionMeta.metaId >>= \case
                     Left err -> expectationFailure (Text.unpack err)
                     Right renamed ->
                         renamed.metaTitle `shouldBe` "Manual title"
-                setSessionArchived
-                    pool
-                    root
-                    handle.sessionMeta.metaId
-                    True `shouldReturn` Right ()
                 listArchivedSessionIds pool
                     `shouldReturn` Right [handle.sessionMeta.metaId]
+                _ <- appendTurn final normalTurn
+                _ <- setGeneratedSessionTitle 3 "Generated replacement" final
+                loadSessionMeta pool root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right renamed -> do
+                        renamed.metaTitle `shouldBe` "Manual title"
+                        renamed.metaTitleIsManual `shouldBe` True
                 setSessionArchived
                     pool
                     root
