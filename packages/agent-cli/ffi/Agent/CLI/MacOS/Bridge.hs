@@ -15,7 +15,7 @@ import Agent.Store.Postgres.Session
     , searchNativeConversations
     )
 import Data.Bifunctor (first)
-import Agent.Store.Postgres.Scope (scopeKindText)
+import Agent.Store.Postgres.Scope (Scope(..), scopeKindText)
 import Agent.Store.Postgres.Skill
     ( LearnedSkill(..)
     , learnedSkillActivationText
@@ -581,7 +581,7 @@ learnedSkillsTerminal callback context status errorPtr errorLength =
     invokeLearnedSkillsListCallback callback context status
         nullPtr 0 nullPtr 0 0
         nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-        nullPtr 0 nullPtr 0 nullPtr 0
+        nullPtr 0 nullPtr 0
         0 nullPtr 0 errorPtr errorLength
 
 ha_accounts_list
