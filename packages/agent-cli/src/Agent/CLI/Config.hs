@@ -171,8 +171,8 @@ data LspConfig = LspConfig
     }
     deriving (Eq, Show)
 
--- | Managed worktree creation policy. Fetching is opt-in so worktree creation
--- remains available in offline repositories by default.
+-- | Managed worktree creation policy. Repositories with remotes fetch by
+-- default, while local-only repositories continue to branch from @HEAD@.
 data WorktreeConfig = WorktreeConfig
     { worktreeFetchLatestUpstream :: !Bool
     }
@@ -327,7 +327,7 @@ defaultHarnessConfig = HarnessConfig
         , lspServers = Map.empty
         }
     , configWorktree = WorktreeConfig
-        { worktreeFetchLatestUpstream = False
+        { worktreeFetchLatestUpstream = True
         }
     , configMaxConcurrentAgents = Nothing
     }
@@ -432,7 +432,7 @@ worktreeConfigDecoder :: Hermes.Decoder WorktreeConfig
 worktreeConfigDecoder =
     Hermes.object $
         WorktreeConfig
-            <$> defaultKey False "fetchLatestUpstream" Hermes.bool
+            <$> defaultKey True "fetchLatestUpstream" Hermes.bool
 
 harnessConfigDecoder :: Hermes.Decoder HarnessConfig
 harnessConfigDecoder =
