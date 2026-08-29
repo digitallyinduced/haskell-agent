@@ -14,11 +14,11 @@ import Agent.FileRetry (retryOnFileBusy)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (relativeDisplayPath, toText, unsafeToFilePath)
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Exception.Safe (SomeException, try, tryIO)
+import Control.Exception.Safe (SomeException, try, tryAny, tryIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
-import Data.IORef (readIORef)
+import Data.IORef (atomicModifyIORef', readIORef)
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory.OsPath
@@ -65,6 +65,41 @@ resolveWithRoots
     -> [OsPath]
     -> IO (Either Text OsPath)
 resolveWithRoots env requested extraRoots = do
+    resolveWithRootsAttempt env requested extraRoots >>= \case
+        Right resolved -> pure (Right resolved)
+        Left (OutsideAllowedRoots resolved) ->
+            readIORef env.toolRootAccessRequest >>= \case
+                Nothing -> pure $ Left (outsideRootsMessage requested)
+                Just requestAccess -> do
+                    root <- nearestExistingDirectory resolved
+                    case root of
+                        Nothing -> pure $ Left (outsideRootsMessage requested)
+                        Just requestedRoot ->
+                            tryAny (requestAccess requestedRoot) >>= \case
+                                Left exception ->
+                                    pure $ Left
+                                        ("Filesystem access request failed: "
+                                            <> Text.pack (show exception))
+                                Right False ->
+                                    pure $ Left (outsideRootsMessage requested)
+                                Right True -> do
+                                    addAllowedRoot env requestedRoot
+                                    resolveWithRootsAttempt env requested extraRoots >>= \case
+                                        Right value -> pure (Right value)
+                                        Left _ -> pure $
+                                            Left (outsideRootsMessage requested)
+        Left (ResolverFailure err) -> pure (Left err)
+
+data ResolveFailure
+    = OutsideAllowedRoots !OsPath
+    | ResolverFailure !Text
+
+resolveWithRootsAttempt
+    :: ToolEnv
+    -> OsPath
+    -> [OsPath]
+    -> IO (Either ResolveFailure OsPath)
+resolveWithRootsAttempt env requested extraRoots = do
     configuredRoots <- readIORef env.toolAllowedRoots
     sessionTmp <- readIORef env.toolSessionTmp
     canonicalRoots <-
@@ -83,12 +118,38 @@ resolveWithRoots env requested extraRoots = do
         then Right <$> canonicalizePath combined
         else resolveMissing combined
     pure $ case resolvedResult of
-        Left err -> Left err
+        Left err -> Left (ResolverFailure err)
         Right resolved
             | any (`isInside` resolved) (absCwd : allowedRoots) ->
                 Right resolved
-            | otherwise -> Left $
-                "Path escapes the allowed filesystem roots: " <> toText requested
+            | otherwise -> Left (OutsideAllowedRoots resolved)
+
+outsideRootsMessage :: OsPath -> Text
+outsideRootsMessage requested =
+    "Path escapes the allowed filesystem roots: " <> toText requested
+
+-- | Return the nearest existing directory containing a requested path. This
+-- keeps grants useful for new files while avoiding a grant for a nonexistent
+-- path that cannot be canonicalized yet.
+nearestExistingDirectory :: OsPath -> IO (Maybe OsPath)
+nearestExistingDirectory path = do
+    doesDirectoryExist path >>= \case
+        True -> Just <$> canonicalizePath path
+        False -> go (takeDirectory path)
+  where
+    go directory = do
+        doesDirectoryExist directory >>= \case
+            True -> Just <$> canonicalizePath directory
+            False ->
+                let parent = takeDirectory directory
+                in if equalFilePath parent directory
+                    then pure Nothing
+                    else go parent
+
+addAllowedRoot :: ToolEnv -> OsPath -> IO ()
+addAllowedRoot env root =
+    atomicModifyIORef' env.toolAllowedRoots \roots ->
+        (if any (equalFilePath root) roots then roots else roots <> [root], ())
 
 resolveMissing :: OsPath -> IO (Either Text OsPath)
 resolveMissing path = do

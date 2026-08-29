@@ -23,6 +23,7 @@ import Agent.Concurrent
 import Agent.CLI.ManagedTurn
 import Agent.CLI.GatewayBridge
 import Agent.CLI.Approval
+import Agent.CLI.Permission (promptRootAccess)
 import Agent.CLI.Recap
 import Agent.CLI.CancelWatch
 import Agent.CLI.Clipboard
@@ -105,6 +106,26 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
       withIoLock action = withMVar ioLock (const action)
+      requestRootAccess root =
+          withMVar ioLock \_ ->
+              case promptRequest of
+                  Just request
+                      | isJust request.managedTurnBridgeDirectory ->
+                          requestManagedRootAccess request root
+                  _ -> case fullscreen of
+                      Just runtime ->
+                          maybe False (== 0)
+                              <$> requestFullscreenChoiceWithBody
+                                  runtime
+                                  "Filesystem access requested"
+                                  ("Allow access to " <> toText root
+                                      <> " for this session?")
+                                  0
+                                  [ ("Allow directory for this session", "")
+                                  , ("Deny", "")
+                                  ]
+                      Nothing ->
+                          withStdinPaused escPaused (promptRootAccess useColor root)
       reportSessionError message =
           case fullscreen of
               Just runtime ->
@@ -118,6 +139,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
       startupWindowTitle
       withIoLock
       writeWindowTitle
+  setToolRootAccessRequest toolEnv (Just requestRootAccess)
   let setWindowTitle = windowTitle.windowTitleSet
       beginWindowTitleBusy = windowTitle.windowTitleBeginBusy
       endWindowTitleBusy = windowTitle.windowTitleEndBusy

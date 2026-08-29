@@ -5,6 +5,7 @@ module Agent.CLI.Permission
     , applyPermissionKey
     , initialPermissionState
     , promptPermission
+    , promptRootAccess
     , renderPermissionFrame
     ) where
 
@@ -22,6 +23,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (hIsTerminalDevice, stderr, stdin)
+import System.OsPath (OsPath)
+import Agent.OsPath (toText)
 
 data PermissionChoice
     = PermissionAllowOnce
@@ -113,6 +116,38 @@ promptPermission color workspace call = do
                     applyPermissionKey
                     (initialPermissionState summary)
             pure (Just (fromMaybe PermissionDeny result))
+
+-- | Ask whether an additional directory may be used for this session.
+-- This is intentionally separate from tool permission: granting a directory
+-- never enables a tool or persists beyond the current session.
+promptRootAccess :: Bool -> OsPath -> IO Bool
+promptRootAccess color root = do
+    isTty <- hIsTerminalDevice stdin
+    let summary = "Allow filesystem access to " <> toText root <> " for this session?"
+        labels = ["Allow directory for this session", "Deny"]
+        render state =
+            let rows = zipWith
+                    (\i label -> renderRow color (i == state) label)
+                    [0 ..] labels
+            in Text.intercalate "\n"
+                (roleWarn color (glyphWarn <> summary) : rows
+                    <> [roleMuted color "↑↓/jk or scroll · enter/click · y allow · n/esc deny"])
+        step key state = case key of
+            PickerKeyCancel -> Left False
+            PickerKeyConfirm -> Left (state == 0)
+            PickerKeyUp -> Right ((state - 1) `mod` length labels)
+            PickerKeyDown -> Right ((state + 1) `mod` length labels)
+            PickerKeyChar c
+                | Text.toLower (Text.singleton c) == "y" -> Left True
+                | Text.toLower (Text.singleton c) == "n" -> Left False
+            _ -> Right state
+    if not isTty
+        then readApprovalLine (roleWarn color (glyphWarn <> summary <> " [y/N] ")) >>= \case
+            Just raw -> pure (Text.toLower (Text.strip raw) `elem` ["y", "yes"])
+            Nothing -> pure False
+        else do
+            notifyAttention stderr PermissionRequested
+            fromMaybe False <$> runOverlay render step 0
 
 cooked :: Bool -> Text -> IO (Maybe PermissionChoice)
 cooked color summary = do
