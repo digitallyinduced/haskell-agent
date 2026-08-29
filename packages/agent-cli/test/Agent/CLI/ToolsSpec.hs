@@ -23,11 +23,17 @@ import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
+import Agent.Codex.Dialect.Runtime
+    ( CodexCodingTools(..)
+    , newCodexCodingTools
+    )
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.CodeMode.Tool (ToolMode(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolSchema(..)
+    , defaultToolEnv
     , freeformApplyPatchAppTool
     , jsonAppTool
     , rawJsonAppTool
@@ -70,6 +76,48 @@ spec = describe "schemasFromAppTools" do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
+
+    it "keeps shell_command workdir optional in direct and code-only mode" do
+        env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
+        bracket
+            (newCodexCodingTools env Nothing Nothing)
+            (.codexClose)
+            \coding ->
+                case
+                    [ tool
+                    | tool <- coding.codexAppTools
+                    , tool.appToolName == "shell_command"
+                    ] of
+                    [shell] -> do
+                        shell.appToolSchema `shouldSatisfy` \case
+                            RawJsonFunctionSchema _ -> True
+                            _ -> False
+
+                        assertOptionalShellSchema $
+                            schemasFromAppTools
+                                codexDialect
+                                coding.codexAppTools
+
+                        let projection =
+                                projectCodeModeTools
+                                    CodeOnlyToolMode
+                                    coding.codexAppTools
+                            projectedSchemas tools =
+                                [ tool.appToolSchema
+                                | tool <- tools
+                                , tool.appToolName == "shell_command"
+                                ]
+                        projectedSchemas projection.directCodeModeTools
+                            `shouldBe` [shell.appToolSchema]
+                        projectedSchemas projection.nestedCodeModeTools
+                            `shouldBe` [shell.appToolSchema]
+                        assertOptionalShellSchema $
+                            schemasFromAppToolsCodeMode
+                                codexDialect
+                                projection.directCodeModeTools
+                    other -> expectationFailure
+                        ("expected one shell_command app tool, got "
+                            <> show (map (.appToolName) other))
 
     it "does not advertise harness tools to the Claude Code subprocess" do
         schemasFromAppTools claudeCodeDialect [jsonTool, patchTool]
@@ -385,3 +433,17 @@ decodeRaw decoder =
 
 rawJsonValue :: Aeson.ToJSON value => value -> RawJson
 rawJsonValue = rawJsonFromEncoding . Aeson.toEncoding
+
+assertOptionalShellSchema :: [ResponseTool] -> Expectation
+assertOptionalShellSchema tools =
+    case functionToolsNamed "shell_command" tools of
+        [shell] -> do
+            shell.strict `shouldBe` Just False
+            required_ shell `shouldBe` Just ["command"]
+            shell.description `shouldSatisfy`
+                maybe False (Text.isInfixOf "`workdir` is optional")
+            propertyNames shell `shouldMatchList`
+                ["command", "workdir", "timeout_ms", "yield_time_ms"]
+            propertyType "workdir" shell `shouldBe` Just "string"
+        other -> expectationFailure
+            ("expected one shell_command function schema, got " <> show other)
