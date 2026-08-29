@@ -83,7 +83,7 @@ import Agent.CLI.Models
       ModelTarget(targetProvider, ModelTarget, targetModelId,
                   targetDialect, targetWireModelId, targetConnectionId) )
 import Agent.CLI.Options
-    ( ApprovalPolicy(PromptMutating),
+    ( ApprovalPolicy(ApproveAll, PromptMutating),
       defaultEffortFor,
       isOneShot,
       resolveApprovalPolicy,
@@ -334,10 +334,11 @@ import Agent.TUI.Motion ( nativeProgressAnimationEnabled )
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(planSessionDir),
+    ( PlanModeEnv(planSessionDir, planStateRef),
       PlanModeHooks(planAskQuestion, PlanModeHooks, planConfirmEnter,
                     planDecideExit),
-      PlanDecision(PlanCancel) )
+      PlanDecision(PlanCancel),
+      PlanModeState(PlanPending) )
 import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
 import Agent.Tools.Types
@@ -446,7 +447,7 @@ import qualified Agent.XAI.Usage as XAIUsage ()
 
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(..), AccountSwitchRequest(..), AgentProcessRuntime(..),
-      AgentRunMode(..), NativeRunHooks(..) )
+      AgentRunMode(..), NativeInteractionMode(..), NativeRunHooks(..) )
 import Agent.CLI.Runtime.Orchestration.Restart
     ( RestartCallbacks(..), runFullscreenRestartLoop )
 import Agent.CLI.Runtime.Orchestration.Background
@@ -1465,6 +1466,8 @@ runAgentInitializedWithLock
             Left err -> startupDie startup (Text.unpack err)
             Right config -> pure config
     let basePlanHooks
+            | Just hooks <- startup.startupNativeHooks =
+                hooks.nativePlanHooks
             | startup.startupBackground =
                 PlanModeHooks
                     { planConfirmEnter = \_ -> pure False
@@ -1587,13 +1590,21 @@ runAgentInitializedWithLock
             (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
             options.optEffort
         policy = case startup.startupNativeHooks of
-            Just _ -> PromptMutating
+            Just hooks -> case hooks.nativeInteractionMode of
+                NativeYolo -> ApproveAll
+                NativeAsk -> PromptMutating
+                NativePlan -> PromptMutating
             Nothing ->
                 resolveApprovalPolicy options isTty
                     projectSettings.settingsAutoApprove
         claudeBypassEnabled =
-            not options.optNoYolo
-                && (options.optYolo || projectSettings.settingsAutoApprove)
+            case startup.startupNativeHooks of
+                Just hooks ->
+                    hooks.nativeInteractionMode == NativeYolo
+                Nothing ->
+                    not options.optNoYolo
+                        && (options.optYolo
+                            || projectSettings.settingsAutoApprove)
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
@@ -1792,6 +1803,9 @@ runAgentInitializedWithLock
             agentTypesRef
             `onException`
                 (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
+    forM_ startup.startupNativeHooks \hooks ->
+        when (hooks.nativeInteractionMode == NativePlan) $
+            writeIORef coding.codingPlanMode.planStateRef PlanPending
     let closeBeforeSession =
             coding.codingClose
                 `finally`

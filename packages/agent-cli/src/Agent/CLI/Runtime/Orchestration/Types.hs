@@ -3,6 +3,8 @@ module Agent.CLI.Runtime.Orchestration.Types
     , AccountSwitchRequest(..)
     , AgentProcessRuntime(..)
     , AgentRunMode(..)
+    , NativeInteractionMode(..)
+    , NativeShellMode(..)
     , NativeRunHooks(..)
     , foregroundRunMode
     , backgroundRunMode
@@ -16,6 +18,7 @@ import Agent.Error ( ApiError )
 import Agent.Loop ( LoopEvent )
 import Agent.Provider ( Credential, TokenProvider )
 import Agent.ToolDispatch ( ToolCall )
+import Agent.Tools.PlanMode ( PlanModeHooks )
 import Control.Concurrent.MVar ( MVar )
 import Data.Text ( Text )
 import System.IO ( Handle, stderr, stdout )
@@ -38,12 +41,31 @@ data AgentProcessRuntime = AgentProcessRuntime
     , processSessionThreads :: !SessionThreadManager
     }
 
+data NativeInteractionMode
+    = NativeAsk
+    -- ^ Prompt before mutating tools.
+    | NativePlan
+    -- ^ Begin this turn with plan mode active.
+    | NativeYolo
+    -- ^ Auto-approve mutating tools.
+    deriving (Eq, Show)
+
+data NativeShellMode
+    = NativeShellNone
+    | NativeShellBash
+    | NativeShellGhci
+    | NativeShellBoth
+    deriving (Eq, Show)
+
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
     , nativeOnSessionId :: !(Text -> IO ())
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())
     , nativeRequestApproval :: !(ToolCall -> IO (Maybe PermissionChoice))
+    , nativePlanHooks :: !PlanModeHooks
+    , nativeInteractionMode :: !NativeInteractionMode
+    , nativeShellMode :: !NativeShellMode
     }
 
 data AgentRunMode = AgentRunMode
