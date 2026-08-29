@@ -20,9 +20,13 @@ import Agent.CLI.MacOS.NativeLoopEvent
 import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.CLI.Login
     ( AccountBilling(..)
+    , AccountUsage(..)
     , LoginAccount(..)
+    , UsageState(..)
+    , UsageWindow(..)
     , discoverLoginAccounts
     , loginAccountSelectionId
+    , refreshLoginAccount
     , storeConnectedCredential
     )
 import Agent.CLI.CredentialStore
@@ -96,6 +100,7 @@ import Control.Concurrent (forkFinally, forkIO)
 import Control.Concurrent.Async
     ( Async
     , cancel
+    , mapConcurrently
     , waitCatchSTM
     , withAsync
     )
@@ -173,7 +178,7 @@ import Foreign
     , nullPtr
     )
 import Foreign.C.String (CString)
-import Foreign.C.Types (CDouble(..), CInt(..), CSize(..))
+import Foreign.C.Types (CDouble(..), CInt(..), CLLong(..), CSize(..))
 import System.Directory.OsPath (getHomeDirectory)
 import System.IO
     ( IOMode(WriteMode)
@@ -211,6 +216,10 @@ type AccountListCallback =
     -> CString -> CSize -> CString -> CSize -> CString -> CSize
     -> CInt -> CInt -> CString -> CSize -> IO ()
 
+type AccountUsageWindowCallback =
+    Ptr () -> CString -> CSize -> CString -> CSize
+    -> CInt -> CLLong -> CLLong -> IO ()
+
 type AccountResultCallback =
     Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
 
@@ -242,6 +251,10 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeAccountListCallback
         :: FunPtr AccountListCallback -> AccountListCallback
+
+foreign import ccall "dynamic"
+    invokeAccountUsageWindowCallback
+        :: FunPtr AccountUsageWindowCallback -> AccountUsageWindowCallback
 
 foreign import ccall "dynamic"
     invokeAccountResultCallback
@@ -445,7 +458,8 @@ foreign export ccall ha_engine_destroy
     :: Ptr () -> IO ()
 
 foreign export ccall ha_accounts_list
-    :: FunPtr AccountListCallback -> Ptr () -> IO CInt
+    :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
+    -> Ptr () -> IO CInt
 
 foreign export ccall ha_account_oauth_start
     :: Ptr Word8 -> CSize -> FunPtr AccountOAuthStartCallback -> Ptr () -> IO CInt
@@ -466,12 +480,16 @@ foreign export ccall ha_account_set_enabled
 foreign export ccall ha_account_delete
     :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
 
-ha_accounts_list :: FunPtr AccountListCallback -> Ptr () -> IO CInt
-ha_accounts_list callback context
-    | callback == nullFunPtr = pure 1
+ha_accounts_list
+    :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
+    -> Ptr () -> IO CInt
+ha_accounts_list callback usageCallback context
+    | callback == nullFunPtr || usageCallback == nullFunPtr = pure 1
     | otherwise = do
         _ <- forkIO do
-            tryAny discoverLoginAccounts >>= \case
+            tryAny
+                (discoverLoginAccounts >>= mapConcurrently refreshLoginAccount)
+                >>= \case
                 Left exception ->
                     withText (Text.pack (show exception)) $ \errorPtr errorLength ->
                         invokeAccountListCallback callback context (-1)
@@ -479,9 +497,10 @@ ha_accounts_list callback context
                             nullPtr 0 nullPtr 0 nullPtr 0
                             0 0 errorPtr errorLength
                 Right accounts -> do
-                    forM_ accounts \account ->
+                    forM_ accounts \account -> do
                         withAccountStrings account $
                             invokeAccountListCallback callback context 0
+                        invokeAccountUsageWindows usageCallback context account
                     invokeAccountListCallback callback context 1
                         nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
                         nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
@@ -612,7 +631,9 @@ withAccountStrings account action =
     withText account.loginAccountId $ \accountId accountIdLength ->
     withText account.loginLabel $ \label labelLength ->
     withText account.loginSource $ \source sourceLength ->
-        withText account.loginSource $ \detail detailLength ->
+        withText
+            (accountUsageSummary account)
+            $ \detail detailLength ->
         withOptionalText account.loginManagedId $ \managedId managedLength ->
         action provider providerLength billing billingLength
             selection selectionLength accountId accountIdLength label labelLength
@@ -625,6 +646,40 @@ billingText :: AccountBilling -> Text
 billingText = \case
     SubscriptionBilling _ -> "subscription"
     ApiCreditsBilling -> "api"
+
+accountUsageSummary :: LoginAccount -> Text
+accountUsageSummary account =
+    Text.intercalate " · " $
+        billing <> case account.loginUsage of
+            UsageNotChecked -> []
+            UsageUnavailable _ -> ["usage unavailable"]
+            UsageAvailable usage ->
+                maybeToList usage.usagePlan
+                    <> maybeToList
+                        (("credits " <>) <$> usage.creditsRemaining)
+                    <> maybeToList
+                        (("used " <>) <$> usage.creditsUsed)
+  where
+    billing = case account.loginBilling of
+        ApiCreditsBilling -> ["API credits"]
+        SubscriptionBilling plan ->
+            maybe ["subscription"] (\value -> ["subscription", value]) plan
+    maybeToList = maybe [] pure
+
+invokeAccountUsageWindows
+    :: FunPtr AccountUsageWindowCallback -> Ptr () -> LoginAccount -> IO ()
+invokeAccountUsageWindows callback context account =
+    case account.loginUsage of
+        UsageAvailable usage ->
+            forM_ usage.usageWindows \window ->
+                withText (loginAccountSelectionId account) $ \selection selectionLength ->
+                withText window.windowName $ \name nameLength ->
+                    invokeAccountUsageWindowCallback callback context
+                        selection selectionLength name nameLength
+                        (fromIntegral window.usedPercent)
+                        (fromIntegral window.windowSeconds)
+                        (round (utcTimeToPOSIXSeconds window.resetsAt))
+        _ -> pure ()
 
 parseChallenge :: Aeson.Value
     -> Maybe (Text, Text, Maybe Text, Maybe Text, Int, Int)

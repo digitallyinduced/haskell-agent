@@ -78,6 +78,19 @@ typedef void (*ha_account_list_callback)(
 );
 
 /*
+ * Usage-window callbacks are emitted after their corresponding account item.
+ * reset_at_unix is an absolute UTC Unix timestamp in seconds.
+ */
+typedef void (*ha_account_usage_window_callback)(
+    void *context,
+    const uint8_t *selection_id, size_t selection_id_length,
+    const uint8_t *name, size_t name_length,
+    int32_t used_percent,
+    int64_t window_seconds,
+    int64_t reset_at_unix
+);
+
+/*
  * Result callbacks use status 0 for success, 1 when OAuth polling remains
  * pending, and -1 for an error.
  */
@@ -145,7 +158,11 @@ void ha_engine_destroy(void *engine);
  * during the callback and must be copied by the caller. All functions return
  * 0 when accepted, or a nonzero error before starting the worker.
  */
-int32_t ha_accounts_list(ha_account_list_callback callback, void *context);
+int32_t ha_accounts_list(
+    ha_account_list_callback callback,
+    ha_account_usage_window_callback usage_callback,
+    void *context
+);
 int32_t ha_account_oauth_start(
     const uint8_t *provider,
     size_t provider_length,
