@@ -28,15 +28,24 @@ spec = describe "decodeMessageLine" do
                     "[{\"type\":\"text\",\"text\":\"first\"},\
                     \{\"type\":\"text\",\"text\":\"second\"}]"
 
-        it "renders objects without text as raw JSON" do
-            -- Claude Code answers ToolSearch with tool_reference blocks.
+        it "labels tool references and images" do
+            -- Claude Code answers ToolSearch with tool_reference blocks and
+            -- image reads with base64 image blocks.
             block <- decodeToolResult
                 "[{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"},\
-                \{\"type\":\"tool_reference\",\"tool_name\":\"WebSearch\"}]"
+                \{\"type\":\"tool_reference\",\"tool_name\":\"WebSearch\"},\
+                \{\"type\":\"image\",\"source\":{\"type\":\"base64\",\
+                \\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]"
             renderedTextOf block `shouldBe`
                 Just
-                    "{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"}\n\
-                    \{\"type\":\"tool_reference\",\"tool_name\":\"WebSearch\"}"
+                    "Tool reference: WebFetch\nTool reference: WebSearch\n\
+                    \[image image/png]"
+
+        it "renders objects without text as raw JSON" do
+            block <- decodeToolResult
+                "[{\"type\":\"mystery\",\"value\":2}]"
+            renderedTextOf block `shouldBe`
+                Just "{\"type\":\"mystery\",\"value\":2}"
 
         it "renders mixed arrays including scalars and nested arrays" do
             block <- decodeToolResult

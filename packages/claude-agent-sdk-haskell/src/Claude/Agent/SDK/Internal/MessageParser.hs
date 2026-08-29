@@ -12,6 +12,7 @@ import Agent.Json
 import qualified Agent.Json.Decode as Json
 import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
 import Claude.Agent.SDK.Types
+import Control.Monad (join)
 import qualified Data.Aeson.Encoding as Aeson
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
@@ -312,8 +313,8 @@ renderToolResultBytes bytes =
         (Json.decodeEither renderedToolResultDecoder bytes)
 
 -- | Render tool result content as text. Arrays join their rendered elements,
--- objects use their @text@ field when present, and anything else falls back
--- to the raw JSON. Every branch consumes the current value exactly once.
+-- objects render as structured blocks, and anything else falls back to the
+-- raw JSON. Every branch consumes the current value exactly once.
 renderedToolResultDecoder :: Json.Decoder Text
 renderedToolResultDecoder =
     Json.withType \case
@@ -321,18 +322,43 @@ renderedToolResultDecoder =
         Json.VArray ->
             Text.intercalate "\n" <$> Json.list renderedToolResultDecoder
         Json.VObject ->
-            Json.withRawJsonByteString \raw ->
-                pure (renderToolResultObjectBytes raw)
+            Json.withRawJsonByteString (strictly . renderToolResultBlock)
         Json.VNull -> pure ""
-        _ -> Json.withRawJsonByteString (pure . displayBytes)
+        _ -> Json.withRawJsonByteString (strictly . displayBytes)
+  where
+    -- The raw bytes alias the parser's input buffer; force the projection
+    -- before the decoder returns.
+    strictly rendered = rendered `seq` pure rendered
 
-renderToolResultObjectBytes :: ByteString -> Text
-renderToolResultObjectBytes raw =
-    case Json.decodeEither (Json.object (optionalText "text")) owned of
-        Right (Just textValue) -> textValue
+-- | Render one structured tool-result block. Text blocks contribute their
+-- text, tool references and images get compact labels, and anything else
+-- falls back to its raw JSON.
+renderToolResultBlock :: ByteString -> Text
+renderToolResultBlock raw =
+    case Json.decodeEither toolResultBlockDecoder owned of
+        Right (Just rendered) -> rendered
         _ -> displayBytes owned
   where
     owned = ByteString.copy raw
+
+toolResultBlockDecoder :: Json.Decoder (Maybe Text)
+toolResultBlockDecoder = Json.object do
+    blockType <- optionalText "type"
+    textValue <- optionalText "text"
+    toolName <- optionalNonEmptyText "tool_name"
+    mediaType <- join <$> optionalTyped "source" imageSourceMediaTypeDecoder
+    pure case (blockType, textValue) of
+        (_, Just text) -> Just text
+        (Just "tool_reference", Nothing) ->
+            ("Tool reference: " <>) <$> toolName
+        (Just "image", Nothing) ->
+            Just ("[image" <> maybe "" (" " <>) mediaType <> "]")
+        _ -> Nothing
+
+imageSourceMediaTypeDecoder :: Json.Decoder (Maybe Text)
+imageSourceMediaTypeDecoder = Json.withType \case
+    Json.VObject -> Json.object (optionalNonEmptyText "media_type")
+    _ -> pure Nothing
 
 usageDecoder :: Json.Decoder Usage
 usageDecoder = Json.object do
