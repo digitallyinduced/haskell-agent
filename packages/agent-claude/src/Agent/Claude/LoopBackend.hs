@@ -14,6 +14,7 @@ import Agent.Claude.Options
 import Agent.Claude.Internal.Messages
     ( ClaudeEventState
     , CompletedClaudeTurn(..)
+    , assistantMessageItem
     , claudeEventStateHasActivity
     , emptyClaudeEventState
     , interpretClaudeTurn
@@ -319,8 +320,7 @@ submitClaudeCodeTurn
                     transcript
                     completed.sessionId
                     inputs
-                    completed.toolItems
-                    completed.assistantText
+                    completed.turnItems
         mapM_ onEvent (remainingClaudeEvents eventState completed)
         pure (Right (output, commit))
 
@@ -615,16 +615,14 @@ commitHostTranscript
     -> Text
     -> [TurnInput]
     -> [ResponseItem]
-    -> Maybe Text
     -> IO ()
 commitHostTranscript
     checkpoint
     transcript
     sessionId
     inputs
-    toolItems
-    assistantText = do
-    appendHostTranscriptRef transcript inputs toolItems assistantText
+    turnItems = do
+    appendHostTranscriptRef transcript inputs turnItems
     -- Read and enter the exact object installed in the IORef before taking its
     -- StableName. Otherwise the lazy append thunk can later be entered by the
     -- CLI, changing the StableName despite no host-side transcript change.
@@ -649,37 +647,20 @@ appendHostTranscript history inputs assistantText =
         <> turnInputsToItems inputs
         <> [assistantMessageItem assistantText]
 
+-- | Append one completed turn: its inputs followed by the turn's transcript
+-- items, which already end in an assistant message.
 appendHostTranscriptRef
     :: IORef [ResponseItem]
     -> [TurnInput]
     -> [ResponseItem]
-    -> Maybe Text
     -> IO ()
-appendHostTranscriptRef transcript inputs toolItems assistantText =
+appendHostTranscriptRef transcript inputs turnItems =
     atomicModifyIORef' transcript \history ->
         ( history
             <> turnInputsToItems inputs
-            <> toolItems
-            <> [assistantMessageItem assistantText]
+            <> turnItems
         , ()
         )
-
-assistantMessageItem :: Maybe Text -> ResponseItem
-assistantMessageItem assistantText =
-    MessageItem ResponseMessage
-        { messageId = Nothing
-        , content = MessageContentParts
-            [ OutputTextPart
-                { text = fromMaybe "" assistantText
-                , annotations = Nothing
-                , logprobs = Nothing
-                }
-            ]
-        , role = RoleAssistant
-        , status = Just ItemCompleted
-        , phase = Nothing
-        , passthrough = Nothing
-        }
 
 sdkErrorToApiError :: ClaudeSDKError -> ApiError
 sdkErrorToApiError = \case

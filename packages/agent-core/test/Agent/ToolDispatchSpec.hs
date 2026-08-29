@@ -51,6 +51,35 @@ spec = describe "dispatchToolCall" do
             (functionToolCall "call-1" "run_terminal_command" "{}")
         result `shouldBe` functionResult "call-1" "ran"
 
+    it "canonicalizes Claude Code built-ins that share a host tool shape" do
+        map canonicalToolName
+            [ "Bash"
+            , "Read"
+            , "Edit"
+            , "Grep"
+            , "TodoWrite"
+            , "TaskOutput"
+            , "TaskStop"
+            , "EnterPlanMode"
+            , "ExitPlanMode"
+            , "AskUserQuestion"
+            ]
+            `shouldBe`
+                [ "run_terminal_cmd"
+                , "read_file"
+                , "search_replace"
+                , "grep"
+                , "todo_write"
+                , "get_task_output"
+                , "kill_task"
+                , "enter_plan_mode"
+                , "exit_plan_mode"
+                , "ask_user_question"
+                ]
+        -- Tools without a compatible host equivalent keep their wire names.
+        map canonicalToolName ["Write", "Glob", "WebFetch", "Agent", "Task"]
+            `shouldBe` ["Write", "Glob", "WebFetch", "Agent", "Task"]
+
     it "canonicalizes every current Grok Build public tool name" do
         map canonicalToolName
             [ "run_terminal_command"

@@ -11,6 +11,7 @@ import Agent.Claude.Options
     , defaultClaudeCodeOptions
     )
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Json (rawJsonBytes)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -31,6 +32,7 @@ import Agent.Responses.Types
     , ResponseCreateParams(..)
     , ResponseItem(..)
     , ResponseMessage(..)
+    , ResponseRole(..)
     , defaultResponseCreateParams
     )
 import Agent.ToolDispatch
@@ -272,6 +274,137 @@ spec = do
                         history <- readIORef transcript
                         [call | FunctionCallItem call <- history]
                             `shouldBe` []
+
+        it "streams interim text and thinking live and persists the whole reply" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_INTERIM", Just "1")]
+                    do
+                        transcript <- newIORef []
+                        events <- newIORef []
+                        result <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend ->
+                                    submitBackend backend
+                                        Nothing
+                                        [UserMessage "read it"]
+                                        (\event ->
+                                            modifyIORef' events (<> [event]))
+                        turn <- case result of
+                            Just (Right value) -> pure value
+                            other -> do
+                                expectationFailure
+                                    ("unexpected turn: " <> show other)
+                                fail "unreachable"
+                        observed <- readIORef events
+                        observed `shouldBe`
+                            [ ReasoningDelta "weighing options"
+                            , TextDelta "Let me read it."
+                            , ToolStarted expectedFakeToolCall
+                            , ToolFinished expectedFakeToolResult
+                            , TextDelta "fake response"
+                            ]
+                        -- Claude Code's result record only carries the last
+                        -- text block; the turn keeps everything, and the
+                        -- host transcript preserves the order seen live.
+                        turn.assistantText
+                            `shouldBe` Just "Let me read it.\n\nfake response"
+                        history <- readIORef transcript
+                        map historyTag history
+                            `shouldBe`
+                                [ "user:read it"
+                                , "assistant:Let me read it."
+                                , "call:fake-tool"
+                                , "output:fake-tool"
+                                , "assistant:fake response"
+                                ]
+
+        it "discards the attempt when displayed text is retracted and replays survivors" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [ ("FAKE_CLAUDE_INTERIM", Just "1")
+                    , ("FAKE_CLAUDE_RETRACT_TEXT", Just "1")
+                    ]
+                    do
+                        transcript <- newIORef []
+                        events <- newIORef []
+                        result <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend ->
+                                    submitBackend backend
+                                        Nothing
+                                        [UserMessage "read it"]
+                                        (\event ->
+                                            modifyIORef' events (<> [event]))
+                        turn <- case result of
+                            Just (Right value) -> pure value
+                            other -> do
+                                expectationFailure
+                                    ("unexpected turn: " <> show other)
+                                fail "unreachable"
+                        observed <- readIORef events
+                        observed `shouldBe`
+                            [ ReasoningDelta "weighing options"
+                            , TextDelta "Let me read it."
+                            , ToolStarted expectedFakeToolCall
+                            , ResponseAttemptDiscarded
+                            , ReasoningDelta "weighing options"
+                            , ToolStarted expectedFakeToolCall
+                            , ToolFinished expectedFakeToolResult
+                            , TextDelta "fake response"
+                            ]
+                        turn.assistantText `shouldBe` Just "fake response"
+                        history <- readIORef transcript
+                        map responseMessageText
+                            [message | MessageItem message <- history]
+                            `shouldBe` ["read it", "fake response"]
+
+        it "renders and persists structured tool results as text" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_STRUCTURED_RESULT", Just "1")]
+                    do
+                        transcript <- newIORef []
+                        events <- newIORef []
+                        result <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend ->
+                                    submitBackend backend
+                                        Nothing
+                                        [UserMessage "search tools"]
+                                        (\event ->
+                                            modifyIORef' events (<> [event]))
+                        result `shouldSatisfy` \case
+                            Just (Right _) -> True
+                            _ -> False
+                        observed <- readIORef events
+                        observed `shouldContain`
+                            [ ToolFinished expectedFakeToolResult
+                                { output = "Tool reference: WebFetch\nloaded" }
+                            ]
+                        history <- readIORef transcript
+                        [ rawJsonBytes output.output
+                            | FunctionCallOutputItem output <- history
+                            ]
+                            `shouldBe` ["\"Tool reference: WebFetch\\nloaded\""]
 
         it "starts from partial tool records and enriches canonical arguments" $
             withFakeClaude \fake ->
@@ -679,9 +812,12 @@ spec = do
                                         && "was active"
                                             `Text.isInfixOf` message
                             _ -> False
+                        -- Text is exposed as it arrives; the failed turn
+                        -- discards the whole displayed attempt.
                         readIORef events `shouldReturn`
                             [ ToolStarted expectedFakeToolCall
                             , ToolFinished expectedFakeToolResult
+                            , TextDelta "fake response"
                             , ResponseAttemptDiscarded
                             ]
 
@@ -1293,13 +1429,24 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  if [ \"$FAKE_CLAUDE_PARTIAL_TOOL\" = 1 ]; then"
         , "    printf '{\"type\":\"stream_event\",\"uuid\":\"partial-tool-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"Read\",\"input\":{}}}}\\n' \"$turn\" \"$session_id\""
         , "  fi"
+        , "  if [ \"$FAKE_CLAUDE_INTERIM\" = 1 ]; then"
+        , "    printf '{\"type\":\"assistant\",\"uuid\":\"thinking-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"weighing options\",\"signature\":\"sig\"}]}}\\n' \"$turn\" \"$session_id\""
+        , "    printf '{\"type\":\"assistant\",\"uuid\":\"interim-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Let me read it.\"}]}}\\n' \"$turn\" \"$session_id\""
+        , "  fi"
         , "  tool_name=${FAKE_CLAUDE_TOOL_NAME:-Read}"
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"tool-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"%s\",\"input\":{\"file_path\":\"README.md\"}}]}}\\n' \"$turn\" \"$session_id\" \"$tool_name\""
         , "  if [ \"$FAKE_CLAUDE_RETRACT_TOOL\" = 1 ]; then"
         , "    printf '{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\"uuid\":\"retract-%s\",\"session_id\":\"%s\",\"retracted_message_uuids\":[\"tool-%s\"]}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  fi"
+        , "  if [ \"$FAKE_CLAUDE_RETRACT_TEXT\" = 1 ]; then"
+        , "    printf '{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\"uuid\":\"retract-text-%s\",\"session_id\":\"%s\",\"retracted_message_uuids\":[\"interim-%s\"]}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  fi"
         , "  if [ \"$FAKE_CLAUDE_PAUSE_AFTER_TOOL\" = 1 ]; then sleep 1; fi"
-        , "  printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
+        , "  if [ \"$FAKE_CLAUDE_STRUCTURED_RESULT\" = 1 ]; then"
+        , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"},{\"type\":\"text\",\"text\":\"loaded\"}]}]}}\\n' \"$turn\" \"$session_id\""
+        , "  else"
+        , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
+        , "  fi"
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  result_session_id=${FAKE_CLAUDE_RESULT_SESSION_ID:-$session_id}"
         , "  if [ -n \"$FAKE_CLAUDE_RESULT_MARKER\" ]; then : > \"$FAKE_CLAUDE_RESULT_MARKER\"; fi"
@@ -1354,6 +1501,16 @@ expectedFakeToolResult = ToolCallResult
     , output = "fake contents"
     , callKind = FunctionCallKind
     }
+
+historyTag :: ResponseItem -> Text
+historyTag = \case
+    MessageItem message
+        | message.role == RoleAssistant ->
+            "assistant:" <> responseMessageText message
+        | otherwise -> "user:" <> responseMessageText message
+    FunctionCallItem call -> "call:" <> call.callId
+    FunctionCallOutputItem output -> "output:" <> output.callId
+    _ -> "other"
 
 eventTag :: LoopEvent -> Text
 eventTag = \case

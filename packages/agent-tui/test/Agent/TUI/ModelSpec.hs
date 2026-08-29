@@ -325,7 +325,7 @@ spec = describe "fullscreen UI reducer" do
                     ]
         case Foldable.toList state.uiBlocks of
             [block] -> do
-                block.blockTitle `shouldBe` "Agent"
+                block.blockTitle `shouldBe` "Spawned agent review the patch"
                 block.blockDetail `shouldBe` ""
                 block.blockState `shouldBe` BlockRunning
             _ -> expectationFailure "expected one updated tool block"
@@ -347,7 +347,7 @@ spec = describe "fullscreen UI reducer" do
                     ]
         case Foldable.toList state.uiBlocks of
             [block] -> do
-                block.blockTitle `shouldBe` "Agent"
+                block.blockTitle `shouldBe` "Spawned agent review the patch"
                 block.blockState `shouldBe` BlockRunning
             _ -> expectationFailure "expected one updated tool block"
         Foldable.toList state.uiToolCalls

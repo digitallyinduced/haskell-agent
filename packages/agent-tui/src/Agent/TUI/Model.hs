@@ -41,8 +41,9 @@ module Agent.TUI.Model
     ) where
 
 import Agent.TUI.Presentation
-    ( formatSearchReplaceDiffRelative
+    ( formatToolDiffRelative
     , formatToolOutputRelative
+    , todoListFromToolArguments
     , todoListFromToolOutput
     , toolCallInput
     , toolCallTitleRelative
@@ -408,12 +409,7 @@ reduceLoop event state = case event of
                 kind = toolBlockKind call.name
                 title = toolCallTitleRelative state.uiWorkspaceRoot call
                 blockIndex = Seq.length state.uiBlocks
-                body = case canonicalToolName call.name of
-                    "search_replace" ->
-                        formatSearchReplaceDiffRelative
-                            state.uiWorkspaceRoot
-                            call.arguments
-                    _ -> ""
+                body = formatToolDiffRelative state.uiWorkspaceRoot call
                 detail = toolCallInput call
             in appendBlock kind title body detail
                 BlockRunning (Just call.callId)
@@ -449,7 +445,9 @@ reduceLoop event state = case event of
                     Just (_, call)
                         | isTodoTool call.name ->
                             fromMaybe state.uiTodos
-                                (todoListFromToolOutput result.output)
+                                (todoListFromToolOutput result.output
+                                    <|> todoListFromToolArguments
+                                        call.arguments)
                     _ -> state.uiTodos
             next =
                 state
@@ -671,12 +669,7 @@ updateToolCall call state =
         Just (blockIndex, previous) ->
             let title =
                     toolCallTitleRelative state.uiWorkspaceRoot call
-                body = case canonicalToolName call.name of
-                    "search_replace" ->
-                        formatSearchReplaceDiffRelative
-                            state.uiWorkspaceRoot
-                            call.arguments
-                    _ -> ""
+                body = formatToolDiffRelative state.uiWorkspaceRoot call
                 blocks
                     | isTodoTool previous.name = state.uiBlocks
                     | otherwise =
@@ -937,7 +930,7 @@ toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName
     | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci", "exec"] =
         BlockShell
-    | name `elem` ["search_replace", "apply_patch"] =
+    | name `elem` ["search_replace", "apply_patch", "Write", "NotebookEdit"] =
         BlockEdit
     | name `elem` ["todo_write", "update_plan"] =
         BlockTodo
