@@ -57,6 +57,19 @@ typedef void (*ha_conversation_search_callback)(
 );
 
 /*
+ * Session mutation callbacks use status 0 for success and -1 for failure.
+ * The error buffer is UTF-8, callback-scoped, and populated only on failure.
+ * Callbacks run serially on the engine worker thread. An accepted mutation
+ * receives exactly one callback unless engine destruction has begun.
+ */
+typedef void (*ha_session_result_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *error,
+    size_t error_length
+);
+
+/*
  * Learned-skill list callbacks emit current rows from all applicable scopes,
  * including archived skills. Status is 0 for an item, 1 for end-of-list, and
  * -1 for an error. UTF-8 buffers are callback-scoped and must be copied.
@@ -201,6 +214,35 @@ int32_t ha_engine_search_conversations(
     size_t query_length,
     size_t limit,
     ha_conversation_search_callback callback,
+    void *context
+);
+/*
+ * Session mutation inputs are copied before return. Returns 0 when accepted,
+ * 1 for a null engine, 2 for an invalid callback/input pointer, and 3 for an
+ * internal failure. Calls must be serialized with ha_engine_destroy.
+ */
+int32_t ha_engine_session_rename(
+    void *engine,
+    const uint8_t *session_id,
+    size_t session_id_length,
+    const uint8_t *title,
+    size_t title_length,
+    ha_session_result_callback callback,
+    void *context
+);
+int32_t ha_engine_session_delete(
+    void *engine,
+    const uint8_t *session_id,
+    size_t session_id_length,
+    ha_session_result_callback callback,
+    void *context
+);
+int32_t ha_engine_session_archive(
+    void *engine,
+    const uint8_t *session_id,
+    size_t session_id_length,
+    int32_t archived,
+    ha_session_result_callback callback,
     void *context
 );
 void ha_engine_destroy(void *engine);

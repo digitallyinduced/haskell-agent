@@ -251,6 +251,9 @@ type AccountUsageWindowCallback =
 type AccountResultCallback =
     Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
 
+type SessionResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> IO ()
+
 type AccountOAuthStartCallback =
     Ptr () -> CInt -> CString -> CSize -> CString -> CSize
     -> CString -> CSize -> CString -> CSize -> CInt -> CInt
@@ -294,6 +297,10 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeAccountResultCallback
         :: FunPtr AccountResultCallback -> AccountResultCallback
+
+foreign import ccall "dynamic"
+    invokeSessionResultCallback
+        :: FunPtr SessionResultCallback -> SessionResultCallback
 
 foreign import ccall "dynamic"
     invokeAccountOAuthStartCallback
@@ -406,28 +413,6 @@ instance Aeson.FromJSON SessionReference where
     parseJSON = Aeson.withObject "SessionReference" \object ->
         SessionReference <$> object .: "id"
 
-data SessionRenameRequest = SessionRenameRequest
-    { sessionRenameId :: !Text
-    , sessionRenameTitle :: !Text
-    }
-
-instance Aeson.FromJSON SessionRenameRequest where
-    parseJSON = Aeson.withObject "SessionRenameRequest" \object ->
-        SessionRenameRequest
-            <$> object .: "id"
-            <*> object .: "title"
-
-data SessionArchiveRequest = SessionArchiveRequest
-    { sessionArchiveId :: !Text
-    , sessionArchiveArchived :: !Bool
-    }
-
-instance Aeson.FromJSON SessionArchiveRequest where
-    parseJSON = Aeson.withObject "SessionArchiveRequest" \object ->
-        SessionArchiveRequest
-            <$> object .: "id"
-            <*> object .: "archived"
-
 data ModelsListRequest = ModelsListRequest
     { modelsListCwd :: !FilePath
     , modelsListSessionId :: !(Maybe Text)
@@ -461,7 +446,14 @@ data AccountAPIKeyRequest = AccountAPIKeyRequest
 data EngineCommand
     = EngineRequest !BridgeRequest
     | EngineSearch !Text !Int !(FunPtr SearchCallback) !(Ptr ())
+    | EngineSessionMutation
+        !SessionMutation !(FunPtr SessionResultCallback) !(Ptr ())
     | EngineStop
+
+data SessionMutation
+    = SessionRename !Text !Text
+    | SessionDelete !Text
+    | SessionArchive !Text !Bool
 
 data Engine = Engine
     { engineCommands :: !(TQueue EngineCommand)
@@ -499,6 +491,18 @@ foreign export ccall ha_engine_stage_turn_images
 
 foreign export ccall ha_engine_destroy
     :: Ptr () -> IO ()
+
+foreign export ccall ha_engine_session_rename
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr SessionResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_session_delete
+    :: Ptr () -> Ptr Word8 -> CSize
+    -> FunPtr SessionResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_session_archive
+    :: Ptr () -> Ptr Word8 -> CSize -> CInt
+    -> FunPtr SessionResultCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_accounts_list
     :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
@@ -1011,6 +1015,57 @@ ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
                     , imageBytes = bytes
                     }
 
+ha_engine_session_rename
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr SessionResultCallback -> Ptr () -> IO CInt
+ha_engine_session_rename engine idBytes (CSize idLength)
+    titleBytes (CSize titleLength) callback context
+    | anyNonEmptyNull
+        [ (idBytes, idLength), (titleBytes, titleLength) ] = pure 2
+    | otherwise = do
+        sessionId <- decodeInput idBytes idLength
+        title <- decodeInput titleBytes titleLength
+        enqueueSessionMutation engine (SessionRename sessionId title) callback context
+
+ha_engine_session_delete
+    :: Ptr () -> Ptr Word8 -> CSize
+    -> FunPtr SessionResultCallback -> Ptr () -> IO CInt
+ha_engine_session_delete engine idBytes (CSize idLength) callback context
+    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
+    | otherwise = do
+        sessionId <- decodeInput idBytes idLength
+        enqueueSessionMutation engine (SessionDelete sessionId) callback context
+
+ha_engine_session_archive
+    :: Ptr () -> Ptr Word8 -> CSize -> CInt
+    -> FunPtr SessionResultCallback -> Ptr () -> IO CInt
+ha_engine_session_archive engine idBytes (CSize idLength)
+    archived callback context
+    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
+    | otherwise = do
+        sessionId <- decodeInput idBytes idLength
+        enqueueSessionMutation
+            engine (SessionArchive sessionId (archived /= 0)) callback context
+
+enqueueSessionMutation
+    :: Ptr ()
+    -> SessionMutation
+    -> FunPtr SessionResultCallback
+    -> Ptr ()
+    -> IO CInt
+enqueueSessionMutation pointer mutation callback context
+    | pointer == nullPtr = pure 1
+    | callback == nullFunPtr = pure 2
+    | otherwise = do
+        accepted <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            atomically $ writeTQueue engine.engineCommands
+                (EngineSessionMutation mutation callback context)
+        pure $ case accepted of
+            Left _ -> 3
+            Right () -> 0
+
 ha_engine_destroy :: Ptr () -> IO ()
 ha_engine_destroy pointer
     | pointer == nullPtr = pure ()
@@ -1063,6 +1118,10 @@ idleLoop callback context config store root processRuntime commands stagedImages
         EngineSearch query limit searchCallback searchContext -> do
             runConversationSearch
                 config store query limit searchCallback searchContext
+            continue
+        EngineSessionMutation mutation resultCallback resultContext -> do
+            runSessionMutation
+                config store root mutation resultCallback resultContext
             continue
         EngineRequest request
             | request.requestMethod == "turn.start" ->
@@ -1162,6 +1221,11 @@ activeLoop callback context config store root commands control running =
                 config store query limit searchCallback searchContext
             activeLoop
                 callback context config store root commands control running
+        Left (EngineSessionMutation mutation resultCallback resultContext) -> do
+            runSessionMutation
+                config store root mutation resultCallback resultContext
+            activeLoop
+                callback context config store root commands control running
         Left (EngineRequest request) -> do
             if request.requestMethod == "turn.cancel"
               then
@@ -1199,6 +1263,41 @@ activeLoop callback context config store root commands control running =
                 commands
                 control
                 running
+
+runSessionMutation
+    :: ManagedPostgresConfig
+    -> MVar (Maybe Store)
+    -> OsPath
+    -> SessionMutation
+    -> FunPtr SessionResultCallback
+    -> Ptr ()
+    -> IO ()
+runSessionMutation config store root mutation callback context = do
+    outcome <- tryAny do
+        activeStore <- acquireStore config store
+        let pool = trustedPool activeStore
+        case mutation of
+            SessionRename sessionId title -> do
+                result <- renameSession pool root sessionId title
+                pure (() <$ result)
+            SessionDelete sessionId ->
+                deleteSession pool root sessionId
+            SessionArchive sessionId archived ->
+                setSessionArchived pool root sessionId archived
+    case outcome of
+        Left exception ->
+            sendSessionMutationFailure
+                callback context (Text.pack (show exception))
+        Right (Left err) ->
+            sendSessionMutationFailure callback context err
+        Right (Right ()) ->
+            invokeSessionResultCallback callback context 0 nullPtr 0
+
+sendSessionMutationFailure
+    :: FunPtr SessionResultCallback -> Ptr () -> Text -> IO ()
+sendSessionMutationFailure callback context message =
+    withText message \errorPtr errorLength ->
+        invokeSessionResultCallback callback context (-1) errorPtr errorLength
 
 runConversationSearch
     :: ManagedPostgresConfig
@@ -1676,53 +1775,6 @@ handleRequest config store root request = do
                             (failureEvent current.requestId)
                             (successEvent current.requestId)
                             snapshot
-            "sessions.rename" ->
-                case (parseParams current
-                    :: Either Text SessionRenameRequest) of
-                    Left err ->
-                        pure (failureEvent current.requestId err)
-                    Right rename -> do
-                        activeStore <- acquireStore config store
-                        renamed <- renameSession
-                            (trustedPool activeStore)
-                            root
-                            rename.sessionRenameId
-                            rename.sessionRenameTitle
-                        pure $ either
-                            (failureEvent current.requestId)
-                            (const (successEvent current.requestId True))
-                            renamed
-            "sessions.delete" ->
-                case (parseParams current
-                    :: Either Text SessionReference) of
-                    Left err ->
-                        pure (failureEvent current.requestId err)
-                    Right reference -> do
-                        activeStore <- acquireStore config store
-                        deleted <- deleteSession
-                            (trustedPool activeStore)
-                            root
-                            reference.sessionReferenceId
-                        pure $ either
-                            (failureEvent current.requestId)
-                            (const (successEvent current.requestId True))
-                            deleted
-            "sessions.archive" ->
-                case (parseParams current
-                    :: Either Text SessionArchiveRequest) of
-                    Left err ->
-                        pure (failureEvent current.requestId err)
-                    Right archive -> do
-                        activeStore <- acquireStore config store
-                        changed <- setSessionArchived
-                            (trustedPool activeStore)
-                            root
-                            archive.sessionArchiveId
-                            archive.sessionArchiveArchived
-                        pure $ either
-                            (failureEvent current.requestId)
-                            (const (successEvent current.requestId True))
-                            changed
             "turn.agents" ->
                 pure $ successEvent current.requestId ([] :: [Aeson.Value])
             "models.list" ->
