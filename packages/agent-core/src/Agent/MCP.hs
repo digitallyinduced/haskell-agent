@@ -18,6 +18,7 @@ module Agent.MCP
     , acquireMcpFleetProgressive
     , releaseMcpFleetLease
     , closeMcpSupervisor
+    , restartMcpSupervisor
     , startMcpFleet
     , startMcpFleetWithProgress
     , startMcpFleetProgressive
@@ -654,6 +655,48 @@ closeMcpSupervisor supervisor = do
             (\entry ->
                 void (tryPutTMVar entry.supervisorPendingResult
                     (Left "MCP supervisor closed")))
+            pending
+    forConcurrentlyBounded_ 8
+        (\entry -> do
+            worker <- atomically
+                (readTMVar entry.supervisorPendingWorker)
+            cancel worker
+            void (waitCatch worker))
+        pending
+    forConcurrentlyBounded_ 4 closeMcpFleet fleets
+
+-- | Discard every cached fleet while keeping the supervisor reusable. Callers
+-- must ensure no active lease is in use; the native engine does so by
+-- serializing this operation in its idle loop.
+restartMcpSupervisor :: McpSupervisor -> IO ()
+restartMcpSupervisor supervisor = do
+    (fleets, pending) <-
+        modifyMVar supervisor.supervisorState \state ->
+            if state.supervisorClosed
+                then ioError (userError "MCP supervisor closed")
+                else if
+                    any ((> 0) . (.supervisorEntryLeases))
+                        state.supervisorEntries
+                        || any ((> 0) . (.supervisorPendingLeases))
+                            state.supervisorPending
+                then ioError (userError
+                    "cannot restart MCP supervisor while a lease is active")
+                else
+                    pure
+                        ( state
+                            { supervisorEntries = []
+                            , supervisorPending = []
+                            }
+                        , ( map (.supervisorEntryFleet)
+                                state.supervisorEntries
+                          , state.supervisorPending
+                          )
+                        )
+    atomically $
+        mapM_
+            (\entry ->
+                void (tryPutTMVar entry.supervisorPendingResult
+                    (Left "MCP supervisor restarted")))
             pending
     forConcurrentlyBounded_ 8
         (\entry -> do

@@ -32,6 +32,7 @@ import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
 import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
+import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
@@ -108,6 +109,7 @@ main = hspec do
     BridgeHeaderSpec.spec
     BridgeFFISpec.spec
     MarkdownSpec.spec
+    McpAdminSpec.spec
     McpManagerSpec.spec
     ModelConfigSpec.spec
     ModelPickerSpec.spec

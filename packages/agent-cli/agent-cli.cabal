@@ -130,6 +130,7 @@ library
                     , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
+                    , Agent.CLI.McpAdmin
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpManager
                     , Agent.CLI.ModelConfig
@@ -375,6 +376,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
+                    , Agent.CLI.McpAdminSpec
                     , Agent.CLI.McpManagerSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
