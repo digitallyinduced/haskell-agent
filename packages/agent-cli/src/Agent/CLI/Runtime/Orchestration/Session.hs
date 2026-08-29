@@ -40,7 +40,7 @@ import Agent.CLI.Options
     ( isOneShot, CliOptions(optShowRawReasoning, optCompactThreshold) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
-import Agent.CLI.Project ()
+import Agent.CLI.Project ( ModelSwitchScope(..) )
 import Agent.CLI.Prompt
     ( codexEnvironmentContext,
       subscriptionSubagentModelGuidance,
@@ -615,6 +615,9 @@ runAgentSession
                         | otherwise = action Nothing
                 withStartupAvailability \startupUnavailable ->
                     runAgentProviders
+                        (if startup.startupBackground
+                            then SessionLocalSwitch
+                            else TopLevelSwitch)
                         loaded
                         sessionRequest
                         activeAccountIdRef
