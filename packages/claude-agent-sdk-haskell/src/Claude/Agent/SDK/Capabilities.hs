@@ -267,7 +267,9 @@ readBounded handle = do
             else
                 let next = ByteString.take limit (acc <> chunk)
                 in if ByteString.length next >= limit
-                    then pure (decode next)
+                    then do
+                        voidClose handle
+                        pure (decode next)
                     else go next
     decode = TextEncoding.decodeUtf8With lenientDecode
 
