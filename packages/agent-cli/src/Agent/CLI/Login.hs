@@ -17,6 +17,7 @@ module Agent.CLI.Login
     , refreshLoginAccount
     , renderLoginFrame
     , runLoginManager
+    , storeConnectedCredential
     ) where
 
 import Agent.CLI.Auth

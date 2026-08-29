@@ -260,6 +260,9 @@ foreign-library haskell-agent-bridge
     build-depends:    agent-cli
                     , agent-core >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
+                    , agent-openai >= 0.1 && < 0.2
+                    , agent-xai >= 0.1 && < 0.2
+                    , agent-openrouter >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
                     , base >= 4.17 && < 5
