@@ -1,10 +1,15 @@
 module Agent.CLI.ApprovalSpec (spec) where
 
 import Agent.CLI.Approval
-    ( ApprovalNotice(..)
+    ( ApprovalAction(..)
+    , ApprovalFacts(..)
+    , ApprovalNotice(..)
+    , ApprovalPlan(..)
     , approveToolDecisionWithReporter
     , approveToolDecisionWithReporterAndPersistence
     , childApprove
+    , planApproval
+    , resolveApprovalPrompt
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Permission (PermissionChoice(..))
@@ -37,7 +42,200 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "planApproval" do
+        it "hard-denies catastrophic shell calls before requesting classification" do
+            let call = functionToolCall
+                    "call-shell"
+                    "shell_command"
+                    "{\"command\":\"rm -rf /\"}"
+                facts = (approvalFacts call)
+                    { policy = ApproveAll
+                    , allowedForSession = Just True
+                    }
+            planApproval facts
+                `shouldSatisfy` \case
+                    CompleteApproval
+                        (Left message)
+                        [ReportApprovalNotice (ApprovalWarning notice)] ->
+                            "Blocked dangerous shell command"
+                                `Text.isInfixOf` message
+                                && message `Text.isInfixOf` notice
+                    _ -> False
+
+        it "requests facts in security-precedence order" do
+            let initial = approvalFacts mutatingCall
+                classified = initial { readOnly = Just False }
+            planApproval initial `shouldBe` NeedReadOnlyClassification
+            planApproval classified `shouldBe` NeedSessionAllowance
+            planApproval (classified { allowedForSession = Just False })
+                `shouldBe` NeedPermissionPrompt
+
+        it "cannot bypass plan mode with remembered approval or yolo" do
+            let facts = (approvalFacts mutatingCall)
+                    { policy = ApproveAll
+                    , planActive = True
+                    , readOnly = Just False
+                    , allowedForSession = Just True
+                    }
+            planApproval facts `shouldSatisfy` \case
+                CompleteApproval
+                    (Left message)
+                    [ReportApprovalNotice (ApprovalWarning notice)] ->
+                        "file edits are not allowed in plan mode"
+                            `Text.isInfixOf` message
+                            && notice == message
+                _ -> False
+
+        it "auto-approves only the dedicated plan-file exception" do
+            let planWrite = functionToolCall
+                    "call-write-plan"
+                    "write_plan"
+                    "{\"content\":\"# Plan\"}"
+                facts = (approvalFacts planWrite)
+                    { policy = PromptMutating
+                    , planActive = True
+                    , readOnly = Just False
+                    }
+            planApproval facts
+                `shouldBe` CompleteApproval (Right True) []
+
+        it "allows the path-locked plan edit but rejects another target" do
+            let searchReplace target = functionToolCall
+                    "call-search-replace"
+                    "search_replace"
+                    ("{\"file_path\":\"" <> target <> "\"}")
+                facts call = (approvalFacts call)
+                    { policy = ApproveAll
+                    , planActive = True
+                    , readOnly = Just False
+                    , allowedForSession = Just True
+                    }
+            planApproval (facts (searchReplace "plan.md"))
+                `shouldBe` CompleteApproval (Right True) []
+            planApproval (facts (searchReplace "src/Main.hs"))
+                `shouldSatisfy` \case
+                    CompleteApproval (Left _) [_] -> True
+                    _ -> False
+
+        it "blocks collaboration writes in plan mode even if marked read-only" do
+            let call = functionToolCall
+                    "call-spawn"
+                    "collaboration.spawn_agent"
+                    "{}"
+                facts = (approvalFacts call)
+                    { policy = ApproveAll
+                    , planActive = True
+                    , readOnly = Just True
+                    , allowedForSession = Just True
+                    }
+            planApproval facts `shouldSatisfy` \case
+                CompleteApproval (Left _) [_] -> True
+                _ -> False
+
+        it "applies the session policy after remembered-tool approval" do
+            let classified = (approvalFacts mutatingCall)
+                    { readOnly = Just False
+                    }
+            planApproval (classified { allowedForSession = Just True })
+                `shouldBe` CompleteApproval (Right True) []
+            planApproval (classified
+                { policy = ApproveAll
+                , allowedForSession = Just False
+                })
+                `shouldBe` CompleteApproval (Right True) []
+            planApproval (classified
+                { policy = DenyMutating
+                , allowedForSession = Just False
+                })
+                `shouldBe` CompleteApproval (Right False) []
+
+        it "auto-approves read-only calls under restrictive policies" do
+            let facts policy = (approvalFacts readOnlyCall)
+                    { policy
+                    , readOnly = Just True
+                    , allowedForSession = Just False
+                    }
+            planApproval (facts DenyMutating)
+                `shouldBe` CompleteApproval (Right True) []
+            planApproval (facts PromptMutating)
+                `shouldBe` CompleteApproval (Right True) []
+
+    describe "resolveApprovalPrompt" do
+        it "maps cancellation and explicit denial to an in-band denial" do
+            resolveApprovalPrompt mutatingCall Nothing
+                `shouldBe` CompleteApproval (Right False) []
+            resolveApprovalPrompt mutatingCall (Just PermissionDeny)
+                `shouldBe` CompleteApproval (Right False) []
+
+        it "allows once without changing approval state" do
+            resolveApprovalPrompt mutatingCall (Just PermissionAllowOnce)
+                `shouldBe` CompleteApproval (Right True) []
+
+        it "plans project persistence after enabling auto-approval" do
+            resolveApprovalPrompt mutatingCall (Just PermissionAllowAll)
+                `shouldBe` CompleteApproval
+                    (Right True)
+                    [ SetApprovalPolicy ApproveAll
+                    , PersistProjectAutoApprove
+                    , ReportApprovalNotice
+                        (ApprovalSuccess
+                            "✓ auto-approve on (saved for project)")
+                    ]
+
+        it "canonicalizes remembered aliases but reports the requested name" do
+            let call = functionToolCall
+                    "call-shell"
+                    "run_terminal_command"
+                    "{\"command\":\"git status\"}"
+            resolveApprovalPrompt call (Just PermissionAllowTool)
+                `shouldBe` CompleteApproval
+                    (Right True)
+                    [ RememberToolForSession "run_terminal_cmd"
+                    , ReportApprovalNotice
+                        (ApprovalSuccess
+                            "✓ always allow run_terminal_command this session")
+                    ]
+
     describe "approveToolDecisionWith" do
+        it "does not classify, prompt, or persist a catastrophic shell call" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            classifications <- newIORef (0 :: Int)
+            permissionRequests <- newIORef (0 :: Int)
+            persistenceCalls <- newIORef (0 :: Int)
+            notices <- newIORef []
+            let call = functionToolCall
+                    "call-shell"
+                    "shell_command"
+                    "{\"command\":\"rm -rf /\"}"
+                shellTool = tool "shell_command" $
+                    ClassifyReadOnly \_ -> do
+                        modifyIORef' classifications (+ 1)
+                        pure True
+
+            result <- approveToolDecisionWithReporterAndPersistence
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowOnce))
+                (\notice -> modifyIORef' notices (<> [notice]))
+                (modifyIORef' persistenceCalls (+ 1))
+                policy allowed (registry [shellTool]) plan call
+
+            result `shouldSatisfy` either
+                (Text.isInfixOf "Blocked dangerous shell command")
+                (const False)
+            readIORef classifications `shouldReturn` 0
+            readIORef permissionRequests `shouldReturn` 0
+            readIORef persistenceCalls `shouldReturn` 0
+            readIORef policy `shouldReturn` PromptMutating
+            readIORef allowed `shouldReturn` Set.empty
+            recordedNotices <- readIORef notices
+            recordedNotices `shouldSatisfy` \case
+                [ApprovalWarning message] ->
+                    "Blocked dangerous shell command"
+                        `Text.isInfixOf` message
+                _ -> False
+
         it "reports plan-mode denials without requiring terminal output" do
             policy <- newIORef ApproveAll
             allowed <- newIORef Set.empty
@@ -198,7 +396,10 @@ spec = do
             let request _ = do
                     modifyIORef' permissionRequests (+ 1)
                     pure (Just PermissionAllowTool)
-                report notice = modifyIORef' notices (<> [notice])
+                report notice = do
+                    readIORef allowed
+                        `shouldReturn` Set.singleton "write"
+                    modifyIORef' notices (<> [notice])
 
             approveToolDecisionWithReporter
                 request report policy allowed
@@ -220,11 +421,20 @@ spec = do
             plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
             notices <- newIORef []
             persisted <- newIORef (0 :: Int)
+            events <- newIORef ([] :: [Text])
+            let persist = do
+                    readIORef policy `shouldReturn` ApproveAll
+                    modifyIORef' persisted (+ 1)
+                    modifyIORef' events (<> ["persist"])
+                report notice = do
+                    readIORef events `shouldReturn` ["persist"]
+                    modifyIORef' events (<> ["report"])
+                    modifyIORef' notices (<> [notice])
 
             approveToolDecisionWithReporterAndPersistence
                 (\_ -> pure (Just PermissionAllowAll))
-                (\notice -> modifyIORef' notices (<> [notice]))
-                (modifyIORef' persisted (+ 1))
+                report
+                persist
                 policy allowed (registry [mutatingTool]) plan mutatingCall
                 `shouldReturn` Right True
 
@@ -232,6 +442,26 @@ spec = do
             readIORef persisted `shouldReturn` 1
             readIORef notices `shouldReturn`
                 [ApprovalSuccess "✓ auto-approve on (saved for project)"]
+            readIORef events `shouldReturn` ["persist", "report"]
+
+        it "does not mutate or report when a prompt is denied" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            notices <- newIORef []
+            persisted <- newIORef (0 :: Int)
+
+            approveToolDecisionWithReporterAndPersistence
+                (\_ -> pure (Just PermissionDeny))
+                (\notice -> modifyIORef' notices (<> [notice]))
+                (modifyIORef' persisted (+ 1))
+                policy allowed (registry [mutatingTool]) plan mutatingCall
+                `shouldReturn` Right False
+
+            readIORef policy `shouldReturn` PromptMutating
+            readIORef allowed `shouldReturn` Set.empty
+            readIORef notices `shouldReturn` []
+            readIORef persisted `shouldReturn` 0
 
         it "shares remembered approval across public and internal Grok aliases" do
             policy <- newIORef PromptMutating
@@ -325,3 +555,13 @@ tool name approval =
 
 registry :: [AppTool] -> ToolRegistry
 registry = either (error . Text.unpack) id . mkToolRegistry
+
+approvalFacts :: ToolCall -> ApprovalFacts
+approvalFacts call = ApprovalFacts
+    { policy = PromptMutating
+    , planActive = False
+    , planPath = unsafeEncodeUtf "/tmp/approval-test/plan.md"
+    , readOnly = Nothing
+    , allowedForSession = Nothing
+    , call
+    }

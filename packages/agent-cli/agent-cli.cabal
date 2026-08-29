@@ -46,6 +46,7 @@ library
     other-modules:    Agent.CLI.AccountPicker
                     , Agent.CLI.AgentSessions.Render
                     , Agent.CLI.AgentViewport.Status
+                    , Agent.CLI.Approval.Decision
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
