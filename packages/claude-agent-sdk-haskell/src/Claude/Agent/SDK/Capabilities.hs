@@ -181,8 +181,8 @@ probeClaudeCapabilitiesIn executable cwd = do
     versionResult <- runProbe executable cwd ["--version"]
     case versionResult of
         Left err -> pure (Left err)
-        Right (exitCode, versionOutput, _versionErr) ->
-            case parseClaudeVersion versionOutput of
+        Right (exitCode, versionOutput, versionErr) ->
+            case parseClaudeVersion (versionOutput <> "\n" <> versionErr) of
                 Nothing -> pure (Left "Unable to parse Claude Code version output.")
                 Just version -> do
                     let key = executable <> "\0" <> Text.unpack version
