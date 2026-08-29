@@ -145,6 +145,7 @@ import Control.Concurrent.STM
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
     ( SomeException
+    , bracket
     , finally
     , tryAny
     )
@@ -518,24 +519,15 @@ ha_learned_skills_list cwdBytes (CSize cwdLength) callback context
             tryAny (listLearnedSkillsFor (Text.unpack cwd)) >>= \case
                 Left exception ->
                     withText (Text.pack (show exception)) $ \errorPtr errorLength ->
-                        invokeLearnedSkillsListCallback callback context (-1)
-                            nullPtr 0 nullPtr 0 0
-                            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                            nullPtr 0 nullPtr 0 nullPtr 0 0 errorPtr errorLength
+                        learnedSkillsTerminal callback context (-1) errorPtr errorLength
                 Right (Left err) ->
                     withText err $ \errorPtr errorLength ->
-                        invokeLearnedSkillsListCallback callback context (-1)
-                            nullPtr 0 nullPtr 0 0
-                            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                            nullPtr 0 nullPtr 0 nullPtr 0 0 errorPtr errorLength
+                        learnedSkillsTerminal callback context (-1) errorPtr errorLength
                 Right (Right skills) -> do
                     forM_ skills \skill ->
                         withLearnedSkillStrings skill $
                             invokeLearnedSkillsListCallback callback context 0
-                    invokeLearnedSkillsListCallback callback context 1
-                        nullPtr 0 nullPtr 0 0
-                        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                        nullPtr 0 nullPtr 0 nullPtr 0 0 nullPtr 0 nullPtr 0
+                    learnedSkillsTerminal callback context 1 nullPtr 0
         pure 0
   where
     listLearnedSkillsFor cwd = do
@@ -550,12 +542,12 @@ ha_learned_skills_list cwdBytes (CSize cwdLength) callback context
                 store <- openStore =<< managedPostgresConfigForHome home
                 case store of
                     Left err -> pure (Left (renderStoreError err))
-                    Right opened -> do
-                        result <- listAllLearnedSkills
-                            (trustedPool opened)
-                            (applicableDatabaseScopes databaseScopes)
-                        closeStore opened
-                        pure (first renderStoreError result)
+                    Right opened ->
+                        bracket (pure opened) closeStore \store ->
+                            first renderStoreError
+                                <$> listAllLearnedSkills
+                                    (trustedPool store)
+                                    (applicableDatabaseScopes databaseScopes)
 
 type LearnedSkillItemCallback =
     CString -> CSize -> CString -> CSize -> CLLong
@@ -581,6 +573,16 @@ withLearnedSkillStrings skill action =
             activation activationLength status statusLength
             (fromIntegral skill.learnedSkillPriority) updated updatedLength
             nullPtr 0
+
+learnedSkillsTerminal
+    :: FunPtr LearnedSkillsListCallback
+    -> Ptr () -> CInt -> CString -> CSize -> IO ()
+learnedSkillsTerminal callback context status errorPtr errorLength =
+    invokeLearnedSkillsListCallback callback context status
+        nullPtr 0 nullPtr 0 0
+        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+        nullPtr 0 nullPtr 0 nullPtr 0
+        0 nullPtr 0 errorPtr errorLength
 
 ha_accounts_list
     :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
