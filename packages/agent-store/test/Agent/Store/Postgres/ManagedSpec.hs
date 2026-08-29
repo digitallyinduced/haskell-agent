@@ -1,4 +1,5 @@
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE FieldSelectors #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -8,6 +9,7 @@ import Control.Exception.Safe (finally)
 import Data.ByteString (ByteString)
 import Data.Either (isLeft, isRight)
 import Data.Text (Text)
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Session as Session
@@ -33,6 +35,11 @@ import Agent.Store.Postgres.Migrations
     , runMigrations
     )
 import Agent.Store.Postgres.Scope (customSchemaStatements)
+import Agent.Store.Postgres.UsageCache
+    ( AccountUsageCacheEntry(..)
+    , loadAccountUsageCache
+    , upsertAccountUsageCache
+    )
 
 spec :: Spec
 spec =
@@ -63,6 +70,22 @@ spec =
                         (Session.script
                             "CREATE SCHEMA runtime_must_not_create")
                     forbiddenResult `shouldSatisfy` isLeft
+                    fetchedAt <- getCurrentTime
+                    let usageEntry = AccountUsageCacheEntry
+                            { accountUsageCacheProvider = "openai"
+                            , accountUsageCacheAccountId = "account-1"
+                            , accountUsageCachePayload = "{\"remaining\":42}"
+                            , accountUsageCacheFetchedAt = fetchedAt
+                            , accountUsageCacheExpiresAt =
+                                addUTCTime 300 fetchedAt
+                            }
+                    upsertAccountUsageCache (trustedPool store) usageEntry
+                        `shouldReturn` Right ()
+                    loadAccountUsageCache
+                        (trustedPool store)
+                        "openai"
+                        "account-1"
+                        `shouldReturn` Right (Just usageEntry)
                     ) >>= \case
                         Left err ->
                             expectationFailure

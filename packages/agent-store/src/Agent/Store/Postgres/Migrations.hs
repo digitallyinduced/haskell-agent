@@ -35,6 +35,9 @@ import Agent.Store.Postgres.Skill
     ( learnedSkillRuntimeGrantStatements
     , learnedSkillSchemaStatements
     )
+import Agent.Store.Postgres.UsageCache
+    ( accountUsageCacheSchemaStatements
+    )
 import Agent.Store.Types
 
 data Migration = Migration
@@ -162,6 +165,15 @@ coreMigrations =
               \ ON harness.sessions (archived_at DESC)\
               \ WHERE deleted_at IS NULL AND archived_at IS NOT NULL"
             ]
+        }
+    , Migration
+        { migrationVersion = 12
+        , migrationName = "account usage cache"
+        , migrationStatements =
+            accountUsageCacheSchemaStatements
+            <> [ "GRANT SELECT, INSERT, UPDATE\
+                \ ON harness.account_usage_cache TO ha_runtime"
+               ]
         }
     ]
 

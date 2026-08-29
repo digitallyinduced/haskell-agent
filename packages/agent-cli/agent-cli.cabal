@@ -269,6 +269,7 @@ foreign-library haskell-agent-bridge
                     , safe-exceptions
                     , stm
                     , text >= 2.0 && < 2.2
+                    , time
 
 executable eval-ghci-vs-bash
     import:           common-options
