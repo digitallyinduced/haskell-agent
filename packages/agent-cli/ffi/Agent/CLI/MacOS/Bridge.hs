@@ -1,4 +1,5 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE FieldSelectors #-}
 
 module Agent.CLI.MacOS.Bridge () where
 
@@ -59,6 +60,11 @@ import Agent.Store.Postgres
     , closeStore
     , openStore
     , trustedPool
+    )
+import Agent.Store.Postgres.UsageCache
+    ( AccountUsageCacheEntry(..)
+    , loadAccountUsageCache
+    , upsertAccountUsageCache
     )
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
@@ -127,6 +133,8 @@ import qualified Data.Set as Set
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Data.Word (Word8)
 import Foreign
     ( FunPtr
@@ -939,7 +947,8 @@ handleRequest config store root request = do
                             (const (successEvent current.requestId True))
                             changed
             "accounts.list" -> do
-                accounts <- accountSummariesJSON
+                activeStore <- acquireStore config store
+                accounts <- cachedAccountSummaries activeStore
                 pure $ successEvent current.requestId
                     accounts
             "turn.agents" ->
@@ -962,6 +971,48 @@ handleRequest config store root request = do
             method ->
                 pure $ failureEvent current.requestId
                     ("unknown method: " <> method)
+
+cachedAccountSummaries :: Store -> IO [Aeson.Value]
+cachedAccountSummaries store = do
+    let pool = trustedPool store
+    cached <- loadAccountUsageCache pool accountCacheProvider accountCacheKey
+    now <- getCurrentTime
+    case cached of
+        Right (Just entry)
+            | Just accounts <- decodeAccountCache entry.accountUsageCachePayload -> do
+                if entry.accountUsageCacheExpiresAt <= now
+                    then void $ forkFinally
+                        (refreshAccountCache store)
+                        (const (pure ()))
+                    else pure ()
+                pure accounts
+        _ -> refreshAccountCache store
+
+refreshAccountCache :: Store -> IO [Aeson.Value]
+refreshAccountCache store = do
+    accounts <- accountSummariesJSON
+    fetchedAt <- getCurrentTime
+    let payload = TextEncoding.decodeUtf8 $
+            LBS.toStrict (Aeson.encode accounts)
+        entry = AccountUsageCacheEntry
+            { accountUsageCacheProvider = accountCacheProvider
+            , accountUsageCacheAccountId = accountCacheKey
+            , accountUsageCachePayload = payload
+            , accountUsageCacheFetchedAt = fetchedAt
+            , accountUsageCacheExpiresAt = addUTCTime 300 fetchedAt
+            }
+    void $ upsertAccountUsageCache (trustedPool store) entry
+    pure accounts
+
+decodeAccountCache :: Text -> Maybe [Aeson.Value]
+decodeAccountCache =
+    Aeson.decodeStrict' . TextEncoding.encodeUtf8
+
+accountCacheProvider :: Text
+accountCacheProvider = "macos-bridge"
+
+accountCacheKey :: Text
+accountCacheKey = "account-summaries-v1"
 
 loadNativeModelCatalog
     :: Store

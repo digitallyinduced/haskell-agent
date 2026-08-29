@@ -44,6 +44,7 @@ library
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
     other-modules:    Agent.CLI.AccountPicker
+                    , Agent.CLI.AccountUsageCache
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
@@ -269,6 +270,7 @@ foreign-library haskell-agent-bridge
                     , safe-exceptions
                     , stm
                     , text >= 2.0 && < 2.2
+                    , time
 
 executable eval-ghci-vs-bash
     import:           common-options

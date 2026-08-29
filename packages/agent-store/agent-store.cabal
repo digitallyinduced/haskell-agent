@@ -47,6 +47,7 @@ library
                     , Agent.Store.Postgres.Scope
                     , Agent.Store.Postgres.Session
                     , Agent.Store.Postgres.Skill
+                    , Agent.Store.Postgres.UsageCache
     other-modules:    Agent.Store.Custom.QueryResult
                     , Agent.Store.Postgres.Custom.Sql
                     , Agent.Store.Postgres.Hasql

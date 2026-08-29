@@ -8,7 +8,7 @@ import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection
     ( SelectedAccount(..),
       providerSupportsUsageAccountSelection,
-      selectProviderAccount )
+      selectProviderAccountCached )
 import Agent.CLI.Afk ()
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..),
@@ -1241,7 +1241,8 @@ runAgentInitializedWithLock
                             , account.projectAccountId
                             ))
                         (projectAccountFor provider projectSettings)
-                selectProviderAccount
+                selectProviderAccountCached
+                    (trustedPool startup.startupDatabaseStore)
                     provider
                     Nothing
                     rememberedIds >>= \case

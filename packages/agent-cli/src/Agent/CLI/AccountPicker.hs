@@ -5,8 +5,10 @@ module Agent.CLI.AccountPicker
     , accountPickerRow
     , formatLoginUsageSummary
     , loadAllAccountPickerOptions
+    , loadAllAccountPickerOptionsCached
     ) where
 
+import Agent.CLI.AccountUsageCache (refreshLoginAccountCached)
 import Agent.CLI.Login
     ( AccountBilling(..)
     , AccountUsage(..)
@@ -28,6 +30,7 @@ import Agent.Provider
     , providerSlug
     )
 import Control.Concurrent.Async (mapConcurrently)
+import Agent.Store.Postgres.Connection (StorePool)
 import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -44,9 +47,20 @@ data AccountPickerOption
     | AccountPickerConnect !Provider
 
 loadAllAccountPickerOptions :: Provider -> IO [AccountPickerOption]
-loadAllAccountPickerOptions currentProvider = do
+loadAllAccountPickerOptions = loadAllAccountPickerOptionsWith refreshLoginAccount
+
+loadAllAccountPickerOptionsCached
+    :: StorePool -> Provider -> IO [AccountPickerOption]
+loadAllAccountPickerOptionsCached pool =
+    loadAllAccountPickerOptionsWith (refreshLoginAccountCached pool)
+
+loadAllAccountPickerOptionsWith
+    :: (LoginAccount -> IO LoginAccount)
+    -> Provider
+    -> IO [AccountPickerOption]
+loadAllAccountPickerOptionsWith refresh currentProvider = do
     discovered <- discoverSelectableLoginAccounts
-    refreshed <- mapConcurrently refreshLoginAccount discovered
+    refreshed <- mapConcurrently refresh discovered
     claudeAuth <- loadClaudeCodeAuth
     now <- getCurrentTime
     let providerAccounts =
