@@ -58,7 +58,8 @@ spec = describe "systemPrompt" do
         openai `shouldSatisfy` Text.isInfixOf "update_plan"
         openai `shouldSatisfy` Text.isInfixOf "call update_plan before starting"
         openai `shouldSatisfy` Text.isInfixOf
-            "Before your final response, when update_plan is available, call it"
+            "Before your final response, when update_plan is available"
+        openai `shouldSatisfy` Text.isInfixOf "left pending/removed"
         openai `shouldSatisfy` Text.isInfixOf "web_search"
         openai `shouldSatisfy` Text.isInfixOf "enter_plan_mode"
         openai `shouldSatisfy` Text.isInfixOf "write_plan"
