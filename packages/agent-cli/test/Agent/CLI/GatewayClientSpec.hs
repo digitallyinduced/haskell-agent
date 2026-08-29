@@ -2,7 +2,18 @@ module Agent.CLI.GatewayClientSpec (spec) where
 
 import Agent.CLI.GatewayClient
 import Agent.Json.Decode qualified as Hermes
+import Control.Exception.Safe (bracket)
+import Data.Bits ((.&.))
 import Data.Text qualified as Text
+import System.Directory
+    ( createDirectory
+    , getTemporaryDirectory
+    , removeFile
+    , removePathForcibly
+    )
+import System.IO (hClose, openTempFile)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
+import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
 
 spec :: Spec
@@ -48,3 +59,31 @@ spec = describe "gateway device authorization" do
         validateBaseUrl "http://localhost.example"
             `shouldBe` Left
                 "Gateway URL must use HTTPS (HTTP is allowed only for localhost development)."
+
+    it "round-trips credentials through a mode-0600 file" $
+        withTempHome \home -> do
+            let credential =
+                    GatewayCredential
+                        "https://gateway"
+                        "wss://gateway/v1/responses"
+                        "secret"
+            saveGatewayCredentialAt home credential `shouldReturn` Right ()
+            loadGatewayCredentialAt home
+                `shouldReturn` Right (Just credential)
+            status <- getFileStatus
+                (either (error . show) id
+                    (decodeUtf (gatewayCredentialPath home)))
+            fileMode status .&. 0o777 `shouldBe` 0o600
+
+withTempHome :: (OsPath -> IO value) -> IO value
+withTempHome =
+    bracket create
+        (removePathForcibly . either (error . show) id . decodeUtf)
+  where
+    create = do
+        temporary <- getTemporaryDirectory
+        (path, handle) <- openTempFile temporary "agent-gateway-client"
+        hClose handle
+        removeFile path
+        createDirectory path
+        pure (unsafeEncodeUtf path)
