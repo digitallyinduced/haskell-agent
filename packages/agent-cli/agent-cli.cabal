@@ -182,6 +182,7 @@ library
                     , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
+                    , Agent.CLI.McpElicitation
                     , Agent.CLI.McpManager
                     , Agent.CLI.ModelConfig
                     , Agent.CLI.Models

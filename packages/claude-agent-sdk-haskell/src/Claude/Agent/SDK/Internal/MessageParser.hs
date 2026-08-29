@@ -5,14 +5,17 @@ module Claude.Agent.SDK.Internal.MessageParser
 
 import Agent.Json
     ( RawJson
+    , rawJsonBytes
     , rawJsonDecoder
     , rawJsonFromEncoding
     )
 import qualified Agent.Json.Decode as Json
 import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
 import Claude.Agent.SDK.Types
+import Control.Monad (join)
 import qualified Data.Aeson.Encoding as Aeson
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -286,22 +289,76 @@ contentBlockDecoder = Json.withType \case
                     <$> Json.liftObjectDecoder rawJsonDecoder
     _ -> fail "content block must be a JSON object"
 
+-- | Capture the complete @content@ value once, then render the retained
+-- bytes in a separate decode pass.
+--
+-- Hermes values are forward-only simdjson On-Demand iterators. Capturing the
+-- raw bytes of an array or object consumes it, so a second decoder must not
+-- run on the same value; iterating the consumed array reads past its tape and
+-- fails with an opaque SIMD error. Scalars tolerate a re-read, which is why
+-- string content never exhibited the problem.
 toolResultContentDecoder :: Json.Decoder ToolResultContent
-toolResultContentDecoder =
-    ToolResultContent <$> rawJsonDecoder <*> renderedToolResultDecoder
+toolResultContentDecoder = do
+    raw <- rawJsonDecoder
+    pure ToolResultContent
+        { raw
+        , renderedText = renderToolResultBytes (rawJsonBytes raw)
+        }
 
+renderToolResultBytes :: ByteString -> Text
+renderToolResultBytes bytes =
+    either
+        (const (displayBytes bytes))
+        id
+        (Json.decodeEither renderedToolResultDecoder bytes)
+
+-- | Render tool result content as text. Arrays join their rendered elements,
+-- objects render as structured blocks, and anything else falls back to the
+-- raw JSON. Every branch consumes the current value exactly once.
 renderedToolResultDecoder :: Json.Decoder Text
 renderedToolResultDecoder =
-    Json.withRawJsonByteString \raw ->
-        Json.withType \case
-            Json.VString -> Json.text
-            Json.VArray ->
-                Text.intercalate "\n" <$> Json.list renderedToolResultDecoder
-            Json.VObject -> Json.object do
-                textValue <- optionalText "text"
-                pure (fromMaybe (displayBytes raw) textValue)
-            Json.VNull -> pure ""
-            _ -> pure (displayBytes raw)
+    Json.withType \case
+        Json.VString -> Json.text
+        Json.VArray ->
+            Text.intercalate "\n" <$> Json.list renderedToolResultDecoder
+        Json.VObject ->
+            Json.withRawJsonByteString (strictly . renderToolResultBlock)
+        Json.VNull -> pure ""
+        _ -> Json.withRawJsonByteString (strictly . displayBytes)
+  where
+    -- The raw bytes alias the parser's input buffer; force the projection
+    -- before the decoder returns.
+    strictly rendered = rendered `seq` pure rendered
+
+-- | Render one structured tool-result block. Text blocks contribute their
+-- text, tool references and images get compact labels, and anything else
+-- falls back to its raw JSON.
+renderToolResultBlock :: ByteString -> Text
+renderToolResultBlock raw =
+    case Json.decodeEither toolResultBlockDecoder owned of
+        Right (Just rendered) -> rendered
+        _ -> displayBytes owned
+  where
+    owned = ByteString.copy raw
+
+toolResultBlockDecoder :: Json.Decoder (Maybe Text)
+toolResultBlockDecoder = Json.object do
+    blockType <- optionalText "type"
+    textValue <- optionalText "text"
+    toolName <- optionalNonEmptyText "tool_name"
+    mediaType <- join <$> optionalTyped "source" imageSourceMediaTypeDecoder
+    pure case (blockType, textValue) of
+        (_, Just text) -> Just text
+        (Just "tool_reference", Nothing) ->
+            ("Tool reference: " <>) <$> toolName
+        (Just "image", Nothing) ->
+            Just ("[image" <> maybe "" (" " <>) mediaType <> "]")
+        _ -> Nothing
+
+imageSourceMediaTypeDecoder :: Json.Decoder (Maybe Text)
+imageSourceMediaTypeDecoder = Json.withType \case
+    Json.VObject -> Json.object (optionalNonEmptyText "media_type")
+    _ -> pure Nothing
 
 usageDecoder :: Json.Decoder Usage
 usageDecoder = Json.object do

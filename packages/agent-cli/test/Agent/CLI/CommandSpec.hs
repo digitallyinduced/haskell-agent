@@ -229,7 +229,7 @@ spec = do
             parseReplLine "/MCP" `shouldBe` ReplMcp
             parseReplLine "/mcps" `shouldBe` ReplMcp
             parseReplLine "/mcp now"
-                `shouldBe` ReplCommandError "usage: /mcp"
+                `shouldBe` ReplCommandError "usage: /mcp [prompt <server> <prompt> [key=value ...]]"
 
         it "lists slash commands with /help" do
             parseReplLine "/help" `shouldBe` ReplHelp Nothing

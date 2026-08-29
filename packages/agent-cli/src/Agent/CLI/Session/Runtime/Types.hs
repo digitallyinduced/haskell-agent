@@ -109,6 +109,8 @@ data SessionRequest = SessionRequest
     , grokRuntime :: !(Maybe GrokRuntimeControl)
     , mcpRegistrations :: ![MCP.McpToolRegistration]
     , mcpWarnings :: ![Text]
+    , mcpInstructions :: ![(Text, Text)]
+    , mcpFleet :: !(Maybe MCP.McpFleet)
     , ghciEnabledRef :: !(IORef Bool)
     , bashEnabledRef :: !(IORef Bool)
     , toolEnv :: !ToolEnv

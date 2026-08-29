@@ -51,7 +51,7 @@ data Command
     deriving (Eq, Show)
 
 data McpCommand
-    = McpLogin Text
+    = McpLogin Text [Text]
     | McpLogout Text
     deriving (Eq, Show)
 
@@ -300,7 +300,14 @@ mcpParser :: Options.Parser Command
 mcpParser = Mcp <$> Options.hsubparser
     ( Options.command "login"
         (Options.info
-            (McpLogin . Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+            (McpLogin
+                <$> (Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+                <*> Options.many
+                    (Text.pack
+                        <$> Options.strOption
+                            (Options.long "scope"
+                                <> Options.metavar "SCOPE"
+                                <> Options.help "Additional OAuth scope to request (repeatable; unioned with granted scopes)")))
             (Options.progDesc "Authorize an MCP server with OAuth PKCE"))
     <> Options.command "logout"
         (Options.info
@@ -530,7 +537,7 @@ usage = unlines
     , "       agent-cli login"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
-    , "       agent-cli mcp login <url>"
+    , "       agent-cli mcp login <url> [--scope SCOPE]..."
     , "       agent-cli mcp logout <url>"
     , "       agent-cli storage <status|start|stop|migrate|doctor>"
     , ""

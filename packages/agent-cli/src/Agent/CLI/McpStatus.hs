@@ -1,5 +1,6 @@
 module Agent.CLI.McpStatus
-    ( formatMcpModelNotice
+    ( formatMcpInstructionsNotice
+    , formatMcpModelNotice
     , formatMcpModelNoticeFor
     , formatMcpProgress
     , summarizeMcpStatuses
@@ -50,6 +51,18 @@ formatMcpProgress statuses =
                 <> " connecting, "
                 <> Text.pack (show ready)
                 <> " ready"
+
+-- | Server-provided usage guidance, delivered once servers settle when the
+-- system prompt was rendered before they were ready.
+formatMcpInstructionsNotice :: [(Text, Text)] -> Text
+formatMcpInstructionsNotice [] = ""
+formatMcpInstructionsNotice instructions =
+    "\n<system-reminder>MCP server instructions:\n"
+        <> Text.intercalate "\n\n"
+            [ "## " <> name <> "\n" <> body
+            | (name, body) <- instructions
+            ]
+        <> "</system-reminder>"
 
 formatMcpModelNotice :: [MCP.McpServerStatus] -> Text
 formatMcpModelNotice =

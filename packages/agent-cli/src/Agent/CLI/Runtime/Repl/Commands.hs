@@ -22,7 +22,7 @@ import Agent.CLI.Command
                  ReplExpandedPrompt, ReplInvokeSkill, ReplSkills, ReplShowShell,
                  ReplSetShell, ReplPaste, ReplShowAttachments, ReplClearAttachments,
                  ReplRemoveAttachment,
-                 ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp,
+                 ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp, ReplMcpPrompt,
                  ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopyLast,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
@@ -218,7 +218,7 @@ import System.OsPath ()
 import System.Posix.Files ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
-import qualified Agent.MCP as MCP ()
+import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter ()
@@ -503,6 +503,22 @@ handleReplLine
                             then requestMcpRestart
                                 fullscreen persist
                             else continue
+                    ReplMcpPrompt server name arguments -> do
+                        outcome <- case env.sessionMcpFleet of
+                            Nothing -> pure (Left "no MCP servers are configured")
+                            Just fleet ->
+                                MCP.mcpFleetGetPrompt fleet server name arguments
+                        case outcome of
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr (roleError color err)
+                                continue
+                            Right result ->
+                                submitExpandedTurn
+                                    continue
+                                    color
+                                    ("/mcp prompt " <> server <> " " <> name)
+                                    (MCP.renderMcpPromptResult result)
                     action@ReplGoalStatus -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplGoalPause -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplGoalResume -> handleWorkflowAction env submitExpandedTurn color continue action

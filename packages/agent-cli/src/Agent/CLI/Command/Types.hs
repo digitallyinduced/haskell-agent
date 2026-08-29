@@ -58,6 +58,7 @@ data ReplAction
     | ReplShowAgentLimit
     | ReplSetAgentLimit Int
     | ReplMcp
+    | ReplMcpPrompt Text Text [(Text, Text)]
     | ReplGoalStatus
     | ReplGoalPause
     | ReplGoalResume
