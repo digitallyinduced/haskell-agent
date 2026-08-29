@@ -5,7 +5,10 @@ module Claude.Agent.SDK.Internal.Transport.SubprocessCLI
     ) where
 
 import Claude.Agent.SDK.Capabilities
-    ( claudeAgentSDKVersion
+    ( capabilitySupportsPermissionMode
+    , claudeAgentSDKVersion
+    , probeClaudeCapabilitiesIn
+    , validateSubprocessArguments
     )
 import Claude.Agent.SDK.Errors
     ( ClaudeSDKError(..)
@@ -174,14 +177,55 @@ connectTransport stateRef options mode model effort = do
     case existing of
         Just _ -> pure (Right ())
         Nothing -> do
-            created <- tryAny (startTransport options mode model effort)
-            case created of
-                Left exception ->
-                    pure $
-                        Left (connectionException options.executable exception)
-                Right running -> do
-                    writeIORef stateRef (Just running)
-                    pure (Right ())
+            capabilityResult <-
+                if options.validateCapabilities
+                    then validateCapabilitiesFor options mode model effort
+                    else pure (Right ())
+            case capabilityResult of
+                Left err -> pure (Left err)
+                Right () -> do
+                    created <- tryAny (startTransport options mode model effort)
+                    case created of
+                        Left exception ->
+                            pure $
+                                Left (connectionException options.executable exception)
+                        Right running -> do
+                            writeIORef stateRef (Just running)
+                            pure (Right ())
+
+validateCapabilitiesFor
+    :: ClaudeAgentOptions
+    -> TransportMode
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either ClaudeSDKError ())
+validateCapabilitiesFor options mode model effort = do
+    probed <- probeClaudeCapabilitiesIn options.executable options.cwd
+    pure case probed of
+        Left message ->
+            Left $
+                CLIConnectionError
+                    ("Claude Code capability probe failed: " <> message)
+        Right capabilities ->
+            case validateSubprocessArguments
+                    capabilities
+                    (subprocessArguments options mode model effort) of
+                Left message ->
+                    Left $
+                        CLIConnectionError
+                            ("Claude Code capability validation failed: " <> message)
+                Right ()
+                    | Just permission <- options.permissionMode
+                    , not $
+                        capabilitySupportsPermissionMode
+                            capabilities
+                            (permissionModeName permission) ->
+                        Left $
+                            CLIConnectionError
+                                ( "Claude Code does not support permission mode "
+                                    <> permissionModeName permission
+                                )
+                Right () -> Right ()
 
 startTransport
     :: ClaudeAgentOptions

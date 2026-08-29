@@ -101,6 +101,7 @@ toClaudeAgentOptions toolMode options = do
             , noChrome = True
             , environment = Just environment
             , clientApplication = Just clientApplicationName
+            , validateCapabilities = True
             , promptWriteTimeoutMicros =
                 options.promptWriteTimeoutMicros
             }

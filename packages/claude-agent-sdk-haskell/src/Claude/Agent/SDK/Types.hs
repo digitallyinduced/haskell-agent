@@ -107,6 +107,9 @@ data ClaudeAgentOptions = ClaudeAgentOptions
     , streamStartupTimeoutMicros :: !Int
     , streamInactivityTimeoutMicros :: !Int
     , turnTimeoutMicros :: !Int
+    -- | When enabled, probe the Claude executable's version/help output before
+    -- spawning a protocol session and fail closed on missing security flags.
+    , validateCapabilities :: !Bool
     -- | Maximum size of one newline-delimited structured-output record.
     --
     -- Claude Code runs its own tools and echoes every tool result on stdout
@@ -157,6 +160,7 @@ defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions
     , streamStartupTimeoutMicros = 60 * 1_000_000
     , streamInactivityTimeoutMicros = 15 * 60 * 1_000_000
     , turnTimeoutMicros = 2 * 60 * 60 * 1_000_000
+    , validateCapabilities = False
     , maxBufferSizeBytes = 1_073_741_824
     }
 
