@@ -2,7 +2,7 @@ module Agent.CLI.WorktreeSpec (spec) where
 
 import Agent.CLI.Config
 import Agent.CLI.Worktree
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
+import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import Data.List (dropWhileEnd, isInfixOf)
 import Data.Text (Text)
@@ -12,7 +12,14 @@ import qualified System.Directory as Directory
 import System.Directory.OsPath (doesDirectoryExist, doesFileExist)
 import System.Exit (ExitCode(..))
 import qualified System.FilePath as FilePath
-import System.OsPath (addTrailingPathSeparator, takeFileName, (</>))
+import System.OsPath
+    ( OsPath
+    , addTrailingPathSeparator
+    , decodeUtf
+    , takeFileName
+    , unsafeEncodeUtf
+    , (</>)
+    )
 import System.Posix.Temp (mkdtemp)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 import Test.Hspec
@@ -108,13 +115,32 @@ spec = describe "Agent.CLI.Worktree" do
 
                 git path ["rev-parse", "HEAD"] `shouldReturn` latest
                 git repo ["rev-parse", "refs/remotes/origin/master"]
-                    `shouldReturn` latest
+                    `shouldReturn` stale
                 readFile (toFilePath (path </> fromFilePath "README"))
                     `shouldReturn` "latest\n"
                 doesFileExist (path </> fromFilePath "LOCAL")
                     `shouldReturn` False
                 git path ["rev-parse", "--abbrev-ref", "HEAD"]
                     `shouldReturn` toFilePath (takeFileName path)
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "uses isolated fetch refs for concurrent worktree creation" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                latest <- git updater ["rev-parse", "HEAD"]
+                paths <-
+                    mapM expectRight
+                        =<< mapConcurrently
+                            (\_ ->
+                                createWorktreeWithFetch
+                                    True
+                                    repo
+                                    (worktreeRoot home))
+                            [1 :: Int .. 4]
+
+                mapM_ (\path ->
+                    git path ["rev-parse", "HEAD"] `shouldReturn` latest) paths
+                temporaryFetchRefs repo `shouldReturn` ""
 
         it "creates two distinct worktrees for the same repo" $
             withTempGitRepo \repo ->
@@ -198,6 +224,14 @@ configureGit repo = do
     _ <- git repo ["config", "user.name", "Test"]
     _ <- git repo ["config", "commit.gpgsign", "false"]
     pure ()
+
+temporaryFetchRefs :: OsPath -> IO String
+temporaryFetchRefs repo =
+    git repo
+        [ "for-each-ref"
+        , "--format=%(refname)"
+        , "refs/haskell-agent/worktree-fetches/"
+        ]
 
 withTempDir :: String -> (OsPath -> IO a) -> IO a
 withTempDir prefix action = do

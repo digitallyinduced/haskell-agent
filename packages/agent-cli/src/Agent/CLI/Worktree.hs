@@ -16,7 +16,7 @@ import Agent.CLI.Config
     )
 import Agent.OsPath (unsafeToFilePath)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (mask, onException, tryAny)
+import Control.Exception.Safe (finally, mask, onException, tryAny)
 import Control.Monad (void)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -25,6 +25,7 @@ import Control.Monad.Trans.Except
     , throwE
     , withExceptT
     )
+import qualified Data.ByteString as ByteString
 import Data.List (isPrefixOf)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -39,6 +40,7 @@ import System.Directory.OsPath
     , doesPathExist
     , removePathForcibly
     )
+import System.Entropy (getEntropy)
 import System.Exit (ExitCode(..))
 import System.OsPath
     ( OsPath
@@ -188,18 +190,27 @@ fetchLatestUpstream :: OsPath -> ExceptT Text IO Text
 fetchLatestUpstream repo = do
     remote <- selectUpstreamRemote repo
     remoteHead <- remoteDefaultBranch repo remote
-    let branch = Text.drop (Text.length headsPrefix) remoteHead
-        localRef = "refs/remotes/" <> remote <> "/" <> branch
-        refspec = "+" <> remoteHead <> ":" <> localRef
+    localRef <- lift freshFetchRef
+    ExceptT $
+        runExceptT (fetchIntoRef repo remote remoteHead localRef)
+            `finally` cleanupFetchRef repo localRef
+
+fetchIntoRef :: OsPath -> Text -> Text -> Text -> ExceptT Text IO Text
+fetchIntoRef repo remote remoteHead localRef = do
+    let refspec = remoteHead <> ":" <> localRef
         context action err =
             "failed to " <> action <> " from git remote "
                 <> quote remote <> ": " <> Text.strip err
+    -- An empty refmap prevents Git from also updating the configured
+    -- remote-tracking ref, which would reintroduce a shared ref-lock race.
     void $
         withExceptT (context "fetch the latest default branch") $
             ExceptT $
                 git repo
                     [ "fetch"
                     , "--no-tags"
+                    , "--no-write-fetch-head"
+                    , "--refmap="
                     , Text.unpack remote
                     , Text.unpack refspec
                     ]
@@ -212,8 +223,23 @@ fetchLatestUpstream repo = do
                     , Text.unpack (localRef <> "^{commit}")
                     ]
     pure (Text.strip commit)
+
+freshFetchRef :: IO Text
+freshFetchRef = do
+    bytes <- ByteString.unpack <$> getEntropy 16
+    pure $
+        "refs/haskell-agent/worktree-fetches/"
+            <> Text.pack (concatMap hexByte bytes)
   where
-    headsPrefix = "refs/heads/"
+    hexByte byte =
+        let encoded = showHex byte ""
+        in replicate (2 - length encoded) '0' <> encoded
+
+cleanupFetchRef :: OsPath -> Text -> IO ()
+cleanupFetchRef repo localRef =
+    void $
+        tryAny $
+            git repo ["update-ref", "-d", Text.unpack localRef]
 
 selectUpstreamRemote :: OsPath -> ExceptT Text IO Text
 selectUpstreamRemote repo = do
