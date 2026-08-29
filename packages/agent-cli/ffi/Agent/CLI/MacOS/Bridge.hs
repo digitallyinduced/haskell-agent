@@ -14,6 +14,11 @@ import Agent.Store.Postgres.Session
     ( NativeConversationSearchResult(..)
     , searchNativeConversations
     )
+import Agent.CLI.ManagedTurn
+    ( ManagedTurnMedia(..)
+    , managedTurnRequestWithImages
+    , renderManagedTurnPrompt
+    )
 import Data.Bifunctor (first)
 import Agent.Store.Postgres.Scope (Scope(..), scopeKindText)
 import Agent.Store.Postgres.Skill
@@ -21,11 +26,6 @@ import Agent.Store.Postgres.Skill
     , learnedSkillActivationText
     , learnedSkillStatusText
     , listAllLearnedSkills
-    )
-import Agent.CLI.ManagedTurn
-    ( ManagedTurnMedia(..)
-    , managedTurnRequestWithImages
-    , renderManagedTurnPrompt
     )
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
@@ -908,7 +908,9 @@ ha_engine_send_json pointer bytes (CSize length)
                 (castPtr bytes, fromIntegral length)
             case (Aeson.eitherDecodeStrict' payload
                 :: Either String BridgeRequest) of
-                Left _ -> pure False
+                Left _ -> do
+                    atomically $ writeTVar engine.engineStagedImages Map.empty
+                    pure False
                 Right request -> do
                     atomically
                         (writeTQueue
@@ -965,8 +967,10 @@ ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
                 [0 .. fromIntegral imageCount - 1]
             case (turnIDText, sequence imageResults) of
                 (Right turnIDValue, Just images) -> do
-                    atomically $ modifyTVar' engine.engineStagedImages
-                        (Map.insertWith (flip (<>)) turnIDValue images)
+                    atomically $ modifyTVar' engine.engineStagedImages $
+                        if null images
+                            then Map.delete turnIDValue
+                            else Map.insert turnIDValue images
                     pure True
                 _ -> pure False
         pure $ case accepted of
@@ -1065,6 +1069,8 @@ idleLoop callback context config store root processRuntime commands stagedImages
                 case (parseParams request
                     :: Either Text TurnStart) of
                     Left err -> do
+                        atomically $ modifyTVar' stagedImages
+                            (Map.delete request.requestId)
                         sendEvent callback context
                             (failureEvent request.requestId err)
                         continue

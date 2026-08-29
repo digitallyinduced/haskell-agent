@@ -87,6 +87,14 @@ int ha_image_attachment_stage_smoke(void) {
     }
     int32_t status = ha_engine_stage_turn_images(
         engine, turn_id, sizeof(turn_id) - 1, images, 2);
+    if (status == 0) {
+        status = ha_engine_stage_turn_images(
+            engine, turn_id, sizeof(turn_id) - 1, images, 1);
+    }
+    if (status == 0) {
+        status = ha_engine_stage_turn_images(
+            engine, turn_id, sizeof(turn_id) - 1, NULL, 0);
+    }
     ha_engine_destroy(engine);
     ha_runtime_exit();
     return status;
