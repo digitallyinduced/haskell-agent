@@ -138,8 +138,11 @@ inputOnlyTurnItems = turnInputsToItems . (.preparedTurnInputs)
 -- or failure no longer erases work that was already visible on screen.
 --
 -- Tool calls left without a result are closed with a synthetic output that
--- states the abort reason, and a user-initiated cancel appends
--- 'turnAbortedNote' so the next request explains the gap to the model.
+-- states the abort reason. After a user cancel such a call may never have
+-- started or may have been stopped mid-run, so the output says it was
+-- interrupted rather than claiming it never ran; a failure before tool
+-- execution reports that the call was not executed. A user-initiated cancel
+-- also appends 'turnAbortedNote' so the next request explains the gap.
 --
 -- While nothing committed — or when the committed state no longer extends
 -- the prepared history, as after a mid-turn automatic compaction — only the
@@ -224,16 +227,17 @@ abortedToolOutput :: TurnAbort -> ToolCall -> ResponseItem
 abortedToolOutput abort call =
     toolResultToItem ToolCallResult
         { callId = call.callId
-        , output =
-            "Tool `" <> call.name <> "` was not executed: "
-                <> abortReason abort <> "."
+        , output = case abort of
+            TurnAbortedByUser ->
+                "Tool `" <> call.name
+                    <> "` was interrupted: the user cancelled the turn. "
+                    <> "It was not run, or was stopped before finishing and "
+                    <> "may have partially executed."
+            TurnAbortedByFailure reason ->
+                "Tool `" <> call.name <> "` was not executed: "
+                    <> reason <> "."
         , callKind = call.callKind
         }
-
-abortReason :: TurnAbort -> Text
-abortReason = \case
-    TurnAbortedByUser -> "the user cancelled the turn"
-    TurnAbortedByFailure reason -> reason
 
 abortNote :: TurnAbort -> [ResponseItem] -> [ResponseItem]
 abortNote abort retained = case abort of
@@ -248,9 +252,9 @@ abortNote abort retained = case abort of
 turnAbortedNote :: Text
 turnAbortedNote =
     "<turn_aborted>\n\
-    \The user interrupted the previous turn on purpose. Tool calls without a \
-    \result were not executed; tools that did run may have completed only \
-    \part of their work. Do not resume the interrupted work unless the user \
+    \The user interrupted the previous turn on purpose. Tool calls marked as \
+    \interrupted were not run, or were stopped before finishing and may have \
+    \partially executed. Do not resume the interrupted work unless the user \
     \asks for it.\n\
     \</turn_aborted>"
 

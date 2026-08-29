@@ -255,7 +255,7 @@ spec = do
                            , toolResultToItem
                                 (ToolCallResult
                                     "c2"
-                                    "Tool `shell` was not executed: the user cancelled the turn."
+                                    "Tool `shell` was interrupted: the user cancelled the turn. It was not run, or was stopped before finishing and may have partially executed."
                                     FunctionCallKind)
                            ]
                         <> turnInputsToItems [UserMessage turnAbortedNote]
