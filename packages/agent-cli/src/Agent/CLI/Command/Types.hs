@@ -26,6 +26,7 @@ data ReplAction
     | ReplToggleFast
     | ReplShowModel
     | ReplSetModel Text
+    | ReplEnableCodeMode
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.

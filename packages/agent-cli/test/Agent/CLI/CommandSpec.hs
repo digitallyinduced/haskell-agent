@@ -85,6 +85,12 @@ spec = do
                 `shouldBe` ReplCommandError
                     "usage: /shell [ghci|bash|both|none]"
 
+        it "parses runtime code-mode enablement" do
+            parseReplLine "/codemod" `shouldBe` ReplEnableCodeMode
+            parseReplLine "/code-mode" `shouldBe` ReplEnableCodeMode
+            parseReplLine "/codemod now"
+                `shouldBe` ReplCommandError "usage: /codemod"
+
         it "rejects extra args on /always-approve" do
             parseReplLine "/always-approve now"
                 `shouldBe` ReplCommandError "usage: /always-approve"

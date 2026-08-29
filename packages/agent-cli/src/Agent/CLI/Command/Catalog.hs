@@ -45,6 +45,7 @@ slashCommands =
     , grokToolCmd "workflow" "deep-research" [] "/deep-research <query>" "Run bounded background research, cross-check evidence, and write a cited report" True
     , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
     , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
+    , cmd "codemod" ["code-mode"] "/codemod" "Enable JavaScript code mode for this session" False
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     , cmd "quit" ["exit"] "/quit" "Exit the current session" False
     ]

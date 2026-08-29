@@ -37,7 +37,9 @@ import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ( catalogContextWindowForTransport )
 import Agent.CLI.Models ()
 import Agent.CLI.Options
-    ( isOneShot, CliOptions(optShowRawReasoning, optCompactThreshold) )
+    ( isOneShot
+    , CliOptions(optCodeMode, optShowRawReasoning, optCompactThreshold)
+    )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
 import Agent.CLI.Project ()
@@ -319,9 +321,10 @@ runAgentSession
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
         mcpInstructions <- MCP.mcpFleetInstructions mcpFleet
-        -- Catalog models: per-model instructions template and, when the
-        -- catalog selects code_mode_only, the exec/wait tool surface. The
-        -- offline lookup never blocks startup on the network.
+        -- Catalog models provide the per-model instructions template. Code
+        -- mode is opt-in even when the catalog selects code_mode_only; normal
+        -- provider tool calling remains the default. The offline lookup never
+        -- blocks startup on the network.
         codexModelInfo <-
             loadCodexCatalogModelInfo
                 stateDirectory
@@ -329,14 +332,15 @@ runAgentSession
                 dialect
                 (Just loaded.loadedTokenProvider)
                 model
-        codeModeRuntime <-
-            codeModeSessionRuntimeFor codexModelInfo tools >>= \case
+        codeModeRuntime <- if options.optCodeMode
+            then codeModeSessionRuntimeFor codexModelInfo tools >>= \case
                 Left err -> do
                     reportStartupWarning startup
                         ("code mode unavailable; falling back to direct tools: "
                             <> err)
                     pure Nothing
                 Right runtime -> pure runtime
+            else pure Nothing
         writeIORef codeModeCloseRef
             (maybe (pure ()) (.codeModeClose) codeModeRuntime)
         let catalogSession = codexModelInfo <&> \info ->

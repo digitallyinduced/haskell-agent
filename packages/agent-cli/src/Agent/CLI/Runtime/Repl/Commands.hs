@@ -27,7 +27,8 @@ import Agent.CLI.Command
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopyLast,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
-                 ReplSetModel, ReplToggleFast, ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
+                 ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
+                 ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplBtw, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplLogin, ReplUsage, ReplReloadAuth,
@@ -100,7 +101,8 @@ import Agent.CLI.Runtime.Repl.Selection
 import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
 import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunRestart, RunSwitchProvider, RunReload, RunQuit) )
+    ( RunResult(RunEnableCodeMode, RunRestart, RunSwitchProvider, RunReload,
+                RunQuit) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReplace),
@@ -572,6 +574,8 @@ handleReplLine
                     action@ReplToggleFast -> handleSelectionAction env continue action
                     action@ReplShowModel -> handleSelectionAction env continue action
                     action@ReplSetModel{} -> handleSelectionAction env continue action
+                    ReplEnableCodeMode ->
+                        requestCodeModeRestart fullscreen persist
                     ReplToggleAlwaysApprove
                         | provider == ClaudeCodeProvider -> do
                             let message =
@@ -860,6 +864,28 @@ requestMcpRestart fullscreen persist = do
             handle <- ensureSession slotRef
             report "restarting MCP servers…"
             pure (RunRestart handle.sessionMeta.metaId)
+
+requestCodeModeRestart
+    :: Maybe FullscreenRuntime
+    -> Persistence
+    -> IO RunResult
+requestCodeModeRestart fullscreen persist = do
+    color <- resolveColor stderr
+    let report message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+    case persist of
+        PersistenceDisabled -> do
+            report "code mode requires a persisted REPL session"
+            pure RunQuit
+        PersistenceEnabled slotRef -> do
+            handle <- ensureSession slotRef
+            report "enabling code mode…"
+            pure (RunEnableCodeMode handle.sessionMeta.metaId)
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
 enterPlanFromSlash env@SessionEnv
