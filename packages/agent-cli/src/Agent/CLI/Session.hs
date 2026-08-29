@@ -9,6 +9,9 @@ module Agent.CLI.Session
     , SessionResumeStats(..)
     , SessionActivity(..)
     , SessionTransfer(..)
+    , SessionTransferEnvelope(..)
+    , sessionTransferFormatVersion
+    , validateSessionTransferEnvelope
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -39,8 +42,16 @@ module Agent.CLI.Session
     , loadSessionTurnsBefore
     , loadSessionHistoryTurnsBefore
     , loadSessionTurnsAfter
+    , loadSessionHistoryTurnsRange
+    , loadSessionHistoryTurnsRangeBounded
+    , loadSessionHistoryTurnsAround
+    , loadSessionHistorySnapshot
     , loadSessionResumeStats
     , importSessionTransfer
+    , importSessionTransferRemapped
+    , exportSessionTransfer
+    , streamSessionTransfer
+    , forkSessionAtTurn
     , loadSessionHandle
     , isValidSessionId
     , listSessions
@@ -113,11 +124,12 @@ import Control.Monad.Trans.Except
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
 import Data.Bits (xor)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -193,6 +205,77 @@ instance ToJSON SessionTransfer where
 instance FromJSON SessionTransfer where
     parseJSON = withObject "SessionTransfer" \o ->
         SessionTransfer <$> o .: "meta" <*> o .: "turns"
+
+-- | Stable interchange envelope for full-fidelity session transfers.
+--
+-- The explicit format marker prevents an arbitrary JSON object from being
+-- accepted as a session. Version changes are intentionally opt-in so importers
+-- cannot silently reinterpret provider-owned response items.
+data SessionTransferEnvelope = SessionTransferEnvelope
+    { transferFormat :: !Text
+    , transferFormatVersion :: !Int
+    , transferSession :: !SessionTransfer
+    } deriving (Eq, Show)
+
+sessionTransferFormatVersion :: Int
+sessionTransferFormatVersion = 1
+
+sessionTransferFormatName :: Text
+sessionTransferFormatName = "haskell-agent.session-transfer"
+
+instance ToJSON SessionTransferEnvelope where
+    toJSON envelope = object
+        [ "format" .= envelope.transferFormat
+        , "version" .= envelope.transferFormatVersion
+        , "session" .= envelope.transferSession
+        ]
+
+instance FromJSON SessionTransferEnvelope where
+    parseJSON = withObject "SessionTransferEnvelope" \o -> do
+        envelope <- SessionTransferEnvelope
+            <$> o .: "format"
+            <*> o .: "version"
+            <*> o .: "session"
+        either (fail . Text.unpack) pure
+            (validateSessionTransferEnvelope envelope)
+
+validateSessionTransferEnvelope
+    :: SessionTransferEnvelope
+    -> Either Text SessionTransferEnvelope
+validateSessionTransferEnvelope envelope
+    | envelope.transferFormat /= sessionTransferFormatName =
+        Left "unsupported session transfer format"
+    | envelope.transferFormatVersion /= sessionTransferFormatVersion =
+        Left
+            ("unsupported session transfer version: "
+                <> Text.pack (show envelope.transferFormatVersion))
+    | not (isValidSessionId meta.metaId) =
+        Left "invalid transferred session id"
+    | meta.metaVersion <= 0 =
+        Left "invalid transferred session schema version"
+    | length turns > maximumTransferTurns =
+        Left "session transfer contains too many turns"
+    | any invalidTurn turns =
+        Left "session transfer contains an oversized turn"
+    | otherwise = Right envelope
+  where
+    transfer = envelope.transferSession
+    meta = transfer.transferMeta
+    turns = transfer.transferTurns
+    invalidTurn turn =
+        Text.length turn.turnUserText > maximumTransferTextLength
+            || maybe False
+                ((> maximumTransferTextLength) . Text.length)
+                turn.turnAssistantText
+            || maybe False
+                ((> maximumTransferTextLength) . Text.length)
+                turn.turnError
+
+maximumTransferTurns :: Int
+maximumTransferTurns = 100000
+
+maximumTransferTextLength :: Int
+maximumTransferTextLength = 16 * 1024 * 1024
 
 -- | Durable provenance for subagent transcripts written before child target
 -- metadata was persisted. Keeping this target separate from the mutable root
@@ -896,6 +979,76 @@ loadSessionTurnsAfter pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
         (\pool' key -> Store.loadSessionTurnsAfter pool' key cursor limit)
 
+loadSessionHistoryTurnsRange
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsRange pool root sessionId start limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key ->
+            Store.loadSessionHistoryTurnsRange pool' key start (boundedLimit limit))
+  where
+    boundedLimit = min 1000 . max 1
+
+loadSessionHistoryTurnsRangeBounded
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsRangeBounded
+        pool root sessionId start endExclusive limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key ->
+            Store.loadSessionHistoryTurnsRangeBounded
+                pool' key start endExclusive (min 1000 (max 1 limit)))
+
+-- | Return a bounded full-history window centered on a durable turn index.
+-- The requested turn is included when it exists. Near either edge the result
+-- is intentionally not rebalanced; callers can use the page flags to continue
+-- in either direction without an eager full-session load.
+loadSessionHistoryTurnsAround
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsAround pool root sessionId center radius
+    | center < 0 = pure (Left "turn index must be non-negative")
+    | radius < 0 = pure (Left "turn radius must be non-negative")
+    | otherwise =
+        loadSessionHistoryTurnsRange
+            pool
+            root
+            sessionId
+            (max 0 (center - fromIntegral boundedRadius))
+            (boundedRadius * 2 + 1)
+  where
+    boundedRadius = min 500 radius
+
+loadSessionHistorySnapshot
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text (SessionMeta, Int64, Int64))
+loadSessionHistorySnapshot pool root sessionId = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    stored <- loadWithLegacyImport
+        root pool sessionId Store.loadSessionHistorySnapshot
+    meta <- except (fromStoredMetadata stored.sessionSnapshotMetadata)
+    validateSessionMeta sessionId meta
+    pure
+        ( meta
+        , stored.sessionSnapshotStart
+        , stored.sessionSnapshotTotal
+        )
+
 loadSessionResumeStats
     :: StorePool
     -> OsPath
@@ -1047,6 +1200,177 @@ importSessionTransfer pool root cwd transfer = runExceptT do
         _ <- tryIO (removePathForcibly dir)
         _ <- removeSessionTemp root sessionId
         pure ()
+
+-- | Import a validated transfer as a new session. The source id is never
+-- reused, which makes importing the same file safe and preserves the source
+-- transcript as an immutable object.
+importSessionTransferRemapped
+    :: StorePool
+    -> OsPath
+    -> Maybe OsPath
+    -> SessionTransferEnvelope
+    -> IO (Either Text Text)
+importSessionTransferRemapped pool root cwd rawEnvelope =
+    case validateSessionTransferEnvelope rawEnvelope of
+        Left err -> pure (Left err)
+        Right envelope -> do
+            (sessionId, _) <- allocateSessionTemp root
+            now <- normalizePostgresTimestamp <$> getCurrentTime
+            let transfer = envelope.transferSession
+                sourceMeta = transfer.transferMeta
+                meta = sourceMeta
+                    { metaId = sessionId
+                    , metaCreatedAt = now
+                    , metaUpdatedAt = now
+                    }
+            importSessionTransfer pool root cwd
+                transfer { transferMeta = meta }
+
+exportSessionTransfer
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text SessionTransferEnvelope)
+exportSessionTransfer pool root sessionId =
+    loadSession pool root sessionId <&> \result -> do
+        (meta, turns) <- result
+        validateSessionTransferEnvelope SessionTransferEnvelope
+            { transferFormat = sessionTransferFormatName
+            , transferFormatVersion = sessionTransferFormatVersion
+            , transferSession = SessionTransfer meta turns
+            }
+
+-- | Stream a transfer document in bounded turn pages. Callback bytes are
+-- valid only for the duration of the callback. The export captures the turn
+-- count from its first page and ignores later appends, yielding an immutable
+-- prefix without hydrating the full transcript.
+streamSessionTransfer
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> (BS.ByteString -> IO ())
+    -> IO (Either Text ())
+streamSessionTransfer pool root sessionId emit = runExceptT do
+    (meta, snapshotStart, snapshotTotal) <-
+        lift (loadSessionHistorySnapshot pool root sessionId) >>= except
+    let snapshotEnd = snapshotStart + max 0 snapshotTotal
+    lift $ emitLazy
+        ("{\"format\":\"haskell-agent.session-transfer\","
+            <> "\"version\":1,\"session\":{\"meta\":"
+            <> Aeson.encode meta
+            <> ",\"turns\":[")
+    firstPage <- lift
+        (loadSessionHistoryTurnsRangeBounded
+            pool root sessionId snapshotStart snapshotEnd 256)
+        >>= except
+    let total = max 0 snapshotTotal
+    emitted <- lift (emitPage True total 0 firstPage)
+    when (emitted < total) $
+        streamRest snapshotEnd total emitted firstPage
+    lift (emitLazy "]}}")
+  where
+    emitLazy = mapM_ emit . LBS.toChunks
+
+    emitPage first total emitted page = do
+        let remaining = max 0 (total - emitted)
+            selected = take (fromIntegral remaining) page.pageTurns
+        _ <- foldl'
+            (\action (_, turn) -> do
+                isFirst <- action
+                unless isFirst (emit ",")
+                emitLazy (Aeson.encode turn)
+                pure False)
+            (pure first)
+            selected
+        pure (emitted + fromIntegral (length selected))
+
+    streamRest snapshotEnd total emitted previous =
+        case reverse previous.pageTurns of
+            [] -> throwE "session export paging made no progress"
+            (lastIndex, _) : _ -> do
+                page <- lift
+                    (loadSessionHistoryTurnsRangeBounded
+                        pool root sessionId (lastIndex + 1) snapshotEnd 256)
+                    >>= except
+                next <- lift (emitPage False total emitted page)
+                when (next <= emitted) $
+                    throwE "session export paging made no progress"
+                when (next < total) (streamRest snapshotEnd total next page)
+
+-- | Fork a source session through an inclusive durable turn index. The source
+-- remains untouched. Transcript effects are copied verbatim, while derived
+-- usage and continuation metadata are recomputed from the selected prefix.
+forkSessionAtTurn
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> IO (Either Text Text)
+forkSessionAtTurn pool root sourceId throughIndex = runExceptT do
+    when (throughIndex < 0) (throwE "turn index must be non-negative")
+    (sourceMeta, snapshotStart, snapshotTotal) <-
+        lift (loadSessionHistorySnapshot pool root sourceId) >>= except
+    let snapshotEnd = snapshotStart + max 0 snapshotTotal
+    when
+        (throughIndex < snapshotStart || throughIndex >= snapshotEnd) $
+        throwE "turn index is outside the session transcript"
+    turns <- loadPrefix snapshotStart (throughIndex + 1) id
+    let
+        usage = foldl' addUsage
+            (TokenUsage
+                { inputTokens = 0
+                , outputTokens = 0
+                , cachedTokens = 0
+                })
+            (mapMaybe (.turnUsage) turns)
+        meta = sourceMeta
+            { metaLastResponseId = continuationResponseId turns
+            , metaInputTokens = usage.inputTokens
+            , metaOutputTokens = usage.outputTokens
+            , metaCachedTokens = usage.cachedTokens
+            , metaLastRecap = Nothing
+            , metaLastTurnSummary = Nothing
+            , metaLastRecapMainTurns = 0
+            , metaTitleUserTurns =
+                length (filter (not . Text.null . Text.strip . (.turnUserText)) turns)
+            }
+        envelope = SessionTransferEnvelope
+            { transferFormat = sessionTransferFormatName
+            , transferFormatVersion = sessionTransferFormatVersion
+            , transferSession = SessionTransfer meta turns
+            }
+    lift (importSessionTransferRemapped pool root Nothing envelope) >>= except
+  where
+    loadPrefix cursor endExclusive append
+        | cursor >= endExclusive = pure (append [])
+        | otherwise = do
+            page <- lift
+                (loadSessionHistoryTurnsRangeBounded
+                    pool root sourceId cursor endExclusive 256)
+                >>= except
+            case page.pageTurns of
+                [] -> throwE "session fork paging made no progress"
+                values -> do
+                    let lastIndex = fst (last values)
+                        pageTurns = map snd values
+                    loadPrefix
+                        (lastIndex + 1)
+                        endExclusive
+                        (append . (pageTurns <>))
+
+    addUsage left right = TokenUsage
+        { inputTokens = left.inputTokens + right.inputTokens
+        , outputTokens = left.outputTokens + right.outputTokens
+        , cachedTokens = left.cachedTokens + right.cachedTokens
+        }
+
+    continuationResponseId = foldl' step Nothing
+    step previous turn =
+        let base = case turn.turnEffect of
+                TranscriptAppend -> previous
+                TranscriptReplace -> Nothing
+                TranscriptReset -> Nothing
+        in turn.turnResponseId <|> base
 
 deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
 deleteSession pool root sessionId = runExceptT do
