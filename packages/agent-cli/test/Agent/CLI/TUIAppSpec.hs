@@ -81,6 +81,7 @@ import Brick
     , VScrollbarRenderer(..)
     , Widget
     , customMain
+    , halt
     , hLimit
     , renderWidget
     , txt
@@ -773,6 +774,11 @@ spec = do
                 (replacementLeavesDurableTailVisible ReplaceWhileHidden)
                 `shouldReturn` Just True
 
+        it "shows the durable tail without relying on a focus-gained event" do
+            timeout 2_000_000
+                (replacementLeavesDurableTailVisible ReplaceWhileHiddenNoFocus)
+                `shouldReturn` Just True
+
     describe "motion demand" do
         it "distinguishes foreground, waiting, background, and static modes" do
             let idle =
@@ -1100,10 +1106,12 @@ spec = do
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
     | FullscreenScriptVty !V.Event
+    | FullscreenScriptHalt
 
 data ReplacementScenario
     = ReplaceWhileFocused
     | ReplaceWhileHidden
+    | ReplaceWhileHiddenNoFocus
 
 replacementLeavesDurableTailVisible :: ReplacementScenario -> IO Bool
 replacementLeavesDurableTailVisible scenario = do
@@ -1155,6 +1163,8 @@ replacementLeavesDurableTailVisible scenario = do
                     fullscreenApp.appHandleEvent (AppEvent event)
                 AppEvent (FullscreenScriptVty event) ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
+                AppEvent FullscreenScriptHalt ->
+                    halt
                 VtyEvent event ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
                 MouseDown name button modifiers location ->
@@ -1193,6 +1203,14 @@ replacementLeavesDurableTailVisible scenario = do
                 , FullscreenScriptApp AppConversationReflow
                 , FullscreenScriptVty V.EvGainedFocus
                 , FullscreenScriptApp AppStop
+                ]
+            ReplaceWhileHiddenNoFocus ->
+                [ FullscreenScriptVty V.EvLostFocus
+                , commit
+                -- Some terminal tabs omit focus gain; the durable replacement
+                -- must still reach the terminal's backing screen.
+                , FullscreenScriptApp AppConversationReflow
+                , FullscreenScriptHalt
                 ]
     mapM_ (writeBChan events) script
 

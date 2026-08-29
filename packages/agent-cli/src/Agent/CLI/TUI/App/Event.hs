@@ -218,6 +218,7 @@ handleEvent event = do
     stateAfterMotionSync <- get
     when
         ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && not (eventRequiresUnfocusedRedraw event)
             && not
                 (completionRequiresRedraw
                     stateBeforeEvent.appUi
@@ -227,6 +228,12 @@ handleEvent event = do
         ) $
         continueWithoutRedraw
   where
+    -- Durable history replacement must reach the terminal backing screen even
+    -- if a terminal tab omits focus gain.
+    eventRequiresUnfocusedRedraw = \case
+        AppEvent (AppHistoryCommitted _ _ _) -> True
+        _ -> False
+
     isMotionTick = \case
         AppEvent AppMotionTick -> True
         _ -> False
