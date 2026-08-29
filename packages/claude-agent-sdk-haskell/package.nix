@@ -13,8 +13,8 @@ mkDerivation {
     safe-exceptions text unix uuid-types
   ];
   testHaskellDepends = [
-    agent-json base bytestring containers directory filepath hspec
-    safe-exceptions text unix
+    aeson agent-json base bytestring containers directory filepath
+    hspec safe-exceptions text unix
   ];
   benchmarkHaskellDepends = [ base bytestring safe-exceptions ];
   description = "Haskell SDK for the Claude Agent SDK stream protocol";

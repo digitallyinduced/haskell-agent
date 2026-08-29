@@ -2,6 +2,7 @@ module Main (main) where
 
 import qualified Claude.Agent.SDK.ClientSpec as ClientSpec
 import qualified Claude.Agent.SDK.CapabilitiesSpec as CapabilitiesSpec
+import qualified Claude.Agent.SDK.ControlSpec as ControlSpec
 import qualified Claude.Agent.SDK.Internal.Transport.OutputBufferSpec as OutputBufferSpec
 import qualified Claude.Agent.SDK.MessageParserSpec as MessageParserSpec
 import qualified Claude.Agent.SDK.QuerySpec as QuerySpec
@@ -21,6 +22,7 @@ main =
             hspec do
                 ClientSpec.spec
                 CapabilitiesSpec.spec
+                ControlSpec.spec
                 OutputBufferSpec.spec
                 MessageParserSpec.spec
                 QuerySpec.spec

@@ -19,11 +19,11 @@ session persistence. This package owns the typed Haskell API, process
 lifecycle, newline-delimited stream JSON transport, message parsing, and
 session-safe response assembly.
 
-This initial release implements the query, persistent-client, typed-message,
-error, and replaceable-transport subset needed by `haskell-agent`. It is not
-yet a drop-in replacement for every Python or TypeScript SDK feature:
-interactive control/permission callbacks, hooks, and the complete background
-task lifecycle are intentionally not implemented.
+This release implements queries, persistent clients, typed messages, errors,
+replaceable transports, and the bidirectional control-protocol foundation
+needed by `haskell-agent`. Permission and in-process MCP callbacks are
+supported. Hooks and the complete background-task lifecycle are not yet a
+drop-in replacement for every Python or TypeScript SDK feature.
 
 ## Requirements
 
@@ -106,10 +106,38 @@ The callback passed to `withClaudeSDKTurn` returns a value together with an
 and invalidates its continuation. This prevents the next turn from resuming
 Claude-side context that the embedding application rolled back.
 
-Call `abort` to force-close the active process and start the next turn on a
-fresh session. The official SDK's in-band `interrupt` control operation is not
-yet implemented. If the transport cannot be closed, `abort` propagates that
-failure and keeps the client fenced so a later close can retry.
+Legacy clients use `abort` to force-close the active process and start the next
+turn on a fresh session. Handler-aware clients first use the in-band
+`interrupt` control operation, preserving the process and Claude conversation
+when it succeeds, and fall back to force-close when it fails.
+
+## Control handlers
+
+Use `withClaudeSDKClientWithHandlers` to enable the SDK initialize handshake,
+permission callbacks, in-process MCP messages, and outbound controls:
+
+```haskell
+let handlers =
+        defaultClaudeAgentHandlers
+            { canUseTool = Just \request ->
+                if request.toolName == "Read"
+                    then pure (ToolPermissionAllow Nothing [])
+                    else pure (ToolPermissionDeny "Denied by host policy" False)
+            }
+
+withClaudeSDKClientWithHandlers options handlers \client ->
+    withClaudeSDKTurn client (pure True) Nothing Nothing Nothing \turn -> do
+        -- `interrupt`, `setModel`, `setPermissionMode`, `getContextUsage`,
+        -- `stopTask`, and raw `sendControlRequest` are available here.
+        result <- queryTurn turn "Inspect the project." print
+        pure ((, pure ()) <$> result)
+```
+
+Handler-aware clients have one supervised stdout reader. It demultiplexes
+ordinary messages, concurrent control requests, matching control responses,
+and cancellation frames. Writes are serialized, missing handlers fail closed,
+and initialization/control/shutdown waits are bounded by
+`ClaudeAgentHandlers`.
 
 ## Response semantics
 

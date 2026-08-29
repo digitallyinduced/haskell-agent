@@ -3,7 +3,9 @@ module Claude.Agent.SDK.Client
     ( ClaudeSDKClient
     , ClaudeSDKTurn
     , withClaudeSDKClient
+    , withClaudeSDKClientWithHandlers
     , withClaudeSDKClientWithTransport
+    , withClaudeSDKClientWithTransportAndHandlers
     , withClaudeSDKClientWithoutTools
     , withClaudeSDKTurn
     , sendQuery
@@ -19,14 +21,33 @@ module Claude.Agent.SDK.Client
     , turnStreamStartupTimeoutMicros
     , turnStreamInactivityTimeoutMicros
     , turnTimeoutMicros
+    , initializationResult
+    , sendControlRequest
+    , interrupt
+    , setPermissionMode
+    , setModel
+    , getContextUsage
+    , stopTask
     , abort
     ) where
 
+import Claude.Agent.SDK.Control
+    ( ClaudeAgentHandlers(..)
+    )
 import Claude.Agent.SDK.Errors
     ( ClaudeSDKError(..)
     )
 import Claude.Agent.SDK.Internal.MessageParser
     ( decodeMessageLine
+    )
+import Claude.Agent.SDK.Internal.ControlRuntime
+    ( ControlRuntime
+    , runtimeInitializationResult
+    , runtimeReadMessage
+    , runtimeSendRequest
+    , runtimeWrite
+    , startControlRuntime
+    , stopControlRuntime
     )
 import Claude.Agent.SDK.Internal.Client.Usage
     ( UsageAccounting(..)
@@ -54,6 +75,12 @@ import Claude.Agent.SDK.Types
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async
+    ( Async
+    , asyncWithUnmask
+    , cancel
+    , poll
+    )
 import Control.Concurrent.MVar
     ( MVar
     , newMVar
@@ -94,6 +121,7 @@ import System.Exit (ExitCode)
 data ClaudeSDKClient = ClaudeSDKClient
     { clientOptions :: !ClaudeAgentOptions
     , clientTransportFactory :: !TransportFactory
+    , clientHandlers :: !(Maybe ClaudeAgentHandlers)
     , clientInitialPrevious :: !(Maybe Text)
     , clientState :: !(IORef ClientState)
     , clientInterruptEpoch :: !(IORef Int)
@@ -114,6 +142,8 @@ data RunningClient = RunningClient
     , runningModel :: !(Maybe Text)
     , runningEffort :: !(Maybe Text)
     , runningTransport :: !Transport
+    , runningControlRuntime :: !(Maybe ControlRuntime)
+    , runningShutdownTimeoutMicros :: !Int
     , runningUsageAccounting :: !(IORef UsageAccounting)
     , runningClosed :: !(IORef Bool)
     , runningCloseLock :: !(MVar ())
@@ -136,6 +166,20 @@ withClaudeSDKClient options =
         options
         (subprocessTransportFactory options)
 
+-- | Allocate a client with bidirectional SDK control handlers. Unlike the
+-- legacy constructor, this starts one supervised stdout reader and completes
+-- the SDK @initialize@ handshake before the first turn is returned.
+withClaudeSDKClientWithHandlers
+    :: ClaudeAgentOptions
+    -> ClaudeAgentHandlers
+    -> (ClaudeSDKClient -> IO a)
+    -> IO a
+withClaudeSDKClientWithHandlers options handlers =
+    withClaudeSDKClientWithTransportAndHandlers
+        options
+        (subprocessTransportFactory options)
+        handlers
+
 -- | Allocate a client backed by a caller-supplied transport factory. The
 -- factory is invoked for every fresh start or resume and the SDK owns the
 -- complete lifecycle of each returned transport.
@@ -145,6 +189,25 @@ withClaudeSDKClientWithTransport
     -> (ClaudeSDKClient -> IO a)
     -> IO a
 withClaudeSDKClientWithTransport options transportFactory =
+    withClient options transportFactory Nothing
+
+-- | Handler-aware variant of 'withClaudeSDKClientWithTransport'.
+withClaudeSDKClientWithTransportAndHandlers
+    :: ClaudeAgentOptions
+    -> TransportFactory
+    -> ClaudeAgentHandlers
+    -> (ClaudeSDKClient -> IO a)
+    -> IO a
+withClaudeSDKClientWithTransportAndHandlers options transportFactory handlers =
+    withClient options transportFactory (Just handlers)
+
+withClient
+    :: ClaudeAgentOptions
+    -> TransportFactory
+    -> Maybe ClaudeAgentHandlers
+    -> (ClaudeSDKClient -> IO a)
+    -> IO a
+withClient options transportFactory handlers =
     bracket acquire release
   where
     acquire = do
@@ -155,6 +218,7 @@ withClaudeSDKClientWithTransport options transportFactory =
         pure ClaudeSDKClient
             { clientOptions = options
             , clientTransportFactory = transportFactory
+            , clientHandlers = handlers
             , clientInitialPrevious = options.resume
             , clientState = state
             , clientInterruptEpoch = interruptEpoch
@@ -275,7 +339,7 @@ sendQueryContent
     -> IO (Either ClaudeSDKError ())
 sendQueryContent turn content = do
     sessionId <- fromMaybe "" <$> turnSessionId turn
-    turn.turnRunning.runningTransport.transportWrite
+    writeRunningClient turn.turnRunning
         ( LazyByteString.toStrict
             ( Aeson.encode
                 (Aeson.object
@@ -319,21 +383,29 @@ receiveMessage
     :: ClaudeSDKTurn
     -> IO (Either ClaudeSDKError (Maybe Message))
 receiveMessage turn =
-    turn.turnRunning.runningTransport.transportRead >>= \case
-        Left err -> pure (Left err)
-        Right Nothing -> pure (Right Nothing)
-        Right (Just bytes)
-            | ByteString.null (trimAsciiWhitespace bytes) ->
-                receiveMessage turn
-            | otherwise ->
-                case decodeMessageLine bytes of
-                    Left CLIJSONDecodeError{}
-                        | not (looksLikeJsonObject bytes) ->
-                            -- Claude Code can occasionally write diagnostic
-                            -- lines such as [SandboxDebug] to stdout.
-                            receiveMessage turn
-                    parsed ->
-                        pure (Just <$> parsed)
+    case turn.turnRunning.runningControlRuntime of
+        Just runtime ->
+            runtimeReadMessage runtime
+        Nothing ->
+            receiveLegacy
+  where
+    receiveLegacy =
+        turn.turnRunning.runningTransport.transportRead >>= \case
+            Left err -> pure (Left err)
+            Right Nothing -> pure (Right Nothing)
+            Right (Just bytes)
+                | ByteString.null (trimAsciiWhitespace bytes) ->
+                    receiveLegacy
+                | otherwise ->
+                    case decodeMessageLine bytes of
+                        Left CLIJSONDecodeError{}
+                            | not (looksLikeJsonObject bytes) ->
+                                -- Claude Code can occasionally write
+                                -- diagnostic lines such as [SandboxDebug] to
+                                -- stdout.
+                                receiveLegacy
+                        parsed ->
+                            pure (Just <$> parsed)
 
 -- | Convert a process-cumulative @modelUsage@ snapshot into a per-turn delta.
 -- When the snapshot is absent, the per-result fallback is remembered as debt
@@ -448,9 +520,85 @@ turnTimeoutMicros :: ClaudeSDKTurn -> Int
 turnTimeoutMicros turn =
     turn.turnOptions.turnTimeoutMicros
 
--- | Force-close the active process and start the next turn on a fresh
--- conversation. This is intentionally stronger than the official SDK's
--- in-band interrupt control request, which is not implemented yet.
+-- | Result object returned by the SDK initialize handshake. Legacy clients
+-- that do not enable control handlers return 'Nothing'.
+initializationResult :: ClaudeSDKTurn -> Maybe Aeson.Value
+initializationResult turn =
+    runtimeInitializationResult
+        <$> turn.turnRunning.runningControlRuntime
+
+-- | Send one raw forward-compatible control request payload.
+sendControlRequest
+    :: ClaudeSDKTurn
+    -> Aeson.Value
+    -> IO (Either ClaudeSDKError Aeson.Value)
+sendControlRequest turn request =
+    case turn.turnRunning.runningControlRuntime of
+        Nothing ->
+            pure $
+                Left $
+                    CLIProtocolError
+                        "Control requests require a handler-aware client."
+        Just runtime ->
+            runtimeSendRequest runtime request
+
+interrupt
+    :: ClaudeSDKTurn
+    -> IO (Either ClaudeSDKError ())
+interrupt turn =
+    fmap (fmap (const ())) $
+        sendControlRequest turn $
+            Aeson.object ["subtype" Aeson..= ("interrupt" :: Text)]
+
+setPermissionMode
+    :: ClaudeSDKTurn
+    -> Text
+    -> IO (Either ClaudeSDKError ())
+setPermissionMode turn mode =
+    fmap (fmap (const ())) $
+        sendControlRequest turn $
+            Aeson.object
+                [ "subtype" Aeson..= ("set_permission_mode" :: Text)
+                , "mode" Aeson..= mode
+                ]
+
+setModel
+    :: ClaudeSDKTurn
+    -> Maybe Text
+    -> IO (Either ClaudeSDKError ())
+setModel turn selected =
+    fmap (fmap (const ())) $
+        sendControlRequest turn $
+            Aeson.object
+                [ "subtype" Aeson..= ("set_model" :: Text)
+                , "model" Aeson..= selected
+                ]
+
+getContextUsage
+    :: ClaudeSDKTurn
+    -> IO (Either ClaudeSDKError Aeson.Value)
+getContextUsage turn =
+    sendControlRequest turn $
+        Aeson.object
+            [ "subtype" Aeson..= ("get_context_usage" :: Text)
+            ]
+
+stopTask
+    :: ClaudeSDKTurn
+    -> Text
+    -> IO (Either ClaudeSDKError ())
+stopTask turn taskId =
+    fmap (fmap (const ())) $
+        sendControlRequest turn $
+            Aeson.object
+                [ "subtype" Aeson..= ("stop_task" :: Text)
+                , "task_id" Aeson..= taskId
+                ]
+
+-- | Interrupt the active turn. Handler-aware clients first use the in-band
+-- control request, preserving the process and conversation when Claude Code
+-- acknowledges it. Legacy clients and failed control requests fall back to a
+-- force-close and fresh session.
 abort :: ClaudeSDKClient -> IO ()
 abort client =
     mask \restore -> do
@@ -468,9 +616,41 @@ abort client =
         case running of
             Nothing ->
                 pure ()
+            Just active
+                | Nothing <- active.runningControlRuntime -> do
+                    restore (forceCloseRunningClient active)
+                    clearRunningClient client active
             Just active -> do
-                restore (forceCloseRunningClient active)
-                clearRunningClient client active
+                interrupted <-
+                    case active.runningControlRuntime of
+                        Nothing -> pure False
+                        Just runtime ->
+                            either (const False) (const True)
+                                <$> restore
+                                    (runtimeSendRequest runtime
+                                        (Aeson.object
+                                            [ "subtype" Aeson..=
+                                                ("interrupt" :: Text)
+                                            ]))
+                if interrupted
+                    then
+                        atomicModifyIORef' client.clientState \state ->
+                            ( state
+                                { stateHadCompletedTurn = True
+                                , stateNeedsFreshSession = False
+                                }
+                            , ()
+                            )
+                    else do
+                        atomicModifyIORef' client.clientState \state ->
+                            ( state
+                                { stateHadCompletedTurn = False
+                                , stateNeedsFreshSession = True
+                                }
+                            , ()
+                            )
+                        restore (forceCloseRunningClient active)
+                        clearRunningClient client active
 
 emptyClientState :: ClientState
 emptyClientState = ClientState
@@ -548,6 +728,7 @@ prepareTurn client previous model effort = do
             running <-
                 startRunningClient
                     client.clientTransportFactory
+                    client.clientHandlers
                     model
                     effort
                     mode
@@ -739,7 +920,9 @@ finishSuccessfulTurn client turnEpoch turn value commit = do
         withMVar client.clientCommitLock \_ -> do
             currentEpoch <- readIORef client.clientInterruptEpoch
             if currentEpoch /= turnEpoch
-                then pure (Left Nothing)
+                then do
+                    markTurnCompleted client turn
+                    pure (Left Nothing)
                 else do
                     committed <- tryAny commit
                     case committed of
@@ -751,8 +934,7 @@ finishSuccessfulTurn client turnEpoch turn value commit = do
     case outcome of
         Right completed ->
             pure (Right completed)
-        Left Nothing -> do
-            abortAndInvalidateTurn client turn
+        Left Nothing ->
             pure $
                 Left $
                     CLIConnectionError
@@ -765,9 +947,9 @@ finishSuccessfulTurn client turnEpoch turn value commit = do
                         "Failed to commit Claude Code turn"
                         exception)
 
-waitForTransportExit :: Transport -> IO ()
-waitForTransportExit transport =
-    go gracefulCloseTimeoutMicros
+waitForTransportExit :: Int -> Transport -> IO ()
+waitForTransportExit closeTimeoutMicros transport =
+    go closeTimeoutMicros
   where
     go remaining = do
         processExit <- transport.transportProcessExit
@@ -800,11 +982,12 @@ invalidateContinuation client =
 
 startRunningClient
     :: TransportFactory
+    -> Maybe ClaudeAgentHandlers
     -> Maybe Text
     -> Maybe Text
     -> TransportMode
     -> IO RunningClient
-startRunningClient transportFactory model effort mode = do
+startRunningClient transportFactory handlers model effort mode = do
     transport <-
         transportFactory TransportRequest
             { transportMode = mode
@@ -835,12 +1018,28 @@ startRunningClient transportFactory model effort mode = do
                     }
             closed <- newIORef False
             closeLock <- newMVar ()
+            controlRuntime <-
+                case handlers of
+                    Nothing -> pure Nothing
+                    Just configured ->
+                        (Just
+                            <$> startControlRuntime
+                                transport
+                                configured)
+                            `onException`
+                                closeTransportQuietly transport
             pure RunningClient
                 { runningSessionId = sessionIdRef
                 , runningStartMode = mode
                 , runningModel = model
                 , runningEffort = effort
                 , runningTransport = transport
+                , runningControlRuntime = controlRuntime
+                , runningShutdownTimeoutMicros =
+                    maybe
+                        gracefulCloseTimeoutMicros
+                        (.shutdownTimeoutMicros)
+                        handlers
                 , runningUsageAccounting = usageAccounting
                 , runningClosed = closed
                 , runningCloseLock = closeLock
@@ -859,10 +1058,44 @@ subprocessTransportFactory options request =
 stopRunningClient :: RunningClient -> IO ()
 stopRunningClient running =
     (do
-        running.runningTransport.transportEndInput
-        waitForTransportExit running.runningTransport)
+        endInputWorker <-
+            asyncWithUnmask \unmask ->
+                unmask running.runningTransport.transportEndInput
+        endInputResult <-
+            pollAsyncUntil
+                running.runningShutdownTimeoutMicros
+                endInputWorker
+        case endInputResult of
+            Nothing ->
+                cancel endInputWorker
+            Just (Left exception) ->
+                throwIO exception
+            Just (Right ()) ->
+                pure ()
+        waitForTransportExit
+            running.runningShutdownTimeoutMicros
+            running.runningTransport)
         `finally`
             forceCloseRunningClient running
+
+pollAsyncUntil
+    :: Int
+    -> Async a
+    -> IO (Maybe (Either SomeException a))
+pollAsyncUntil maximumWaitMicros worker =
+    go (max 0 maximumWaitMicros)
+  where
+    go remaining =
+        poll worker >>= \case
+            Just result ->
+                pure (Just result)
+            Nothing
+                | remaining <= 0 ->
+                    pure Nothing
+                | otherwise -> do
+                    let delay = min gracefulClosePollMicros remaining
+                    threadDelay delay
+                    go (remaining - delay)
 
 abortRunningClient :: RunningClient -> IO Bool
 abortRunningClient running =
@@ -874,9 +1107,27 @@ abortRunningClient running =
 
 forceCloseRunningClient :: RunningClient -> IO ()
 forceCloseRunningClient running =
-    closeRunningClient
-        running
-        running.runningTransport.transportClose
+    case running.runningControlRuntime of
+        Nothing ->
+            closeRunningClient
+                running
+                running.runningTransport.transportClose
+        Just runtime ->
+            closeRunningClient running do
+                runtimeResult <-
+                    tryAny (stopControlRuntime runtime)
+                running.runningTransport.transportClose
+                either throwIO pure runtimeResult
+
+writeRunningClient
+    :: RunningClient
+    -> ByteString.ByteString
+    -> IO (Either ClaudeSDKError ())
+writeRunningClient running bytes =
+    case running.runningControlRuntime of
+        Just runtime -> runtimeWrite runtime bytes
+        Nothing ->
+            running.runningTransport.transportWrite bytes
 
 closeRunningClient :: RunningClient -> IO () -> IO ()
 closeRunningClient running closeAction =

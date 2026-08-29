@@ -40,6 +40,7 @@ library
     exposed-modules:  Claude.Agent.SDK
                     , Claude.Agent.SDK.Client
                     , Claude.Agent.SDK.Capabilities
+                    , Claude.Agent.SDK.Control
                     , Claude.Agent.SDK.Errors
                     , Claude.Agent.SDK.Internal.Transport.OutputBuffer
                     , Claude.Agent.SDK.Internal.MessageParser
@@ -47,6 +48,7 @@ library
                     , Claude.Agent.SDK.Transport
                     , Claude.Agent.SDK.Types
     other-modules:    Claude.Agent.SDK.Internal.Client.Usage
+                    , Claude.Agent.SDK.Internal.ControlRuntime
                     , Claude.Agent.SDK.Internal.Process
                     , Claude.Agent.SDK.Internal.Query
                     , Claude.Agent.SDK.Internal.Transport.SubprocessCLI
@@ -87,6 +89,7 @@ test-suite claude-agent-sdk-haskell-test
     main-is:          Spec.hs
     other-modules:    Claude.Agent.SDK.CapabilitiesSpec
                     , Claude.Agent.SDK.ClientSpec
+                    , Claude.Agent.SDK.ControlSpec
                     , Claude.Agent.SDK.Internal.Transport.OutputBufferSpec
                     , Claude.Agent.SDK.MessageParserSpec
                     , Claude.Agent.SDK.QuerySpec
@@ -95,6 +98,7 @@ test-suite claude-agent-sdk-haskell-test
     build-depends:    base >= 4.17 && < 5
                     , claude-agent-sdk-haskell
                     , agent-json
+                    , aeson
                     , bytestring
                     , containers
                     , directory
