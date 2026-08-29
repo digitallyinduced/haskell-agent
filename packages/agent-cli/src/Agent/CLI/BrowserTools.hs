@@ -35,7 +35,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Network.URI
     ( URI(uriAuthority, uriScheme)
-    , URIAuth(uriRegName)
+    , URIAuth(uriRegName, uriUserInfo)
     , parseURI
     )
 
@@ -227,7 +227,10 @@ validateHttpUrl value = do
                     `elem` ["http:", "https:"]
                 , Just authority <- uriAuthority uri
                 , not (null (uriRegName authority)) ->
-                    pure url
+                    if null (uriUserInfo authority)
+                        then pure url
+                        else failParser
+                            "url must not contain embedded credentials"
             _ -> invalid
   where
     invalid = failParser "url must be an absolute HTTP or HTTPS URL"
