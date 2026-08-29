@@ -212,6 +212,31 @@ parseSlash catalog raw line = case Text.words line of
             Nothing -> unknownCommand command
         Just spec -> case spec.slashName of
             "help" -> parseHelpCommand catalog args
+            "init" ->
+                if null args
+                    then ReplInit
+                    else ReplCommandError "usage: /init"
+            "review" ->
+                let instructions =
+                        Text.strip (Text.drop (Text.length command) line)
+                in ReplReview
+                    (if Text.null instructions then Nothing else Just instructions)
+            "diff" ->
+                if null args
+                    then ReplDiff
+                    else ReplCommandError "usage: /diff"
+            "fork" ->
+                let name = Text.strip (Text.drop (Text.length command) line)
+                in ReplFork
+                    (if Text.null name then Nothing else Just name)
+            "export" ->
+                let path = Text.strip (Text.drop (Text.length command) line)
+                in ReplExport
+                    (if Text.null path then Nothing else Just path)
+            "permissions" ->
+                if null args
+                    then ReplPermissions
+                    else ReplCommandError "usage: /permissions"
             "effort" -> parseEffortCommand args
             "fast" ->
                 if null args
