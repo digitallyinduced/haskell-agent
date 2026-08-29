@@ -16,7 +16,7 @@ import Agent.Process (terminateProcessGroup)
 import qualified Agent.Json.Decode as Json
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception.Safe (displayException, finally, mask, tryAny)
+import Control.Exception.Safe (displayException, mask, onException, tryAny)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -132,13 +132,16 @@ runAuthStatusProbe executablePath cleanEnvironment =
                         killThread outThread
                         killThread errThread
                         mapM_ hCloseQuiet [out, err]
-                result <- restore (timeout authProbeTimeoutMicros (waitForProcess processHandle))
-                    `finally` pure ()
-                case result of
-                    Nothing -> do
+                    stop = do
                         group <- getPid processHandle
                         terminateProcessGroup group processHandle
                         cleanup
+                result <- restore
+                    (timeout authProbeTimeoutMicros (waitForProcess processHandle))
+                    `onException` stop
+                case result of
+                    Nothing -> do
+                        stop
                         pure (ExitFailure 124, "", "authentication probe timed out")
                     Just code -> do
                         stdoutText <- maybe "" id <$> timeout readerDrainTimeoutMicros (takeMVar outDone)
