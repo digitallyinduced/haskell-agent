@@ -69,6 +69,8 @@ module Agent.CLI.TUI.App
     , withTrackedVtyBuilder
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , showFullscreenToolImage
+    , toolImageBlockId
     , applyStoredFullscreenWindowTitle
     , turnCompletionRequiresRedraw
     , syntaxLanguagesForBlocks

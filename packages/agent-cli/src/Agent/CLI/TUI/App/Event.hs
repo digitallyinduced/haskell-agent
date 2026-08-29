@@ -454,6 +454,24 @@ handleEventInner event = case event of
                 , appSubmittedImagePreviews = submitted
                 }
         queueConversationReflow
+    AppEvent (AppToolImage callId preview) -> do
+        state <- get
+        case toolImageBlockId callId state.appUi of
+            Nothing -> pure ()
+            Just blockId -> do
+                modify' \current ->
+                    current
+                        { appSubmittedImagePreviews =
+                            Map.insertWith
+                                (flip (<>))
+                                blockId
+                                [preview]
+                                current.appSubmittedImagePreviews
+                        }
+                -- Running tool bodies are cached while empty; the new image
+                -- section must not be served from that entry.
+                invalidateCache
+                queueConversationReflow
     AppEvent (AppDictationPartial text) -> do
         state <- get
         when (isJust state.appDictation) $

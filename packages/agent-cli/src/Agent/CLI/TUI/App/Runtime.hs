@@ -575,6 +575,23 @@ commitFullscreenImagePreviews runtime images = do
     -- terminals retain the encoded attachment for a viewport-aware placement.
     enqueueAppEvent runtime (AppCommitImagePreviews prepared)
 
+-- | Attach an agent-displayed image to the tool block that produced it. The
+-- preview is prepared on the calling tool thread: ANSI previews force the
+-- sampled bitmap here so the Brick draw thread never decodes an image.
+showFullscreenToolImage
+    :: FullscreenRuntime
+    -> Text
+    -> ImageAttachment
+    -> IO (Either Text ())
+showFullscreenToolImage runtime callId image =
+    case prepareTuiImagePreview image of
+        Left err -> pure (Left ("cannot decode image: " <> err))
+        Right preview -> do
+            unless runtime.runtimeNativeImagePreviews $
+                void $ pure $! pixelAt preview.previewSample 0 0
+            enqueueAppEvent runtime (AppToolImage callId preview)
+            pure (Right ())
+
 prepareFullscreenImagePreviews
     :: FullscreenRuntime
     -> [ImageAttachment]

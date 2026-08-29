@@ -50,6 +50,7 @@ import Agent.CLI.TUI.App
     , setFullscreenWindowTitle
     , syntaxLanguagesForBlocks
     , textOverlayDisplayText
+    , toolImageBlockId
     , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     )
@@ -127,6 +128,41 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "toolImageBlockId" do
+        let started callId name =
+                reduceUi
+                    (UiLoop (ToolStarted (functionToolCall callId name "{}")))
+            finished callId =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            (ToolCallResult callId "done" FunctionCallKind)))
+            firstBlock = BlockId initialUiState.uiNextBlockId
+            secondBlock = BlockId (initialUiState.uiNextBlockId + 1)
+
+        it "attaches to the block of the originating call" do
+            let ui =
+                    started "call-2" "show_image" $
+                        started "call-1" "shell_command" initialUiState
+            toolImageBlockId "call-1" ui `shouldBe` Just firstBlock
+            toolImageBlockId "call-2" ui `shouldBe` Just secondBlock
+
+        it "falls back to the newest running tool block for nested code-mode calls" do
+            let ui =
+                    started "exec-1" "exec" $
+                        finished "call-1" $
+                            started "call-1" "shell_command" initialUiState
+            toolImageBlockId "code-mode:1:show_image" ui
+                `shouldBe` Just secondBlock
+
+        it "ignores unknown calls once no tool is running" do
+            let ui =
+                    finished "call-1" $
+                        started "call-1" "shell_command" initialUiState
+            toolImageBlockId "code-mode:1:show_image" ui `shouldBe` Nothing
+            toolImageBlockId "code-mode:1:show_image" initialUiState
+                `shouldBe` Nothing
+
     describe "background activity status" do
         it "names a running agent and its current step" do
             backgroundActivityText
