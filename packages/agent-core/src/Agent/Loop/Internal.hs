@@ -176,16 +176,10 @@ tokensPerSecond tokens millis
     | otherwise =
         Just (fromIntegral tokens * 1000 / fromIntegral millis)
 
--- | Prefer provider-reported output tokens; fall back to the streamed-text
--- estimate when usage is missing.
-generationTokensPerSecond :: Int -> Int -> Int -> Maybe Double
-generationTokensPerSecond reportedOutput chars millis =
-    tokensPerSecond
-        ( if reportedOutput > 0
-            then reportedOutput
-            else estimateTokensFromChars chars
-        )
-        millis
+-- | Completed generation speed from provider-reported output-token metadata.
+-- Character-derived estimates are reserved for the live streaming display.
+generationTokensPerSecond :: Int -> Int -> Maybe Double
+generationTokensPerSecond = tokensPerSecond
 
 -- | Live tok/s is noisy on the first few hundred milliseconds of a stream.
 liveTokenRateMinMillis :: Int

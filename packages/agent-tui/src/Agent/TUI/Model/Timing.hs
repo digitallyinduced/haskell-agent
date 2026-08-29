@@ -4,6 +4,7 @@ module Agent.TUI.Model.Timing
     , uiNextDeadlineMillis
     , uiNeedsTick
     , uiTokensPerSecond
+    , uiTokensPerSecondEstimated
     , retryCountdownText
     ) where
 
@@ -43,6 +44,10 @@ advanceUiTime rawElapsedMillis state =
             if state.uiGenerating
                 then state.uiGenerationMillis + elapsedMillis
                 else state.uiGenerationMillis
+        , uiResponseMillis =
+            if state.uiRunning
+                then state.uiResponseMillis + elapsedMillis
+                else state.uiResponseMillis
         , uiActivity =
             if state.uiCompletionRemainingMillis > 0
                 && completionRemainingMillis == 0
@@ -62,6 +67,16 @@ uiTokensPerSecond state
         liveTokensPerSecond state.uiGenerationChars state.uiGenerationMillis
             <|> state.uiLastTokensPerSecond
     | otherwise = state.uiLastTokensPerSecond
+
+-- | Whether the displayed rate is the live streamed-text estimate rather than
+-- a retained provider-reported rate.
+uiTokensPerSecondEstimated :: UiState -> Bool
+uiTokensPerSecondEstimated state =
+    state.uiGenerating
+        && liveTokensPerSecond
+            state.uiGenerationChars
+            state.uiGenerationMillis
+            /= Nothing
 
 uiNeedsTick :: UiState -> Bool
 uiNeedsTick state =

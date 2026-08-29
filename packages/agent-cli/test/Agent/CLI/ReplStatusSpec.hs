@@ -15,6 +15,7 @@ import Agent.CLI
     , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
+    , formatEstimatedTokensPerSecond
     , formatTokensPerSecond
     , formatUsageWithRate
     , withRestoredCurrentDirectory
@@ -385,6 +386,12 @@ spec = do
             formatTokensPerSecond 4.2 `shouldBe` "4.2 tok/s"
             formatTokensPerSecond 42 `shouldBe` "42 tok/s"
             formatTokensPerSecond 12500 `shouldBe` "13k tok/s"
+
+        it "marks character-derived rates as estimates" do
+            formatEstimatedTokensPerSecond True 42
+                `shouldBe` "~42 tok/s"
+            formatEstimatedTokensPerSecond False 42
+                `shouldBe` "42 tok/s"
 
         it "joins usage and rate" do
             formatUsageWithRate emptyTokenUsage (Just 42)

@@ -78,8 +78,8 @@ spec = describe "runLoop" do
         tokensPerSecond 100 0 `shouldBe` Nothing
         tokensPerSecond 100 1000 `shouldBe` Just 100
         tokensPerSecond 40 2000 `shouldBe` Just 20
-        generationTokensPerSecond 80 16 1000 `shouldBe` Just 80
-        generationTokensPerSecond 0 16 1000 `shouldBe` Just 4
+        generationTokensPerSecond 80 1000 `shouldBe` Just 80
+        generationTokensPerSecond 0 1000 `shouldBe` Nothing
         liveTokensPerSecond 16 (liveTokenRateMinMillis - 1) `shouldBe` Nothing
         liveTokensPerSecond 16 liveTokenRateMinMillis
             `shouldBe` tokensPerSecond 4 liveTokenRateMinMillis
