@@ -146,6 +146,15 @@ typedef void (*ha_account_oauth_start_callback)(
     const uint8_t *error,
     size_t error_length
 );
+ * An image submitted for a native turn. The runtime copies both buffers
+ * before this call returns; the caller retains ownership of them.
+ */
+typedef struct ha_image_attachment {
+    const uint8_t *mime;
+    size_t mime_length;
+    const uint8_t *bytes;
+    size_t bytes_length;
+} ha_image_attachment;
 
 /* Runtime calls are process-global and reference counted. */
 int32_t ha_runtime_init(void);
@@ -158,6 +167,19 @@ void ha_runtime_exit(void);
  * for an invalid request envelope.
  */
 void *ha_engine_create(ha_event_callback callback, void *context);
+/*
+ * Stage ordered images for a turn before its turn.start request. Staging is
+ * consumed by the matching turn.start. Returns 0 when accepted, 1 for a
+ * null engine, 2 for an invalid turn ID, 3 for an internal failure, and 4
+ * for an invalid image array or UTF-8 MIME.
+ */
+int32_t ha_engine_stage_turn_images(
+    void *engine,
+    const uint8_t *turn_id,
+    size_t turn_id_length,
+    const ha_image_attachment *images,
+    size_t image_count
+);
 int32_t ha_engine_send_json(
     void *engine,
     const uint8_t *bytes,

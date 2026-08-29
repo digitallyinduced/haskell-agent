@@ -22,6 +22,11 @@ import Agent.Store.Postgres.Skill
     , learnedSkillStatusText
     , listAllLearnedSkills
     )
+import Agent.CLI.ManagedTurn
+    ( ManagedTurnMedia(..)
+    , managedTurnRequestWithImages
+    , renderManagedTurnPrompt
+    )
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     )
@@ -94,7 +99,7 @@ import Agent.CLI.SessionAdmin
     , managedPostgresConfigForHome
     , sessionSummaryWithStatusJSON
     )
-import Agent.Loop (LoopEvent(..))
+import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.Dialect (dialectSlug)
 import Agent.Provider (Provider(..), providerSlug, parseProvider, BillingMode(..))
 import Agent.Store.Postgres
@@ -189,12 +194,21 @@ import Foreign
     , newStablePtr
     , nullFunPtr
     , nullPtr
+    , plusPtr
+    , peekByteOff
+    , sizeOf
     )
 import Foreign.C.String (CString)
 import Foreign.C.Types (CDouble(..), CInt(..), CLLong(..), CSize(..))
+import System.Directory
+    ( getTemporaryDirectory
+    , removeFile
+    )
 import System.Directory.OsPath (getHomeDirectory)
 import System.IO
     ( IOMode(WriteMode)
+    , hClose
+    , openBinaryTempFile
     , withFile
     )
 import System.OsPath
@@ -452,6 +466,7 @@ data EngineCommand
 data Engine = Engine
     { engineCommands :: !(TQueue EngineCommand)
     , engineDone :: !(MVar ())
+    , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
     }
 
 data TurnControl = TurnControl
@@ -478,6 +493,9 @@ foreign export ccall ha_engine_create
 
 foreign export ccall ha_engine_send_json
     :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
+
+foreign export ccall ha_engine_stage_turn_images
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize -> IO CInt
 
 foreign export ccall ha_engine_destroy
     :: Ptr () -> IO ()
@@ -855,17 +873,20 @@ ha_engine_create callback context
             config <- managedPostgresConfigForHome home
             commands <- newTQueueIO
             done <- newEmptyMVar
+            stagedImages <- newTVarIO Map.empty
             _ <- forkFinally
                 (workerLifecycle
                     callback
                     context
                     config
                     (sessionsRoot home)
-                    commands)
+                    commands
+                    stagedImages)
                 (const (putMVar done ()))
             stable <- newStablePtr Engine
                 { engineCommands = commands
                 , engineDone = done
+                , engineStagedImages = stagedImages
                 }
             pure (castStablePtrToPtr stable)
         case created of
@@ -926,6 +947,60 @@ ha_engine_search_conversations pointer bytes (CSize length) rawLimit callback co
             Right False -> 2
             Right True -> 0
 
+ha_engine_stage_turn_images
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize -> IO CInt
+ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
+    | pointer == nullPtr = pure 1
+    | turnID == nullPtr || turnIDLength == 0 = pure 2
+    | imagePointer == nullPtr && imageCount > 0 = pure 4
+    | toInteger imageCount > toInteger (maxBound :: Int) = pure 4
+    | otherwise = do
+        accepted <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            turnIDBytes <- BS.packCStringLen
+                (castPtr turnID, fromIntegral turnIDLength)
+            turnIDText <- either (const (fail "invalid turn ID UTF-8")) pure
+                (TextEncoding.decodeUtf8' turnIDBytes)
+            images <- mapM peekImage
+                [0 .. fromIntegral imageCount - 1]
+            atomically $ modifyTVar' engine.engineStagedImages
+                (Map.insertWith (flip (<>)) turnIDText images)
+        pure $ case accepted of
+            Left _ -> 4
+            Right () -> 0
+  where
+    pointerSize = sizeOf (nullPtr :: Ptr ())
+    sizeSize = sizeOf (undefined :: CSize)
+    imageSize = pointerSize + sizeSize + pointerSize + sizeSize
+
+    peekImage index = do
+        let base = castPtr imagePointer `plusPtr` (index * imageSize)
+            readPointer offset =
+                peekByteOff base offset :: IO (Ptr Word8)
+            readLength offset =
+                peekByteOff base offset :: IO CSize
+        mimePointer <- readPointer 0
+        mimeLength <- readLength pointerSize
+        bytesPointer <- readPointer (pointerSize + sizeSize)
+        bytesLength <- readLength (pointerSize + sizeSize + pointerSize)
+        if
+            (mimePointer == nullPtr && mimeLength > 0)
+                || (bytesPointer == nullPtr && bytesLength > 0)
+                || mimeLength == 0
+        then fail "invalid image attachment"
+        else do
+            mimeBytes <- BS.packCStringLen
+                (castPtr mimePointer, fromIntegral mimeLength)
+            mime <- either (const (fail "invalid MIME UTF-8")) pure
+                (TextEncoding.decodeUtf8' mimeBytes)
+            bytes <- BS.packCStringLen
+                (castPtr bytesPointer, fromIntegral bytesLength)
+            pure ImageAttachment
+                { imageMime = mime
+                , imageBytes = bytes
+                }
+
 ha_engine_destroy :: Ptr () -> IO ()
 ha_engine_destroy pointer
     | pointer == nullPtr = pure ()
@@ -943,8 +1018,9 @@ workerLifecycle
     -> ManagedPostgresConfig
     -> OsPath
     -> TQueue EngineCommand
+    -> TVar (Map Text [ImageAttachment])
     -> IO ()
-workerLifecycle callback context config root commands = do
+workerLifecycle callback context config root commands stagedImages = do
     store <- newMVar Nothing
     processRuntime <- newNativeProcessRuntime root
     let cleanup =
@@ -958,6 +1034,7 @@ workerLifecycle callback context config root commands = do
         root
         processRuntime
         commands
+        stagedImages
         `finally` cleanup
 
 idleLoop
@@ -968,8 +1045,9 @@ idleLoop
     -> OsPath
     -> NativeProcessRuntime
     -> TQueue EngineCommand
+    -> TVar (Map Text [ImageAttachment])
     -> IO ()
-idleLoop callback context config store root processRuntime commands =
+idleLoop callback context config store root processRuntime commands stagedImages =
     atomically (readTQueue commands) >>= \case
         EngineStop -> pure ()
         EngineSearch query limit searchCallback searchContext -> do
@@ -985,6 +1063,11 @@ idleLoop callback context config store root processRuntime commands =
                             (failureEvent request.requestId err)
                         continue
                     Right start -> do
+                        images <- atomically $ do
+                            staged <- readTVar stagedImages
+                            writeTVar stagedImages
+                                (Map.delete start.turnStartId staged)
+                            pure (Map.findWithDefault [] start.turnStartId staged)
                         control <- newTurnControl start.turnStartId
                         sendEvent callback context $
                             successEvent request.requestId $
@@ -1004,7 +1087,8 @@ idleLoop callback context config store root processRuntime commands =
                                 context
                                 processRuntime
                                 control
-                                start)
+                                start
+                                images)
                             \running ->
                                 activeLoop
                                     callback
@@ -1030,7 +1114,15 @@ idleLoop callback context config store root processRuntime commands =
                 continue
   where
     continue =
-        idleLoop callback context config store root processRuntime commands
+        idleLoop
+            callback
+            context
+            config
+            store
+            root
+            processRuntime
+            commands
+            stagedImages
 
 activeLoop
     :: FunPtr EventCallback
@@ -1186,8 +1278,9 @@ runNativeTurn
     -> NativeProcessRuntime
     -> TurnControl
     -> TurnStart
+    -> [ImageAttachment]
     -> IO TurnOutcome
-runNativeTurn callback context processRuntime control start = do
+runNativeTurn callback context processRuntime control start images = do
     sessionIdRef <- newIORef start.turnStartSessionId
     completedRef <- newIORef False
     let hooks = NativeRunHooks
@@ -1238,15 +1331,17 @@ runNativeTurn callback context processRuntime control start = do
                     []
                     (\effort -> ["--effort", Text.unpack effort])
                     start.turnStartEffort
-                <> ["--prompt", Text.unpack start.turnStartPrompt]
     result <- tryAny $
-        withFile "/dev/null" WriteMode \output ->
-            runNativeAgent
-                processRuntime
-                output
-                (unsafeEncodeUtf start.turnStartCwd)
-                hooks
-                args
+        withTurnImages start.turnStartPrompt images \managedFile ->
+            withFile "/dev/null" WriteMode \output ->
+                runNativeAgent
+                    processRuntime
+                    output
+                    (unsafeEncodeUtf start.turnStartCwd)
+                    hooks
+                    (args <> maybe ["--prompt", Text.unpack start.turnStartPrompt]
+                        (\path -> ["--managed-turn-file", path])
+                        managedFile)
     completed <- readIORef completedRef
     sessionId <- readIORef sessionIdRef
     pure TurnOutcome
@@ -1261,6 +1356,46 @@ runNativeTurn callback context processRuntime control start = do
                         Just
                             "turn ended without a completion event"
         }
+
+withTurnImages
+    :: Text
+    -> [ImageAttachment]
+    -> (Maybe FilePath -> IO a)
+    -> IO a
+withTurnImages _ [] action = action Nothing
+withTurnImages prompt images action = do
+    temporaryDirectory <- getTemporaryDirectory
+    withImageFiles temporaryDirectory images \paths -> do
+        let request = managedTurnRequestWithImages prompt
+                [ ManagedTurnMedia
+                    { managedTurnMediaPath = path
+                    , managedTurnMediaMime = image.imageMime
+                    , managedTurnMediaName = Nothing
+                    }
+                | (path, image) <- zip paths images
+                ]
+        bracket
+            (openBinaryTempFile temporaryDirectory "ha-native-turn-")
+            (\(path, handle) -> do
+                hClose handle
+                void (tryAny (removeFile path)))
+            \(path, handle) -> do
+                hClose handle
+                BS.writeFile path
+                    (TextEncoding.encodeUtf8 (renderManagedTurnPrompt request))
+                action (Just path)
+  where
+    withImageFiles _ [] action = action []
+    withImageFiles directory (image : rest) action =
+        bracket
+            (openBinaryTempFile directory "ha-native-image-")
+            (\(path, handle) -> do
+                hClose handle
+                void (tryAny (removeFile path)))
+            \(path, handle) -> do
+                hClose handle
+                BS.writeFile path image.imageBytes
+                withImageFiles directory rest (action . (path :))
 
 newTurnControl :: Text -> IO TurnControl
 newTurnControl turnId =
