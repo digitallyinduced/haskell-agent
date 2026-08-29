@@ -22,6 +22,10 @@ import Agent.CLI.SessionTitle
 import Agent.Concurrent
 import Agent.CLI.ManagedTurn
 import Agent.CLI.GatewayBridge
+import Agent.CLI.Notification
+    ( AttentionRequest(PermissionRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Approval
 import Agent.CLI.Permission (promptRootAccess)
 import Agent.CLI.Recap
@@ -113,7 +117,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       | isJust request.managedTurnBridgeDirectory ->
                           requestManagedRootAccess request root
                   _ -> case fullscreen of
-                      Just runtime ->
+                      Just runtime -> do
+                          notifyAttention stderrHandle PermissionRequested
                           maybe False (== 0)
                               <$> requestFullscreenChoiceWithBody
                                   runtime
