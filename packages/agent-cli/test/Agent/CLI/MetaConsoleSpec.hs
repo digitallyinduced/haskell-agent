@@ -56,6 +56,41 @@ spec = do
                         ]
                     }
 
+        it "decodes explicit and interactive account selection" do
+            decodeMetaPlan
+                "{\"summary\":\"use work\",\"actions\":[{\"type\":\"select_account\",\"provider\":\"grok\",\"account\":\"Work\"}]}"
+                `shouldBe`
+                    Right MetaPlan
+                        { metaSummary = "use work"
+                        , metaActions =
+                            [MetaSelectAccount XAIProvider (Just "Work")]
+                        }
+            decodeMetaPlan
+                "{\"summary\":\"pick one\",\"actions\":[{\"type\":\"select_account\",\"provider\":\"openai\"}]}"
+                `shouldBe`
+                    Right MetaPlan
+                        { metaSummary = "pick one"
+                        , metaActions =
+                            [MetaSelectAccount OpenAIProvider Nothing]
+                        }
+
+        it "rejects blank or conflicting account selections" do
+            decodeMetaPlan
+                "{\"summary\":\"bad account\",\"actions\":[{\"type\":\"select_account\",\"provider\":\"openai\",\"account\":\"  \"}]}"
+                `shouldSatisfy` \case
+                    Left err -> "must not be empty" `Text.isInfixOf` err
+                    Right _ -> False
+            decodeMetaPlan
+                (Text.concat
+                    [ "{\"summary\":\"two accounts\",\"actions\":["
+                    , "{\"type\":\"select_account\",\"provider\":\"openai\"},"
+                    , "{\"type\":\"select_account\",\"provider\":\"grok\"}"
+                    , "]}"
+                    ])
+                `shouldSatisfy` \case
+                    Left err -> "conflicting account selection" `Text.isInfixOf` err
+                    Right _ -> False
+
         it "rejects unknown fields rather than silently accepting them" do
             decodeMetaPlan
                 "{\"summary\":\"change\",\"actions\":[{\"type\":\"connect_account\",\"provider\":\"grok\",\"token\":\"do-not-accept\"}]}"
@@ -206,6 +241,8 @@ spec = do
             prompt `shouldNotSatisfy` Text.isInfixOf "hidden"
             prompt `shouldSatisfy` Text.isInfixOf "<redacted>"
             prompt `shouldSatisfy` Text.isInfixOf "Never emit env"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "use clarify rather than guessing"
 
     describe "metaPlanPreviews" do
         it "describes mutations without MCP arguments or credentials" do
@@ -232,6 +269,14 @@ spec = do
                         (MetaSetMcpSecretEnv "docs" "API_TOKEN")
             preview `shouldSatisfy` Text.isInfixOf "'API_TOKEN'"
             preview `shouldSatisfy` Text.isInfixOf "prompted securely"
+
+        it "previews explicit selection or an interactive picker" do
+            metaActionPreview
+                (MetaSelectAccount XAIProvider (Just "Work"))
+                `shouldSatisfy` Text.isInfixOf "'Work'"
+            metaActionPreview
+                (MetaSelectAccount OpenAIProvider Nothing)
+                `shouldSatisfy` Text.isInfixOf "account picker"
 
     describe "runMetaConsoleWithCancel" do
         it "uses empty private state, strips tools, disables storage, and repairs JSON once" do

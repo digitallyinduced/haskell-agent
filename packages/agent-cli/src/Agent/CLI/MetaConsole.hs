@@ -73,6 +73,9 @@ data MetaPlan = MetaPlan
 data MetaAction
     = MetaSessionCommand !Text
     | MetaConnectAccount !Provider
+    | MetaSelectAccount !Provider !(Maybe Text)
+      -- ^ Optional account label or id.  'Nothing' opens the provider's
+      -- account picker; the executor must not silently choose an account.
     | MetaUpsertMcp !MetaMcpServer
     | MetaRemoveMcp !Text
     | MetaSetMcpEnabled !Text !Bool
@@ -163,6 +166,16 @@ instance Aeson.FromJSON MetaAction where
                         fail
                             "unsupported provider (expected openai, grok/xai, openrouter, or claude)"
                     Just provider -> pure (MetaConnectAccount provider)
+            "select_account" -> do
+                rejectUnknownKeys "select_account"
+                    ["type", "provider", "account"] object
+                providerText <- object .: "provider"
+                provider <- case parseMetaProvider providerText of
+                    Nothing ->
+                        fail
+                            "unsupported provider (expected openai, grok/xai, openrouter, or claude)"
+                    Just parsed -> pure parsed
+                MetaSelectAccount provider <$> object .:? "account"
             "mcp_upsert" -> do
                 rejectUnknownKeys "mcp_upsert"
                     [ "type", "name", "enabled", "url", "command", "args"
@@ -366,6 +379,13 @@ validateAction :: MetaAction -> Either Text ()
 validateAction = \case
     MetaSessionCommand command -> validateSessionCommand command
     MetaConnectAccount _ -> pure ()
+    MetaSelectAccount _ selector ->
+        case selector of
+            Nothing -> pure ()
+            Just value -> do
+                requireNonBlank "account label or id" value
+                when (Text.length value > 256) $
+                    Left "account label or id must be at most 256 characters"
     MetaUpsertMcp server -> validateMcpServer server
     MetaRemoveMcp name -> validateConfigName "MCP server" name
     MetaSetMcpEnabled name _ -> validateConfigName "MCP server" name
@@ -571,6 +591,7 @@ validateSingletonActions actions =
         , ("web-fetch update", count isWebFetch)
         , ("LSP enabled update", count isLspEnabled)
         , ("maximum concurrent agents", count isMaxAgents)
+        , ("account selection", count isAccountSelection)
         ]
   where
     count predicate = length (filter predicate actions)
@@ -584,6 +605,8 @@ validateSingletonActions actions =
     isLspEnabled _ = False
     isMaxAgents MetaSetMaxConcurrentAgents{} = True
     isMaxAgents _ = False
+    isAccountSelection MetaSelectAccount{} = True
+    isAccountSelection _ = False
 
 validateMcpConflicts :: [MetaAction] -> Either Text ()
 validateMcpConflicts actions =
@@ -655,6 +678,15 @@ metaActionPreview = \case
     MetaSessionCommand command -> "Run session command " <> quote command
     MetaConnectAccount provider ->
         "Connect a " <> providerDisplayName provider <> " account"
+    MetaSelectAccount provider selector ->
+        case selector of
+            Nothing ->
+                "Open the " <> providerDisplayName provider <> " account picker"
+            Just account ->
+                "Select "
+                    <> providerDisplayName provider
+                    <> " account "
+                    <> quote account
     MetaUpsertMcp server ->
         "Add or update MCP server "
             <> quote server.metaMcpName
@@ -785,6 +817,7 @@ metaConsolePrompt context request =
         , "  \"actions\": ["
         , "    {\"type\":\"session_command\",\"command\":\"/model MODEL\"},"
         , "    {\"type\":\"connect_account\",\"provider\":\"openai|grok|xai|openrouter|claude\"},"
+        , "    {\"type\":\"select_account\",\"provider\":\"openai|grok|xai|openrouter|claude\",\"account\":\"optional label or id\"},"
         , "    {\"type\":\"mcp_upsert\",\"name\":\"NAME\",\"enabled\":true,\"url\":\"https://...\"|null,\"command\":\"PROGRAM\"|null,\"args\":[],\"cwd\":null,\"startupTimeoutSeconds\":30,\"requestTimeoutSeconds\":60,\"protocol\":\"auto|modern|legacy\",\"oauthScopes\":[\"scope\"]},"
         , "    {\"type\":\"mcp_remove\",\"name\":\"NAME\"},"
         , "    {\"type\":\"mcp_set_enabled\",\"name\":\"NAME\",\"enabled\":true},"
@@ -804,6 +837,7 @@ metaConsolePrompt context request =
         , ""
         , "Omit optional fields rather than guessing. Never emit env, clientSecret, token, password, apiKey, or credential fields."
         , "Secret environment actions carry only name and key; the host securely prompts for the value. Never add a value field."
+        , "For select_account, omit account to open a picker. If a requested label or id could refer to multiple accounts, use clarify rather than guessing."
         , "Allowed session_command forms: /model MODEL, /effort LEVEL, /fast, /shell MODE, /codemod, /always-approve, /agents limit N, /skills reload."
         ]
 
