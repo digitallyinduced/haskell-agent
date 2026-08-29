@@ -52,6 +52,11 @@ enum {
 };
 
 enum {
+    HA_BROWSER_URL_MAX_BYTES = 8192,
+    HA_BROWSER_SELECTOR_MAX_BYTES = 4096,
+    HA_BROWSER_TEXT_MAX_BYTES = 65536,
+    HA_BROWSER_KEY_MAX_BYTES = 128,
+    HA_BROWSER_SCROLL_MAX_ABS_DELTA = 10000,
     HA_BROWSER_OUTPUT_CAPACITY = 262144
 };
 
@@ -59,13 +64,19 @@ enum {
  * Host-browser callback used by browser tools in native agent turns.
  *
  * Commands use these typed fields:
- *   NAVIGATE: argument1 is an absolute URL.
+ *   NAVIGATE: argument1 is an absolute HTTP(S) URL without userinfo, at most
+ *             HA_BROWSER_URL_MAX_BYTES UTF-8 bytes.
  *   SNAPSHOT: no arguments.
- *   CLICK: argument1 is a CSS selector.
- *   TYPE: argument1 is a CSS selector, argument2 is text, and flags bit
+ *   CLICK: argument1 is a CSS selector, at most
+ *          HA_BROWSER_SELECTOR_MAX_BYTES UTF-8 bytes.
+ *   TYPE: argument1 is a selector with the same limit as CLICK; argument2 is
+ *         at most HA_BROWSER_TEXT_MAX_BYTES UTF-8 bytes; flags bit
  *         HA_BROWSER_TYPE_SUBMIT requests form submission.
- *   KEY: argument1 is a DOM KeyboardEvent.key value.
- *   SCROLL: scroll_delta_x and scroll_delta_y are finite CSS-pixel deltas.
+ *   KEY: argument1 is a nonempty DOM KeyboardEvent.key value, at most
+ *        HA_BROWSER_KEY_MAX_BYTES UTF-8 bytes.
+ *   SCROLL: scroll_delta_x and scroll_delta_y are finite CSS-pixel deltas,
+ *           each with absolute value at most
+ *           HA_BROWSER_SCROLL_MAX_ABS_DELTA; at least one must be nonzero.
  *   BACK, FORWARD, RELOAD: no arguments.
  *
  * Unused text fields have length zero. Unused scroll fields and flags are

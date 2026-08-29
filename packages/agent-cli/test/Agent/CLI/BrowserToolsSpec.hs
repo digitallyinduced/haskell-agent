@@ -162,6 +162,56 @@ spec = describe "native browser tools" do
                         "url must not contain embedded credentials"
         readIORef invoked `shouldReturn` False
 
+    it "enforces the app-group UTF-8 byte limits exactly" do
+        invocationCount <- newIORef (0 :: Int)
+        let handler _ = do
+                current <- readIORef invocationCount
+                writeIORef invocationCount (current + 1)
+                pure (Right "ok")
+            run name arguments = dispatchToolCall defaultLoopDispatch
+                (appToolHandlers (browserTools handler))
+                (functionToolCall "browser-call" name arguments)
+            shouldSucceed name arguments = do
+                result <- run name arguments
+                result.output `shouldBe` "ok"
+            shouldFailWith name arguments message = do
+                result <- run name arguments
+                result.output `shouldSatisfy` Text.isInfixOf message
+            urlPrefix = "https://example.com/"
+            exactUrl =
+                urlPrefix <> Text.replicate (8192 - Text.length urlPrefix) "a"
+            exactSelector = Text.replicate 4096 "a"
+            exactText = Text.replicate 32768 "λ"
+            exactKey = Text.replicate 64 "λ"
+        shouldSucceed "browser_navigate"
+            ("{\"url\":\"" <> exactUrl <> "\"}")
+        shouldSucceed "browser_click"
+            ("{\"selector\":\"" <> exactSelector <> "\"}")
+        shouldSucceed "browser_type"
+            ("{\"selector\":\"#q\",\"text\":\"" <> exactText <> "\"}")
+        shouldSucceed "browser_key"
+            ("{\"key\":\"" <> exactKey <> "\"}")
+        shouldSucceed "browser_scroll"
+            "{\"delta_x\":10000,\"delta_y\":-10000}"
+        readIORef invocationCount `shouldReturn` 5
+
+        shouldFailWith "browser_navigate"
+            ("{\"url\":\"" <> exactUrl <> "a\"}")
+            "url must not exceed 8192 UTF-8 bytes"
+        shouldFailWith "browser_click"
+            ("{\"selector\":\"" <> exactSelector <> "a\"}")
+            "selector must not exceed 4096 UTF-8 bytes"
+        shouldFailWith "browser_type"
+            ("{\"selector\":\"#q\",\"text\":\"" <> exactText <> "a\"}")
+            "text must not exceed 65536 UTF-8 bytes"
+        shouldFailWith "browser_key"
+            ("{\"key\":\"" <> exactKey <> "a\"}")
+            "key must not exceed 128 UTF-8 bytes"
+        shouldFailWith "browser_scroll"
+            "{\"delta_x\":10000.01,\"delta_y\":0}"
+            "delta_x and delta_y must be between -10000 and 10000"
+        readIORef invocationCount `shouldReturn` 5
+
     it "rejects empty selectors, empty keys, and invalid scroll deltas" do
         let run name arguments = dispatchToolCall defaultLoopDispatch
                 (appToolHandlers (browserTools successHandler))
@@ -177,8 +227,8 @@ spec = describe "native browser tools" do
             "{\"delta_x\":0,\"delta_y\":0}"
             "must be nonzero"
         shouldFailWith "browser_scroll"
-            "{\"delta_x\":100001,\"delta_y\":1}"
-            "between -100000 and 100000"
+            "{\"delta_x\":10001,\"delta_y\":1}"
+            "between -10000 and 10000"
         shouldFailWith "browser_scroll"
             "{\"delta_x\":\"down\",\"delta_y\":1}"
             "Expected number for key: delta_x"

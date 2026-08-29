@@ -89,6 +89,11 @@ int ha_browser_callback_abi_smoke(void) {
             || HA_BROWSER_STATUS_UNSUPPORTED != 5
             || HA_BROWSER_STATUS_FAILED != 6
             || HA_BROWSER_STATUS_OUTPUT_TOO_LARGE != 7
+            || HA_BROWSER_URL_MAX_BYTES != 8192
+            || HA_BROWSER_SELECTOR_MAX_BYTES != 4096
+            || HA_BROWSER_TEXT_MAX_BYTES != 65536
+            || HA_BROWSER_KEY_MAX_BYTES != 128
+            || HA_BROWSER_SCROLL_MAX_ABS_DELTA != 10000
             || HA_BROWSER_OUTPUT_CAPACITY != 262144) {
         return 1;
     }
