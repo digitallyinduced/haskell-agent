@@ -93,6 +93,7 @@ library
                     , Agent.CLI.AccountSelection
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
+                    , Agent.CLI.BrowserTools
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
@@ -346,6 +347,7 @@ test-suite agent-cli-test
     main-is:          Spec.hs
     include-dirs:     include
     other-modules:    Agent.CLI.AccountSelectionSpec
+                    , Agent.CLI.MacOS.BrowserBridgeFFISpec
                     , Agent.CLI.MacOS.NativeLoopEventSpec
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.BridgeHeaderSpec
@@ -356,6 +358,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
+                    , Agent.CLI.BrowserToolsSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
@@ -456,7 +459,8 @@ test-suite agent-cli-test
                     , unix
                     , vty >= 6.4 && < 7
     if os(darwin)
-        c-sources:    test/cbits/HaskellAgentBridgeImageSmoke.c
+        c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
+                    , test/cbits/HaskellAgentBridgeImageSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
         other-modules: Agent.CLI.MacOS.Bridge
 

@@ -1928,6 +1928,8 @@ runAgentInitializedWithLock
         databaseAppTools = databaseTools databaseToolsEnv
         learnedSkillAppTools =
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
+        nativeAppTools =
+            maybe [] (.nativeTools) startup.startupNativeHooks
         allTools =
             coding.codingAppTools
                 ++ extraTools
@@ -1936,6 +1938,7 @@ runAgentInitializedWithLock
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ nativeAppTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
@@ -1945,6 +1948,7 @@ runAgentInitializedWithLock
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ nativeAppTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -1980,6 +1984,7 @@ runAgentInitializedWithLock
                         ++ gatewayTools
                         ++ databaseAppTools
                         ++ learnedSkillAppTools
+                        ++ nativeAppTools
                     )
                     mcpFleet.mcpFleetRegistrations
             of
