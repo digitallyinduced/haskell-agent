@@ -295,6 +295,7 @@ spec = do
                     [ "help"
                     , "model"
                     , "effort"
+                    , "fast"
                     , "plan"
                     , "btw"
                     , "recap"

@@ -19,6 +19,7 @@ import Agent.Responses.LoopBackend
     ( responseNeedsLoopContinuation
     , streamOutputObserved
     )
+import Agent.Responses.Request (stripReplayedItemStatus)
 import Agent.Responses.Types
 import Agent.ToolDispatch
 import Agent.Tools.Types (ToolRegistry, mkToolRegistry)
@@ -508,13 +509,15 @@ spec = do
             second `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "done"))
 
             requests <- readIORef seen
+            -- Replayed provider items lose their lifecycle status on the wire.
             map inputItems requests `shouldBe`
                 [ turnInputsToItems [UserMessage "read it"]
-                , turnInputsToItems [UserMessage "read it"]
-                    <> [functionCallItem "c1" "read_file"
-                        "{\"target_file\":\"README.md\"}"]
-                    <> turnInputsToItems
-                        [CompletedTool (functionResult "c1" "file contents")]
+                , map stripReplayedItemStatus
+                    (turnInputsToItems [UserMessage "read it"]
+                        <> [functionCallItem "c1" "read_file"
+                            "{\"target_file\":\"README.md\"}"]
+                        <> turnInputsToItems
+                            [CompletedTool (functionResult "c1" "file contents")])
                 ]
             readIORef transcript `shouldReturn`
                 ( turnInputsToItems [UserMessage "read it"]
@@ -568,9 +571,10 @@ spec = do
             map reasoningEffort requests `shouldBe` [Just "low", Just "high"]
             map inputItems requests `shouldBe`
                 [ turnInputsToItems [UserMessage "one"]
-                , turnInputsToItems [UserMessage "one"]
-                    <> [assistantItem "one"]
-                    <> turnInputsToItems [UserMessage "two"]
+                , map stripReplayedItemStatus
+                    (turnInputsToItems [UserMessage "one"]
+                        <> [assistantItem "one"]
+                        <> turnInputsToItems [UserMessage "two"])
                 ]
 
     describe "openAiBackendWith" do

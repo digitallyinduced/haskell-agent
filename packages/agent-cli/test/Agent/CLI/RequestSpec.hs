@@ -205,9 +205,11 @@ spec = describe "requestParams" do
 
     it "clears Fast mode when switching models" do
         let params =
-                (requestParams OpenAIProvider "gpt-generic"
-                    "instructions" [] "high")
-                    { serviceTier = Just "priority" }
+                case requestParams OpenAIProvider "gpt-generic"
+                    "instructions" [] "high" of
+                    ResponseCreateParams{..} ->
+                        ResponseCreateParams
+                            { serviceTier = Just "priority", .. }
         setRequestModel OpenAIProvider "gpt-5.6-terra" params
             `shouldSatisfy` \result -> result.serviceTier == Nothing
 
