@@ -831,26 +831,31 @@ runToolCalls config calls = do
                     (\scheduled ->
                         IntSet.notMember scheduled.index readyIndexes)
                     remaining
-        batchResults <-
-            mapConcurrently
+        raced <- race
+            (waitCancel config.loopCancel)
+            (mapConcurrently
                 (\scheduled -> do
                     result <-
                         runPreparedToolCall config scheduled.prepared
                     pure (fmap (\value -> (scheduled.index, value)) result))
-                ready
-        let completed' =
-                foldr
-                    (\result acc ->
-                        maybe
-                            acc
-                            (\(index, value) -> IntMap.insert index value acc)
-                            result)
-                    completed
-                    batchResults
-        cancelled <- isCancelled config.loopCancel
-        if cancelled
-            then pure (IntMap.elems completed')
-            else go pending completed'
+                ready)
+        case raced of
+            Left () ->
+                -- 'race' cancels and joins the structured concurrent batch,
+                -- so no tool handler survives the cancelled turn.
+                pure (IntMap.elems completed)
+            Right batchResults -> do
+                let completed' =
+                        foldr
+                            (\result acc ->
+                                maybe
+                                    acc
+                                    (\(index, value) ->
+                                        IntMap.insert index value acc)
+                                    result)
+                            completed
+                            batchResults
+                go pending completed'
 
 data IndexedPreparedToolCall = IndexedPreparedToolCall
     { index :: !Int
