@@ -19,20 +19,21 @@ spec :: Spec
 spec = do
     catalog <- runIO readPackagedCatalog
     describe "decodePickerKey" do
-        it "maps arrows and vim keys" do
+        it "maps arrows while keeping printable keys available to search" do
             decodePickerKey "\ESC[A" `shouldBe` Just PickerUp
             decodePickerKey "\ESC[B" `shouldBe` Just PickerDown
-            decodePickerKey "k" `shouldBe` Just PickerUp
-            decodePickerKey "j" `shouldBe` Just PickerDown
+            decodePickerKey "k" `shouldBe` Just (PickerType 'k')
+            decodePickerKey "j" `shouldBe` Just (PickerType 'j')
 
         it "maps confirm and cancel" do
             decodePickerKey "\n" `shouldBe` Just PickerConfirm
             decodePickerKey "\r" `shouldBe` Just PickerConfirm
             decodePickerKey "\ESC" `shouldBe` Just PickerCancel
-            decodePickerKey "q" `shouldBe` Just PickerCancel
+            decodePickerKey "q" `shouldBe` Just (PickerType 'q')
 
         it "maps filter editing" do
             decodePickerKey "\DEL" `shouldBe` Just PickerBackspace
+            decodePickerKey [toEnum 127] `shouldBe` Just PickerBackspace
             decodePickerKey "g" `shouldBe` Just (PickerType 'g')
 
     describe "renderPickerFrame" do
@@ -54,6 +55,28 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "grok-4.6"
             frame `shouldSatisfy` Text.isInfixOf "enter"
             frame `shouldSatisfy` Text.isInfixOf "filter"
+
+        it "keeps large live catalogs inside a scrolling viewport" do
+            let options =
+                    [ rawModelOption
+                        OpenRouterProvider
+                        ("vendor/model-" <> Text.pack (show index))
+                    | index <- [0 .. 29 :: Int]
+                    ]
+                state =
+                    (initialPickerState
+                        catalog
+                        "openrouter"
+                        OpenRouterProvider
+                        "vendor/model-20"
+                        GenericResponsesDialect)
+                        { pickerAll = options
+                        , pickerIndex = 20
+                        }
+                frame = renderPickerFrame False state
+            length (Text.lines frame) `shouldBe` 16
+            frame `shouldSatisfy` Text.isInfixOf "vendor/model-20"
+            frame `shouldNotSatisfy` Text.isInfixOf "vendor/model-0 "
 
     describe "formatCatalogListing" do
         it "lists the current model and entries from every provider" do

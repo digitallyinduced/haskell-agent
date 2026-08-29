@@ -16,6 +16,7 @@ module Agent.CLI.Models
     , ensureCurrentInList
     , initialPickerState
     , initialPickerStateResolved
+    , initialPickerStateResolvedWith
     , visibleOptions
     , selectedOption
     , applyPickerEvent
@@ -41,7 +42,8 @@ import Agent.Dialect
 import qualified Agent.OpenRouter.Options as OpenRouter
 import qualified Agent.OpenRouter.Request as OpenRouter
 import Agent.Provider (Provider(..))
-import Data.List (findIndex)
+import Data.Char (isPrint)
+import Data.List (findIndex, nubBy)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -198,12 +200,45 @@ initialPickerStateResolved
     -> DialectId
     -> IO PickerState
 initialPickerStateResolved
-        catalog connectionId provider current currentDialect = do
-    resolved <- traverse resolveModelOptionDialect
-        (prioritizeCurrentConnection connectionId (modelCatalog catalog))
+        catalog connectionId provider current currentDialect =
+    initialPickerStateResolvedWith
+        catalog
+        []
+        connectionId
+        provider
+        current
+        currentDialect
+
+-- | Build picker state with additional, runtime-discovered models. Configured
+-- entries win when the same connection/model pair also appears in the live
+-- catalog, preserving custom labels and wire-model overrides.
+initialPickerStateResolvedWith
+    :: ModelCatalog
+    -> [ModelOption]
+    -> Text
+    -> Provider
+    -> Text
+    -> DialectId
+    -> IO PickerState
+initialPickerStateResolvedWith
+        catalog discovered connectionId provider current currentDialect = do
+    let options =
+            prioritizeCurrentConnection connectionId
+                $ deduplicateOptions
+                    (modelCatalog catalog <> discovered)
+    resolved <- resolveModelOptionsDialects options
     pure $
         pickerStateFromOptions
             connectionId provider current currentDialect resolved
+
+deduplicateOptions :: [ModelOption] -> [ModelOption]
+deduplicateOptions = nubBy sameIdentity
+  where
+    sameIdentity left right =
+        left.modelTarget.targetConnectionId
+            == right.modelTarget.targetConnectionId
+            && left.modelTarget.targetModelId
+                == right.modelTarget.targetModelId
 
 prioritizeCurrentConnection :: Text -> [ModelOption] -> [ModelOption]
 prioritizeCurrentConnection current options =
@@ -312,23 +347,43 @@ resolvePersistedDialect storedDialect storedTransportModel inferred =
 
 resolveModelOptionDialect :: ModelOption -> IO ModelOption
 resolveModelOptionDialect option
-    | option.modelTarget.targetConnectionId
-        == builtinConnectionId OpenRouterProvider = do
+    | isBuiltinOpenRouter option = do
         options <- OpenRouter.clientOptionsFromEnv
+        pure (resolveModelOptionDialectWith options option)
+    | otherwise = pure option
+
+resolveModelOptionsDialects :: [ModelOption] -> IO [ModelOption]
+resolveModelOptionsDialects options
+    | any isBuiltinOpenRouter options = do
+        clientOptions <- OpenRouter.clientOptionsFromEnv
+        pure (map (resolveModelOptionDialectWith clientOptions) options)
+    | otherwise = pure options
+
+resolveModelOptionDialectWith
+    :: OpenRouter.ClientOptions
+    -> ModelOption
+    -> ModelOption
+resolveModelOptionDialectWith options option
+    | isBuiltinOpenRouter option =
         let transportedModel
                 | option.modelTarget.targetWireModelId
                     /= option.modelTarget.targetModelId =
                         option.modelTarget.targetWireModelId
                 | otherwise =
                     OpenRouter.mapModel options option.modelTarget.targetModelId
-        pure option
+        in option
             { modelTarget = option.modelTarget
                 { targetWireModelId = transportedModel
                 , targetDialect =
                     dialectIdForModel OpenRouterProvider transportedModel
                 }
             }
-    | otherwise = pure option
+    | otherwise = option
+
+isBuiltinOpenRouter :: ModelOption -> Bool
+isBuiltinOpenRouter option =
+    option.modelTarget.targetConnectionId
+        == builtinConnectionId OpenRouterProvider
 
 move :: Int -> PickerState -> PickerState
 move delta state =
@@ -353,11 +408,7 @@ clampIndex n i
     | otherwise = i
 
 isFilterChar :: Char -> Bool
-isFilterChar c =
-    c == '-' || c == '/' || c == '.' || c == '_'
-        || (c >= 'a' && c <= 'z')
-        || (c >= 'A' && c <= 'Z')
-        || (c >= '0' && c <= '9')
+isFilterChar = isPrint
 
 isCurrent :: Text -> Text -> DialectId -> ModelOption -> Bool
 isCurrent connectionId current dialect option =
