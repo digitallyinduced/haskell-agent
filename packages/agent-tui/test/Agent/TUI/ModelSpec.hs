@@ -773,7 +773,22 @@ spec = describe "fullscreen UI reducer" do
         uiTokensPerSecond afterNext `shouldBe` Just 200
         afterNext.uiGenerationMillis `shouldBe` 0
 
-    it "keeps turn elapsed time when a response restarts" do
+    it "excludes time to first token from generation speed" do
+        let waiting =
+                advanceUiTime 5000 $
+                    reduceUi (UiLoop TurnStarted) initialUiState
+            streaming =
+                advanceUiTime liveTokenRateMinMillis $
+                    reduceUi
+                        (UiLoop (TextDelta "abcdefghijklmnop"))
+                        waiting
+        waiting.uiGenerating `shouldBe` False
+        waiting.uiGenerationMillis `shouldBe` 0
+        uiTokensPerSecond waiting `shouldBe` Nothing
+        streaming.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
+        uiTokensPerSecond streaming `shouldBe` Just 10
+
+    it "keeps turn elapsed time but resets generation timing when a response restarts" do
         let streaming =
                 advanceUiTime 800 $
                     apply
@@ -782,12 +797,15 @@ spec = describe "fullscreen UI reducer" do
                         ]
             restarted =
                 reduceUi (UiLoop (ResponseRestarted "retrying")) streaming
+            waiting = advanceUiTime 1200 restarted
         streaming.uiElapsedMillis `shouldBe` 800
         restarted.uiElapsedMillis `shouldBe` 800
         restarted.uiGenerationMillis `shouldBe` 0
         restarted.uiGenerationChars `shouldBe` 0
-        restarted.uiGenerating `shouldBe` True
+        restarted.uiGenerating `shouldBe` False
         restarted.uiActivity `shouldBe` "Retrying response…"
+        waiting.uiElapsedMillis `shouldBe` 2000
+        waiting.uiGenerationMillis `shouldBe` 0
 
     it "drops last tok/s when the conversation is cleared" do
         let finished =

@@ -309,8 +309,10 @@ reduceUi event state = case event of
 
 resetGeneration :: UiState -> UiState
 resetGeneration state =
+    -- Throughput measures decoding, so the clock starts with the first delta
+    -- rather than including request latency and prompt ingestion.
     state
-        { uiGenerating = True
+        { uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0
         }
@@ -318,7 +320,8 @@ resetGeneration state =
 appendGenerationChars :: Text -> UiState -> UiState
 appendGenerationChars delta state =
     state
-        { uiGenerationChars =
+        { uiGenerating = True
+        , uiGenerationChars =
             state.uiGenerationChars + Text.length delta
         }
 
@@ -354,13 +357,11 @@ reduceLoop event state = case event of
         appendOrExtend BlockThinking "Thought" delta BlockStreaming $
             appendGenerationChars delta state
                 { uiActivity = "Thinking…"
-                , uiGenerating = True
                 }
     TextDelta delta ->
         appendOrExtend BlockAssistant "Assistant" delta BlockStreaming $
             appendGenerationChars delta state
                 { uiActivity = "Writing…"
-                , uiGenerating = True
                 }
     ActivityUpdated activity ->
         state { uiActivity = activity }
