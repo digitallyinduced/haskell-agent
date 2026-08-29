@@ -294,6 +294,7 @@ handleEvent event = do
         ReasoningDelta{} -> True
         ActivityUpdated{} -> True
         ToolUpdated{} -> True
+        ToolArgumentsUpdated{} -> True
         ToolOutputUpdated{} -> True
         NativeAgentOutput{} -> True
         _ -> False

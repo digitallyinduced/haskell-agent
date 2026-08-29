@@ -500,6 +500,8 @@ updateManagedActivity event state =
                 }
         ToolUpdated _ ->
             state
+        ToolArgumentsUpdated _ ->
+            state
         ToolRetracted _ ->
             state
         ResponseAttemptDiscarded ->
