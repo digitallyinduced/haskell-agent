@@ -118,6 +118,7 @@ library
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
+                    , Agent.CLI.GatewayClient
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
                     , Agent.CLI.Input.Display
@@ -375,6 +376,8 @@ test-suite agent-cli-test
                     , Agent.CLI.ErrorSpec
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
+                    , Agent.CLI.GatewayClientSpec
+                    , Agent.CLI.GatewayClientSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
