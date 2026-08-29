@@ -87,6 +87,18 @@ spec = do
                     recordRenderTurnRate (addUTCTime 2 startedAt) turn started
             stateLastTokensPerSecond recorded `shouldBe` Just 40
 
+        it "does not estimate a completed rate without provider usage" do
+            let startedAt = UTCTime (fromGregorian 2026 1 2) 0
+                started =
+                    countGenerationChars "abcdefghijklmnop" $
+                        beginRenderTurn startedAt $
+                            emptyRenderState
+                                { stateLastTokensPerSecond = Just 42 }
+                turn = emptyTurnOutput "r1" [] (Just "abcdefghijklmnop")
+                recorded =
+                    recordRenderTurnRate (addUTCTime 2 startedAt) turn started
+            stateLastTokensPerSecond recorded `shouldBe` Nothing
+
         it "keeps the turn timer when a generation restarts" do
             let startedAt = UTCTime (fromGregorian 2026 1 2) 0
                 started = beginRenderTurn startedAt $

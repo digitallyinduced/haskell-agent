@@ -779,6 +779,27 @@ spec = describe "fullscreen UI reducer" do
         uiTokensPerSecond afterNext `shouldBe` Just 200
         afterNext.uiGenerationMillis `shouldBe` 0
 
+    it "drops the live estimate when completed token metadata is missing" do
+        let streaming =
+                advanceUiTime liveTokenRateMinMillis $
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                            { uiLastTokensPerSecond = Just 42 }
+                        [ UiLoop TurnStarted
+                        , UiLoop (TextDelta "abcdefghijklmnop")
+                        ]
+            finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [] (Just "abcdefghijklmnop"))))
+                    streaming
+        uiTokensPerSecond streaming `shouldBe` Just 10
+        uiTokensPerSecondEstimated streaming `shouldBe` True
+        uiTokensPerSecond finished `shouldBe` Nothing
+        uiTokensPerSecondEstimated finished `shouldBe` False
+
     it "excludes time to first token from generation speed" do
         let waiting =
                 advanceUiTime 5000 $

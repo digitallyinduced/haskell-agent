@@ -304,9 +304,7 @@ recordRenderTurnRate now turn state =
         { stateLastTokensPerSecond =
             generationTokensPerSecond
                 turn.tokenUsage.outputTokens
-                state.stateGenerationChars
                 (generationElapsedMillis now state)
-                <|> state.stateLastTokensPerSecond
         }
 
 renderTokensPerSecond :: UTCTime -> RenderState -> Maybe Double

@@ -338,9 +338,7 @@ snapshotGenerationRate usage state =
         , uiLastTokensPerSecond =
             generationTokensPerSecond
                 usage.outputTokens
-                state.uiGenerationChars
                 generationMillis
-                <|> state.uiLastTokensPerSecond
         }
 
 reduceLoop :: LoopEvent -> UiState -> UiState
@@ -781,10 +779,6 @@ finalizeTurn terminalState state =
         , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
             state.uiLastTokensPerSecond
-                <|> generationTokensPerSecond
-                    0
-                    state.uiGenerationChars
-                    generationMillis
         , uiActivity =
             if terminalState == BlockComplete
                 then "Finished"
