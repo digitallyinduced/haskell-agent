@@ -125,6 +125,7 @@ import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
                       subagentOptions, subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
+                      subagentAllowedRoots, subagentRootAccessRequest,
                       subagentParams, subagentMcpTools, subagentRegistry,
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
@@ -414,6 +415,8 @@ runAgentSession
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentSkillRoots = toolEnv.toolSkillRoots
+                , subagentAllowedRoots = toolEnv.toolAllowedRoots
+                , subagentRootAccessRequest = toolEnv.toolRootAccessRequest
                 , subagentParams = paramsRef
                 , subagentMcpTools = mcpTools
                 , subagentRegistry = registry
