@@ -9,6 +9,7 @@ import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
+import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
@@ -28,6 +29,7 @@ import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.LearnedSkillsSpec as LearnedSkillsSpec
 import qualified Agent.CLI.MacOS.NativeLoopEventSpec as NativeLoopEventSpec
+import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
@@ -84,6 +86,7 @@ main = hspec do
     ArtifactSpec.spec
     AuthSpec.spec
     BtwSpec.spec
+    BrowserToolsSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
@@ -103,6 +106,7 @@ main = hspec do
     LoginSpec.spec
     LearnedSkillsSpec.spec
     NativeLoopEventSpec.spec
+    BrowserBridgeFFISpec.spec
     MarkdownSpec.spec
     McpManagerSpec.spec
     ModelConfigSpec.spec

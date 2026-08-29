@@ -24,6 +24,95 @@ typedef void (*ha_event_callback)(
     const uint8_t *bytes,
     size_t length
 );
+enum {
+    HA_BROWSER_NAVIGATE = 1,
+    HA_BROWSER_SNAPSHOT = 2,
+    HA_BROWSER_CLICK = 3,
+    HA_BROWSER_TYPE = 4,
+    HA_BROWSER_BACK = 5,
+    HA_BROWSER_FORWARD = 6,
+    HA_BROWSER_RELOAD = 7,
+    HA_BROWSER_KEY = 8,
+    HA_BROWSER_SCROLL = 9
+};
+
+enum {
+    HA_BROWSER_TYPE_SUBMIT = 1
+};
+
+enum {
+    HA_BROWSER_STATUS_SUCCESS = 0,
+    HA_BROWSER_STATUS_INVALID_ARGUMENT = 1,
+    HA_BROWSER_STATUS_UNAVAILABLE = 2,
+    HA_BROWSER_STATUS_TIMEOUT = 3,
+    HA_BROWSER_STATUS_PERMISSION_DENIED = 4,
+    HA_BROWSER_STATUS_UNSUPPORTED = 5,
+    HA_BROWSER_STATUS_FAILED = 6,
+    HA_BROWSER_STATUS_OUTPUT_TOO_LARGE = 7
+};
+
+enum {
+    HA_BROWSER_OUTPUT_CAPACITY = 262144
+};
+
+/*
+ * Host-browser callback used by browser tools in native agent turns.
+ *
+ * Commands use these typed fields:
+ *   NAVIGATE: argument1 is an absolute URL.
+ *   SNAPSHOT: no arguments.
+ *   CLICK: argument1 is a CSS selector.
+ *   TYPE: argument1 is a CSS selector, argument2 is text, and flags bit
+ *         HA_BROWSER_TYPE_SUBMIT requests form submission.
+ *   KEY: argument1 is a DOM KeyboardEvent.key value.
+ *   SCROLL: scroll_delta_x and scroll_delta_y are finite CSS-pixel deltas.
+ *   BACK, FORWARD, RELOAD: no arguments.
+ *
+ * Unused text fields have length zero. Unused scroll fields and flags are
+ * zero. Unknown commands or nonzero unused fields must be rejected with
+ * HA_BROWSER_STATUS_INVALID_ARGUMENT.
+ *
+ * Input buffers are nonnull, callback-scoped UTF-8 and may have zero length.
+ * output is a nonnull, callback-scoped writable buffer. Set *output_length to
+ * the UTF-8 bytes written, never above output_capacity. Return 0 for success
+ * or a HA_BROWSER_STATUS_* value for failure; on failure, write a useful UTF-8
+ * error to output when possible. The runtime supplies
+ * HA_BROWSER_OUTPUT_CAPACITY bytes. The callback runs synchronously on an
+ * agent tool worker, never the setter's caller or AppKit main thread. It must
+ * not call engine functions.
+ *
+ * The runtime does not retain input/output buffers. The host owns callback
+ * and context. ha_engine_set_browser_callback may wait for an in-flight
+ * callback; after it returns, a replaced callback/context will not be used
+ * again. The currently installed callback/context must remain valid until
+ * replaced, disabled, or ha_engine_destroy returns.
+ */
+typedef int32_t (*ha_browser_callback)(
+    void *context,
+    int32_t command,
+    const uint8_t *argument1, size_t argument1_length,
+    const uint8_t *argument2, size_t argument2_length,
+    double scroll_delta_x,
+    double scroll_delta_y,
+    int32_t flags,
+    uint8_t *output, size_t output_capacity, size_t *output_length
+);
+
+/*
+ * Installs browser support for future turns. A turn exposes browser tools only
+ * when its turn.start processing observes a nonnull callback. Passing NULL
+ * disables browser support; context is ignored in that case. Tools retained
+ * by an already-started turn fail as inactive after disabling.
+ *
+ * Returns 0 on success, 1 for a null engine, or 2 for an internal failure.
+ * Calls must be serialized with ha_engine_destroy. This function may block
+ * until a running browser callback returns.
+ */
+int32_t ha_engine_set_browser_callback(
+    void *engine,
+    ha_browser_callback callback,
+    void *context
+);
 
 /*
  * A conversation-search callback. status is 0 for a result, 1 for terminal

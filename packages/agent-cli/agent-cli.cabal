@@ -93,6 +93,7 @@ library
                     , Agent.CLI.AccountSelection
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
+                    , Agent.CLI.BrowserTools
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
@@ -342,7 +343,12 @@ test-suite agent-cli-test
     ghc-options:      -threaded
     hs-source-dirs:   test ffi
     main-is:          Spec.hs
+    c-sources:        test/cbits/HaskellAgentBridgeBrowserSmoke.c
+                    , cbits/HaskellAgentBridgeRuntime.c
+    include-dirs:     include
     other-modules:    Agent.CLI.AccountSelectionSpec
+                    , Agent.CLI.MacOS.BrowserBridgeFFISpec
+                    , Agent.CLI.MacOS.Bridge
                     , Agent.CLI.MacOS.NativeLoopEventSpec
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.ApprovalSpec
@@ -351,6 +357,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
+                    , Agent.CLI.BrowserToolsSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
