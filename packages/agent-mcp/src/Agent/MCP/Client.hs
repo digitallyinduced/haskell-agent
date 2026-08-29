@@ -1807,14 +1807,18 @@ decodeProgress raw =
 -- | Run background work owned by the client. Finished workers are pruned on
 -- the next spawn; remaining ones are cancelled by 'closeMcpClient'.
 spawnClientWorker :: McpClient -> IO () -> IO ()
-spawnClientWorker client action = mask_ do
-    worker <- asyncWithUnmask \unmask -> unmask (void (tryAny action))
-    current <- readTVarIO client.clientWorkers
-    live <- fmap catMaybes $ forM current \existing ->
-        poll existing >>= \case
-            Nothing -> pure (Just existing)
-            Just _ -> pure Nothing
-    atomically $ writeTVar client.clientWorkers (worker : live)
+spawnClientWorker client action =
+    -- Share the close lock through registration: shutdown either observes the
+    -- worker and joins it, or completes first and prevents it from starting.
+    withMVar client.clientClosed \closed ->
+        unless closed $ mask_ do
+            worker <- asyncWithUnmask \unmask -> unmask (void (tryAny action))
+            current <- readTVarIO client.clientWorkers
+            live <- fmap catMaybes $ forM current \existing ->
+                poll existing >>= \case
+                    Nothing -> pure (Just existing)
+                    Just _ -> pure Nothing
+            atomically $ writeTVar client.clientWorkers (worker : live)
 
 -- * Transport: Streamable HTTP
 
