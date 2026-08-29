@@ -17,6 +17,7 @@ import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , jsonToolParameters
@@ -290,6 +291,8 @@ fake name = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 raceArgs :: Text

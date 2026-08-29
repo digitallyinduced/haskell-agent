@@ -14,6 +14,7 @@ import Agent.MCP.Types
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
@@ -655,6 +656,8 @@ mcpSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 grokSearchTool :: McpFleet -> AppTool
@@ -776,6 +779,8 @@ grokSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 callCatalogEntryWithReconnect
@@ -921,6 +926,8 @@ mcpCallTool fleet = AppTool
         ClassifyReadOnly (catalogCallIsReadOnly fleet callArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 grokUseTool :: McpFleet -> AppTool
@@ -950,6 +957,8 @@ grokUseTool fleet = AppTool
         ClassifyReadOnly (catalogCallIsReadOnly fleet grokCallArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 mcpListResourcesTool :: McpFleet -> AppTool
@@ -989,6 +998,8 @@ mcpListResourcesTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
   where
     resourceJson :: McpResource -> Value
@@ -1034,6 +1045,8 @@ mcpReadResourceTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
   where
     readArgumentsDecoder = Json.object do

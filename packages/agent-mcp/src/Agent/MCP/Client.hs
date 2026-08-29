@@ -17,6 +17,7 @@ import Agent.Tools.IO (terminateProcessGroup)
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
@@ -837,6 +838,8 @@ appToolFor client tool = AppTool
     , appToolExecution =
         if tool.discoveredReadOnly then ParallelSafe else TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
   where
     qualifiedName = qualifiedMcpToolName

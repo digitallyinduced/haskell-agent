@@ -3,6 +3,8 @@ module Agent.Tools.Types
     , ToolSchema(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , ToolBatchPhase(..)
+    , ToolCallNormalizer
     , ToolRegistry
     , ToolEnv(..)
     , addToolAllowedRoot
@@ -19,12 +21,17 @@ module Agent.Tools.Types
     , freeformApplyPatchAppToolWithExecution
     , freeformGrammarAppToolWithExecution
     , withToolResourceClaims
+    , withToolBatchPhase
+    , withToolCallNormalizer
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
     , toolExecutionPolicyFor
+    , toolBatchPhaseFor
+    , normalizeRegisteredToolCall
     , toolSchedulingPlanFor
     , dispatchRegisteredToolCall
+    , dispatchRegisteredToolCallDetailed
     , jsonToolParameters
     , appToolHandlers
     , toolAllowsWithoutPrompt
@@ -35,10 +42,12 @@ import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult
+    , ToolDispatchOutcome
     , ToolDispatchConfig
     , ToolHandler
     , canonicalToolName
     , dispatchToolHandler
+    , dispatchToolHandlerDetailed
     , handlerName
     )
 import Agent.Tools.Scheduling
@@ -88,8 +97,26 @@ data ToolExecutionPolicy
     | TurnSequential
     deriving (Eq, Show)
 
+-- | Turn-local ordering phase for tool calls emitted in one model response.
+--
+-- Normal calls retain resource-aware scheduling. A mode barrier runs after
+-- every preceding non-terminal call and before later calls are prepared.
+-- Terminal barriers are moved behind every non-terminal call so they observe
+-- the complete batch (for example, plan edits before @exit_plan_mode@).
+data ToolBatchPhase
+    = ToolBatchNormal
+    | ToolBatchModeBarrier
+    | ToolBatchTerminal
+    deriving (Eq, Show)
+
 type ToolResourceResolver =
     ToolCall -> IO (Either Text [ToolResourceClaim])
+
+-- | Rewrite provider-facing arguments into the one call used by approval,
+-- scheduling, and execution. Normalizers may change only 'arguments'; the
+-- call identity, wire kind, tool name, and encryption marker are immutable.
+type ToolCallNormalizer =
+    ToolCall -> IO (Either Text ToolCall)
 
 data AppTool = AppTool
     { appToolName :: !Text
@@ -99,6 +126,8 @@ data AppTool = AppTool
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
+    , appToolBatchPhase :: !ToolBatchPhase
+    , appToolCallNormalizer :: !(Maybe ToolCallNormalizer)
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -217,6 +246,8 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -249,6 +280,8 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 withToolResourceClaims
@@ -257,6 +290,17 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
+
+withToolBatchPhase :: ToolBatchPhase -> AppTool -> AppTool
+withToolBatchPhase phase tool =
+    tool { appToolBatchPhase = phase }
+
+withToolCallNormalizer
+    :: ToolCallNormalizer
+    -> AppTool
+    -> AppTool
+withToolCallNormalizer normalizer tool =
+    tool { appToolCallNormalizer = Just normalizer }
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -285,6 +329,8 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 -- | Construct a freeform tool that advertises an explicit grammar.
@@ -306,6 +352,8 @@ freeformGrammarAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
@@ -346,6 +394,36 @@ toolExecutionPolicyFor registry call =
     maybe TurnSequential (\tool -> tool.appToolExecution)
         (lookupRegisteredTool call.name registry)
 
+-- | Unknown tools use the ordinary phase and remain conservative exclusive
+-- calls through 'toolSchedulingPlanFor'.
+toolBatchPhaseFor :: ToolRegistry -> ToolCall -> ToolBatchPhase
+toolBatchPhaseFor registry call =
+    maybe ToolBatchNormal (.appToolBatchPhase)
+        (lookupRegisteredTool call.name registry)
+
+normalizeRegisteredToolCall
+    :: ToolRegistry
+    -> ToolCall
+    -> IO (Either Text ToolCall)
+normalizeRegisteredToolCall registry original =
+    case lookupRegisteredTool original.name registry
+            >>= (.appToolCallNormalizer) of
+        Nothing -> pure (Right original)
+        Just normalize ->
+            normalize original >>= pure . (>>= validateEnvelope)
+  where
+    validateEnvelope :: ToolCall -> Either Text ToolCall
+    validateEnvelope normalized
+        | normalized.callId /= original.callId =
+            Left "tool call normalizer changed call_id"
+        | normalized.name /= original.name =
+            Left "tool call normalizer changed tool name"
+        | normalized.callKind /= original.callKind =
+            Left "tool call normalizer changed call kind"
+        | normalized.argumentsEncrypted /= original.argumentsEncrypted =
+            Left "tool call normalizer changed the encryption marker"
+        | otherwise = Right normalized
+
 toolSchedulingPlanFor
     :: ToolRegistry
     -> ToolCall
@@ -373,6 +451,16 @@ dispatchRegisteredToolCall
     -> IO ToolCallResult
 dispatchRegisteredToolCall config registry call =
     dispatchToolHandler config
+        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        call
+
+dispatchRegisteredToolCallDetailed
+    :: ToolDispatchConfig
+    -> ToolRegistry
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchRegisteredToolCallDetailed config registry call =
+    dispatchToolHandlerDetailed config
         ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
         call
 

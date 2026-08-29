@@ -14,6 +14,8 @@ import Agent.TextBuffer
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
+    , ToolDispatchOutcome(..)
+    , ToolDispatchStatus(..)
     , ToolDispatchConfig(..)
     )
 import Agent.Tools.Scheduling
@@ -21,8 +23,11 @@ import Agent.Tools.Scheduling
     , schedulingPlansConflict
     )
 import Agent.Tools.Types
-    ( ToolRegistry
-    , dispatchRegisteredToolCall
+    ( ToolBatchPhase(..)
+    , ToolRegistry
+    , dispatchRegisteredToolCallDetailed
+    , normalizeRegisteredToolCall
+    , toolBatchPhaseFor
     , toolSchedulingPlanFor
     )
 import Control.Concurrent.Async
@@ -909,13 +914,159 @@ recordLoopEventFailure pump failure =
     void (tryPutTMVar pump.eventPumpFailure failure)
 
 -- | Preserve model order between conflicting calls while allowing independent
--- calls from the same model turn to overlap. Results are returned in model
--- order regardless of completion order.
+-- normal calls from the same model turn to overlap. Mode barriers split
+-- preparation/execution phases. Terminal barriers run after every
+-- non-terminal call regardless of model order, but results are still returned
+-- in model order.
 runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
 runToolCalls config calls = do
-    prepared <- prepareIndexedToolCalls config (zip [0..] calls)
-    scheduled <- traverse schedule prepared
-    go scheduled IntMap.empty
+    let indexed =
+            [ IndexedToolCall index call
+            | (index, call) <- zip [0..] calls
+            ]
+        nonTerminal =
+            filter
+                ((/= ToolBatchTerminal)
+                    . toolBatchPhaseFor config.loopTools
+                    . (.call))
+                indexed
+        terminal =
+            filter
+                ((== ToolBatchTerminal)
+                    . toolBatchPhaseFor config.loopTools
+                    . (.call))
+                indexed
+    beforeTerminal <-
+        runNonTerminalToolCalls config nonTerminal emptyToolBatchProgress
+    completed <- runTerminalToolCalls config terminal beforeTerminal
+    pure (IntMap.elems completed.batchResults)
+
+data IndexedToolCall = IndexedToolCall
+    { index :: !Int
+    , call :: !ToolCall
+    }
+
+data ToolBatchProgress = ToolBatchProgress
+    { batchResults :: !(IntMap ToolCallResult)
+    , batchSucceeded :: !Bool
+    , batchCancelled :: !Bool
+    }
+
+emptyToolBatchProgress :: ToolBatchProgress
+emptyToolBatchProgress = ToolBatchProgress
+    { batchResults = IntMap.empty
+    , batchSucceeded = True
+    , batchCancelled = False
+    }
+
+mergeToolBatchProgress
+    :: ToolBatchProgress
+    -> ToolBatchProgress
+    -> ToolBatchProgress
+mergeToolBatchProgress earlier later = ToolBatchProgress
+    { batchResults =
+        IntMap.union earlier.batchResults later.batchResults
+    , batchSucceeded =
+        earlier.batchSucceeded && later.batchSucceeded
+    , batchCancelled =
+        earlier.batchCancelled || later.batchCancelled
+    }
+
+-- | Prepare later calls only after a mode barrier's handler has completed.
+-- This is what makes an enter-plan call affect approval of subsequent edits.
+runNonTerminalToolCalls
+    :: LoopConfig
+    -> [IndexedToolCall]
+    -> ToolBatchProgress
+    -> IO ToolBatchProgress
+runNonTerminalToolCalls _ [] progress = pure progress
+runNonTerminalToolCalls config remaining progress
+    | progress.batchCancelled = pure progress
+    | otherwise =
+        case span isNormal remaining of
+            (normal@(_:_), rest) -> do
+                completed <- runIndexedToolCallGroup config normal
+                runNonTerminalToolCalls
+                    config
+                    rest
+                    (mergeToolBatchProgress progress completed)
+            ([], barrier : rest) -> do
+                completed <- runIndexedToolCallGroup config [barrier]
+                runNonTerminalToolCalls
+                    config
+                    rest
+                    (mergeToolBatchProgress progress completed)
+            ([], []) -> pure progress
+  where
+    isNormal :: IndexedToolCall -> Bool
+    isNormal indexed =
+        toolBatchPhaseFor config.loopTools indexed.call
+            == ToolBatchNormal
+
+-- | Terminal calls are deliberately prepared one at a time after all
+-- non-terminal work. Once an earlier call fails or cancellation is observed,
+-- their approval callbacks and handlers are not invoked.
+runTerminalToolCalls
+    :: LoopConfig
+    -> [IndexedToolCall]
+    -> ToolBatchProgress
+    -> IO ToolBatchProgress
+runTerminalToolCalls _ [] progress = pure progress
+runTerminalToolCalls config remaining progress
+    | not progress.batchSucceeded || progress.batchCancelled = do
+        skipped <- skipTerminalToolCalls config remaining
+        pure (mergeToolBatchProgress progress skipped)
+runTerminalToolCalls config (terminal : rest) progress = do
+    completed <- runIndexedToolCallGroup config [terminal]
+    let progress' = mergeToolBatchProgress progress completed
+    if completed.batchCancelled
+        then do
+            skipped <- skipTerminalToolCalls config (terminal : rest)
+            pure (mergeToolBatchProgress progress' skipped)
+        else
+            runTerminalToolCalls config rest progress'
+
+skipTerminalToolCalls
+    :: LoopConfig
+    -> [IndexedToolCall]
+    -> IO ToolBatchProgress
+skipTerminalToolCalls config calls = do
+    results <- traverse skip calls
+    pure ToolBatchProgress
+        { batchResults = IntMap.fromList results
+        , batchSucceeded = False
+        , batchCancelled = False
+        }
+  where
+    skip :: IndexedToolCall -> IO (Int, ToolCallResult)
+    skip indexed = do
+        let call = indexed.call
+            result = ToolCallResult
+                { callId = call.callId
+                , output =
+                    "Skipped terminal tool call because an earlier tool call "
+                        <> "was denied, cancelled, or failed."
+                , callKind = call.callKind
+                }
+        config.loopOnEvent (ToolStarted call)
+        config.loopOnEvent (ToolFinished result)
+        pure (indexed.index, result)
+
+runIndexedToolCallGroup
+    :: LoopConfig
+    -> [IndexedToolCall]
+    -> IO ToolBatchProgress
+runIndexedToolCallGroup config indexed = do
+    PreparedToolCallBatch prepared cancelled <-
+        prepareIndexedToolCalls config indexed
+    if cancelled
+        then pure emptyToolBatchProgress
+            { batchSucceeded = False
+            , batchCancelled = True
+            }
+        else do
+            scheduled <- traverse schedule prepared
+            runScheduledToolCalls config scheduled
   where
     schedule
         :: IndexedPreparedToolCall
@@ -928,12 +1079,14 @@ runToolCalls config calls = do
             , prepared = indexed.prepared
             }
 
-    go
-        :: [PreparedScheduledToolCall]
-        -> IntMap ToolCallResult
-        -> IO [ToolCallResult]
-    go [] completed =
-        pure (IntMap.elems completed)
+runScheduledToolCalls
+    :: LoopConfig
+    -> [PreparedScheduledToolCall]
+    -> IO ToolBatchProgress
+runScheduledToolCalls config calls =
+    go calls emptyToolBatchProgress
+  where
+    go [] completed = pure completed
     go remaining completed = do
         let ready = readyCalls remaining
             readyIndexes = IntSet.fromList (map (.index) ready)
@@ -946,27 +1099,43 @@ runToolCalls config calls = do
             (waitCancel config.loopCancel)
             (mapConcurrently
                 (\scheduled -> do
-                    result <-
+                    outcome <-
                         runPreparedToolCall config scheduled.prepared
-                    pure (fmap (\value -> (scheduled.index, value)) result))
+                    pure (scheduled.index, outcome))
                 ready)
         case raced of
             Left () ->
                 -- 'race' cancels and joins the structured concurrent batch,
                 -- so no tool handler survives the cancelled turn.
-                pure (IntMap.elems completed)
-            Right batchResults -> do
-                let completed' =
-                        foldr
-                            (\result acc ->
-                                maybe
-                                    acc
-                                    (\(index, value) ->
-                                        IntMap.insert index value acc)
-                                    result)
-                            completed
-                            batchResults
-                go pending completed'
+                pure completed
+                    { batchSucceeded = False
+                    , batchCancelled = True
+                    }
+            Right outcomes -> do
+                let batch = foldr addOutcome emptyToolBatchProgress outcomes
+                    completed' = mergeToolBatchProgress completed batch
+                if batch.batchCancelled
+                    then pure completed'
+                    else go pending completed'
+
+    addOutcome
+        :: (Int, PreparedToolCallOutcome)
+        -> ToolBatchProgress
+        -> ToolBatchProgress
+    addOutcome (index, outcome) progress =
+        case outcome of
+            PreparedToolCallCancelled ->
+                progress
+                    { batchSucceeded = False
+                    , batchCancelled = True
+                    }
+            PreparedToolCallCompleted result succeeded ->
+                progress
+                    { batchResults =
+                        IntMap.insert index result progress.batchResults
+                    , batchSucceeded =
+                        progress.batchSucceeded && succeeded
+                    }
 
 data IndexedPreparedToolCall = IndexedPreparedToolCall
     { index :: !Int
@@ -993,32 +1162,52 @@ readyCalls calls =
 
 prepareIndexedToolCalls
     :: LoopConfig
-    -> [(Int, ToolCall)]
-    -> IO [IndexedPreparedToolCall]
-prepareIndexedToolCalls _ [] = pure []
-prepareIndexedToolCalls config ((index, call) : rest) = do
-    cancelled <- isCancelled config.loopCancel
-    if cancelled
-        then pure []
-        else do
-            prepared <- prepareToolCall config call
-            cancelledAfter <- isCancelled config.loopCancel
-            if cancelledAfter
-                then pure []
-                else
-                    (IndexedPreparedToolCall
-                        { index
-                        , prepared
-                        } :)
-                        <$> prepareIndexedToolCalls config rest
+    -> [IndexedToolCall]
+    -> IO PreparedToolCallBatch
+prepareIndexedToolCalls config = go []
+  where
+    go
+        :: [IndexedPreparedToolCall]
+        -> [IndexedToolCall]
+        -> IO PreparedToolCallBatch
+    go prepared [] =
+        pure (PreparedToolCallBatch (reverse prepared) False)
+    go prepared (indexed : rest) = do
+        cancelled <- isCancelled config.loopCancel
+        if cancelled
+            then pure (PreparedToolCallBatch (reverse prepared) True)
+            else do
+                toolCall <- prepareToolCall config indexed.call
+                cancelledAfter <- isCancelled config.loopCancel
+                if cancelledAfter
+                    then pure (PreparedToolCallBatch (reverse prepared) True)
+                    else
+                        go
+                            ( IndexedPreparedToolCall
+                                { index = indexed.index
+                                , prepared = toolCall
+                                }
+                            : prepared
+                            )
+                            rest
+
+data PreparedToolCallBatch = PreparedToolCallBatch
+    ![IndexedPreparedToolCall]
+    !Bool
 
 data ToolApproval
     = ToolApprovalDenied !Text
     | ToolApprovalRejected
+    | ToolApprovalFailed !Text
+    | ToolNormalizationFailed !Text
     | ToolApprovalGranted
 
 data PreparedToolCall =
     PreparedToolCall !ToolCall !ToolApproval
+
+data PreparedToolCallOutcome
+    = PreparedToolCallCompleted !ToolCallResult !Bool
+    | PreparedToolCallCancelled
 
 schedulingPlanForPrepared
     :: LoopConfig
@@ -1032,22 +1221,42 @@ schedulingPlanForPrepared config (PreparedToolCall call approval) =
             pure ToolUnconstrained
         ToolApprovalRejected ->
             pure ToolUnconstrained
+        ToolApprovalFailed{} ->
+            pure ToolUnconstrained
+        ToolNormalizationFailed{} ->
+            pure ToolUnconstrained
 
 -- | Approval may touch interactive or otherwise order-sensitive state, so it
 -- is prepared serially even when the resulting handlers may run concurrently.
+-- A call is normalized exactly once before approval; that same value is used
+-- for resource claims and handler dispatch.
 prepareToolCall :: LoopConfig -> ToolCall -> IO PreparedToolCall
-prepareToolCall config call = do
-    approval <- tryAny (config.loopApprove call)
-    pure $
-        PreparedToolCall call $
-            case approval of
-                Left exception ->
-                    ToolApprovalDenied
-                        ("Tool " <> call.name
-                            <> " could not be prepared: "
-                            <> exceptionSummary exception)
-                Right decision ->
-                    normalizeApproval decision
+prepareToolCall config original = do
+    normalized <-
+        tryAny (normalizeRegisteredToolCall config.loopTools original)
+    case normalized of
+        Left exception ->
+            pure . PreparedToolCall original . ToolNormalizationFailed $
+                "Tool " <> original.name
+                    <> " could not be normalized: "
+                    <> exceptionSummary exception
+        Right (Left err) ->
+            pure . PreparedToolCall original . ToolNormalizationFailed $
+                "Tool " <> original.name
+                    <> " could not be normalized: "
+                    <> err
+        Right (Right call) -> do
+            approval <- tryAny (config.loopApprove call)
+            pure $
+                PreparedToolCall call $
+                    case approval of
+                        Left exception ->
+                            ToolApprovalFailed
+                                ("Tool " <> call.name
+                                    <> " could not be prepared: "
+                                    <> exceptionSummary exception)
+                        Right decision ->
+                            normalizeApproval decision
   where
     normalizeApproval = \case
         Left denial -> ToolApprovalDenied denial
@@ -1057,28 +1266,52 @@ prepareToolCall config call = do
 runPreparedToolCall
     :: LoopConfig
     -> PreparedToolCall
-    -> IO (Maybe ToolCallResult)
+    -> IO PreparedToolCallOutcome
 runPreparedToolCall config (PreparedToolCall call approval) = do
     cancelled <- isCancelled config.loopCancel
     if cancelled
-        then pure Nothing
+        then pure PreparedToolCallCancelled
         else do
             config.loopOnEvent (ToolStarted call)
-            result <- case approval of
+            (result, succeeded) <- case approval of
                 ToolApprovalDenied denial ->
-                    pure ToolCallResult
-                        { callId = call.callId
-                        , output = denial
-                        , callKind = call.callKind
-                        }
+                    pure
+                        ( ToolCallResult
+                            { callId = call.callId
+                            , output = denial
+                            , callKind = call.callKind
+                            }
+                        , False
+                        )
                 ToolApprovalRejected ->
-                    pure ToolCallResult
-                        { callId = call.callId
-                        , output = "Tool call rejected by user."
-                        , callKind = call.callKind
-                        }
-                ToolApprovalGranted ->
-                    dispatchRegisteredToolCall
+                    pure
+                        ( ToolCallResult
+                            { callId = call.callId
+                            , output = "Tool call rejected by user."
+                            , callKind = call.callKind
+                            }
+                        , False
+                        )
+                ToolApprovalFailed failure ->
+                    pure
+                        ( ToolCallResult
+                            { callId = call.callId
+                            , output = failure
+                            , callKind = call.callKind
+                            }
+                        , False
+                        )
+                ToolNormalizationFailed failure ->
+                    pure
+                        ( ToolCallResult
+                            { callId = call.callId
+                            , output = failure
+                            , callKind = call.callKind
+                            }
+                        , False
+                        )
+                ToolApprovalGranted -> do
+                    outcome <- dispatchRegisteredToolCallDetailed
                         config.loopDispatch
                             { toolDispatchOnOutput = \progressCall output ->
                                 config.loopDispatch.toolDispatchOnOutput progressCall output
@@ -1087,5 +1320,9 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                             }
                         config.loopTools
                         call
+                    pure
+                        ( outcome.toolDispatchResult
+                        , outcome.toolDispatchStatus == ToolDispatchSucceeded
+                        )
             config.loopOnEvent (ToolFinished result)
-            pure (Just result)
+            pure (PreparedToolCallCompleted result succeeded)

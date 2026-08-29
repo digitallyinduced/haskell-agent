@@ -171,6 +171,25 @@ spec = describe "dispatchToolCall" do
         result <- dispatchToolCall testConfig [] (functionToolCall "call-1" "missing" "{}")
         result `shouldBe` functionResult "call-1" "ERR unknown:missing"
 
+    it "retains handler failure independently of formatted output" do
+        let config = testConfig
+                { toolDispatchFormatResult =
+                    either (const "provider-compatible output") id
+                }
+        outcome <- dispatchToolCallDetailed config
+            [noArgsTool "fail" (pure (Left "bad input"))]
+            (functionToolCall "call-1" "fail" "{}")
+        outcome.toolDispatchResult
+            `shouldBe` functionResult "call-1" "provider-compatible output"
+        outcome.toolDispatchStatus `shouldBe` ToolDispatchFailed
+
+    it "marks successful handler dispatch explicitly" do
+        outcome <- dispatchToolCallDetailed testConfig
+            [noArgsTool "ok" (pure (Right "done"))]
+            (functionToolCall "call-1" "ok" "{}")
+        outcome.toolDispatchResult `shouldBe` functionResult "call-1" "done"
+        outcome.toolDispatchStatus `shouldBe` ToolDispatchSucceeded
+
     it "formats exceptions and invokes the exception hook" do
         seen <- newIORef []
         let config = testConfig

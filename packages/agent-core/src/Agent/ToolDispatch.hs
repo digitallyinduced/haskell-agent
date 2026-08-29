@@ -4,6 +4,8 @@ module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolDispatchStatus(..)
+    , ToolDispatchOutcome(..)
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -17,7 +19,9 @@ module Agent.ToolDispatch
     , canonicalToolName
     , canonicalToolArguments
     , dispatchToolCall
+    , dispatchToolCallDetailed
     , dispatchToolHandler
+    , dispatchToolHandlerDetailed
     , handlerName
     , toolArgumentsValue
     , decodeToolArguments
@@ -75,6 +79,19 @@ data ToolCallResult = ToolCallResult
     { callId :: !Text
     , output :: !Text
     , callKind :: !ToolCallKind
+    } deriving (Eq, Show)
+
+-- | Internal execution status retained independently of provider-facing
+-- formatting. Callers must not infer success from a formatted output prefix:
+-- dialects are free to format handler errors differently.
+data ToolDispatchStatus
+    = ToolDispatchSucceeded
+    | ToolDispatchFailed
+    deriving (Eq, Show)
+
+data ToolDispatchOutcome = ToolDispatchOutcome
+    { toolDispatchResult :: !ToolCallResult
+    , toolDispatchStatus :: !ToolDispatchStatus
     } deriving (Eq, Show)
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
@@ -149,6 +166,14 @@ dispatchToolCall :: ToolDispatchConfig -> [ToolHandler] -> ToolCall -> IO ToolCa
 dispatchToolCall config handlers call =
     dispatchToolHandler config (findHandler call.name handlers) call
 
+dispatchToolCallDetailed
+    :: ToolDispatchConfig
+    -> [ToolHandler]
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchToolCallDetailed config handlers call =
+    dispatchToolHandlerDetailed config (findHandler call.name handlers) call
+
 -- | Dispatch with an already-resolved handler. Registries should prefer this
 -- entry point so canonical-name lookup and uniqueness checks happen once.
 dispatchToolHandler
@@ -156,7 +181,19 @@ dispatchToolHandler
     -> Maybe ToolHandler
     -> ToolCall
     -> IO ToolCallResult
-dispatchToolHandler config maybeHandler call = do
+dispatchToolHandler config maybeHandler call =
+    (.toolDispatchResult)
+        <$> dispatchToolHandlerDetailed config maybeHandler call
+
+-- | Dispatch while retaining whether decoding/the handler/finalization
+-- failed. The public result remains byte-for-byte compatible with
+-- 'dispatchToolHandler'.
+dispatchToolHandlerDetailed
+    :: ToolDispatchConfig
+    -> Maybe ToolHandler
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchToolHandlerDetailed config maybeHandler call = do
     let callName = call.name
         input = canonicalToolArguments call.name call.arguments
         runTool = case maybeHandler of
@@ -167,26 +204,38 @@ dispatchToolHandler config maybeHandler call = do
                     input
                     handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
-    result <- tryAny runTool
-    resultOutput <- case result of
+    attempted <- tryAny runTool
+    (handlerStatus, resultOutput) <- case attempted of
         Right toolResult ->
-            pure (config.toolDispatchFormatResult toolResult)
+            pure
+                ( either
+                    (const ToolDispatchFailed)
+                    (const ToolDispatchSucceeded)
+                    toolResult
+                , config.toolDispatchFormatResult toolResult
+                )
         Left exception -> do
             -- Diagnostics must not replace the original tool failure with a
             -- second exception. 'tryAny' still lets asynchronous cancellation
             -- propagate.
             _ <- tryAny (config.toolDispatchOnException callName exception)
-            pure (config.toolDispatchFormatException callName exception)
-    finalizedOutput <-
+            pure
+                ( ToolDispatchFailed
+                , config.toolDispatchFormatException callName exception
+                )
+    (finalStatus, finalizedOutput) <-
         tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
-            Right output -> pure output
+            Right output -> pure (handlerStatus, output)
             Left exception -> do
                 _ <- tryAny (config.toolDispatchOnException callName exception)
-                pure resultOutput
-    pure ToolCallResult
-        { callId = call.callId
-        , output = finalizedOutput
-        , callKind = call.callKind
+                pure (ToolDispatchFailed, resultOutput)
+    pure ToolDispatchOutcome
+        { toolDispatchResult = ToolCallResult
+            { callId = call.callId
+            , output = finalizedOutput
+            , callKind = call.callKind
+            }
+        , toolDispatchStatus = finalStatus
         }
 
 toolArgumentsValue :: Text -> Text

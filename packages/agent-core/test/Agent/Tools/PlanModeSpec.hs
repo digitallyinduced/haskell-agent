@@ -14,6 +14,7 @@ import Agent.Tools.PlanMode.Tracker
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolBatchPhase(..)
     , jsonToolParameters
     )
 import Control.Exception.Safe (bracket)
@@ -48,6 +49,13 @@ spec = describe "Agent.Tools.PlanMode" do
             case (enterPlanModeTool env).appToolApproval of
                 AlwaysReadOnly -> pure ()
                 _ -> expectationFailure "enter_plan_mode should be read-only"
+
+    it "marks entry and exit as mode-changing batch barriers" do
+        withTempPlan \env -> do
+            (enterPlanModeTool env).appToolBatchPhase
+                `shouldBe` ToolBatchModeBarrier
+            (exitPlanModeTool env).appToolBatchPhase
+                `shouldBe` ToolBatchTerminal
 
     it "activates and deactivates plan mode" do
         withTempPlan \env -> do

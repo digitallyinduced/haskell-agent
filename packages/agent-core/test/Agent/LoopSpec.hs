@@ -17,11 +17,15 @@ import Agent.Tools.Scheduling
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
+    , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , jsonAppToolWithExecution
     , mkToolRegistry
+    , toolBatchPhaseFor
     , toolExecutionPolicyFor
+    , withToolBatchPhase
+    , withToolCallNormalizer
     , withToolResourceClaims
     )
 import Control.Concurrent (forkIO, threadDelay)
@@ -474,6 +478,345 @@ spec = describe "runLoop" do
                 , tokenUsage = emptyTokenUsage
                 }
 
+    it "runs a terminal call after later normal work" do
+        assertTerminalRunsAfterNormal
+            [ functionToolCall "exit-call" "exit" "{}"
+            , functionToolCall "write-call" "write" "{}"
+            ]
+
+    it "runs a terminal call after earlier normal work" do
+        assertTerminalRunsAfterNormal
+            [ functionToolCall "write-call" "write" "{}"
+            , functionToolCall "exit-call" "exit" "{}"
+            ]
+
+    it "does not prepare calls after a mode barrier until it completes" do
+        active <- newIORef False
+        editApprovalSawActive <- newIORef False
+        handlerOrder <- newIORef ([] :: [Text])
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "enter-call" "enter" "{}"
+                , functionToolCall "edit-call" "edit" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        let tools =
+                [ phasedTool ToolBatchModeBarrier "enter" do
+                    modifyIORef' handlerOrder (<> ["enter"])
+                    writeIORef active True
+                    pure (Right "entered")
+                , phasedTool ToolBatchNormal "edit" do
+                    modifyIORef' handlerOrder (<> ["edit"])
+                    pure (Right "edited")
+                ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopApprove = \call -> do
+                    if call.name == "edit"
+                        then readIORef active >>= writeIORef editApprovalSawActive
+                        else pure ()
+                    pure (Right True)
+                }
+        runLoop config Nothing "go" `shouldReturn` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "ok"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        readIORef editApprovalSawActive `shouldReturn` True
+        readIORef handlerOrder `shouldReturn` ["enter", "edit"]
+
+    it "preserves calls preceding a mode barrier" do
+        active <- newIORef False
+        editApprovalSawActive <- newIORef True
+        handlerOrder <- newIORef ([] :: [Text])
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "edit-call" "edit" "{}"
+                , functionToolCall "enter-call" "enter" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        let tools =
+                [ phasedTool ToolBatchModeBarrier "enter" do
+                    modifyIORef' handlerOrder (<> ["enter"])
+                    writeIORef active True
+                    pure (Right "entered")
+                , phasedTool ToolBatchNormal "edit" do
+                    modifyIORef' handlerOrder (<> ["edit"])
+                    pure (Right "edited")
+                ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopApprove = \call -> do
+                    if call.name == "edit"
+                        then readIORef active >>= writeIORef editApprovalSawActive
+                        else pure ()
+                    pure (Right True)
+                }
+        _ <- runLoop config Nothing "go"
+        readIORef editApprovalSawActive `shouldReturn` False
+        readIORef handlerOrder `shouldReturn` ["edit", "enter"]
+
+    it "skips terminal approval after an earlier denial" do
+        terminalApprovals <- newIORef (0 :: Int)
+        terminalRuns <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "exit-call" "exit" "{}"
+                , functionToolCall "write-call" "write" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        let tools =
+                [ phasedTool ToolBatchNormal "write"
+                    (pure (Right "unexpected"))
+                , phasedTool ToolBatchTerminal "exit" do
+                    modifyIORef' terminalRuns (+ 1)
+                    pure (Right "unexpected")
+                ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopApprove = \call ->
+                    if call.name == "write"
+                        then pure (Right False)
+                        else do
+                            modifyIORef' terminalApprovals (+ 1)
+                            pure (Right True)
+                }
+        _ <- runLoop config Nothing "go"
+        readIORef terminalApprovals `shouldReturn` 0
+        readIORef terminalRuns `shouldReturn` 0
+        readIORef submissions >>= \case
+            [_, (_, [CompletedTool skipped, CompletedTool denied])] -> do
+                skipped.callId `shouldBe` "exit-call"
+                skipped.output `shouldSatisfy` Text.isInfixOf "Skipped terminal"
+                denied.output `shouldBe` "Tool call rejected by user."
+            other -> expectationFailure
+                ("unexpected terminal denial submissions: " <> show other)
+
+    it "skips terminal approval after a handler failure" do
+        terminalApprovals <- newIORef (0 :: Int)
+        terminalRuns <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "exit-call" "exit" "{}"
+                , functionToolCall "write-call" "write" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        let tools =
+                [ phasedTool ToolBatchNormal "write"
+                    (pure (Left "write failed"))
+                , phasedTool ToolBatchTerminal "exit" do
+                    modifyIORef' terminalRuns (+ 1)
+                    pure (Right "unexpected")
+                ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopApprove = \call -> do
+                    if call.name == "exit"
+                        then modifyIORef' terminalApprovals (+ 1)
+                        else pure ()
+                    pure (Right True)
+                }
+        _ <- runLoop config Nothing "go"
+        readIORef terminalApprovals `shouldReturn` 0
+        readIORef terminalRuns `shouldReturn` 0
+        readIORef submissions >>= \case
+            [_, (_, [CompletedTool skipped, CompletedTool failed])] -> do
+                skipped.callId `shouldBe` "exit-call"
+                failed.output `shouldBe` "Error: write failed"
+            other -> expectationFailure
+                ("unexpected terminal failure submissions: " <> show other)
+
+    it "normalizes a call once before approval, resources, and dispatch" do
+        normalizerCalls <- newIORef (0 :: Int)
+        approvalArguments <- newIORef ""
+        resourceArguments <- newIORef ""
+        handlerArguments <- newIORef ("", "")
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall
+                    "normalize-call"
+                    "normalize"
+                    "{\"message\":\"raw\"}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        let normalizedArguments = "{\"message\":\"normalized\"}"
+            tool =
+                withToolResourceClaims
+                    (\call -> do
+                        writeIORef resourceArguments call.arguments
+                        pure (Right []))
+                    . withToolCallNormalizer
+                        (\call -> do
+                            modifyIORef' normalizerCalls (+ 1)
+                            pure (Right call
+                                { arguments = normalizedArguments
+                                }))
+                    $ jsonAppToolWithExecution
+                        "normalize"
+                        ""
+                        []
+                        AlwaysReadOnly
+                        TurnSequential
+                        (typedToolWithCall
+                            "normalize"
+                            echoArgsDecoder
+                            \call EchoArgs{message} -> do
+                                writeIORef handlerArguments
+                                    (call.arguments, message)
+                                pure (Right "done"))
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                , loopApprove = \call -> do
+                    writeIORef approvalArguments call.arguments
+                    pure (Right True)
+                }
+        _ <- runLoop config Nothing "go"
+        readIORef normalizerCalls `shouldReturn` 1
+        readIORef approvalArguments `shouldReturn` normalizedArguments
+        readIORef resourceArguments `shouldReturn` normalizedArguments
+        readIORef handlerArguments
+            `shouldReturn` (normalizedArguments, "normalized")
+
+    it "skips terminal approval after call normalization fails" do
+        normalizerCalls <- newIORef (0 :: Int)
+        normalApprovals <- newIORef (0 :: Int)
+        terminalApprovals <- newIORef (0 :: Int)
+        handlerRuns <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "exit-call" "exit" "{}"
+                , functionToolCall "write-call" "write" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        let writeTool =
+                withToolCallNormalizer
+                    (\_ -> do
+                        modifyIORef' normalizerCalls (+ 1)
+                        pure (Left "invalid target"))
+                    (phasedTool ToolBatchNormal "write" do
+                        modifyIORef' handlerRuns (+ 1)
+                        pure (Right "unexpected"))
+            exitTool = phasedTool ToolBatchTerminal "exit" do
+                modifyIORef' handlerRuns (+ 1)
+                pure (Right "unexpected")
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [writeTool, exitTool]
+                , loopApprove = \call -> do
+                    if call.name == "exit"
+                        then modifyIORef' terminalApprovals (+ 1)
+                        else modifyIORef' normalApprovals (+ 1)
+                    pure (Right True)
+                }
+        _ <- runLoop config Nothing "go"
+        readIORef normalizerCalls `shouldReturn` 1
+        readIORef normalApprovals `shouldReturn` 0
+        readIORef terminalApprovals `shouldReturn` 0
+        readIORef handlerRuns `shouldReturn` 0
+        readIORef submissions >>= \case
+            [_, (_, [CompletedTool skipped, CompletedTool failed])] -> do
+                skipped.callId `shouldBe` "exit-call"
+                failed.output `shouldBe`
+                    "Tool write could not be normalized: invalid target"
+            other -> expectationFailure
+                ("unexpected normalization failure submissions: " <> show other)
+
+    it "returns a synthetic terminal result when preparation cancels" do
+        terminalApprovals <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "exit-call" "exit" "{}"
+                , functionToolCall "write-call" "write" "{}"
+                ]
+                Nothing
+            ]
+        let tools =
+                [ phasedTool ToolBatchNormal "write"
+                    (pure (Right "unexpected"))
+                , phasedTool ToolBatchTerminal "exit"
+                    (pure (Right "unexpected"))
+                ]
+        config0 <- testConfig backend
+        let cancelFlag = config0.loopCancel
+            config = config0
+                { loopTools = registryFromTools tools
+                , loopApprove = \call ->
+                    if call.name == "write"
+                        then do
+                            requestCancel cancelFlag
+                            pure (Right False)
+                        else do
+                            modifyIORef' terminalApprovals (+ 1)
+                            pure (Right True)
+                }
+        runLoop config Nothing "go" `shouldReturn`
+            Left
+                (LoopCancelled
+                    [ ToolCallResult
+                        { callId = "exit-call"
+                        , output =
+                            "Skipped terminal tool call because an earlier tool call was denied, cancelled, or failed."
+                        , callKind = FunctionCallKind
+                        }
+                    ])
+        readIORef terminalApprovals `shouldReturn` 0
+
+    it "preserves relative execution order among terminal calls" do
+        executionOrder <- newIORef ([] :: [Text])
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "terminal-a-call" "terminal-a" "{}"
+                , functionToolCall "normal-call" "normal" "{}"
+                , functionToolCall "terminal-b-call" "terminal-b" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        let recorded name = do
+                modifyIORef' executionOrder (<> [name])
+                pure (Right name)
+            tools =
+                [ phasedTool ToolBatchTerminal "terminal-a"
+                    (recorded "terminal-a")
+                , phasedTool ToolBatchNormal "normal"
+                    (recorded "normal")
+                , phasedTool ToolBatchTerminal "terminal-b"
+                    (recorded "terminal-b")
+                ]
+        config0 <- testConfig backend
+        _ <- runLoop
+            config0 { loopTools = registryFromTools tools }
+            Nothing
+            "go"
+        readIORef executionOrder
+            `shouldReturn` ["normal", "terminal-a", "terminal-b"]
+
     it "keeps sequential calls as barriers around parallel-safe batches" do
         firstSafeStarted <- newEmptyMVar
         secondSafeStarted <- newEmptyMVar
@@ -795,6 +1138,14 @@ spec = describe "runLoop" do
             (registryFromHandlers [noArgsTool "known" (pure (Right "ok"))])
             (functionToolCall "c1" "unknown" "{}")
             `shouldBe` TurnSequential
+
+    it "defaults tools to the normal batch phase" do
+        let registry =
+                registryFromHandlers [noArgsTool "known" (pure (Right "ok"))]
+        toolBatchPhaseFor registry (functionToolCall "c1" "known" "{}")
+            `shouldBe` ToolBatchNormal
+        toolBatchPhaseFor registry (functionToolCall "c2" "unknown" "{}")
+            `shouldBe` ToolBatchNormal
 
     it "returns a denial as tool output when approval is refused" do
         submissions <- newIORef []
@@ -1691,6 +2042,75 @@ resourceTool name resource action =
             AlwaysReadOnly
             TurnSequential
             (noArgsTool name action))
+
+phasedTool
+    :: ToolBatchPhase
+    -> Text
+    -> IO (Either Text Text)
+    -> AppTool
+phasedTool phase name action =
+    withToolBatchPhase phase $
+        jsonAppToolWithExecution
+            name
+            ""
+            []
+            AlwaysReadOnly
+            TurnSequential
+            (noArgsTool name action)
+
+assertTerminalRunsAfterNormal :: [ToolCall] -> Expectation
+assertTerminalRunsAfterNormal calls = do
+    executionOrder <- newIORef ([] :: [Text])
+    exitApprovalSawWrite <- newIORef False
+    submissions <- newIORef []
+    backend <- scriptedBackend submissions
+        [ Right $ emptyTurnOutput "resp-1" calls Nothing
+        , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+        ]
+    let write = do
+            modifyIORef' executionOrder (<> ["write"])
+            pure (Right "wrote")
+        exit = do
+            seen <- readIORef executionOrder
+            if seen == ["write"]
+                then do
+                    modifyIORef' executionOrder (<> ["exit"])
+                    pure (Right "reviewed")
+                else pure (Left "exit ran before write")
+        tools =
+            [ phasedTool ToolBatchNormal "write" write
+            , phasedTool ToolBatchTerminal "exit" exit
+            ]
+    config0 <- testConfig backend
+    let config = config0
+            { loopTools = registryFromTools tools
+            , loopApprove = \call -> do
+                if call.name == "exit"
+                    then do
+                        order <- readIORef executionOrder
+                        writeIORef exitApprovalSawWrite (order == ["write"])
+                    else pure ()
+                pure (Right True)
+            }
+    runLoop
+        config
+        Nothing
+        "go"
+        `shouldReturn` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "ok"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+    readIORef executionOrder `shouldReturn` ["write", "exit"]
+    readIORef exitApprovalSawWrite `shouldReturn` True
+    readIORef submissions >>= \case
+        [_, (_, results)] ->
+            [ result.callId
+            | CompletedTool result <- results
+            ] `shouldBe` map (.callId) calls
+        other -> expectationFailure
+            ("unexpected terminal ordering submissions: " <> show other)
 
 concurrencyProbeMicros :: Int
 concurrencyProbeMicros = 5000000

@@ -52,8 +52,10 @@ import Agent.ToolDSL
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
     ( AppTool
+    , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withToolBatchPhase
     )
 import Agent.Tools.PlanMode.File
     ( PlanDigest(..)
@@ -256,16 +258,19 @@ enterCodexPlanModeTool env =
     enterPlanModeToolWith CompleteWithProposedPlan env
 
 enterPlanModeToolWith :: PlanCompletion -> PlanModeEnv -> AppTool
-enterPlanModeToolWith completion env = jsonTool "enter_plan_mode"
-    (enterPlanDescription completion)
-    [ PropertySchema "explanation" PropertyString False $ Just
-        "Optional reason this task needs a planning phase before implementation."
-    ]
-    -- The tool performs its own explicit user confirmation through
-    -- planConfirmEnter, so it must not also trigger generic tool approval.
-    True
-    TurnSequential
-    (typedTool "enter_plan_mode" enterPlanArgsDecoder (runEnterPlanMode completion env))
+enterPlanModeToolWith completion env =
+    withToolBatchPhase ToolBatchModeBarrier $
+        jsonTool "enter_plan_mode"
+            (enterPlanDescription completion)
+            [ PropertySchema "explanation" PropertyString False $ Just
+                "Optional reason this task needs a planning phase before implementation."
+            ]
+            -- The tool performs its own explicit user confirmation through
+            -- planConfirmEnter, so it must not also trigger generic tool approval.
+            True
+            TurnSequential
+            (typedTool "enter_plan_mode" enterPlanArgsDecoder
+                (runEnterPlanMode completion env))
 
 enterPlanDescription :: PlanCompletion -> Text
 enterPlanDescription completion =
@@ -348,13 +353,16 @@ exitPlanArgsDecoder = objectArgs \object -> ExitPlanArgs
         <$> optText object "summary"
 
 exitPlanModeTool :: PlanModeEnv -> AppTool
-exitPlanModeTool env = jsonTool "exit_plan_mode" exitPlanDescription
-    [ PropertySchema "summary" PropertyString False $ Just
-        "Optional short summary shown with the plan approval prompt."
-    ]
-    False
-    TurnSequential
-    (typedTool "exit_plan_mode" exitPlanArgsDecoder (runExitPlanMode env))
+exitPlanModeTool env =
+    withToolBatchPhase ToolBatchTerminal $
+        jsonTool "exit_plan_mode" exitPlanDescription
+            [ PropertySchema "summary" PropertyString False $ Just
+                "Optional short summary shown with the plan approval prompt."
+            ]
+            False
+            TurnSequential
+            (typedTool "exit_plan_mode" exitPlanArgsDecoder
+                (runExitPlanMode env))
 
 exitPlanDescription :: Text
 exitPlanDescription =
