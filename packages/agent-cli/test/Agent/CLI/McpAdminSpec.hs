@@ -2,6 +2,7 @@ module Agent.CLI.McpAdminSpec (spec) where
 
 import Agent.CLI.Config (HarnessConfig(..), loadHarnessConfig)
 import Agent.CLI.McpAdmin
+import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (bracket)
 import qualified Data.Map.Strict as Map
 import System.Directory.OsPath (getTemporaryDirectory)
@@ -69,6 +70,19 @@ spec = describe "Agent.CLI.McpAdmin" do
                     , mcpAdminValue = []
                     }
 
+    it "allows exactly one writer for a shared snapshot revision" $
+        withTempDir \home -> do
+            Right initial <- listMcpAdminServers home
+            (left, right) <- concurrently
+                (addMcpAdminServer home initial.mcpAdminRevision "left" input)
+                (addMcpAdminServer home initial.mcpAdminRevision "right" input)
+            length (filter isSuccess [left, right]) `shouldBe` 1
+            length (filter isConflict [left, right]) `shouldBe` 1
+            Right final <- listMcpAdminServers home
+            length final.mcpAdminValue `shouldBe` 1
+            final.mcpAdminRevision `shouldSatisfy`
+                (> initial.mcpAdminRevision)
+
 input :: McpAdminServerInput
 input = McpAdminServerInput
     { mcpAdminInputCommand = "mcp-docs"
@@ -89,3 +103,11 @@ withTempDir action = do
 
 filePath :: OsPath -> FilePath
 filePath value = either (error . show) id (decodeUtf value)
+
+isSuccess :: Either McpAdminError a -> Bool
+isSuccess = either (const False) (const True)
+
+isConflict :: Either McpAdminError a -> Bool
+isConflict = \case
+    Left (McpAdminConflict _) -> True
+    _ -> False

@@ -1,9 +1,11 @@
 module Agent.CLI.ConfigSpec (spec) where
 
 import Agent.CLI.Config
+import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
+import Data.Either (isRight)
 import qualified Data.Text as Text
 import System.Directory.OsPath
     ( createDirectoryIfMissing
@@ -176,6 +178,41 @@ spec = describe "Agent.CLI.Config" do
             saveHarnessConfig home broken
                 `shouldReturn`
                     Left "MCP server 'broken' has an empty command"
+
+    it "serializes concurrent read-modify-write transactions without loss" $
+        withTempDir "agent-config-" \home -> do
+            let increment _ config =
+                    Right
+                        ( config
+                            { configMaxConcurrentAgents =
+                                Just (maybe 1 (+ 1)
+                                    config.configMaxConcurrentAgents)
+                            }
+                        , ()
+                        )
+            results <- mapConcurrently
+                (const (modifyHarnessConfig home increment))
+                [1 .. 32 :: Int]
+            results `shouldSatisfy` all isRight
+            loadHarnessConfig home >>= \case
+                Left err -> expectationFailure (show err)
+                Right config ->
+                    config.configMaxConcurrentAgents `shouldBe` Just 32
+
+    it "returns a monotonic revision for the exact locked snapshot" $
+        withTempDir "agent-config-" \home -> do
+            Right (initialRevision, initial) <-
+                loadHarnessConfigSnapshot home
+            saveHarnessConfig home initial `shouldReturn` Right ()
+            Right (firstRevision, firstConfig) <-
+                loadHarnessConfigSnapshot home
+            saveHarnessConfig home firstConfig `shouldReturn` Right ()
+            Right (secondRevision, secondConfig) <-
+                loadHarnessConfigSnapshot home
+            initialRevision `shouldBe` 0
+            firstRevision `shouldSatisfy` (> initialRevision)
+            secondRevision `shouldSatisfy` (> firstRevision)
+            secondConfig `shouldBe` firstConfig
 
 writeConfig :: OsPath -> LBS.ByteString -> IO ()
 writeConfig home bytes = do
