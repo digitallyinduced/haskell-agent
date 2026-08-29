@@ -71,3 +71,41 @@ int ha_image_attachment_abi_smoke(void) {
     }
     return 0;
 }
+
+static void image_stage_callback(void *context, const uint8_t *bytes,
+                                 size_t length) {
+    (void)context;
+    (void)bytes;
+    (void)length;
+}
+
+/*
+ * Exercise the actual exported bridge entry points as a native caller would:
+ * initialize the runtime, create an engine, stage one image, and tear it down.
+ * The Haskell entry point copies the buffers before returning, so these
+ * stack-backed buffers are intentionally short-lived.
+ */
+int ha_image_attachment_stage_smoke(void) {
+    const uint8_t turn_id[] = "native-smoke-turn";
+    const uint8_t mime[] = "image/png";
+    const uint8_t bytes[] = {0x89, 0x50, 0x4e, 0x47};
+    const ha_image_attachment image = {
+        .mime = mime,
+        .mime_length = sizeof(mime) - 1,
+        .bytes = bytes,
+        .bytes_length = sizeof(bytes),
+    };
+    if (ha_runtime_init() != 0) {
+        return 10;
+    }
+    void *engine = ha_engine_create(image_stage_callback, NULL);
+    if (engine == NULL) {
+        ha_runtime_exit();
+        return 11;
+    }
+    int32_t status = ha_engine_stage_turn_images(
+        engine, turn_id, sizeof(turn_id) - 1, &image, 1);
+    ha_engine_destroy(engine);
+    ha_runtime_exit();
+    return status;
+}

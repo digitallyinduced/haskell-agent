@@ -343,11 +343,14 @@ test-suite agent-cli-test
     hs-source-dirs:   test ffi
     main-is:          Spec.hs
     c-sources:        test/cbits/HaskellAgentBridgeImageSmoke.c
+                    , cbits/HaskellAgentBridgeRuntime.c
     include-dirs:     include
     other-modules:    Agent.CLI.AccountSelectionSpec
                     , Agent.CLI.MacOS.NativeLoopEventSpec
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.BridgeHeaderSpec
+                    , Agent.CLI.MacOS.BridgeFFISpec
+                    , Agent.CLI.MacOS.Bridge
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
