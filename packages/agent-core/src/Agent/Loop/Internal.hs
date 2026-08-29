@@ -67,7 +67,7 @@ import Control.Monad (void)
 import Data.Aeson (ToJSON(..), object, (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
@@ -220,6 +220,10 @@ data LoopProgress
 data LoopExecution = LoopExecution
     { executionState :: ![ResponseItem]
     , executionProgress :: !LoopProgress
+    -- | Assistant text exposed by streaming events during this execution.
+    -- This is display metadata only: callers must not add it to backend state
+    -- when a submission did not commit.
+    , executionVisibleAssistantText :: !(Maybe Text)
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
 
@@ -393,16 +397,43 @@ runLoopInputsUnsafe
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
+    visibleTextRef <- newIORef ([], [])
     initialSteering <- config0.loopReadSteering
     withAsync (runLoopEventPump eventPump) \eventWorker -> do
-        let config = config0
-                { loopOnEvent = emitLoopEvent eventPump
+        let recordVisible event =
+                modifyIORef' visibleTextRef \(finished, current) ->
+                    case event of
+                        TextDelta delta -> (finished, delta : current)
+                        ResponseRestarted _ -> finishCurrent finished current
+                        TurnFinished turn ->
+                            finishCurrent finished
+                                (if null current
+                                    then maybe [] pure turn.assistantText
+                                    else current)
+                        ResponseAttemptDiscarded -> (finished, [])
+                        _ -> (finished, current)
+            finishCurrent finished current
+                | null current = (finished, [])
+                | otherwise = (current : finished, [])
+            config = config0
+                { loopOnEvent = \event -> do
+                    recordVisible event
+                    emitLoopEvent eventPump event
                 }
             finish state progress result = do
                 writeIORef progressRef (state, progress)
+                (finishedChunks, currentChunks) <- readIORef visibleTextRef
+                let visibleText = Text.intercalate "\n\n" $
+                        filter (not . Text.null) $
+                            map (Text.concat . reverse)
+                                (reverse finishedChunks <> [currentChunks])
                 pure LoopExecution
                     { executionState = state
                     , executionProgress = progress
+                    , executionVisibleAssistantText =
+                        if Text.null visibleText
+                            then Nothing
+                            else Just visibleText
                     , executionResult = result
                     }
             unexpected state progress exception =

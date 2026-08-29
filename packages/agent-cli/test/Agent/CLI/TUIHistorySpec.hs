@@ -358,6 +358,22 @@ spec = describe "bounded fullscreen history window" do
             `shouldSatisfy`
                 all (not . Text.isInfixOf "Don't mention skills")
 
+    it "preserves partial assistant output in a cancelled durable turn" do
+        let turnValue =
+                (sessionTurn TranscriptAppend "stop here"
+                    [userMessage "stop here"])
+                    { turnAssistantText = Just "already visible"
+                    , turnError = Just "cancelled"
+                    }
+            blocks = toList $
+                (sessionHistoryTurn (19 :: Int) turnValue).historyTurnBlocks
+        map (\block -> (block.blockKind, block.blockBody, block.blockState)) blocks
+            `shouldBe`
+                [ (BlockUser, "stop here", BlockComplete)
+                , (BlockAssistant, "already visible", BlockComplete)
+                , (BlockError, "cancelled", BlockFailed)
+                ]
+
     it "does not rematerialise the compacted prefix of replacement turns" do
         let projected =
                 sessionHistoryTurn
