@@ -1085,29 +1085,14 @@ renameSession
 renameSession pool root sessionId rawTitle = runExceptT do
     let title = Text.unwords (Text.words (Text.strip rawTitle))
     when (Text.null title) (throwE "session title cannot be empty")
-    meta <- lift (loadSessionMeta pool root sessionId) >>= except
-    dir <- except (sessionDirForId root sessionId)
-    exists <- lift (doesDirectoryExist dir)
-    lock <- if exists
-        then lift (acquireSessionLock dir sessionId) >>= \case
-            Left _ -> throwE "cannot rename a running session"
-            Right lock -> pure (Just lock)
-        else pure Nothing
-    let updated = meta
-            { metaTitle = title
-            , metaTitleIsManual = True
-            , metaTitleRefreshIndex = 2
-            }
+    _ <- except (sessionDirForId root sessionId)
+    now <- lift getCurrentTime
     renamed <- lift $
-        Store.replaceSessionMetadata
-            pool
-            "session.renamed"
-            (toStoredMetadata updated)
-            `finally` maybe (pure ()) releaseSessionLock lock
+        Store.setSessionTitle pool sessionId title True 2 now
     case renamed of
         Left err -> throwE (renderStoreError err)
         Right False -> throwE ("session not found: " <> sessionId)
-        Right True -> pure updated
+        Right True -> lift (loadSessionMeta pool root sessionId) >>= except
 
 setSessionArchived
     :: StorePool
@@ -1116,20 +1101,10 @@ setSessionArchived
     -> Bool
     -> IO (Either Text ())
 setSessionArchived pool root sessionId archived = runExceptT do
-    dir <- except (sessionDirForId root sessionId)
-    exists <- lift (doesDirectoryExist dir)
-    lock <- if exists
-        then lift (acquireSessionLock dir sessionId) >>= \case
-            Left _ -> throwE $
-                if archived
-                    then "cannot archive a running session"
-                    else "cannot restore a running session"
-            Right lock -> pure (Just lock)
-        else pure Nothing
+    _ <- except (sessionDirForId root sessionId)
     now <- lift getCurrentTime
     changed <- lift $
         Store.setSessionArchived pool sessionId archived now
-            `finally` maybe (pure ()) releaseSessionLock lock
     case changed of
         Left err -> throwE (renderStoreError err)
         Right False -> throwE ("session not found: " <> sessionId)
@@ -1199,7 +1174,34 @@ sessionTitleFromPrompt prompt =
 setGeneratedSessionTitle :: Int -> Text -> SessionHandle -> IO SessionHandle
 setGeneratedSessionTitle refreshIndex rawTitle handle
     | handle.sessionMeta.metaTitleIsManual = pure handle
-    | otherwise = writeTitle False refreshIndex rawTitle handle
+    | otherwise = do
+        let title = Text.unwords (Text.words (Text.strip rawTitle))
+        now <- getCurrentTime
+        Store.setGeneratedSessionTitle
+            handle.sessionPool
+            handle.sessionMeta.metaId
+            title
+            (fromIntegral refreshIndex)
+            now >>= \case
+                Left err ->
+                    fail
+                        ("could not update PostgreSQL session title: "
+                            <> Text.unpack (renderStoreError err))
+                Right True ->
+                    pure handle
+                        { sessionMeta = handle.sessionMeta
+                            { metaTitle = title
+                            , metaTitleIsManual = False
+                            , metaTitleRefreshIndex = refreshIndex
+                            }
+                        }
+                Right False ->
+                    loadSessionMeta
+                        handle.sessionPool
+                        handle.sessionDir
+                        handle.sessionMeta.metaId >>= \case
+                            Left err -> fail (Text.unpack err)
+                            Right meta -> pure handle { sessionMeta = meta }
 
 setManualSessionTitle :: Text -> SessionHandle -> IO SessionHandle
 setManualSessionTitle = writeTitle True 2
@@ -1212,8 +1214,21 @@ writeTitle manual refreshIndex rawTitle handle = do
             , metaTitleIsManual = manual
             , metaTitleRefreshIndex = refreshIndex
             }
-    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
-    pure handle { sessionMeta = meta }
+    now <- getCurrentTime
+    Store.setSessionTitle
+        handle.sessionPool
+        handle.sessionMeta.metaId
+        title
+        manual
+        (fromIntegral refreshIndex)
+        now >>= \case
+            Left err ->
+                fail
+                    ("could not update PostgreSQL session title: "
+                        <> Text.unpack (renderStoreError err))
+            Right False ->
+                fail ("session not found: " <> Text.unpack handle.sessionMeta.metaId)
+            Right True -> pure handle { sessionMeta = meta }
 
 resetSessionTitleToAuto :: SessionHandle -> IO SessionHandle
 resetSessionTitleToAuto handle = do
@@ -1221,8 +1236,21 @@ resetSessionTitleToAuto handle = do
             { metaTitleIsManual = False
             , metaTitleRefreshIndex = 0
             }
-    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
-    pure handle { sessionMeta = meta }
+    now <- getCurrentTime
+    Store.setSessionTitle
+        handle.sessionPool
+        handle.sessionMeta.metaId
+        meta.metaTitle
+        False
+        0
+        now >>= \case
+            Left err ->
+                fail
+                    ("could not reset PostgreSQL session title: "
+                        <> Text.unpack (renderStoreError err))
+            Right False ->
+                fail ("session not found: " <> Text.unpack handle.sessionMeta.metaId)
+            Right True -> pure handle { sessionMeta = meta }
 
 setSessionRecap :: Text -> Int -> SessionHandle -> IO SessionHandle
 setSessionRecap summary mainTurns handle = do
