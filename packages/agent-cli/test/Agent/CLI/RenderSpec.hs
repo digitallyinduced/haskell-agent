@@ -286,7 +286,7 @@ spec = do
             formatActivityLine False "⠋" "Thinking…" 1.2 Nothing
                 `shouldBe` "⠋ Thinking…  1.2s"
             formatActivityLine False "⠋" "Writing…" 1.2 (Just 42)
-                `shouldBe` "⠋ Writing…  1.2s · 42 tok/s"
+                `shouldBe` "⠋ Writing…  1.2s · 42 ◈/s"
 
     describe "formatToolStarted" do
         it "renders English verbs for known tools" do
