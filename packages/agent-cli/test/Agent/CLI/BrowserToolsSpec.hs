@@ -117,6 +117,9 @@ spec = describe "native browser tools" do
             [ "file:///tmp/private"
             , "javascript:alert(1)"
             , "https:relative"
+            , "http://"
+            , "http:///missing-host"
+            , "https://#missing-host"
             , " https://example.com"
             ]
             \url -> do
@@ -124,6 +127,19 @@ spec = describe "native browser tools" do
                 result.output `shouldSatisfy`
                     Text.isInfixOf "absolute HTTP or HTTPS URL"
         readIORef invoked `shouldReturn` False
+
+    it "accepts case-insensitive HTTP schemes with a nonempty host" do
+        observed <- newIORef Nothing
+        let handler command = do
+                writeIORef observed (Just command)
+                pure (Right "ok")
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (browserTools handler))
+            (functionToolCall "browser-call" "browser_navigate"
+                "{\"url\":\"HTTPS://example.com/path\"}")
+        result.output `shouldBe` "ok"
+        readIORef observed `shouldReturn`
+            Just (BrowserNavigate "HTTPS://example.com/path")
 
     it "rejects empty selectors, empty keys, and invalid scroll deltas" do
         let run name arguments = dispatchToolCall defaultLoopDispatch
@@ -145,6 +161,9 @@ spec = describe "native browser tools" do
         shouldFailWith "browser_scroll"
             "{\"delta_x\":\"down\",\"delta_y\":1}"
             "Expected number for key: delta_x"
+        shouldFailWith "browser_scroll"
+            "{\"delta_x\":1e999,\"delta_y\":1}"
+            "delta_x must be a finite number"
 
 successHandler :: BrowserCommand -> IO (Either Text Text)
 successHandler _ = pure (Right "ok")

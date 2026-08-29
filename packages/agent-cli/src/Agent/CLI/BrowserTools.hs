@@ -30,12 +30,12 @@ import Data.Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Object, Parser)
-import Data.Maybe (isJust)
 import Data.Scientific (toRealFloat)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Network.URI
     ( URI(uriAuthority, uriScheme)
+    , URIAuth(uriRegName)
     , parseURI
     )
 
@@ -223,8 +223,10 @@ validateHttpUrl value = do
         then invalid
         else case parseURI (Text.unpack url) of
             Just uri
-                | uriScheme uri `elem` ["http:", "https:"]
-                , isJust (uriAuthority uri) ->
+                | Text.toCaseFold (Text.pack (uriScheme uri))
+                    `elem` ["http:", "https:"]
+                , Just authority <- uriAuthority uri
+                , not (null (uriRegName authority)) ->
                     pure url
             _ -> invalid
   where
