@@ -51,11 +51,22 @@ spec = describe "Agent.Tools.PlanMode" do
 
     it "activates and deactivates plan mode" do
         withTempPlan \env -> do
+            readPlanModeState env `shouldReturn` PlanInactive
             isPlanModeActive env `shouldReturn` False
             activatePlanMode env
+            readPlanModeState env `shouldReturn` PlanActive
             isPlanModeActive env `shouldReturn` True
             deactivatePlanMode env
             isPlanModeActive env `shouldReturn` False
+
+    it "exposes non-breaking session attachment accessors" do
+        withTempPlan \env -> do
+            readPlanSessionDir env `shouldReturn` Nothing
+            attachPlanSessionDir env (fromFilePath "/tmp/attached-session")
+            readPlanSessionDir env `shouldReturn`
+                Just (fromFilePath "/tmp/attached-session")
+            setPlanSessionDir env Nothing
+            readPlanSessionDir env `shouldReturn` Nothing
 
     it "writes and reads an authoritative plan snapshot" do
         withTempPlan \env -> do
@@ -218,6 +229,31 @@ spec = describe "Agent.Tools.PlanMode" do
             markPlanContinuationDelivered approved
                 `shouldSatisfy`
                     ((== Nothing) . (.trackerApprovedContinuation))
+
+        it "restores only when no newer revision has won" do
+            let snapshot = initialPlanTracker
+                active = activatePlanTracker snapshot
+                reminded = notePlanReminder active
+            planTrackerCurrentRevision active `shouldBe` 1
+            planTrackerReminderCount reminded `shouldBe` 1
+            restorePlanTrackerIfRevision
+                active.trackerRevision
+                snapshot
+                reminded
+                `shouldBe`
+                    Left
+                        (PlanTrackerRevisionConflict
+                            active.trackerRevision
+                            reminded.trackerRevision)
+            restored <- expectRight $
+                restorePlanTrackerIfRevision
+                    reminded.trackerRevision
+                    snapshot
+                    reminded
+            restored.trackerPhase `shouldBe` TrackerInactive
+            restored.trackerRevision `shouldBe`
+                reminded.trackerRevision + 1
+            restored.trackerEverActivated `shouldBe` True
 
     describe "ask_user_question" do
         it "advertises the structured Grok Build questions schema" do

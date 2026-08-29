@@ -9,6 +9,8 @@ module Agent.Tools.PlanMode.Tracker
     , PlanTrackerError(..)
     , initialPlanTracker
     , planTrackerRestrictsWrites
+    , planTrackerCurrentRevision
+    , planTrackerReminderCount
     , requestPlanActivation
     , activatePlanTracker
     , deactivatePlanTracker
@@ -19,6 +21,7 @@ module Agent.Tools.PlanMode.Tracker
     , bufferPlanActivation
     , consumeBufferedPlanActivation
     , markPlanContinuationDelivered
+    , restorePlanTrackerIfRevision
     , normalizePlanTrackerAfterRestart
     ) where
 
@@ -76,6 +79,7 @@ data PlanTrackerError
     = PlanTrackerNotActive
     | PlanTrackerNoPendingApproval
     | PlanTrackerStaleResolution
+    | PlanTrackerRevisionConflict !Word64 !Word64
     deriving (Eq, Show)
 
 initialPlanTracker :: PlanTracker
@@ -96,6 +100,12 @@ initialPlanTracker = PlanTracker
 planTrackerRestrictsWrites :: PlanTracker -> Bool
 planTrackerRestrictsWrites tracker =
     tracker.trackerPhase `elem` [TrackerActive, TrackerExitPending]
+
+planTrackerCurrentRevision :: PlanTracker -> Word64
+planTrackerCurrentRevision = (.trackerRevision)
+
+planTrackerReminderCount :: PlanTracker -> Word64
+planTrackerReminderCount = (.trackerReminderCount)
 
 requestPlanActivation :: PlanTracker -> PlanTracker
 requestPlanActivation tracker =
@@ -227,6 +237,32 @@ markPlanContinuationDelivered :: PlanTracker -> PlanTracker
 markPlanContinuationDelivered tracker =
     bumpRevision tracker
         { trackerApprovedContinuation = Nothing }
+
+-- | Compare-and-restore a previously captured tracker snapshot. The caller
+-- supplies the revision it expects after its own turn-scoped transitions. If
+-- a user action or another owner has advanced the tracker, restoration is
+-- rejected rather than overwriting the newer state. Generation remains
+-- monotonic even when the older snapshot is restored.
+restorePlanTrackerIfRevision
+    :: Word64
+    -> PlanTracker
+    -> PlanTracker
+    -> Either PlanTrackerError PlanTracker
+restorePlanTrackerIfRevision expectedRevision snapshot current
+    | current.trackerRevision /= expectedRevision =
+        Left
+            (PlanTrackerRevisionConflict
+                expectedRevision
+                current.trackerRevision)
+    | otherwise =
+        Right snapshot
+            { trackerSchemaVersion = current.trackerSchemaVersion
+            , trackerRevision = current.trackerRevision + 1
+            , trackerGeneration =
+                max snapshot.trackerGeneration current.trackerGeneration
+            , trackerEverActivated =
+                snapshot.trackerEverActivated || current.trackerEverActivated
+            }
 
 -- | Restart never relaxes an interrupted approval. A persisted pending
 -- activation is kept pending; an exit remains write-restricted and replayable.

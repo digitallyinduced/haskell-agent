@@ -18,6 +18,11 @@ module Agent.Tools.PlanMode
     , newPlanModeEnv
     , planFileName
     , planFilePath
+    , readPlanModeState
+    , writePlanModeState
+    , readPlanSessionDir
+    , setPlanSessionDir
+    , attachPlanSessionDir
     , isPlanModeActive
     , activatePlanMode
     , deactivatePlanMode
@@ -129,20 +134,37 @@ newPlanModeEnv fallbackDir hooks = do
 
 planFilePath :: PlanModeEnv -> IO OsPath
 planFilePath env = do
-    sessionDir <- readIORef env.planSessionDir
+    sessionDir <- readPlanSessionDir env
     canonicalDirectory <- canonicalizePath $ case sessionDir of
         Just dir -> dir
         Nothing -> env.planFallbackDir
     pure (canonicalDirectory </> planFileName)
 
+readPlanModeState :: PlanModeEnv -> IO PlanModeState
+readPlanModeState = readIORef . (.planStateRef)
+
+-- | Compatibility setter while callers migrate from direct 'IORef' access to
+-- the durable tracker. New code should keep state transitions in one owner.
+writePlanModeState :: PlanModeEnv -> PlanModeState -> IO ()
+writePlanModeState env = writeIORef env.planStateRef
+
+readPlanSessionDir :: PlanModeEnv -> IO (Maybe OsPath)
+readPlanSessionDir = readIORef . (.planSessionDir)
+
+setPlanSessionDir :: PlanModeEnv -> Maybe OsPath -> IO ()
+setPlanSessionDir env = writeIORef env.planSessionDir
+
+attachPlanSessionDir :: PlanModeEnv -> OsPath -> IO ()
+attachPlanSessionDir env = setPlanSessionDir env . Just
+
 isPlanModeActive :: PlanModeEnv -> IO Bool
-isPlanModeActive env = (== PlanActive) <$> readIORef env.planStateRef
+isPlanModeActive env = (== PlanActive) <$> readPlanModeState env
 
 activatePlanMode :: PlanModeEnv -> IO ()
-activatePlanMode env = writeIORef env.planStateRef PlanActive
+activatePlanMode env = writePlanModeState env PlanActive
 
 deactivatePlanMode :: PlanModeEnv -> IO ()
-deactivatePlanMode env = writeIORef env.planStateRef PlanInactive
+deactivatePlanMode env = writePlanModeState env PlanInactive
 
 readPlanMarkdown :: PlanModeEnv -> IO Text
 readPlanMarkdown env =
