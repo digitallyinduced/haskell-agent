@@ -146,6 +146,7 @@ typedef void (*ha_account_oauth_start_callback)(
     const uint8_t *error,
     size_t error_length
 );
+/*
  * An image submitted for a native turn. The runtime copies both buffers
  * before this call returns; the caller retains ownership of them.
  */
