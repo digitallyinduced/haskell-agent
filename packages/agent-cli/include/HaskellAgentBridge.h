@@ -10,7 +10,17 @@ extern "C" {
 
 typedef void (*ha_event_callback)(
     void *context,
-    /* Valid only for the duration of this callback; copy before returning. */
+    /*
+     * Events are normally UTF-8 JSON. Native loop events use a versioned
+     * binary HAEV frame:
+     *   magic "HAEV" (4), version (u8), kind (u8), flags (u16 BE),
+     *   turn-id and kind-specific fields as u32-BE length-prefixed UTF-8.
+     * Kind 1 is reasoning text, 2 text, 3 status, 4 tool-start, and 5
+     * tool-finish. Tool-start flags use bit 0 for encrypted arguments and
+     * bit 1 for truncation; tool-finish uses bit 1 for truncation.
+     * The bytes are valid only for the duration of this callback; copy before
+     * returning.
+     */
     const uint8_t *bytes,
     size_t length
 );
