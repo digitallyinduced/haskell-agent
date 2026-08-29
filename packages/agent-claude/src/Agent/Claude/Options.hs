@@ -28,6 +28,7 @@ import qualified Data.Text as Text
 -- the hidden subprocess to ask the terminal user for confirmation.
 data ClaudeCodePermission
     = ClaudeCodeDontAsk
+    | ClaudeCodeManual
     | ClaudeCodeBypass
     deriving (Eq, Show)
 
@@ -88,6 +89,7 @@ toClaudeAgentOptions toolMode options = do
             , disallowedTools = ["AskUserQuestion"]
             , permissionMode = Just case options.permission of
                 ClaudeCodeDontAsk -> PermissionDontAsk
+                ClaudeCodeManual -> PermissionManual
                 ClaudeCodeBypass -> PermissionBypassPermissions
             , allowDangerouslySkipPermissions =
                 options.permission == ClaudeCodeBypass

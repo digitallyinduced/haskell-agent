@@ -47,7 +47,8 @@ injects only `ANTHROPIC_BASE_URL=$HASKELL_AGENT_GATEWAY_URL/anthropic` and the
 gateway token into Claude Code. It does not require a local Claude login. The
 token is redacted from `Show` and status output.
 
-Thinking blocks are ignored and never surfaced. Claude Code executes its own
+Thinking blocks are surfaced as reasoning progress events (and are never
+copied into the persisted conversation prompt). Claude Code executes its own
 tools; tool records are emitted only as display events and are never returned
 to the harness for dispatch.
 

@@ -2,6 +2,7 @@
 -- provider-neutral events expected by the harness.
 module Agent.Claude.Internal.Messages
     ( CompletedClaudeTurn(..)
+    , ClaudeInterpretationError(..)
     , ClaudeLiveEvent(..)
     , ClaudeEventState
     , emptyClaudeEventState
@@ -79,6 +80,15 @@ data CompletedClaudeTurn = CompletedClaudeTurn
     , turnItems :: ![ResponseItem]
     } deriving (Eq, Show)
 
+-- | A completed result can be rejected either because the credential source
+-- was not an allowed subscription, or because the stream violated the
+-- protocol.  Keeping these cases typed prevents callers from misreporting
+-- malformed output as an authentication failure.
+data ClaudeInterpretationError
+    = ClaudeAuthenticationFailure !Text
+    | ClaudeProtocolFailure !Text
+    deriving (Eq, Show)
+
 -- | Kind of the most recent streamed delta since the last tool start. The
 -- renderer extends the current block for consecutive deltas of one kind, so
 -- separate wire blocks need an explicit paragraph break between them.
@@ -102,6 +112,8 @@ data ClaudeEventState = ClaudeEventState
     -- discarded, so nothing more is exposed live and completion replays the
     -- surviving records in order.
     , replayAtCompletion :: !Bool
+    -- | True once any user-visible response activity has been emitted.
+    , emittedActivity :: !Bool
     } deriving (Eq, Show)
 
 emptyClaudeEventState :: ClaudeEventState
@@ -116,11 +128,12 @@ emptyClaudeEventState =
         , streamedMessageIds = Set.empty
         , lastDelta = Nothing
         , replayAtCompletion = False
+        , emittedActivity = False
         }
 
 claudeEventStateHasActivity :: ClaudeEventState -> Bool
 claudeEventStateHasActivity state =
-    not (Set.null state.startedToolCalls)
+    state.emittedActivity
 
 -- | Expose completed top-level records as soon as Claude Code emits them.
 -- Claude Code writes one assistant record per content block and its final
@@ -176,7 +189,10 @@ streamClaudeProgress state = \case
         nestedNativeEvents state parent message
     QueryMessagesRetracted scope identifiers
         | scope == Nothing || scope == Just QueryTopLevel
-        , any (`Set.member` state.streamedMessageIds) identifiers ->
+        , not state.replayAtCompletion
+        , state.emittedActivity
+        , any (`Set.member` state.streamedMessageIds) identifiers
+            || null identifiers ->
             -- Displayed text has no per-block retraction event. Discard the
             -- whole attempt and replay the surviving records at completion.
             ( emptyClaudeEventState
@@ -392,14 +408,14 @@ remainingClaudeEvents state completed =
 interpretClaudeTurn
     :: [Message]
     -> ResultMessage
-    -> Either Text CompletedClaudeTurn
+    -> Either ClaudeInterpretationError CompletedClaudeTurn
 interpretClaudeTurn = interpretClaudeTurnWithCredentialValidation True
 
 interpretClaudeTurnWithCredentialValidation
     :: Bool
     -> [Message]
     -> ResultMessage
-    -> Either Text CompletedClaudeTurn
+    -> Either ClaudeInterpretationError CompletedClaudeTurn
 interpretClaudeTurnWithCredentialValidation validateCredential messages result = do
     let visibleMessages =
             filter (not . messageHasParentToolUseId) messages
@@ -437,7 +453,7 @@ interpretClaudeTurnWithCredentialValidation validateCredential messages result =
         , turnItems
         }
 
-validateSubscriptionSource :: [Message] -> Either Text ()
+validateSubscriptionSource :: [Message] -> Either ClaudeInterpretationError ()
 validateSubscriptionSource messages =
     case
         [ system.apiKeySource
@@ -445,18 +461,21 @@ validateSubscriptionSource messages =
         , system.subtype == "init"
         ] of
         [] ->
-            Left
+            Left (ClaudeAuthenticationFailure
                 "Claude Code completed before confirming subscription authentication."
+                )
         sources
             | Just source <- firstUnexpected sources ->
-                Left
+                Left (ClaudeAuthenticationFailure
                     ( "Claude Code selected non-subscription credential source "
                         <> source
                         <> "."
                     )
+                    )
             | Nothing `elem` sources ->
-                Left
+                Left (ClaudeAuthenticationFailure
                     "Claude Code did not identify its credential source."
+                    )
             | otherwise ->
                 Right ()
   where
@@ -716,14 +735,18 @@ advanceLiveEvents initialState toolEvents =
             | alreadyStreamed messageId -> (state, events)
             | otherwise ->
                 ( (markStreamed messageId state)
-                    { lastDelta = Just LiveTextDelta }
+                    { lastDelta = Just LiveTextDelta
+                    , emittedActivity = True
+                    }
                 , TextDelta (paragraph LiveTextDelta state text) : events
                 )
         ClaudeThinking messageId thinking
             | alreadyStreamed messageId -> (state, events)
             | otherwise ->
                 ( (markStreamed messageId state)
-                    { lastDelta = Just LiveThinkingDelta }
+                    { lastDelta = Just LiveThinkingDelta
+                    , emittedActivity = True
+                    }
                 , ReasoningDelta (paragraph LiveThinkingDelta state thinking)
                     : events
                 )
@@ -753,6 +776,7 @@ advanceLiveEvents initialState toolEvents =
                             call
                             state.startedToolDetails
                     , lastDelta = Nothing
+                    , emittedActivity = True
                     }
                 , ToolStarted call : events
                 )
@@ -764,6 +788,7 @@ advanceLiveEvents initialState toolEvents =
                 ( state
                     { finishedToolCalls =
                         Set.insert result.callId state.finishedToolCalls
+                    , emittedActivity = True
                     }
                 , ToolFinished result : events
                 )

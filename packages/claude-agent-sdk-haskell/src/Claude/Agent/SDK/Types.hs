@@ -46,6 +46,8 @@ data PermissionMode
     | PermissionPlan
     | PermissionBypassPermissions
     | PermissionDontAsk
+    -- | Compatibility spelling accepted by newer Claude Code releases.
+    | PermissionManual
     | PermissionAuto
     deriving (Eq, Ord, Show)
 
@@ -56,6 +58,7 @@ permissionModeName = \case
     PermissionPlan -> "plan"
     PermissionBypassPermissions -> "bypassPermissions"
     PermissionDontAsk -> "dontAsk"
+    PermissionManual -> "manual"
     PermissionAuto -> "auto"
 
 data SystemPrompt
