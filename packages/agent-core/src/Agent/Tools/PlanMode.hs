@@ -9,6 +9,10 @@ module Agent.Tools.PlanMode
     ( PlanModeState(..)
     , PlanDecision(..)
     , PlanCompletion(..)
+    , PlanDigest(..)
+    , PlanSnapshot(..)
+    , PlanFileError(..)
+    , PlanReadResult(..)
     , PlanModeEnv(..)
     , PlanModeHooks(..)
     , newPlanModeEnv
@@ -18,7 +22,10 @@ module Agent.Tools.PlanMode
     , activatePlanMode
     , deactivatePlanMode
     , readPlanMarkdown
+    , readPlanSnapshot
     , writePlanMarkdown
+    , writePlanSnapshot
+    , ensurePlanMarkdown
     , planModeReminder
     , planApprovedContinuation
     , planModeBlockedEditMessage
@@ -30,9 +37,8 @@ module Agent.Tools.PlanMode
     , askUserQuestionTool
     ) where
 
-import Agent.FileRetry (retryOnFileBusy)
 import Agent.Json.Decode (Decoder)
-import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.OsPath (toText)
 import Agent.ToolArgs (objectArgs, optBool, optList, optText, reqText)
 import Agent.ToolDSL
     ( PropertySchema(..)
@@ -44,16 +50,25 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     )
+import Agent.Tools.PlanMode.File
+    ( PlanDigest(..)
+    , PlanFileError(..)
+    , PlanReadResult(..)
+    , PlanSnapshot(..)
+    , ensurePlanFile
+    , readPlanFile
+    , renderPlanFileError
+    , writePlanFile
+    )
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (throwString)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
-import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
-import System.OsPath (OsPath, equalFilePath, takeDirectory, unsafeEncodeUtf, (</>))
+import System.Directory.OsPath (canonicalizePath)
+import System.OsPath (OsPath, equalFilePath, unsafeEncodeUtf, (</>))
 
 data PlanModeState
     = PlanInactive
@@ -115,9 +130,10 @@ newPlanModeEnv fallbackDir hooks = do
 planFilePath :: PlanModeEnv -> IO OsPath
 planFilePath env = do
     sessionDir <- readIORef env.planSessionDir
-    pure $ case sessionDir of
-        Just dir -> dir </> planFileName
-        Nothing -> env.planFallbackDir </> planFileName
+    canonicalDirectory <- canonicalizePath $ case sessionDir of
+        Just dir -> dir
+        Nothing -> env.planFallbackDir
+    pure (canonicalDirectory </> planFileName)
 
 isPlanModeActive :: PlanModeEnv -> IO Bool
 isPlanModeActive env = (== PlanActive) <$> readIORef env.planStateRef
@@ -129,22 +145,35 @@ deactivatePlanMode :: PlanModeEnv -> IO ()
 deactivatePlanMode env = writeIORef env.planStateRef PlanInactive
 
 readPlanMarkdown :: PlanModeEnv -> IO Text
-readPlanMarkdown env = do
-    path <- planFilePath env
-    exists <- doesFileExist path
-    if not exists
-        then pure ""
-        else either (const "") id
-            <$> tryAny (retryOnFileBusy (Text.readFile (unsafeToFilePath path)))
+readPlanMarkdown env =
+    readPlanSnapshot env >>= \case
+        PlanAbsent -> pure ""
+        PlanPresent snapshot -> pure snapshot.planSnapshotMarkdown
+        PlanUnreadable err ->
+            throwString (Text.unpack (renderPlanFileError err))
+
+readPlanSnapshot :: PlanModeEnv -> IO PlanReadResult
+readPlanSnapshot env =
+    planFilePath env >>= readPlanFile
 
 writePlanMarkdown :: PlanModeEnv -> Text -> IO (Either Text ())
-writePlanMarkdown env content = do
+writePlanMarkdown env content =
+    fmap (either (Left . renderPlanFileError) (const (Right ())))
+        (writePlanSnapshot env content)
+
+writePlanSnapshot
+    :: PlanModeEnv
+    -> Text
+    -> IO (Either PlanFileError PlanSnapshot)
+writePlanSnapshot env content = do
     path <- planFilePath env
-    createDirectoryIfMissing True (takeDirectory path)
-    result <- tryAny (retryOnFileBusy (Text.writeFile (unsafeToFilePath path) content))
-    pure $ case result of
-        Left err -> Left ("failed to write plan file: " <> Text.pack (show err))
-        Right () -> Right ()
+    writePlanFile path content
+
+ensurePlanMarkdown
+    :: PlanModeEnv
+    -> IO (Either PlanFileError PlanSnapshot)
+ensurePlanMarkdown env =
+    planFilePath env >>= ensurePlanFile
 
 planModeReminder :: PlanCompletion -> OsPath -> Text
 planModeReminder completion path =
@@ -179,11 +208,10 @@ planModeBlockedEditMessage path =
         <> toText path
         <> ")."
 
--- | True when @target@ refers to this session's plan.md (absolute or basename).
+-- | Compare paths only after the caller has resolved both to canonical paths.
+-- A raw @plan.md@ basename is deliberately not authorization.
 isPlanFileEditTarget :: OsPath -> OsPath -> Bool
-isPlanFileEditTarget planPath target =
-    equalFilePath planPath target
-        || equalFilePath planFileName target
+isPlanFileEditTarget = equalFilePath
 
 --------------------------------------------------------------------------------
 -- Grok-build tools
@@ -243,12 +271,16 @@ runEnterPlanMode completion env args = do
                 then pure $ Left "User declined plan mode. Stay in normal mode and continue."
                 else do
                     path <- planFilePath env
-                    activatePlanMode env
-                    pure $ Right $
-                        "You have entered plan mode. Explore the codebase and write an implementation plan to "
-                            <> toText path
-                            <> ". "
-                            <> completionInstruction completion
+                    ensurePlanFile path >>= \case
+                        Left err ->
+                            pure (Left (renderPlanFileError err))
+                        Right _ -> do
+                            activatePlanMode env
+                            pure $ Right $
+                                "You have entered plan mode. Explore the codebase and write an implementation plan to "
+                                    <> toText path
+                                    <> ". "
+                                    <> completionInstruction completion
 
 data WritePlanArgs = WritePlanArgs
     { content :: Text
@@ -315,29 +347,36 @@ runExitPlanMode env args = do
     if not active
         then pure $ Left "Plan mode is not active."
         else do
-            content <- readPlanMarkdown env
             path <- planFilePath env
-            let body
-                    | Text.null (Text.strip content) =
-                        "No plan written yet.\n\n(expected plan file: " <> toText path <> ")"
-                    | otherwise = content
-                header = case args.summary of
-                    Just s | not (Text.null (Text.strip s)) -> s <> "\n\n"
-                    _ -> ""
-            decision <- env.planHooks.planDecideExit (header <> body)
-            case decision of
-                PlanApprove -> do
-                    deactivatePlanMode env
-                    pure (Right planApprovedContinuation)
-                PlanRequestChanges notes ->
-                    pure $ Right $
-                        "The user requested changes to the plan. Stay in plan mode and revise plan.md.\n"
-                            <> "Feedback:\n"
-                            <> notes
-                PlanCancel -> do
-                    deactivatePlanMode env
-                    pure $ Right
-                        "The user cancelled the plan. Plan mode is off. Do not call exit_plan_mode again unless asked to re-enter plan mode."
+            readPlanFile path >>= \case
+                PlanUnreadable err ->
+                    pure (Left (renderPlanFileError err))
+                PlanAbsent -> reviewPlanContent path ""
+                PlanPresent snapshot ->
+                    reviewPlanContent path snapshot.planSnapshotMarkdown
+  where
+    reviewPlanContent path content = do
+        let body
+                | Text.null (Text.strip content) =
+                    "No plan written yet.\n\n(expected plan file: " <> toText path <> ")"
+                | otherwise = content
+            header = case args.summary of
+                Just s | not (Text.null (Text.strip s)) -> s <> "\n\n"
+                _ -> ""
+        decision <- env.planHooks.planDecideExit (header <> body)
+        case decision of
+            PlanApprove -> do
+                deactivatePlanMode env
+                pure (Right planApprovedContinuation)
+            PlanRequestChanges notes ->
+                pure $ Right $
+                    "The user requested changes to the plan. Stay in plan mode and revise plan.md.\n"
+                        <> "Feedback:\n"
+                        <> notes
+            PlanCancel -> do
+                deactivatePlanMode env
+                pure $ Right
+                    "The user cancelled the plan. Plan mode is off. Do not call exit_plan_mode again unless asked to re-enter plan mode."
 
 data AskUserQuestionOption = AskUserQuestionOption
     { label :: Text

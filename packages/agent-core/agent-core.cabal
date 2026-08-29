@@ -85,6 +85,9 @@ library
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.OutputArtifact
                     , Agent.Tools.PlanMode
+                    , Agent.Tools.PlanMode.Document
+                    , Agent.Tools.PlanMode.File
+                    , Agent.Tools.PlanMode.Tracker
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
                     , Agent.Tools.ShowImage
@@ -110,6 +113,7 @@ library
                     , base64-bytestring
                     , bytestring
                     , containers
+                    , crypton
                     , crypton-connection
                     , directory
                     , filepath

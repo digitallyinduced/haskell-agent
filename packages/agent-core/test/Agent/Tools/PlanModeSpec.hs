@@ -9,19 +9,33 @@ import Agent.ToolDispatch
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.PlanMode
+import Agent.Tools.PlanMode.Document
+import Agent.Tools.PlanMode.Tracker
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , jsonToolParameters
     )
 import Control.Exception.Safe (bracket)
+import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory
+    ( createFileLink
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    )
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
+import System.Posix.Files
+    ( accessModes
+    , fileMode
+    , getFileStatus
+    , intersectFileModes
+    )
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
@@ -43,23 +57,167 @@ spec = describe "Agent.Tools.PlanMode" do
             deactivatePlanMode env
             isPlanModeActive env `shouldReturn` False
 
-    it "writes and reads plan.md under the fallback directory" do
+    it "writes and reads an authoritative plan snapshot" do
         withTempPlan \env -> do
             writePlanMarkdown env "# Hello\n" `shouldReturn` Right ()
             content <- readPlanMarkdown env
             content `shouldBe` "# Hello\n"
+            readPlanSnapshot env `shouldReturn`
+                PlanPresent PlanSnapshot
+                    { planSnapshotMarkdown = "# Hello\n"
+                    , planSnapshotBytes = "# Hello\n"
+                    , planSnapshotDigest =
+                        PlanDigest
+                            "90f8ec5669cd34183b9b0fdf8b94f5efb4c3672876330f4aa76088c2b4ad17be"
+                    }
             path <- planFilePath env
             path `shouldSatisfy` Text.isSuffixOf "plan.md" . toText
 
-    it "recognizes plan.md edit targets" do
+    it "authorizes only the exact resolved plan path" do
         isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
             (fromFilePath "/tmp/sess/plan.md") `shouldBe` True
         isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
-            (fromFilePath "plan.md") `shouldBe` True
+            (fromFilePath "plan.md") `shouldBe` False
         isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
             (fromFilePath "/tmp/other/plan.md") `shouldBe` False
         isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
             (fromFilePath "/tmp/sess/other.hs") `shouldBe` False
+
+    describe "authoritative plan file" do
+        it "distinguishes absence and seeds without truncating existing content" do
+            withTempPlan \env -> do
+                readPlanSnapshot env `shouldReturn` PlanAbsent
+                first <- ensurePlanMarkdown env
+                fmap (.planSnapshotMarkdown) first `shouldBe` Right ""
+                writePlanMarkdown env "keep me" `shouldReturn` Right ()
+                second <- ensurePlanMarkdown env
+                fmap (.planSnapshotMarkdown) second `shouldBe` Right "keep me"
+
+        it "writes private mode-0600 files" do
+            withTempPlan \env -> do
+                writePlanMarkdown env "private" `shouldReturn` Right ()
+                path <- planFilePath env
+                status <- getFileStatus (Text.unpack (toText path))
+                fileMode status `intersectFileModes` accessModes
+                    `shouldBe` 0o600
+
+        it "reports invalid UTF-8 instead of treating the plan as empty" do
+            withTempPlan \env -> do
+                path <- planFilePath env
+                BS.writeFile (Text.unpack (toText path)) (BS.pack [0xff, 0xfe])
+                readPlanSnapshot env >>= \case
+                    PlanUnreadable (PlanFileInvalidUtf8 _ _) -> pure ()
+                    result -> expectationFailure
+                        ("expected invalid UTF-8, got " <> show result)
+
+        it "refuses a symlink leaf for reads and writes" do
+            withTempPlan \env -> do
+                path <- planFilePath env
+                let pathText = Text.unpack (toText path)
+                    target = take (length pathText - length ("plan.md" :: String))
+                        pathText
+                            </> "outside.md"
+                writeFile target "outside"
+                createFileLink target pathText
+                readPlanSnapshot env `shouldReturn`
+                    PlanUnreadable (PlanFileSymlink path)
+                writeResult <- writePlanMarkdown env "replacement"
+                writeResult `shouldSatisfy` isLeft
+                readFile target `shouldReturn` "outside"
+
+    describe "structured plan documents" do
+        it "recognizes section aliases and extracts actionable verification" do
+            let document = parsePlanDocument $
+                    "# Summary\nKeep behavior compatible.\n\n"
+                        <> "## Design\nUse a pure state machine.\n\n"
+                        <> "## Affected Areas\n- agent-core\n\n"
+                        <> "## Tests\n"
+                        <> "- cabal repl agent-core:agent-core-test\n"
+                        <> "```sh\n"
+                        <> "tmux capture-pane -p\n"
+                        <> "```\n"
+            map (.planSectionKind) document.planDocumentSections
+                `shouldBe`
+                    [ PlanContext
+                    , PlanApproach
+                    , PlanChanges
+                    , PlanVerification
+                    ]
+            document.planDocumentVerification `shouldBe`
+                [ "cabal repl agent-core:agent-core-test"
+                , "tmux capture-pane -p"
+                ]
+            document.planDocumentWarnings `shouldBe` []
+
+        it "keeps headings inside fenced code out of the structure" do
+            let document = parsePlanDocument $
+                    "## Approach\nRead first.\n"
+                        <> "```markdown\n## Verification\n- not real\n```\n"
+                        <> "## Changes\n- parser\n"
+            map (.planSectionKind) document.planDocumentSections
+                `shouldBe` [PlanApproach, PlanChanges]
+            map (.planWarningCode) document.planDocumentWarnings
+                `shouldContain` [PlanMissingVerification]
+
+        it "emits advisory warnings without rejecting native Markdown" do
+            let document = parsePlanDocument "#Summary\nJust prose."
+            map (.planWarningCode) document.planDocumentWarnings
+                `shouldMatchList`
+                    [ PlanMissingApproach
+                    , PlanMissingChangeScope
+                    , PlanMissingVerification
+                    , PlanMalformedSectionHeading
+                    ]
+
+        it "warns when verification has no actionable checks" do
+            let document = parsePlanDocument $
+                    "## Approach\nDo it.\n"
+                        <> "## Changes\nCore.\n"
+                        <> "## Verification\nLooks correct.\n"
+            map (.planWarningCode) document.planDocumentWarnings
+                `shouldBe` [PlanVerificationNotActionable]
+
+    describe "pure plan tracker" do
+        it "keeps exit pending write-restricted and rejects stale replies" do
+            let digest = PlanDigest "digest"
+                active = activatePlanTracker initialPlanTracker
+                exited = beginPlanExit "request-1" digest active
+            fmap planTrackerRestrictsWrites exited `shouldBe` Right True
+            (exited >>= resolvePlanApproval
+                    (PlanGeneration 99)
+                    digest
+                    RevisePlan)
+                `shouldBe` Left PlanTrackerStaleResolution
+
+        it "returns to active on revise and retains approved continuation" do
+            let digest = PlanDigest "digest"
+                continuation = ApprovedPlanContinuation
+                    { approvedPlanDigest = digest
+                    , approvedPlanVerification = ["cabal repl"]
+                    , approvedPlanContinuation = "Implement now."
+                    }
+                begin = beginPlanExit
+                    "request-1"
+                    digest
+                    (activatePlanTracker initialPlanTracker)
+            revised <- expectRight $
+                begin >>= resolvePlanApproval
+                    (PlanGeneration 1)
+                    digest
+                    RevisePlan
+            revised.trackerPhase `shouldBe` TrackerActive
+            approved <- expectRight $
+                beginPlanExit "request-2" digest revised
+                    >>= resolvePlanApproval
+                        (PlanGeneration 2)
+                        digest
+                        (ApprovePlan continuation)
+            approved.trackerPhase `shouldBe` TrackerInactive
+            approved.trackerApprovedContinuation
+                `shouldBe` Just continuation
+            markPlanContinuationDelivered approved
+                `shouldSatisfy`
+                    ((== Nothing) . (.trackerApprovedContinuation))
 
     describe "ask_user_question" do
         it "advertises the structured Grok Build questions schema" do
@@ -203,6 +361,13 @@ runAskTool env arguments = do
         [(askUserQuestionTool env).appToolHandler]
         (functionToolCall "ask-1" "ask_user_question" arguments)
     pure result.output
+
+expectRight :: Show error => Either error value -> IO value
+expectRight = \case
+    Right value -> pure value
+    Left err -> do
+        expectationFailure ("expected Right, got Left " <> show err)
+        fail "unreachable after expectation failure"
 
 testDispatchConfig :: ToolDispatchConfig
 testDispatchConfig = ToolDispatchConfig
