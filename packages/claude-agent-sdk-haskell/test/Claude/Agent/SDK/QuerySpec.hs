@@ -244,6 +244,18 @@ spec = describe "query" do
                     ("expected CLIJSONDecodeError, got " <> show other)
         messages `shouldBe` []
 
+    it "routes top-level control requests through an explicit handler" do
+        (result, controls) <- runQueryLinesWithControlHandler
+            [ "{\"type\":\"control_request\",\"request_id\":\"permission-1\",\
+              \\"request\":{\"subtype\":\"can_use_tool\",\
+              \\"tool_name\":\"Bash\",\"input\":{\"command\":\"touch file\"}}}"
+            , successResult testSessionId
+            ]
+
+        _ <- expectRight result
+        show controls `shouldContain` "permission-1"
+        show controls `shouldContain` "can_use_tool"
+
     it "ignores parent-scoped terminal and control records for completion" do
         (result, messages) <- runQueryLines
             [ assistantLine "outer-assistant" "outer answer"
@@ -466,6 +478,41 @@ runQueryLines linesToEmit =
                     modifyIORef' messagesRef (<> [message]))
         messages <- readIORef messagesRef
         pure (result, messages)
+
+runQueryLinesWithControlHandler
+    :: [Text]
+    -> IO
+        ( Either ClaudeSDKError ResultMessage
+        , [Aeson.Object]
+        )
+runQueryLinesWithControlHandler linesToEmit =
+    withFakeClaude (oneShotScript linesToEmit) \directory executable -> do
+        controlsRef <- newIORef []
+        result <-
+            withClaudeSDKClient
+                (testOptions executable directory)
+                \client ->
+                    withClaudeSDKTurn
+                        client
+                        (pure True)
+                        Nothing
+                        Nothing
+                        Nothing
+                        \turn -> do
+                            completed <-
+                                queryTurnContentWithControlHandler
+                                    turn
+                                    [UserTextBlock "hello"]
+                                    (const (pure (Right ())))
+                                    (\control -> do
+                                        modifyIORef'
+                                            controlsRef
+                                            (<> [control])
+                                        pure (Right ()))
+                                    (const (pure ()))
+                            pure ((, pure ()) <$> completed)
+        controls <- readIORef controlsRef
+        pure (result, controls)
 
 canonicalResponseLines :: [Text]
 canonicalResponseLines =

@@ -23,6 +23,7 @@ import Agent.CLI.Options
     , CliOptions
     )
 import Agent.CLI.ProviderTransition (PendingTurn)
+import Agent.CLI.Runtime.Orchestration.Types (NativeRunHooks)
 import Agent.CLI.Session
     ( LegacySubagentTarget
     , Persistence
@@ -166,6 +167,7 @@ data StartupRuntime = StartupRuntime
     , startupSyntaxLoadDuration :: !(IORef (Maybe NominalDiffTime))
     , startupFinished :: !(IORef Bool)
     , startupSessionState :: !SessionState
+    , startupNativeHooks :: !(Maybe NativeRunHooks)
     }
 
 newtype StartupFailure = StartupFailure String

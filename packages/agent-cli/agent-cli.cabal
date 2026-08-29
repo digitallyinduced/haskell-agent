@@ -80,7 +80,6 @@ library
                     , Agent.CLI.Session.Runner
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
-                    , Agent.CLI.SessionAdmin
                     , Agent.CLI.Startup.Auth
                     , Agent.CLI.StartupContext
                     , Agent.CLI.Startup.Format
@@ -135,6 +134,7 @@ library
                     , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
                     , Agent.CLI.Notification
+                    , Agent.CLI.NativeRuntime
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
                     , Agent.CLI.PendingInputs
@@ -154,6 +154,7 @@ library
                     , Agent.CLI.Session
                     , Agent.CLI.Session.History
                     , Agent.CLI.Session.StoreCodec
+                    , Agent.CLI.SessionAdmin
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
                     , Agent.CLI.SessionLock
@@ -242,6 +243,31 @@ executable agent-cli
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
+
+foreign-library haskell-agent-bridge
+    import:           common-options
+    type:             native-shared
+    options:          standalone
+    hs-source-dirs:   ffi
+    other-modules:    Agent.CLI.MacOS.Bridge
+    c-sources:        cbits/HaskellAgentBridgeRuntime.c
+    include-dirs:     include
+    includes:         HaskellAgentBridge.h
+    install-includes: HaskellAgentBridge.h
+    ghc-options:      -threaded
+    build-depends:    agent-cli
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , stm
+                    , text >= 2.0 && < 2.2
 
 executable eval-ghci-vs-bash
     import:           common-options

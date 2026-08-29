@@ -9,6 +9,7 @@ module Claude.Agent.SDK.Query
     , queryTurnContent
     , queryTurnWithMessageValidator
     , queryTurnContentWithMessageValidator
+    , queryTurnContentWithControlHandler
     , receiveResponse
     , receiveResponseWithMessageValidator
     ) where
@@ -37,12 +38,14 @@ import Claude.Agent.SDK.Internal.Query
     )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
-    , Message
+    , Message(..)
     , ResultMessage(..)
     , UserContentBlock(..)
+    , messageHasParentToolUseId
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Aeson (Object)
 import System.Exit (ExitCode)
 import System.Timeout (timeout)
 
@@ -145,6 +148,25 @@ queryTurnContentWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryTurnContentWithMessageValidator turn content validateMessage onMessage = do
+    queryTurnContentWithControlHandler
+        turn
+        content
+        validateMessage
+        (\_ -> pure (Left (CLIProtocolError
+            "Claude Code requested interactive protocol input that this client does not support.")))
+        onMessage
+
+-- | Structured query with an explicit handler for Claude Code control
+-- requests such as @can_use_tool@.
+queryTurnContentWithControlHandler
+    :: ClaudeSDKTurn
+    -> [UserContentBlock]
+    -> (Message -> IO (Either ClaudeSDKError ()))
+    -> (Object -> IO (Either ClaudeSDKError ()))
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryTurnContentWithControlHandler
+    turn content validateMessage handleControl onMessage = do
     completed <-
         timeout
             (max 1 (turnTimeoutMicros turn))
@@ -152,9 +174,10 @@ queryTurnContentWithMessageValidator turn content validateMessage onMessage = do
                 sendQueryContent turn content >>= \case
                     Left err -> pure (Left err)
                     Right () ->
-                        receiveResponseWithMessageValidator
+                        receiveResponseWithControlHandler
                             turn
                             validateMessage
+                            handleControl
                             onMessage
     case completed of
         Nothing ->
@@ -183,6 +206,21 @@ receiveResponseWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 receiveResponseWithMessageValidator turn validateMessage onMessage =
+    receiveResponseWithControlHandler
+        turn
+        validateMessage
+        (\_ -> pure (Left (CLIProtocolError
+            "Claude Code requested interactive protocol input that this client does not support.")))
+        onMessage
+
+receiveResponseWithControlHandler
+    :: ClaudeSDKTurn
+    -> (Message -> IO (Either ClaudeSDKError ()))
+    -> (Object -> IO (Either ClaudeSDKError ()))
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+receiveResponseWithControlHandler
+    turn validateMessage handleControl onMessage =
     go emptyQueryAccumulator False
   where
     go
@@ -217,8 +255,14 @@ receiveResponseWithMessageValidator turn validateMessage onMessage =
                 case validated of
                     Left err ->
                         pure (Left err)
-                    Right () ->
-                        case consumeQueryMessage accumulator message of
+                    Right () -> case message of
+                        MessageControlRequest request
+                            | not (messageHasParentToolUseId message) -> do
+                                handled <- handleControl request
+                                case handled of
+                                    Left err -> pure (Left err)
+                                    Right () -> go accumulator True
+                        _ -> case consumeQueryMessage accumulator message of
                             Left err ->
                                 pure (Left err)
                             Right (nextAccumulator, Nothing) ->

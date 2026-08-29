@@ -32,11 +32,15 @@ module Agent.Store.Postgres.Session
     , SessionTurnPage(..)
     , SessionResumeStats(..)
     , loadRecentSessionTurns
+    , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
+    , loadSessionHistoryTurnsBefore
     , loadSessionTurnsAfter
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , listSessionArchiveKeys
+    , setSessionArchived
     , searchConversationTurns
     , deleteSession
     , importLegacySession
@@ -220,6 +224,7 @@ sessionSchemaStatements =
       \ last_recap_main_turns bigint NOT NULL DEFAULT 0 CHECK (last_recap_main_turns >= 0),\
       \ next_event_sequence bigint NOT NULL DEFAULT 1,\
       \ next_turn_index bigint NOT NULL DEFAULT 0,\
+      \ archived_at timestamptz,\
       \ deleted_at timestamptz,\
       \ CHECK (updated_at >= created_at),\
       \ CHECK (next_event_sequence >= 1),\
@@ -243,6 +248,9 @@ sessionSchemaStatements =
     , "CREATE INDEX IF NOT EXISTS sessions_updated_at_idx\
       \ ON harness.sessions (updated_at DESC)\
       \ WHERE deleted_at IS NULL"
+    , "CREATE INDEX IF NOT EXISTS sessions_archived_at_idx\
+      \ ON harness.sessions (archived_at DESC)\
+      \ WHERE deleted_at IS NULL AND archived_at IS NOT NULL"
     , "CREATE TABLE IF NOT EXISTS harness.session_events (\
       \ event_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
       \ session_id uuid NOT NULL\
@@ -525,6 +533,23 @@ loadRecentSessionTurns pool sessionKey limit =
     loadTurnPage pool sessionKey
         (Transaction.statement (sessionKey, fromIntegral (max 1 limit + 1))
             loadRecentTurnsStatement)
+        (Transaction.statement sessionKey currentGenerationStatement)
+        (max 1 limit)
+        PageRecent
+
+-- | Page the complete durable conversation, including turns that precede the
+-- latest transcript replacement checkpoint. Native transcript views use this
+-- while resume/model-context loading continues to use the active generation.
+loadRecentSessionHistoryTurns
+    :: StorePool
+    -> Text
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadRecentSessionHistoryTurns pool sessionKey limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement (sessionKey, fromIntegral (max 1 limit + 1))
+            loadRecentHistoryTurnsStatement)
+        (Transaction.statement sessionKey fullHistoryStatement)
         (max 1 limit)
         PageRecent
 
@@ -539,6 +564,22 @@ loadSessionTurnsBefore pool sessionKey cursor limit =
         (Transaction.statement
             (sessionKey, cursor, fromIntegral (max 1 limit + 1))
             loadTurnsBeforeStatement)
+        (Transaction.statement sessionKey currentGenerationStatement)
+        (max 1 limit)
+        PageBefore
+
+loadSessionHistoryTurnsBefore
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionHistoryTurnsBefore pool sessionKey cursor limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            (sessionKey, cursor, fromIntegral (max 1 limit + 1))
+            loadHistoryTurnsBeforeStatement)
+        (Transaction.statement sessionKey fullHistoryStatement)
         (max 1 limit)
         PageBefore
 
@@ -553,6 +594,7 @@ loadSessionTurnsAfter pool sessionKey cursor limit =
         (Transaction.statement
             (sessionKey, cursor, fromIntegral (max 1 limit + 1))
             loadTurnsAfterStatement)
+        (Transaction.statement sessionKey currentGenerationStatement)
         (max 1 limit)
         PageAfter
 
@@ -572,10 +614,11 @@ loadTurnPage
     :: StorePool
     -> Text
     -> Transaction.Transaction [TurnRow]
+    -> Transaction.Transaction (Int64, Int64)
     -> Int
     -> PageMode
     -> IO (Either StoreError (Maybe SessionTurnPage))
-loadTurnPage pool sessionKey loadRows limit mode =
+loadTurnPage pool sessionKey loadRows loadBounds limit mode =
     withSession pool
         (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
             metadata <- Transaction.statement sessionKey loadMetadataStatement
@@ -583,8 +626,7 @@ loadTurnPage pool sessionKey loadRows limit mode =
                 Nothing -> pure (Right Nothing)
                 Just _ -> do
                     rows0 <- loadRows
-                    (generationStart, total) <-
-                        Transaction.statement sessionKey currentGenerationStatement
+                    (generationStart, total) <- loadBounds
                     let visibleRows = case mode of
                             PageRecent -> reverse (take limit rows0)
                             PageBefore -> reverse (take limit rows0)
@@ -637,6 +679,43 @@ listSessionMetadata pool =
     withSession pool $
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement () listMetadataStatement
+
+listSessionArchiveKeys
+    :: StorePool
+    -> IO (Either StoreError [Text])
+listSessionArchiveKeys pool =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement () listArchiveKeysStatement
+
+setSessionArchived
+    :: StorePool
+    -> Text
+    -> Bool
+    -> UTCTime
+    -> IO (Either StoreError Bool)
+setSessionArchived pool sessionKey archived occurredAt =
+    withSession pool $
+        Transactions.transaction Transactions.Serializable Transactions.Write do
+            _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
+            changed <- Transaction.statement
+                (sessionKey, archived, occurredAt)
+                setArchivedProjectionStatement
+            case changed of
+                Nothing -> pure False
+                Just (sessionId, sequence) -> do
+                    _ <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = sequence
+                            , eventInsertKind =
+                                if archived
+                                    then "session.archived"
+                                    else "session.restored"
+                            , eventInsertOccurredAt = occurredAt
+                            }
+                        insertEventStatement
+                    pure True
 
 searchConversationTurns
     :: StorePool
@@ -861,6 +940,37 @@ sessionExistsStatement = mkStatement
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
     True
 
+listArchiveKeysStatement :: Statement () [Text]
+listArchiveKeysStatement = mkStatement
+    "SELECT session_key FROM harness.sessions\
+    \ WHERE deleted_at IS NULL AND archived_at IS NOT NULL\
+    \ ORDER BY archived_at DESC, session_key ASC"
+    Encoders.noParams
+    (Decoders.rowList $
+        Decoders.column (Decoders.nonNullable Decoders.text))
+    True
+
+setArchivedProjectionStatement
+    :: Statement (Text, Bool, UTCTime) (Maybe (Text, Int64))
+setArchivedProjectionStatement = mkStatement
+    "UPDATE harness.sessions SET\
+    \ archived_at = CASE WHEN $2 THEN $3 ELSE NULL END,\
+    \ next_event_sequence = next_event_sequence + 1\
+    \ WHERE session_key = $1 AND deleted_at IS NULL\
+    \ RETURNING session_id::text, next_event_sequence - 1"
+    ( ((\(key, _, _) -> key)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, archived, _) -> archived)
+            >$< Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> ((\(_, _, occurredAt) -> occurredAt)
+            >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+    )
+    (Decoders.rowMaybe $
+        (,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+    True
+
 insertSessionStatement :: Statement SessionMetadata Text
 insertSessionStatement = mkStatement
     "INSERT INTO harness.sessions (\
@@ -1077,6 +1187,19 @@ loadRecentTurnsStatement = mkStatement
     (Decoders.rowList turnRowDecoder)
     True
 
+loadRecentHistoryTurnsStatement :: Statement (Text, Int64) [TurnRow]
+loadRecentHistoryTurnsStatement = mkStatement
+    ( turnSelectSql
+        <> " WHERE s.session_key = $1"
+        <> " ORDER BY t.turn_index DESC"
+        <> " LIMIT $2"
+    )
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList turnRowDecoder)
+    True
+
 loadTurnsBeforeStatement :: Statement (Text, Int64, Int64) [TurnRow]
 loadTurnsBeforeStatement = mkStatement
     (turnSelectSql
@@ -1092,6 +1215,24 @@ loadTurnsBeforeStatement = mkStatement
            \ ), 0)\
            \ ORDER BY t.turn_index DESC\
            \ LIMIT $3")
+    ( ((\(value, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList turnRowDecoder)
+    True
+
+loadHistoryTurnsBeforeStatement :: Statement (Text, Int64, Int64) [TurnRow]
+loadHistoryTurnsBeforeStatement = mkStatement
+    ( turnSelectSql
+        <> " WHERE s.session_key = $1"
+        <> " AND t.turn_index < $2"
+        <> " ORDER BY t.turn_index DESC"
+        <> " LIMIT $3"
+    )
     ( ((\(value, _, _) -> value)
         >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> ((\(_, value, _) -> value)
@@ -1125,6 +1266,26 @@ loadTurnsAfterStatement = mkStatement
             >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowList turnRowDecoder)
+    True
+
+fullHistoryStatement :: Statement Text (Int64, Int64)
+fullHistoryStatement = mkStatement
+    ( "WITH target AS ("
+        <> " SELECT session_id"
+        <> " FROM harness.sessions"
+        <> " WHERE session_key = $1 AND deleted_at IS NULL"
+        <> " )"
+        <> " SELECT COALESCE(min(t.turn_index), 0)::bigint,"
+        <> " count(t.turn_id)::bigint"
+        <> " FROM target"
+        <> " LEFT JOIN harness.session_turns t"
+        <> " ON t.session_id = target.session_id"
+    )
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow $
+        (,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
     True
 
 currentGenerationStatement :: Statement Text (Int64, Int64)

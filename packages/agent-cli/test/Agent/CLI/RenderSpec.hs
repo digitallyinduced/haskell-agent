@@ -113,6 +113,28 @@ spec = do
             let out = Text.unlines (map (Text.pack . show) [1 :: Int .. 12])
             truncateToolOutput out `shouldSatisfy` Text.isInfixOf "… 4 more"
 
+    describe "formatNativeLoopEvent" do
+        it "encodes tool lifecycle records and ignores prose" do
+            let started = formatNativeLoopEvent
+                    (ToolStarted
+                        (functionToolCall
+                            "call-1"
+                            "read_file"
+                            "{\"target_file\":\"src/A.hs\"}"))
+                finished = formatNativeLoopEvent
+                    (ToolFinished ToolCallResult
+                        { callId = "call-1"
+                        , output = "done"
+                        , callKind = FunctionCallKind
+                        })
+            started `shouldSatisfy`
+                maybe False (Text.isPrefixOf (Text.singleton '\RS'))
+            started `shouldSatisfy`
+                maybe False (Text.isInfixOf "\"type\":\"tool_started\"")
+            finished `shouldSatisfy`
+                maybe False (Text.isInfixOf "\"output\":\"done\"")
+            formatNativeLoopEvent (TextDelta "hello") `shouldBe` Nothing
+
     describe "formatToolOutput" do
         it "renders structured collaboration results as readable text" do
             let spawn = functionToolCall "c1" "collaboration.spawn_agent" "{}"
@@ -796,6 +818,7 @@ withRenderConfigNativeMode showThinking color native motionMode action = do
                 , renderStderr = handle
                 , renderModelRef = modelRef
                 , renderNativeProgress = native
+                , renderNativeEvents = False
                 , renderMotionMode = motionMode
                 }
         action config handle path

@@ -2,8 +2,11 @@
 -- provider-neutral agent loop.
 module Agent.Claude.LoopBackend
     ( withClaudeCodeBackend
+    , withClaudeCodeBackendPermissions
     , claudeCodeOneShotBackend
     , appendHostTranscript
+    , ClaudeToolPermissionDecision(..)
+    , ClaudeToolPermissionRequest(..)
     ) where
 
 import Agent.Claude.Options
@@ -51,6 +54,7 @@ import Claude.Agent.SDK.Client
     ( ClaudeSDKClient
     , ClaudeSDKTurn
     , resolveTurnUsage
+    , sendControlResponse
     , turnIsNewSession
     , withClaudeSDKClient
     , withClaudeSDKTurn
@@ -68,6 +72,7 @@ import Data.IORef
     , writeIORef
     )
 import Data.Maybe (catMaybes, fromMaybe)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -86,7 +91,7 @@ import Claude.Agent.SDK.Errors
     , renderClaudeSDKError
     )
 import Claude.Agent.SDK.Query
-    ( queryTurnContentWithMessageValidator
+    ( queryTurnContentWithControlHandler
     )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
@@ -99,6 +104,18 @@ import Claude.Agent.SDK.Types
     )
 import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (void)
+import Data.Aeson ((.:))
+import qualified Data.Aeson.Types as AesonTypes
+
+data ClaudeToolPermissionRequest = ClaudeToolPermissionRequest
+    { claudePermissionRequestId :: !Text
+    , claudePermissionToolName :: !Text
+    , claudePermissionInput :: !Aeson.Value
+    }
+
+data ClaudeToolPermissionDecision
+    = ClaudeToolPermissionAllow
+    | ClaudeToolPermissionDeny !Text
 
 data HostTranscriptCheckpoint = HostTranscriptCheckpoint
     { checkpointTranscript :: !(StableName [ResponseItem])
@@ -116,13 +133,50 @@ withClaudeCodeBackend
     -> (Backend -> IO a)
     -> IO a
 withClaudeCodeBackend options initialPrevious getParams transcript callback =
+    withClaudeCodeBackendPermissions
+        options
+        Nothing
+        initialPrevious
+        getParams
+        transcript
+        callback
+
+withClaudeCodeBackendPermissions
+    :: ClaudeCodeOptions
+    -> Maybe
+        (ClaudeToolPermissionRequest
+            -> IO ClaudeToolPermissionDecision)
+    -> Maybe Text
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> (Backend -> IO a)
+    -> IO a
+withClaudeCodeBackendPermissions
+    options permissionHandler initialPrevious getParams transcript callback =
     toClaudeAgentOptions ClaudeCodeDefaultTools options >>= \sdkOptions ->
+    let effectiveOptions = case permissionHandler of
+            Nothing -> sdkOptions
+            Just _ -> sdkOptions
+                { permissionMode = Nothing
+                , extraArgs =
+                    Map.insert
+                        "permission-prompt-tool"
+                        (Just "stdio")
+                        sdkOptions.extraArgs
+                }
+    in
     withClaudeSDKClient
-        sdkOptions
+        effectiveOptions
             { resume = initialPrevious >>= canonicalClaudeSessionId }
         \session -> do
         checkpoint <- newIORef Nothing
-        callback (backendForSession session checkpoint getParams transcript)
+        callback
+            (backendForSession
+                session
+                checkpoint
+                getParams
+                transcript
+                permissionHandler)
 
 -- | A backend for isolated side requests. Every submission owns and cleans up
 -- its own structured Claude process, while still using subscription auth.
@@ -145,6 +199,7 @@ claudeCodeOneShotBackend options getParams transcript =
                 transcript
                 inputs
                 onEvent
+                Nothing
         attachBackendState transcript result
 
 backendForSession
@@ -152,8 +207,12 @@ backendForSession
     -> IORef (Maybe HostTranscriptCheckpoint)
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
+    -> Maybe
+        (ClaudeToolPermissionRequest
+            -> IO ClaudeToolPermissionDecision)
     -> Backend
-backendForSession session checkpoint getParams transcript =
+backendForSession
+    session checkpoint getParams transcript permissionHandler =
     Backend \_state previous inputs onEvent -> do
         result <- submitClaudeCodeTurn
             session
@@ -163,6 +222,7 @@ backendForSession session checkpoint getParams transcript =
             transcript
             inputs
             onEvent
+            permissionHandler
         attachBackendState transcript result
 
 attachBackendState
@@ -186,6 +246,9 @@ submitClaudeCodeTurn
     -> IORef [ResponseItem]
     -> [TurnInput]
     -> (LoopEvent -> IO ())
+    -> Maybe
+        (ClaudeToolPermissionRequest
+            -> IO ClaudeToolPermissionDecision)
     -> IO (Either ApiError TurnOutput)
 submitClaudeCodeTurn
     session
@@ -194,7 +257,8 @@ submitClaudeCodeTurn
     getParams
     transcript
     inputs
-    onEvent =
+    onEvent
+    permissionHandler =
     do
         bracket
             (collectTurnInputs inputs)
@@ -224,10 +288,13 @@ submitClaudeCodeTurn
                             content =
                                 claudeUserContent inputImages prompt
                         awaitResult <-
-                            queryTurnContentWithMessageValidator
+                            queryTurnContentWithControlHandler
                                 turn
                                 content
                                 validateSubscriptionMessage
+                                (handleControlRequest
+                                    turn
+                                    permissionHandler)
                                 (\message ->
                                     modifyIORef' messages (message :))
                         case awaitResult of
@@ -288,6 +355,74 @@ submitClaudeCodeTurn
                     completed.assistantText
         mapM_ onEvent completed.events
         pure (Right (output, commit))
+
+handleControlRequest
+    :: ClaudeSDKTurn
+    -> Maybe
+        (ClaudeToolPermissionRequest
+            -> IO ClaudeToolPermissionDecision)
+    -> Aeson.Object
+    -> IO (Either ClaudeSDKError ())
+handleControlRequest _ Nothing _ =
+    pure $ Left $ CLIProtocolError
+        "Claude Code requested permission, but no permission handler is configured."
+handleControlRequest turn (Just requestPermission) raw =
+    case AesonTypes.parseEither
+        parseClaudePermissionRequest
+        (Aeson.Object raw) of
+            Left err ->
+                pure (Left (CLIProtocolError (Text.pack err)))
+            Right request -> do
+                decision <- requestPermission request
+                sendControlResponse turn $
+                    controlResponse request decision
+
+parseClaudePermissionRequest
+    :: Aeson.Value
+    -> AesonTypes.Parser ClaudeToolPermissionRequest
+parseClaudePermissionRequest =
+    Aeson.withObject "control request" \outer -> do
+        requestId <- outer .: "request_id"
+        requestValue <- outer .: "request"
+        Aeson.withObject "permission request" (\request -> do
+            subtype <- request .: "subtype"
+            if (subtype :: Text) /= "can_use_tool"
+                then fail
+                    ("unsupported control request subtype: "
+                        <> Text.unpack subtype)
+                else ClaudeToolPermissionRequest
+                    requestId
+                    <$> request .: "tool_name"
+                    <*> request .: "input"
+            ) requestValue
+
+controlResponse
+    :: ClaudeToolPermissionRequest
+    -> ClaudeToolPermissionDecision
+    -> Aeson.Value
+controlResponse request decision =
+    Aeson.object
+        [ "type" Aeson..= ("control_response" :: Text)
+        , "response" Aeson..= Aeson.object
+            [ "subtype" Aeson..= ("success" :: Text)
+            , "request_id" Aeson..= request.claudePermissionRequestId
+            , "response" Aeson..= case decision of
+                ClaudeToolPermissionAllow ->
+                    Aeson.object
+                        [ "behavior" Aeson..= ("allow" :: Text)
+                        , "updatedInput" Aeson..=
+                            request.claudePermissionInput
+                        , "updatedPermissions" Aeson..=
+                            ([] :: [Aeson.Value])
+                        ]
+                ClaudeToolPermissionDeny message ->
+                    Aeson.object
+                        [ "behavior" Aeson..= ("deny" :: Text)
+                        , "message" Aeson..= message
+                        , "interrupt" Aeson..= False
+                        ]
+            ]
+        ]
 
 collectTurnInputs :: [TurnInput] -> IO (Text, [ImageAttachment], [FilePath])
 collectTurnInputs inputs = do

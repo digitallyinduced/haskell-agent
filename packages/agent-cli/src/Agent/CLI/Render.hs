@@ -19,6 +19,7 @@ module Agent.CLI.Render
     , beginRenderTurn
     , formatActivityLine
     , formatElapsed
+    , formatNativeLoopEvent
     , formatLoopError
     , formatLoopErrorAt
     , formatLoopErrorColored
@@ -117,12 +118,15 @@ import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, void, when)
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isDigit, isSpace)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Word (Word64)
@@ -148,6 +152,7 @@ data RenderConfig = RenderConfig
     , renderStderr :: !Handle
     , renderModelRef :: !(IORef Text)
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
+    , renderNativeEvents :: !Bool
     , renderMotionMode :: !MotionMode
     }
 
@@ -575,7 +580,14 @@ streamMarkdown input state =
 
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
 renderEvent config event =
-    withMVar config.renderLock \_ -> renderEventUnlocked config event
+    withMVar config.renderLock \_ -> do
+        when config.renderNativeEvents $
+            case formatNativeLoopEvent event of
+                Nothing -> pure ()
+                Just record -> do
+                    Text.hPutStrLn config.renderStdout record
+                    hFlush config.renderStdout
+        renderEventUnlocked config event
 
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
@@ -649,11 +661,13 @@ renderEventUnlocked config = \case
                 }
             , ()
             )
-        unless (isTodoTool call.name) do
-            putTextLn config.renderStderr (formatToolStarted config.renderColor call)
-            let extra = formatToolBody config.renderColor call
-            unless (Text.null extra) do
-                putTextLn config.renderStderr extra
+        unless config.renderNativeEvents $
+            unless (isTodoTool call.name) do
+                putTextLn config.renderStderr
+                    (formatToolStarted config.renderColor call)
+                let extra = formatToolBody config.renderColor call
+                unless (Text.null extra) do
+                    putTextLn config.renderStderr extra
         when config.renderShowThinking do
             visible <- (.stateThinkingVisible) <$> readRenderState config
             if visible
@@ -681,9 +695,48 @@ renderEventUnlocked config = \case
                         (roleToolOutput
                             config.renderColor
                             (truncateToolOutput formatted))
-        case painted of
-            Nothing -> pure ()
-            Just line -> putTextLn config.renderStderr line
+        unless config.renderNativeEvents $
+            case painted of
+                Nothing -> pure ()
+                Just line -> putTextLn config.renderStderr line
+
+-- | Record separator plus one JSON object. Other stderr diagnostics remain
+-- human-readable, while native clients can split these records out without
+-- parsing terminal presentation.
+formatNativeLoopEvent :: LoopEvent -> Maybe Text
+formatNativeLoopEvent = \case
+    ToolStarted call ->
+        let (arguments, truncated) =
+                boundedNativeEventText
+                    (if call.argumentsEncrypted then "" else call.arguments)
+        in Just $ encodeNativeEvent $ Aeson.object
+            [ "type" Aeson..= ("tool_started" :: Text)
+            , "callId" Aeson..= call.callId
+            , "name" Aeson..= call.name
+            , "summary" Aeson..= summarizeToolCall call
+            , "arguments" Aeson..= arguments
+            , "argumentsEncrypted" Aeson..= call.argumentsEncrypted
+            , "truncated" Aeson..= truncated
+            ]
+    ToolFinished result ->
+        let (output, truncated) = boundedNativeEventText result.output
+        in Just $ encodeNativeEvent $ Aeson.object
+            [ "type" Aeson..= ("tool_finished" :: Text)
+            , "callId" Aeson..= result.callId
+            , "output" Aeson..= output
+            , "truncated" Aeson..= truncated
+            ]
+    _ -> Nothing
+
+encodeNativeEvent :: Aeson.Value -> Text
+encodeNativeEvent value =
+    Text.singleton '\RS'
+        <> TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode value))
+
+boundedNativeEventText :: Text -> (Text, Bool)
+boundedNativeEventText value =
+    let (visible, remainder) = Text.splitAt 8192 value
+    in (visible, not (Text.null remainder))
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.

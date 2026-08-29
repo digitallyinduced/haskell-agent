@@ -161,7 +161,10 @@ runOneTurn env promptText inputs =
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
-        (runOneTurnBusy env promptText inputs)
+        (bracket_
+            env.sessionBeginTurnActivity
+            env.sessionEndTurnActivity
+            (runOneTurnBusy env promptText inputs))
 
 runOneTurnBusy :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurnBusy env@SessionEnv

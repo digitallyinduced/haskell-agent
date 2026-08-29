@@ -247,6 +247,36 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected recent page: " <> show other)
+                            loadRecentSessionHistoryTurns pool "session-1" 2
+                                >>= \case
+                                    Right (Just page) -> do
+                                        map (.storedTurnIndex) page.sessionPageTurns
+                                            `shouldBe` [4, 5]
+                                        page.sessionPageGenerationStart
+                                            `shouldBe` 0
+                                        page.sessionPageTotal `shouldBe` 6
+                                        page.sessionPageHasOlder `shouldBe` True
+                                        page.sessionPageHasNewer `shouldBe` False
+                                    other ->
+                                        expectationFailure
+                                            ( "unexpected full-history recent page: "
+                                                <> show other
+                                            )
+                            loadSessionHistoryTurnsBefore pool "session-1" 2 2
+                                >>= \case
+                                    Right (Just page) -> do
+                                        map (.storedTurnIndex) page.sessionPageTurns
+                                            `shouldBe` [0, 1]
+                                        page.sessionPageGenerationStart
+                                            `shouldBe` 0
+                                        page.sessionPageTotal `shouldBe` 6
+                                        page.sessionPageHasOlder `shouldBe` False
+                                        page.sessionPageHasNewer `shouldBe` True
+                                    other ->
+                                        expectationFailure
+                                            ( "unexpected full-history older page: "
+                                                <> show other
+                                            )
                             loadSessionTurnsBefore pool "session-1" 4 2 >>= \case
                                 Right (Just page) -> do
                                     map (.storedTurnIndex) page.sessionPageTurns

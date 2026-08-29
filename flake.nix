@@ -159,8 +159,11 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "cbits"
                         "config"
                         "eval"
+                        "ffi"
+                        "include"
                         "skills"
                         "src"
                         "test"
@@ -451,6 +454,24 @@
                                             ]}"
                                 '';
                         });
+                agentNativeBridgePackage = pkgs.runCommand
+                    "haskell-agent-native-bridge-0.1.0"
+                    { }
+                    ''
+                        bridge="$(${pkgs.findutils}/bin/find \
+                            ${agentCliPackage}/lib \
+                            -name libhaskell-agent-bridge.dylib \
+                            -print -quit)"
+                        header="$(${pkgs.findutils}/bin/find \
+                            ${agentCliPackage}/lib \
+                            -name HaskellAgentBridge.h \
+                            -print -quit)"
+                        test -n "$bridge"
+                        test -n "$header"
+                        mkdir -p "$out/lib" "$out/include"
+                        cp "$bridge" "$out/lib/libhaskell-agent-bridge.dylib"
+                        cp "$header" "$out/include/HaskellAgentBridge.h"
+                    '';
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
                 functionalTestCredentialHome =
                     builtins.getEnv "AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME";
@@ -567,6 +588,8 @@
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;

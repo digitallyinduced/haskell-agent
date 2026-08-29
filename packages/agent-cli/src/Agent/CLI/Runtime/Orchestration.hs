@@ -83,7 +83,8 @@ import Agent.CLI.Models
       ModelTarget(targetProvider, ModelTarget, targetModelId,
                   targetDialect, targetWireModelId, targetConnectionId) )
 import Agent.CLI.Options
-    ( defaultEffortFor,
+    ( ApprovalPolicy(PromptMutating),
+      defaultEffortFor,
       isOneShot,
       resolveApprovalPolicy,
       CliOptions(optMotionMode, optNoYolo,
@@ -93,6 +94,7 @@ import Agent.CLI.Options
                  optScreenMode, optGhci, optBash, optResume, optCwd),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ( withPendingInputs )
+import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Plan ( cliPlanHooks )
 import Agent.CLI.Project
     ( ProjectAccount(..),
@@ -259,10 +261,12 @@ import Agent.Claude
     ( ClaudeCodeAuth(..),
       ClaudeCodeOptions(..),
       ClaudeCodePermission(..),
+      ClaudeToolPermissionDecision(..),
+      ClaudeToolPermissionRequest(..),
       claudeCodeOneShotBackend,
       defaultClaudeCodeOptions,
       loadClaudeCodeAuth,
-      withClaudeCodeBackend )
+      withClaudeCodeBackendPermissions )
 import Agent.Dialect ( dialectForId, DialectId(GrokBuildDialect) )
 import Agent.Error ( ApiError(..) )
 import Agent.GrokBuild.Dialect.Goal ()
@@ -274,6 +278,7 @@ import Agent.Loop
       addTokenUsage,
       emptyTokenUsage,
       LoopError(LoopNoResponseId) )
+import Agent.ToolDispatch (functionToolCall)
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient
@@ -377,6 +382,9 @@ import Data.IORef
 import Data.List ()
 import Data.Maybe ( isNothing, fromMaybe, isJust )
 import Data.Text ( Text )
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock ( getCurrentTime, utctDay )
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
@@ -438,7 +446,7 @@ import qualified Agent.XAI.Usage as XAIUsage ()
 
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(..), AccountSwitchRequest(..), AgentProcessRuntime(..),
-      AgentRunMode(..) )
+      AgentRunMode(..), NativeRunHooks(..) )
 import Agent.CLI.Runtime.Orchestration.Restart
     ( RestartCallbacks(..), runFullscreenRestartLoop )
 import Agent.CLI.Runtime.Orchestration.Background
@@ -881,6 +889,9 @@ prepareAgentIterationTracked
                 reportTerminalCwd terminal stdoutHandle terminalCwd
                 toolEnv <- defaultToolEnv cwd
                 writeIORef cancelToolRef (requestCancel toolEnv.toolCancel)
+                forM_ runMode.runNativeHooks \hooks ->
+                    hooks.nativeRegisterCancel
+                        (requestCancel toolEnv.toolCancel)
                 forM_ fullscreen \runtime ->
                     setFullscreenSessionActions
                         runtime
@@ -916,6 +927,7 @@ prepareAgentIterationTracked
                         , startupSyntaxLoadDuration = syntaxLoadDurationRef
                         , startupFinished = startupFinishedRef
                         , startupSessionState = sessionState
+                        , startupNativeHooks = runMode.runNativeHooks
                         }
                 runAgentInitialized
                     processRuntime
@@ -928,6 +940,8 @@ prepareAgentIterationTracked
                     cwd
                     startup
         cleanup = do
+            forM_ runMode.runNativeHooks \hooks ->
+                hooks.nativeRegisterCancel (pure ())
             writeIORef uiRuntimeRef Nothing
             writeIORef cancelToolRef (pure ())
             forM_ fullscreen resetFullscreenSessionActions
@@ -960,6 +974,32 @@ resetFullscreenSessionActions runtime =
         (pure ForceExit)
         (pure (AgentRoot, []))
         (const (pure ()))
+
+nativeClaudePermissionHandler
+    :: Maybe NativeRunHooks
+    -> Maybe
+        (ClaudeToolPermissionRequest
+            -> IO ClaudeToolPermissionDecision)
+nativeClaudePermissionHandler = fmap \hooks request -> do
+    let arguments =
+            TextEncoding.decodeUtf8
+                (LBS.toStrict
+                    (Aeson.encode request.claudePermissionInput))
+        call = functionToolCall
+            request.claudePermissionRequestId
+            request.claudePermissionToolName
+            arguments
+    hooks.nativeRequestApproval call >>= \case
+        Just PermissionAllowOnce ->
+            pure ClaudeToolPermissionAllow
+        Just PermissionAllowTool ->
+            pure ClaudeToolPermissionAllow
+        Just PermissionAllowAll ->
+            pure ClaudeToolPermissionAllow
+        Just PermissionDeny ->
+            pure (ClaudeToolPermissionDeny "Denied by user.")
+        Nothing ->
+            pure (ClaudeToolPermissionDeny "Permission request dismissed.")
 
 runAgentInitialized
     :: AgentProcessRuntime
@@ -1545,8 +1585,11 @@ runAgentInitializedWithLock
         effort = fromMaybe
             (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
             options.optEffort
-        policy = resolveApprovalPolicy options isTty
-            projectSettings.settingsAutoApprove
+        policy = case startup.startupNativeHooks of
+            Just _ -> PromptMutating
+            Nothing ->
+                resolveApprovalPolicy options isTty
+                    projectSettings.settingsAutoApprove
         claudeBypassEnabled =
             not options.optNoYolo
                 && (options.optYolo || projectSettings.settingsAutoApprove)
@@ -2565,8 +2608,10 @@ runAgentInitializedWithLock
                         writeIORef activeAccountRef claudeAuth.accountLabel
                         claudeTranscriptRef <-
                             newIORef =<< readLiveTranscript conversationRef
-                        withClaudeCodeBackend
+                        withClaudeCodeBackendPermissions
                             claudeOptions
+                            (nativeClaudePermissionHandler
+                                startup.startupNativeHooks)
                             initialPrevious
                             (readIORef paramsRef)
                             claudeTranscriptRef

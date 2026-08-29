@@ -8,6 +8,7 @@ module Claude.Agent.SDK.Client
     , withClaudeSDKTurn
     , sendQuery
     , sendQueryContent
+    , sendControlResponse
     , receiveMessage
     , resolveTurnUsage
     , acceptTurnSessionId
@@ -299,6 +300,15 @@ sendQueryContent turn content = do
                 <> "\n"
             )
         )
+
+-- | Send one control-protocol response while a query remains active.
+sendControlResponse
+    :: ClaudeSDKTurn
+    -> Aeson.Value
+    -> IO (Either ClaudeSDKError ())
+sendControlResponse turn response =
+    turn.turnRunning.runningTransport.transportWrite
+        (LazyByteString.toStrict (Aeson.encode response <> "\n"))
 
 userContentValue :: UserContentBlock -> Aeson.Value
 userContentValue = \case

@@ -771,6 +771,32 @@ spec = describe "Agent.CLI.Session" do
 
                 listed <- listSessions pool root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
+                renameSession
+                    pool
+                    root
+                    handle.sessionMeta.metaId
+                    "  Manual   title  " >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right renamed -> do
+                            renamed.metaTitle `shouldBe` "Manual title"
+                            renamed.metaTitleIsManual `shouldBe` True
+                loadSessionMeta pool root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right renamed ->
+                        renamed.metaTitle `shouldBe` "Manual title"
+                setSessionArchived
+                    pool
+                    root
+                    handle.sessionMeta.metaId
+                    True `shouldReturn` Right ()
+                listArchivedSessionIds pool
+                    `shouldReturn` Right [handle.sessionMeta.metaId]
+                setSessionArchived
+                    pool
+                    root
+                    handle.sessionMeta.metaId
+                    False `shouldReturn` Right ()
+                listArchivedSessionIds pool `shouldReturn` Right []
                 deleteSession pool root handle.sessionMeta.metaId
                     `shouldReturn` Right ()
                 doesDirectoryExist handle.sessionDir `shouldReturn` False

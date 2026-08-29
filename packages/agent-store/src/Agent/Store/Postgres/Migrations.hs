@@ -150,6 +150,19 @@ coreMigrations =
         , migrationStatements =
             [migrateSessionTranscriptEffectsStatement]
         }
+    -- Versions 9 and 10 are already deployed by the conversation-search and
+    -- binary-attachment branches. Keep them reserved until those land here.
+    , Migration
+        { migrationVersion = 11
+        , migrationName = "archived sessions"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS archived_at timestamptz"
+            , "CREATE INDEX IF NOT EXISTS sessions_archived_at_idx\
+              \ ON harness.sessions (archived_at DESC)\
+              \ WHERE deleted_at IS NULL AND archived_at IS NOT NULL"
+            ]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty

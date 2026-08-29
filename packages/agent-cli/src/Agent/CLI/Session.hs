@@ -29,18 +29,22 @@ module Agent.CLI.Session
     , appendTurnKeepTitleIndexed
     , addSessionUsage
     , deleteSession
+    , renameSession
     , loadSession
     , loadSessions
     , loadActiveSession
     , loadSessionMeta
     , loadRecentSessionTurns
+    , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
+    , loadSessionHistoryTurnsBefore
     , loadSessionTurnsAfter
     , loadSessionResumeStats
     , importSessionTransfer
     , loadSessionHandle
     , isValidSessionId
     , listSessions
+    , listArchivedSessionIds
     , sessionDirForId
     , sessionTempDirForId
     , sessionTempsRoot
@@ -50,6 +54,7 @@ module Agent.CLI.Session
     , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
+    , setSessionArchived
     , setManualSessionTitle
     , resetSessionTitleToAuto
     , setSessionRecap
@@ -847,6 +852,16 @@ loadRecentSessionTurns pool root sessionId limit =
     loadSessionTurnPage root pool sessionId
         (\pool' key -> Store.loadRecentSessionTurns pool' key limit)
 
+loadRecentSessionHistoryTurns
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadRecentSessionHistoryTurns pool root sessionId limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key -> Store.loadRecentSessionHistoryTurns pool' key limit)
+
 loadSessionTurnsBefore
     :: StorePool
     -> OsPath
@@ -857,6 +872,18 @@ loadSessionTurnsBefore
 loadSessionTurnsBefore pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
         (\pool' key -> Store.loadSessionTurnsBefore pool' key cursor limit)
+
+loadSessionHistoryTurnsBefore
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsBefore pool root sessionId cursor limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key ->
+            Store.loadSessionHistoryTurnsBefore pool' key cursor limit)
 
 loadSessionTurnsAfter
     :: StorePool
@@ -1049,6 +1076,65 @@ deleteSession pool root sessionId = runExceptT do
     tempRemoved <- lift (removeSessionTemp root sessionId)
     except tempRemoved
 
+renameSession
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Text
+    -> IO (Either Text SessionMeta)
+renameSession pool root sessionId rawTitle = runExceptT do
+    let title = Text.unwords (Text.words (Text.strip rawTitle))
+    when (Text.null title) (throwE "session title cannot be empty")
+    meta <- lift (loadSessionMeta pool root sessionId) >>= except
+    dir <- except (sessionDirForId root sessionId)
+    exists <- lift (doesDirectoryExist dir)
+    lock <- if exists
+        then lift (acquireSessionLock dir sessionId) >>= \case
+            Left _ -> throwE "cannot rename a running session"
+            Right lock -> pure (Just lock)
+        else pure Nothing
+    let updated = meta
+            { metaTitle = title
+            , metaTitleIsManual = True
+            , metaTitleRefreshIndex = 2
+            }
+    renamed <- lift $
+        Store.replaceSessionMetadata
+            pool
+            "session.renamed"
+            (toStoredMetadata updated)
+            `finally` maybe (pure ()) releaseSessionLock lock
+    case renamed of
+        Left err -> throwE (renderStoreError err)
+        Right False -> throwE ("session not found: " <> sessionId)
+        Right True -> pure updated
+
+setSessionArchived
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Bool
+    -> IO (Either Text ())
+setSessionArchived pool root sessionId archived = runExceptT do
+    dir <- except (sessionDirForId root sessionId)
+    exists <- lift (doesDirectoryExist dir)
+    lock <- if exists
+        then lift (acquireSessionLock dir sessionId) >>= \case
+            Left _ -> throwE $
+                if archived
+                    then "cannot archive a running session"
+                    else "cannot restore a running session"
+            Right lock -> pure (Just lock)
+        else pure Nothing
+    now <- lift getCurrentTime
+    changed <- lift $
+        Store.setSessionArchived pool sessionId archived now
+            `finally` maybe (pure ()) releaseSessionLock lock
+    case changed of
+        Left err -> throwE (renderStoreError err)
+        Right False -> throwE ("session not found: " <> sessionId)
+        Right True -> pure ()
+
 -- | Session ids are single path components. Keep this deliberately broader
 -- than the current date-plus-hex allocator so older ids remain resumable.
 isValidSessionId :: Text -> Bool
@@ -1080,6 +1166,12 @@ listSessions pool _root = do
                 ("could not list PostgreSQL sessions: "
                     <> Text.unpack (renderStoreError err))
         Right values -> pure (catMaybes (map decodeMetaQuiet values))
+
+listArchivedSessionIds :: StorePool -> IO (Either Text [Text])
+listArchivedSessionIds pool =
+    Store.listSessionArchiveKeys pool >>= \case
+        Left err -> pure (Left (renderStoreError err))
+        Right sessionIds -> pure (Right sessionIds)
 
 writeSessionMeta :: StorePool -> OsPath -> SessionMeta -> IO ()
 writeSessionMeta pool _path meta = do

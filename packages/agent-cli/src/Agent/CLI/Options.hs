@@ -5,6 +5,8 @@ module Agent.CLI.Options
     , CliOptions(..)
     , Command(..)
     , ScreenMode(..)
+    , SessionOutputFormat(..)
+    , SessionPageRequest(..)
     , StorageCommand(..)
     , defaultCliOptions
     , defaultEffortFor
@@ -21,8 +23,9 @@ import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Provider (Provider(..), parseProvider)
 import Agent.TUI.Motion (MotionMode(..))
 import Data.Foldable (asum)
+import Data.Int (Int64)
 import qualified Data.List as List
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Options.Applicative as Options
@@ -31,12 +34,23 @@ data Command
     = ShowHelp
     | ShowVersion
     | Login
-    | ListSessions
-    | ShowSession Text
+    | ListSessions SessionOutputFormat
+    | ShowSession Text SessionOutputFormat (Maybe SessionPageRequest)
     | WaitSession Text
     | ImportSession (Maybe OsPath)
     | Storage StorageCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data SessionPageRequest
+    = SessionRecent !Int
+    | SessionBefore !Int64 !Int
+    deriving (Eq, Show)
+
+-- | Output intended either for people at a terminal or for native clients.
+data SessionOutputFormat
+    = SessionHuman
+    | SessionJSON
     deriving (Eq, Show)
 
 -- | Administrative commands for the harness-managed PostgreSQL server.
@@ -206,6 +220,34 @@ commandParserInfo =
                 "Run an agent or administer persisted sessions and storage"
         )
 
+sessionShowParser :: Options.Parser Command
+sessionShowParser =
+    makeSessionShow
+        <$> (Text.pack
+            <$> Options.argument Options.str
+                (Options.metavar "SESSION_ID"))
+        <*> sessionOutputFormatParser
+        <*> Options.optional
+            (Options.option sessionCursorReader
+                ( Options.long "before"
+                    <> Options.metavar "TURN_INDEX"
+                    <> Options.help "Load turns older than this cursor"
+                ))
+        <*> Options.optional
+            (Options.option (positiveIntReader "--limit")
+                ( Options.long "limit"
+                    <> Options.metavar "N"
+                    <> Options.help "Bound JSON transcript turns (maximum 500)"
+                ))
+  where
+    makeSessionShow sessionId outputFormat before limit =
+        ShowSession sessionId outputFormat $
+            case (before, limit) of
+                (Nothing, Nothing) -> Nothing
+                (Nothing, Just value) -> Just (SessionRecent value)
+                (Just cursor, maybeLimit) ->
+                    Just (SessionBefore cursor (fromMaybe 50 maybeLimit))
+
 commandParser :: Options.Parser Command
 commandParser =
     Options.hsubparser
@@ -223,17 +265,15 @@ commandParser =
 
 sessionsParser :: Options.Parser Command
 sessionsParser =
-    maybe ListSessions id
+    maybe (ListSessions SessionHuman) id
         <$> Options.optional
             (Options.hsubparser
                 ( Options.command "list"
-                    (Options.info (pure ListSessions)
+                    (Options.info
+                        (ListSessions <$> sessionOutputFormatParser)
                         (Options.progDesc "List persisted sessions"))
                     <> Options.command "show"
-                        (Options.info
-                            (ShowSession . Text.pack
-                                <$> Options.argument Options.str
-                                    (Options.metavar "SESSION_ID"))
+                        (Options.info sessionShowParser
                             (Options.progDesc "Show a persisted session"))
                     <> Options.command "wait"
                         (Options.info
@@ -247,6 +287,13 @@ sessionsParser =
                                 "Import a session from the current process"))
                 )
             )
+
+sessionOutputFormatParser :: Options.Parser SessionOutputFormat
+sessionOutputFormatParser =
+    Options.flag SessionHuman SessionJSON
+        ( Options.long "json"
+            <> Options.help "Emit stable machine-readable JSON"
+        )
 
 importSessionParser :: Options.Parser Command
 importSessionParser =
@@ -419,6 +466,16 @@ positiveIntReader :: String -> Options.ReadM Int
 positiveIntReader flag =
     Options.eitherReader (parseInt flag)
 
+sessionCursorReader :: Options.ReadM Int64
+sessionCursorReader =
+    Options.eitherReader \value ->
+        case reads value of
+            [(cursor, "")] | cursor >= 0 -> Right cursor
+            _ ->
+                Left
+                    ("--before expects a non-negative integer, got "
+                        <> value)
+
 effortReader :: Options.ReadM Text
 effortReader =
     Options.eitherReader (parseEffort . Text.pack)
@@ -430,7 +487,17 @@ motionReader =
 validateCommand :: Command -> Either String Command
 validateCommand = \case
     RunAgent options -> RunAgent <$> validate options
+    ShowSession _ SessionHuman (Just _) ->
+        Left "session pagination requires --json"
+    command@(ShowSession _ SessionJSON (Just page))
+        | sessionPageLimit page > 500 ->
+            Left "--limit must not exceed 500"
+        | otherwise -> Right command
     command -> Right command
+  where
+    sessionPageLimit = \case
+        SessionRecent limit -> limit
+        SessionBefore _ limit -> limit
 
 validate :: CliOptions -> Either String CliOptions
 validate options
@@ -480,7 +547,8 @@ usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
     , "       agent-cli login"
     , "       agent-cli sessions [list]"
-    , "       agent-cli sessions show <session-id>"
+    , "       agent-cli sessions show <session-id> [--json]"
+    , "              [--limit N] [--before TURN_INDEX]"
     , "       agent-cli storage <status|start|stop|migrate|doctor>"
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
@@ -492,6 +560,8 @@ usage = unlines
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
     , "      --save-session      Persist a one-shot (-p) run as a session"
+    , "      --limit N           Bound JSON session transcript turns (max 500)"
+    , "      --before INDEX      Load JSON turns older than a turn cursor"
     , "      --agents-md         Discover and inject AGENTS.md (default)"
     , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --skills            Discover Agent Skills (default)"

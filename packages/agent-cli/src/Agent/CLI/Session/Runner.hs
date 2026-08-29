@@ -61,6 +61,8 @@ import Agent.CLI.Session.Runtime.Types
     , SessionRequest(..)
     , StartupRuntime(..)
     )
+import Agent.CLI.Session.Selection (reservedSessionId)
+import Agent.CLI.Runtime.Orchestration.Types (NativeRunHooks(..))
 import Agent.CLI.Interrupt (noteFullscreenCtrlC)
 import Agent.Store.Postgres
     ( trustedPool )
@@ -92,6 +94,10 @@ import Agent.CLI.Session.History
     , writeLiveTranscript
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionLock
+    ( acquireSessionActivityLock
+    , releaseSessionLock
+    )
 import Agent.CLI.Session.Interaction (runBtwQuestion, setSessionEffort)
 import Agent.CLI.Skills
     ( installSkillCatalogWithOmissions, installSkillToolRoots
@@ -211,6 +217,7 @@ import Data.Time.Clock
     ( getCurrentTime
     , utctDay
     )
+import System.Environment (lookupEnv)
 import System.Mem.StableName (StableName, makeStableName)
 
 data AgentStepCache = AgentStepCache
@@ -306,6 +313,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
+    forM_ startup.startupNativeHooks \hooks ->
+        reservedSessionId persist >>= mapM_ hooks.nativeOnSessionId
     selectedAgent <- newIORef AgentRoot
     agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
     let cachedAgentSteps target variant items build = do
@@ -521,6 +530,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             }
     writeIORef startup.startupAgentSnapshot
         (loadAgentSnapshot False)
+    forM_ startup.startupNativeHooks \hooks ->
+        hooks.nativeRegisterAgentSnapshot (snd <$> loadAgentSnapshot False)
     writeIORef startup.startupAgentSelect selectAgent
     let installSkills context queueContext skills = do
             before <- readIORef context
@@ -668,6 +679,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 Just dir -> writeIORef storeRoot (Just dir)
                 Nothing -> pure ()
     syncStore
+    renderNativeEvents <- (== Just "1")
+        <$> lookupEnv "HASKELL_AGENT_NATIVE_EVENTS"
     let render = RenderConfig
             { renderShowThinking = stderrTty
             , renderThinkingSpinner = spinnerRef
@@ -685,9 +698,12 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     && terminal.terminalNativeProgress
                     && nativeProgressAnimationEnabled
                         options.optMotionMode
+            , renderNativeEvents
             , renderMotionMode = options.optMotionMode
             }
         emitLoop event = do
+            forM_ startup.startupNativeHooks \hooks ->
+                hooks.nativeOnLoopEvent event
             managedLoopPublisher event
             case fullscreen of
                 Nothing -> renderEvent render event
@@ -713,9 +729,20 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     && (not (isBashToolName toolName) || bashEnabled)
         approveRegisteredTool call =
             withMVar ioLock \_ ->
-                case promptRequest of
-                    Just request
-                        | isJust request.managedTurnBridgeDirectory ->
+                case startup.startupNativeHooks of
+                    Just hooks ->
+                        approveToolDecisionWithReporterAndPersistence
+                            hooks.nativeRequestApproval
+                            (const (pure ()))
+                            (pure ())
+                            policyRef
+                            allowedToolsRef
+                            toolRegistry
+                            planMode
+                            call
+                    Nothing -> case promptRequest of
+                        Just request
+                            | isJust request.managedTurnBridgeDirectory ->
                             approveToolDecisionWithReporterAndPersistence
                                 (requestManagedApproval request)
                                 (const (pure ()))
@@ -725,28 +752,32 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 toolRegistry
                                 planMode
                                 call
-                    _ -> case fullscreen of
-                        Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecision
-                                    policyRef allowedToolsRef toolRegistry planMode
-                                    projectRoot call
-                        Just runtime ->
-                            approveToolDecisionWithReporterAndPersistence
-                                (requestFullscreenPermission runtime)
-                                (\case
-                                    ApprovalWarning _ -> pure ()
-                                    ApprovalSuccess message ->
-                                        emitUiEvent runtime
-                                            (UiSetNotice
-                                                (Just
-                                                    (successNotice message))))
-                                (saveProjectAutoApprove projectRoot True)
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
+                        _ -> case fullscreen of
+                            Nothing ->
+                                withStdinPaused escPaused $
+                                    approveToolDecision
+                                        policyRef
+                                        allowedToolsRef
+                                        toolRegistry
+                                        planMode
+                                        projectRoot
+                                        call
+                            Just runtime ->
+                                approveToolDecisionWithReporterAndPersistence
+                                    (requestFullscreenPermission runtime)
+                                    (\case
+                                        ApprovalWarning _ -> pure ()
+                                        ApprovalSuccess message ->
+                                            emitUiEvent runtime
+                                                (UiSetNotice
+                                                    (Just
+                                                        (successNotice message))))
+                                    (saveProjectAutoApprove projectRoot True)
+                                    policyRef
+                                    allowedToolsRef
+                                    toolRegistry
+                                    planMode
+                                    call
         config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
@@ -876,7 +907,34 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure ("concurrent agent limit: " <> Text.pack (show next))
     btwRequests <- newChan
     recapRequests <- newChan
+    turnActivityRef <- newIORef Nothing
+    turnIsActiveRef <- newIORef False
     let
+        acquireTurnActivity handle = do
+            current <- readIORef turnActivityRef
+            when (isNothing current) $
+                acquireSessionActivityLock
+                    handle.sessionDir
+                    handle.sessionMeta.metaId >>= \case
+                        Left _ -> pure ()
+                        Right lock -> writeIORef turnActivityRef (Just lock)
+        beginTurnActivity = do
+            writeIORef turnIsActiveRef True
+            case persist of
+                PersistenceDisabled -> pure ()
+                PersistenceEnabled slotRef ->
+                    readIORef slotRef >>= \case
+                        PersistencePending{} -> pure ()
+                        PersistenceActive handle -> acquireTurnActivity handle
+        endTurnActivity = do
+            writeIORef turnIsActiveRef False
+            atomicModifyIORef' turnActivityRef
+                (\current -> (Nothing, current))
+                >>= mapM_ releaseSessionLock
+        onPersistedWithActivity handle = do
+            onPersisted handle
+            readIORef turnIsActiveRef >>= \active ->
+                when active (acquireTurnActivity handle)
         compactRunnerWithContext focus = do
             result <- compactRunner focus
             case result of
@@ -940,13 +998,15 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionSetWindowTitle = setWindowTitle
             , sessionBeginWindowTitleBusy = beginWindowTitleBusy
             , sessionEndWindowTitleBusy = endWindowTitleBusy
+            , sessionBeginTurnActivity = beginTurnActivity
+            , sessionEndTurnActivity = endTurnActivity
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
             , sessionAbortSubagentTurn = abortSubagentTurn
             , sessionConcurrentLimit = currentConcurrentLimit
             , sessionSetConcurrentLimit = setConcurrentLimit
-            , sessionOnPersisted = onPersisted
+            , sessionOnPersisted = onPersistedWithActivity
             , sessionReset = sessionReset
             }
     writeIORef generatedContextReloadRef reloadGeneratedContext
