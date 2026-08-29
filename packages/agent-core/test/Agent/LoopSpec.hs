@@ -1381,6 +1381,28 @@ spec = describe "runLoop" do
                     echoed.output `shouldBe` "echo:hi"
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
+    it "resets the empty-completion allowance after a tool continuation" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] Nothing
+            , Right $ emptyTurnOutput "resp-3"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-4" [] Nothing
+            , Right $ emptyTurnOutput "resp-5" [] Nothing
+            , Right $ emptyTurnOutput "resp-6" [] (Just "done")
+            ]
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-6"
+            , finalText = Just "done"
+            , turnsUsed = 6
+            , tokenUsage = emptyTokenUsage
+            }
+        length <$> readIORef submissions `shouldReturn` 6
+
     it "stops after repeated empty completions and warns" do
         events <- newIORef []
         submissions <- newIORef []
