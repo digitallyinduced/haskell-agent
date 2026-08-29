@@ -278,6 +278,10 @@ data LoopEvent
     -- | Replace the metadata for an already-visible in-flight tool call.
     -- Providers may learn canonical arguments after an early live start.
     | ToolUpdated ToolCall
+    -- | Replace the live UI preview for an in-flight tool call while its
+    -- arguments are still streaming. Append-only renderers may ignore this;
+    -- retained renderers can repaint the existing tool block.
+    | ToolArgumentsUpdated ToolCall
     -- | Latest accumulated output snapshot for an in-flight tool call.
     | ToolOutputUpdated Text Text
     | ToolFinished ToolCallResult

@@ -436,6 +436,8 @@ reduceLoop event state = case event of
                     }
     ToolUpdated call ->
         updateToolCall call state
+    ToolArgumentsUpdated call ->
+        updateToolCall call state
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->

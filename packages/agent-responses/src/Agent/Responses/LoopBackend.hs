@@ -27,6 +27,8 @@ import Agent.InterAgentMessage
     , renderInterAgentMessage
     , renderInterAgentMessageHeader
     )
+import Agent.Json (rawJsonFromEncoding)
+import Agent.JsonText (jsonTextFieldPartial)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -46,11 +48,11 @@ import Agent.Provider
     )
 import Agent.Responses.Request (stripReplayedItemStatus)
 import Agent.Responses.Types
-import Agent.Json (rawJsonFromEncoding)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , canonicalToolName
     )
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
@@ -647,12 +649,10 @@ codexRateLimitsWarning limits =
 -- | Stateful projection of one streamed response attempt into loop events.
 --
 -- On top of 'streamEventToLoopEventWithRawReasoning' this surfaces streamed
--- tool-call arguments as live activity. Argument deltas map to no visible
--- loop event on their own, so a model writing a large tool call — or stuck in
--- a degenerate repetition loop inside one (observed as multi-minute
--- 128k-output-token samples whose arguments repeat @\\u0000@ or a hallucinated
--- path segment) — previously looked like endless silent reasoning until the
--- provider's output-token cap ended the turn.
+-- shell arguments as a repaintable command preview and reports coarse activity
+-- for other tools. It also warns when a model gets stuck in a degenerate
+-- repetition loop inside one call (observed as multi-minute 128k-output-token
+-- samples whose arguments repeat @\\u0000@ or a hallucinated path segment).
 --
 -- Build one projector per response attempt so counters describe a single
 -- provider sample.
@@ -683,6 +683,9 @@ runawayToolArgumentWarningChars = 100000
 
 data ToolArgumentStreamState = ToolArgumentStreamState
     { toolNamesById :: !(Map Text Text)
+    , toolCallsById :: !(Map Text ToolCall)
+    , currentToolCall :: !(Maybe ToolCall)
+    , shellPreviewsByCallId :: !(Map Text Text)
     , currentToolName :: !(Maybe Text)
     , streamedArgumentChars :: !Int
     , announcedArgumentChars :: !Int
@@ -692,6 +695,9 @@ data ToolArgumentStreamState = ToolArgumentStreamState
 emptyToolArgumentStreamState :: ToolArgumentStreamState
 emptyToolArgumentStreamState = ToolArgumentStreamState
     { toolNamesById = Map.empty
+    , toolCallsById = Map.empty
+    , currentToolCall = Nothing
+    , shellPreviewsByCallId = Map.empty
     , currentToolName = Nothing
     , streamedArgumentChars = 0
     , announcedArgumentChars = 0
@@ -704,40 +710,55 @@ toolArgumentStreamStep
     -> (ToolArgumentStreamState, [LoopEvent])
 toolArgumentStreamStep event state = case event of
     ResponseOutputItemAddedEvent { item = FunctionCallItem call } ->
-        announceToolCall (namespacedToolName call.namespace call.name)
+        announceToolCall
+            (responseItemToToolCall (FunctionCallItem call))
+            (namespacedToolName call.namespace call.name)
             (maybeToList call.itemId <> [call.callId])
             state
     ResponseOutputItemAddedEvent { item = CustomToolCallItem call } ->
-        announceToolCall (namespacedToolName call.namespace call.name)
+        announceToolCall
+            (responseItemToToolCall (CustomToolCallItem call))
+            (namespacedToolName call.namespace call.name)
             (maybeToList call.itemId <> [call.callId])
             state
     ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText, streamItemId } ->
-        countToolArgumentChars
-            (resolveToolName [streamItemId] state)
-            (Text.length deltaText)
+        updateToolArguments
+            [streamItemId]
+            deltaText
             state
     ResponseCustomToolInputDeltaEvent
         { delta = Just deltaText, streamItemId, streamCallId } ->
-            countToolArgumentChars
-                (resolveToolName [streamItemId, streamCallId] state)
-                (Text.length deltaText)
+            updateToolArguments
+                [streamItemId, streamCallId]
+                deltaText
                 state
     _ -> (state, [])
 
 announceToolCall
-    :: Text
+    :: Maybe ToolCall
+    -> Text
     -> [Text]
     -> ToolArgumentStreamState
     -> (ToolArgumentStreamState, [LoopEvent])
-announceToolCall name identities state =
+announceToolCall maybeCall name identities state =
     ( state
         { toolNamesById =
             foldr (\identity -> Map.insert identity name)
                 state.toolNamesById
                 identities
+        , toolCallsById =
+            case maybeCall of
+                Nothing -> state.toolCallsById
+                Just call ->
+                    foldr (\identity -> Map.insert identity call)
+                        state.toolCallsById
+                        identities
+        , currentToolCall = maybeCall <|> state.currentToolCall
         , currentToolName = Just name
         }
-    , [ActivityUpdated (writingToolCallActivity name Nothing)]
+    , [ ActivityUpdated (writingToolCallActivity name Nothing)
+      | not (isLiveShellTool name)
+      ]
     )
 
 resolveToolName :: [Maybe Text] -> ToolArgumentStreamState -> Text
@@ -749,6 +770,102 @@ resolveToolName identities state =
             ]
   where
     firstJust = foldr (<|>) Nothing
+
+resolveToolCall
+    :: [Maybe Text]
+    -> ToolArgumentStreamState
+    -> Maybe ToolCall
+resolveToolCall identities state =
+    firstJust
+        [ Map.lookup identity state.toolCallsById
+        | Just identity <- identities
+        ]
+        <|> state.currentToolCall
+  where
+    firstJust = foldr (<|>) Nothing
+
+-- Keep enough raw arguments to render a useful one-line shell preview without
+-- accumulating an unbounded repeated strict Text value for runaway calls.
+liveToolArgumentPrefixChars :: Int
+liveToolArgumentPrefixChars = 4096
+
+updateToolArguments
+    :: [Maybe Text]
+    -> Text
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+updateToolArguments identities delta state =
+    let name = resolveToolName identities state
+        maybeCall = resolveToolCall identities state
+        (withDraft, previewEvents) = case maybeCall of
+            Just call
+                | isLiveShellTool call.name ->
+                    updateLiveShellCall call delta state
+            _ -> (state, [])
+        (counted, activityEvents) =
+            countToolArgumentChars name (Text.length delta) withDraft
+    in (counted, previewEvents <> activityEvents)
+
+updateLiveShellCall
+    :: ToolCall
+    -> Text
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+updateLiveShellCall call delta state =
+    let rawArguments =
+            Text.take liveToolArgumentPrefixChars (call.arguments <> delta)
+        updatedCall = withToolArguments call rawArguments
+        updatedCalls =
+            Map.map
+                (\known ->
+                    if known.callId == call.callId then updatedCall else known)
+                state.toolCallsById
+        maybeCommand = jsonTextFieldPartial "command" rawArguments
+        preview = Text.takeWhile (/= '\n') <$> maybeCommand
+        previousPreview = Map.lookup call.callId state.shellPreviewsByCallId
+        changed = maybe False
+            (\value -> not (Text.null value) && Just value /= previousPreview)
+            preview
+        displayCall command =
+            withToolArguments updatedCall $
+                Text.decodeUtf8
+                    (LBS.toStrict
+                        (Aeson.encode (Aeson.object ["command" Aeson..= command])))
+        next = state
+            { toolCallsById = updatedCalls
+            , currentToolCall = Just updatedCall
+            , shellPreviewsByCallId =
+                maybe state.shellPreviewsByCallId
+                    (\value -> Map.insert call.callId value
+                        state.shellPreviewsByCallId)
+                    preview
+            }
+    in
+    ( next
+    , [ToolArgumentsUpdated (displayCall command)
+      | changed
+      , command <- maybeToList preview
+      ]
+    )
+
+isLiveShellTool :: Text -> Bool
+isLiveShellTool name =
+    canonicalToolName name `elem` ["shell_command", "run_terminal_cmd"]
+
+withToolArguments :: ToolCall -> Text -> ToolCall
+withToolArguments ToolCall
+    { callId
+    , name
+    , callKind
+    , argumentsEncrypted
+    } arguments =
+        ToolCall
+            { callId
+            , name
+            , arguments
+            , callKind
+            , argumentsEncrypted
+            }
 
 countToolArgumentChars
     :: Text
@@ -773,6 +890,7 @@ countToolArgumentChars name deltaChars state =
         }
     , [ ActivityUpdated (writingToolCallActivity name (Just total))
       | announce
+      , not (isLiveShellTool name)
       ]
         <> [ WarningRaised (runawayToolArgumentWarning name total)
            | warn

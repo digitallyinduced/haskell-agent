@@ -332,6 +332,29 @@ spec = describe "fullscreen UI reducer" do
         Foldable.toList state.uiToolCalls
             `shouldBe` [(0, canonical)]
 
+    it "repaints a running shell call as command arguments stream" do
+        let early = functionToolCall "c1" "shell_command" ""
+            preview =
+                functionToolCall
+                    "c1"
+                    "shell_command"
+                    "{\"command\":\"git status\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolArgumentsUpdated preview)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "$ git status"
+                block.blockState `shouldBe` BlockRunning
+                state.uiActivity `shouldBe` "$ git status"
+            _ -> expectationFailure "expected one updated shell block"
+        Foldable.toList state.uiToolCalls
+            `shouldBe` [(0, preview)]
+
     it "makes repeated tool starts idempotent by call id" do
         let early = functionToolCall "c1" "Task" "{}"
             canonical =

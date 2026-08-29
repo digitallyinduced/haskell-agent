@@ -502,6 +502,10 @@ renderEventUnlocked config = \case
                             call
                 unless (Text.null extra) do
                     putTextLn config.renderStderr extra
+    -- Partial arguments can be repainted by the retained fullscreen UI, but
+    -- cannot be updated safely in append-only terminal scrollback.
+    ToolArgumentsUpdated _ ->
+        pure ()
     ToolRetracted _ ->
         pure ()
     ResponseAttemptDiscarded ->
