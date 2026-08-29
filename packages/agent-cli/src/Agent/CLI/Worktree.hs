@@ -85,7 +85,7 @@ createWorktreeWithFetch fetchLatest source root = runExceptT do
     repoName <- gitRepositoryName repo
     base <-
         if fetchLatest
-            then Just <$> fetchLatestUpstream repo
+            then fetchLatestUpstream repo
             else pure Nothing
     now <- lift getCurrentTime
     let day = utctDay now
@@ -184,16 +184,21 @@ gitRepositoryName repo = do
             else takeFileName path
 
 -- | Fetch and return the commit at the selected remote's advertised default
--- branch. The current branch's configured remote wins, followed by conventional
--- @upstream@ and @origin@ names, then a sole remaining remote.
-fetchLatestUpstream :: OsPath -> ExceptT Text IO Text
+-- branch, or use the local @HEAD@ when the repository has no remotes. The
+-- current branch's configured remote wins, followed by conventional @upstream@
+-- and @origin@ names, then a sole remaining remote.
+fetchLatestUpstream :: OsPath -> ExceptT Text IO (Maybe Text)
 fetchLatestUpstream repo = do
-    remote <- selectUpstreamRemote repo
-    remoteHead <- remoteDefaultBranch repo remote
-    localRef <- lift freshFetchRef
-    ExceptT $
-        runExceptT (fetchIntoRef repo remote remoteHead localRef)
-            `finally` cleanupFetchRef repo localRef
+    selectUpstreamRemote repo >>= \case
+        Nothing -> pure Nothing
+        Just remote -> do
+            remoteHead <- remoteDefaultBranch repo remote
+            localRef <- lift freshFetchRef
+            commit <-
+                ExceptT $
+                    runExceptT (fetchIntoRef repo remote remoteHead localRef)
+                        `finally` cleanupFetchRef repo localRef
+            pure (Just commit)
 
 fetchIntoRef :: OsPath -> Text -> Text -> Text -> ExceptT Text IO Text
 fetchIntoRef repo remote remoteHead localRef = do
@@ -241,7 +246,7 @@ cleanupFetchRef repo localRef =
         tryAny $
             git repo ["update-ref", "-d", Text.unpack localRef]
 
-selectUpstreamRemote :: OsPath -> ExceptT Text IO Text
+selectUpstreamRemote :: OsPath -> ExceptT Text IO (Maybe Text)
 selectUpstreamRemote repo = do
     output <- ExceptT (git repo ["remote"])
     let remotes = filter (not . Text.null) (map Text.strip (Text.lines output))
@@ -256,11 +261,9 @@ selectUpstreamRemote repo = do
             [remote] -> Just remote
             _ -> Nothing
       of
-        Just remote -> pure remote
+        Just remote -> pure (Just remote)
         Nothing
-            | null remotes ->
-                throwE
-                    "worktree.fetchLatestUpstream requires a git remote"
+            | null remotes -> pure Nothing
             | otherwise ->
                 throwE
                     ( "could not choose an upstream git remote; configure the "

@@ -87,29 +87,36 @@ spec = describe "Agent.CLI.Worktree" do
                         expectationFailure ("expected failure, got " <> toFilePath path)
                 doesDirectoryExist root `shouldReturn` False
 
-        it "fails closed when latest-upstream mode has no remote" $
+        it "uses local HEAD when default fetching has no remote" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
+                sourceHead <- git repo ["rev-parse", "HEAD"]
+                path <- expectRight =<< createManagedWorktree home repo
+                git path ["rev-parse", "HEAD"] `shouldReturn` sourceHead
+
+        it "fails closed when a configured remote cannot be fetched" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                _ <- git repo
+                    [ "remote"
+                    , "add"
+                    , "origin"
+                    , toFilePath (repo </> fromFilePath "missing.git")
+                    ]
                 let root = worktreeRoot home
                 result <- createWorktreeWithFetch True repo root
                 result `shouldSatisfy` \case
                     Left err ->
-                        "requires a git remote" `Text.isInfixOf` err
+                        "failed to inspect git remote" `Text.isInfixOf` err
                     Right _ -> False
                 doesDirectoryExist root `shouldReturn` False
 
-        it "fetches and branches from the remote's latest default commit" $
+        it "fetches and branches from the remote's latest default commit by default" $
             withTempRemoteRepo \repo updater ->
             withTempDir "agent-home-" \home -> do
                 stale <- git repo ["rev-parse", "refs/remotes/origin/master"]
                 latest <- git updater ["rev-parse", "HEAD"]
                 stale `shouldNotBe` latest
-                let config = defaultHarnessConfig
-                        { configWorktree = WorktreeConfig
-                            { worktreeFetchLatestUpstream = True
-                            }
-                        }
-                saveHarnessConfig home config `shouldReturn` Right ()
 
                 path <- expectRight =<< createManagedWorktree home repo
 
@@ -123,6 +130,25 @@ spec = describe "Agent.CLI.Worktree" do
                 git path ["rev-parse", "--abbrev-ref", "HEAD"]
                     `shouldReturn` toFilePath (takeFileName path)
                 temporaryFetchRefs repo `shouldReturn` ""
+
+        it "uses local HEAD when latest-upstream fetching is disabled" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                local <- git repo ["rev-parse", "HEAD"]
+                latest <- git updater ["rev-parse", "HEAD"]
+                local `shouldNotBe` latest
+                let config = defaultHarnessConfig
+                        { configWorktree = WorktreeConfig
+                            { worktreeFetchLatestUpstream = False
+                            }
+                        }
+                saveHarnessConfig home config `shouldReturn` Right ()
+
+                path <- expectRight =<< createManagedWorktree home repo
+
+                git path ["rev-parse", "HEAD"] `shouldReturn` local
+                doesFileExist (path </> fromFilePath "LOCAL")
+                    `shouldReturn` True
 
         it "uses isolated fetch refs for concurrent worktree creation" $
             withTempRemoteRepo \repo updater ->

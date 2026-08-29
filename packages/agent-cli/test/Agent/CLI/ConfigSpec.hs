@@ -164,14 +164,24 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configMaxConcurrentAgents) result
                 `shouldBe` Right (Just 48)
 
-    it "loads the managed worktree fetch policy" $
+    it "fetches the latest upstream for managed worktrees by default" $
         withTempDir "agent-config-" \home -> do
             writeConfig home
-                "{\"worktree\":{\"fetchLatestUpstream\":true}}"
+                "{\"worktree\":{}}"
             result <- loadHarnessConfig home
             fmap (.configWorktree) result
                 `shouldBe` Right WorktreeConfig
                     { worktreeFetchLatestUpstream = True
+                    }
+
+    it "loads the managed worktree fetch opt-out" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"worktree\":{\"fetchLatestUpstream\":false}}"
+            result <- loadHarnessConfig home
+            fmap (.configWorktree) result
+                `shouldBe` Right WorktreeConfig
+                    { worktreeFetchLatestUpstream = False
                     }
 
     it "decodes LSP maps and retains opaque JSON options" $
