@@ -21,6 +21,7 @@ import Agent.ToolDispatch (ToolCall(..), typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
     ( asyncWithUnmask
+    , concurrently
     , mapConcurrently
     , poll
     )
@@ -40,9 +41,12 @@ import Control.Concurrent.STM
     , TVar
     , atomically
     , modifyTVar'
+    , newTQueueIO
     , newTVarIO
+    , readTQueue
     , readTVar
     , readTVarIO
+    , writeTQueue
     , writeTVar
     )
 import Control.Exception.Safe
@@ -227,9 +231,13 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
     activeServers <- newMVar Set.empty
     results <-
         restore
-            (mapConcurrently
-                (startServerTracked ownedClients activeServers)
-                configs)
+            (withProgressReporter reportActive \publishActive ->
+                mapConcurrently
+                    (startServerTracked
+                        ownedClients
+                        activeServers
+                        publishActive)
+                    configs)
             `onException` closeOwnedClients ownedClients
     let (clients, registrations, warnings, failures) =
             foldr collectServerResult ([], [], [], Map.empty) results
@@ -275,8 +283,15 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
     forM_ clients (attachFleetEvents fleet)
     pure fleet
   where
-    startServerTracked ownedClients activeServers config = mask \restore -> do
-        updateActive activeServers (Set.insert config.mcpServerName)
+    startServerTracked
+        ownedClients
+        activeServers
+        publishActive
+        config = mask \restore -> do
+        updateActive
+            activeServers
+            publishActive
+            (Set.insert config.mcpServerName)
         (do
             attempt <- tryAny (restore (startServer config))
             case attempt of
@@ -294,12 +309,16 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
                     atomicModifyIORef' ownedClients \clients ->
                         (client : clients, ())
                     pure (Right result))
-            `finally` updateActive activeServers (Set.delete config.mcpServerName)
+            `finally`
+                updateActive
+                    activeServers
+                    publishActive
+                    (Set.delete config.mcpServerName)
 
-    updateActive activeServers update =
+    updateActive activeServers publishActive update =
         modifyMVar_ activeServers \current -> do
             let active = update current
-            reportActive (Set.toAscList active)
+            publishActive (Set.toAscList active)
             pure active
 
     closeOwnedClients ownedClients =
@@ -355,6 +374,25 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
             <> config.mcpServerName
             <> " failed to start: "
             <> err
+
+-- | Deliver progress updates in state-transition order without running the
+-- callback under the state lock or blocking server startup on callback work.
+withProgressReporter
+    :: (a -> IO ())
+    -> ((a -> IO ()) -> IO b)
+    -> IO b
+withProgressReporter report action = do
+    updates <- newTQueueIO
+    fst <$> concurrently
+        ( action (atomically . writeTQueue updates . Just)
+            `finally` atomically (writeTQueue updates Nothing)
+        )
+        (reportUpdates updates)
+  where
+    reportUpdates updates =
+        atomically (readTQueue updates) >>= \case
+            Nothing -> pure ()
+            Just update -> report update >> reportUpdates updates
 
 validateServerNames :: [McpServerConfig] -> IO ()
 validateServerNames = go Set.empty
