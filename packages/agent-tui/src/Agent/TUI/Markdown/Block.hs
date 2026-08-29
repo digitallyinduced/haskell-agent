@@ -1,7 +1,9 @@
 -- | Renderer-neutral parsing for the Markdown block constructs supported by
 -- both terminal renderers.
 module Agent.TUI.Markdown.Block
-    ( headingParts
+    ( TableAlignment(..)
+    , MarkdownTable(..)
+    , headingParts
     , headingPartsWith
     , bulletParts
     , bulletPartsWith
@@ -16,6 +18,19 @@ import Data.Char (isDigit, isSpace)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+
+data TableAlignment
+    = AlignDefault
+    | AlignLeft
+    | AlignCenter
+    | AlignRight
+    deriving (Eq, Show)
+
+data MarkdownTable = MarkdownTable
+    { tableAlignments :: ![TableAlignment]
+    , tableRows :: ![[Text]]
+    }
+    deriving (Eq, Show)
 
 headingParts :: Text -> Maybe (Int, Text)
 headingParts = headingPartsWith isSpace
@@ -71,15 +86,22 @@ isThematicBreak line =
 
 -- | Parse a complete pipe table from the front of a line sequence. The first
 -- row is the header; the separator row is consumed but omitted from the
--- returned rows.
-takeTableRows :: [Text] -> Maybe ([[Text]], [Text])
+-- returned rows. Alignment markers in the separator are retained so every
+-- renderer can apply the same GFM column alignment.
+takeTableRows :: [Text] -> Maybe (MarkdownTable, [Text])
 takeTableRows (header : separator : rest)
     | Just headerCells <- splitTableRow header
     , Just separatorCells <- splitTableRow separator
     , length separatorCells == length headerCells
     , all isSeparatorCell separatorCells =
         let (body, after) = span isTableRow rest
-        in Just (headerCells : mapMaybe splitTableRow body, after)
+        in Just
+            ( MarkdownTable
+                { tableAlignments = map separatorAlignment separatorCells
+                , tableRows = headerCells : mapMaybe splitTableRow body
+                }
+            , after
+            )
 takeTableRows _ = Nothing
 
 isTableRow :: Text -> Bool
@@ -90,6 +112,16 @@ isSeparatorCell cell =
     Text.any (== '-') cell
         && Text.null
             (Text.filter (`notElem` ['-', ':', ' ']) cell)
+
+separatorAlignment :: Text -> TableAlignment
+separatorAlignment cell =
+    case (Text.isPrefixOf ":" stripped, Text.isSuffixOf ":" stripped) of
+        (True, True) -> AlignCenter
+        (True, False) -> AlignLeft
+        (False, True) -> AlignRight
+        (False, False) -> AlignDefault
+  where
+    stripped = Text.strip cell
 
 -- | Split a pipe row on actual column delimiters. Escaped pipes and pipes
 -- inside matching backtick spans remain part of their cell.

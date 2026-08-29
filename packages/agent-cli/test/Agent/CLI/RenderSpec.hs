@@ -148,6 +148,39 @@ spec = do
             first <> second `shouldSatisfy` Text.isInfixOf "hello"
             first <> second `shouldSatisfy` Text.isInfixOf "world"
 
+        it "streams tables without optional outer pipes" do
+            let input =
+                    "Name | Footprint\n\
+                    \--- | ---:\n\
+                    \WebKit | 27.7 GiB\n\
+                    \Control Center | 4.6 GiB\n\
+                    \after\n"
+                (_state, output) = streamMarkdown input emptyRenderState
+            output `shouldSatisfy` Text.isInfixOf "Name"
+            output `shouldSatisfy` Text.isInfixOf "Control Center"
+            output `shouldSatisfy` Text.isInfixOf "─"
+            output `shouldSatisfy` (not . Text.isInfixOf "|")
+
+        it "streams ordinary prose before its newline" do
+            let (state1, first) = streamMarkdown "hello" emptyRenderState
+                (_state2, second) = streamMarkdown " world" state1
+            first `shouldBe` ""
+            first <> second `shouldSatisfy` Text.isInfixOf "hello world"
+
+        it "keeps lowercase multiword table headers reclassifiable" do
+            let (state1, first) =
+                    streamMarkdown "first name " emptyRenderState
+                (_state2, second) =
+                    streamMarkdown
+                        "| age\n--- | ---:\nalice smith | 42\nafter\n"
+                        state1
+                output = first <> second
+            first `shouldBe` ""
+            output `shouldSatisfy` Text.isInfixOf "first name"
+            output `shouldSatisfy` Text.isInfixOf "alice smith"
+            output `shouldSatisfy` Text.isInfixOf "─"
+            output `shouldSatisfy` (not . Text.isInfixOf "|")
+
     describe "summarizeToolCall" do
         it "uses English verbs and argument highlights" do
             summarizeToolCall (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")
@@ -718,6 +751,7 @@ spec = do
                         \and **bold *italic* `code`**\n"
                     , "```haskell\nmain = pure ()\n```\n"
                     , "| Key | Value |\n| --- | --- |\n| snake_case | `code` |\n"
+                    , "Key | Value\n--- | ---:\nsnake_case | `code`\n"
                     ]
             forM_ samples \source -> do
                 let expected = stripTerminalControls
