@@ -141,6 +141,27 @@ spec = describe "native browser tools" do
         readIORef observed `shouldReturn`
             Just (BrowserNavigate "HTTPS://example.com/path")
 
+    it "rejects URL userinfo before invoking the host" do
+        invoked <- newIORef False
+        let handler _ = do
+                writeIORef invoked True
+                pure (Right "unexpected")
+            run url = dispatchToolCall defaultLoopDispatch
+                (appToolHandlers (browserTools handler))
+                (functionToolCall "browser-call" "browser_navigate"
+                    ("{\"url\":\"" <> url <> "\"}"))
+        forM_
+            [ "https://user@example.com/private"
+            , "https://user:password@example.com/private"
+            , "https://%75ser@example.com/private"
+            ]
+            \url -> do
+                result <- run url
+                result.output `shouldSatisfy`
+                    Text.isInfixOf
+                        "url must not contain embedded credentials"
+        readIORef invoked `shouldReturn` False
+
     it "rejects empty selectors, empty keys, and invalid scroll deltas" do
         let run name arguments = dispatchToolCall defaultLoopDispatch
                 (appToolHandlers (browserTools successHandler))
