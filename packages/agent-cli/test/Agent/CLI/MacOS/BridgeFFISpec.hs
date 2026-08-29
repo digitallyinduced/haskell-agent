@@ -9,15 +9,25 @@ import Test.Hspec (Spec, describe, it, shouldReturn)
 
 foreign import ccall "ha_image_attachment_stage_smoke"
     imageAttachmentStageSmoke :: IO CInt
+
+foreign import ccall "ha_task_supervisor_abi_smoke"
+    taskSupervisorAbiSmoke :: IO CInt
 #else
 import Test.Hspec (Spec, describe, it, pendingWith)
 #endif
 
 spec :: Spec
-spec = describe "native image attachment staging" do
+spec = describe "native bridge FFI" do
     it "accepts copied image buffers through the exported bridge" do
 #ifdef darwin_HOST_OS
         imageAttachmentStageSmoke `shouldReturn` 0
+#else
+        pendingWith "the native bridge smoke test only links on macOS"
+#endif
+
+    it "controls and snapshots native tasks through the exported bridge" do
+#ifdef darwin_HOST_OS
+        taskSupervisorAbiSmoke `shouldReturn` 0
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif

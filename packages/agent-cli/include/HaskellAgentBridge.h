@@ -18,8 +18,11 @@ typedef void (*ha_event_callback)(
      * Kind 1 is reasoning text, 2 text, 3 status, 4 tool-start, and 5
      * tool-finish. Tool-start flags use bit 0 for encrypted arguments and
      * bit 1 for truncation; tool-finish uses bit 1 for truncation.
-     * The bytes are valid only for the duration of this callback; copy before
-     * returning.
+     * Turn IDs are stable task IDs for the lifetime of an engine. Events for
+     * one task are delivered in order, but callbacks for different tasks may
+     * run concurrently on runtime worker threads. The callback must be
+     * thread-safe and return promptly. The bytes are valid only for the
+     * duration of this callback; copy before returning.
      */
     const uint8_t *bytes,
     size_t length
@@ -170,6 +173,26 @@ typedef struct ha_image_attachment {
     size_t bytes_length;
 } ha_image_attachment;
 
+/*
+ * Active-task snapshots emit status 0 for each task, status 1 exactly once on
+ * completion, and status -1 for failure. state is 0 for queued or 1 for
+ * running. session_id is NULL/zero until a new task creates its session; all
+ * other item pointers are non-NULL. Error is populated only for status -1.
+ * Buffers are callback-scoped UTF-8 and must be copied before returning.
+ * Callbacks run serially on the engine command worker, not the caller thread.
+ */
+typedef void (*ha_task_snapshot_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *task_id,
+    size_t task_id_length,
+    const uint8_t *session_id,
+    size_t session_id_length,
+    int32_t state,
+    const uint8_t *error,
+    size_t error_length
+);
+
 /* Runtime calls are process-global and reference counted. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
@@ -202,6 +225,35 @@ int32_t ha_engine_send_json(
     const uint8_t *bytes,
     size_t length
 );
+/*
+ * Queue cancellation for a copied, non-empty UTF-8 task ID. Return 0 means
+ * the command was accepted, not that the task necessarily still exists.
+ * Terminal task outcome continues through ha_event_callback. Returns 1 for a
+ * null engine, 2 for an invalid task ID, and 3 for an internal failure.
+ */
+int32_t ha_engine_cancel_task(
+    void *engine,
+    const uint8_t *task_id,
+    size_t task_id_length
+);
+/*
+ * List currently queued and running tasks. Returns 0 when accepted, 1 for a
+ * null engine, 2 for a null callback, and 3 for an internal failure. An
+ * accepted request receives exactly one terminal callback unless destruction
+ * has begun. Calls must be serialized with ha_engine_destroy.
+ */
+int32_t ha_engine_list_tasks(
+    void *engine,
+    ha_task_snapshot_callback callback,
+    void *context
+);
+/*
+ * Set the engine-wide cross-session concurrency limit for future scheduling.
+ * Existing tasks are not cancelled when lowering it. Valid limits are 1...32;
+ * the default is 3. Returns 0 when accepted, 1 for a null engine, 2 for an
+ * invalid limit, and 3 for an internal failure.
+ */
+int32_t ha_engine_set_task_limit(void *engine, size_t limit);
 /*
  * Search active and archived (but not deleted) conversations. The query is
  * copied before return and limit is clamped to 1...100. Returns 0 when
