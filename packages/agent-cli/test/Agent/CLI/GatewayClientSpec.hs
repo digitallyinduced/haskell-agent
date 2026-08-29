@@ -41,3 +41,10 @@ spec = describe "gateway device authorization" do
         let credential =
                 GatewayCredential "https://gateway" "wss://gateway/v1/responses" "secret"
         show credential `shouldSatisfy` not . Text.isInfixOf "secret" . Text.pack
+
+    it "allows local HTTP development without trusting lookalike hosts" do
+        validateBaseUrl "http://localhost:8080"
+            `shouldBe` Right "http://localhost:8080"
+        validateBaseUrl "http://localhost.example"
+            `shouldBe` Left
+                "Gateway URL must use HTTPS (HTTP is allowed only for localhost development)."
