@@ -258,7 +258,7 @@ spec = describe "query" do
             , "{\"type\":\"user\",\"uuid\":\"background-user\",\
               \\"session_id\":\""
                 <> testSessionId
-                <> "\",\"origin\":{\"kind\":\"task_notification\"},\
+                <> "\",\"origin\":{\"kind\":\"task-notification\"},\
                    \\"message\":{\"role\":\"user\",\"content\":\"background\"}}"
             , "{\"type\":\"assistant\",\"uuid\":\"background-assistant\",\
               \\"session_id\":\""
@@ -276,7 +276,7 @@ spec = describe "query" do
               \\"is_error\":false,\"session_id\":\""
                 <> testSessionId
                 <> "\",\"uuid\":\"background-result\",\
-                   \\"origin\":{\"kind\":\"task_notification\"},\
+                   \\"origin\":{\"kind\":\"task-notification\"},\
                    \\"result\":\"background answer\"}"
             , "{\"type\":\"result\",\"subtype\":\"success\",\
               \\"is_error\":false,\"session_id\":\""
@@ -302,8 +302,8 @@ spec = describe "query" do
         let foreignUser identifier =
                 "{\"type\":\"user\",\"uuid\":\"user-" <> identifier <> "\",\
                 \\"session_id\":\"" <> testSessionId <> "\",\
-                \\"origin\":{\"kind\":\"task_notification\",\
-                \\"task_id\":\"" <> identifier <> "\"},\
+                \\"origin\":{\"kind\":\"task-notification\",\
+                \\"senderTaskId\":\"" <> identifier <> "\"},\
                 \\"message\":{\"role\":\"user\",\"content\":\"start "
                     <> identifier <> "\"}}"
             foreignAssistant identifier =
@@ -313,18 +313,18 @@ spec = describe "query" do
                 "{\"type\":\"result\",\"subtype\":\"success\",\
                 \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
                 \\"uuid\":\"result-" <> identifier <> "\",\
-                \\"origin\":{\"kind\":\"task_notification\",\
-                \\"task_id\":\"" <> identifier <> "\"}}"
+                \\"origin\":{\"kind\":\"task-notification\",\
+                \\"senderTaskId\":\"" <> identifier <> "\"}}"
             explicitHuman =
                 "{\"type\":\"user\",\"uuid\":\"human-user\",\
                 \\"session_id\":\"" <> testSessionId <> "\",\
-                \\"origin\":{\"kind\":\"human\",\"request_id\":\"request-1\"},\
+                \\"origin\":{\"kind\":\"human\",\"fromSession\":\"request-1\"},\
                 \\"message\":{\"role\":\"user\",\"content\":\"human\"}}"
             humanResult =
                 "{\"type\":\"result\",\"subtype\":\"success\",\
                 \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
                 \\"uuid\":\"human-result\",\
-                \\"origin\":{\"kind\":\"human\",\"request_id\":\"request-1\"},\
+                \\"origin\":{\"kind\":\"human\",\"fromSession\":\"request-1\"},\
                 \\"result\":\"human answer\"}"
         (result, messages) <- runQueryLines
             [ foreignUser "task-a"
@@ -347,14 +347,14 @@ spec = describe "query" do
     it "hides unoriginated output when its autonomous route is ambiguous" do
         let foreignUser identifier =
                 "{\"type\":\"user\",\"uuid\":\"user-" <> identifier <> "\",\
-                \\"origin\":{\"kind\":\"task_notification\",\
-                \\"task_id\":\"" <> identifier <> "\"},\
+                \\"origin\":{\"kind\":\"task-notification\",\
+                \\"senderTaskId\":\"" <> identifier <> "\"},\
                 \\"message\":{\"role\":\"user\",\"content\":\"start\"}}"
             foreignResult identifier =
                 "{\"type\":\"result\",\"subtype\":\"success\",\
                 \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
-                \\"origin\":{\"kind\":\"task_notification\",\
-                \\"task_id\":\"" <> identifier <> "\"}}"
+                \\"origin\":{\"kind\":\"task-notification\",\
+                \\"senderTaskId\":\"" <> identifier <> "\"}}"
         (result, messages) <- runQueryLines
             [ foreignUser "task-a"
             , foreignUser "task-b"
@@ -391,7 +391,7 @@ spec = describe "query" do
             backgroundUser =
                 "{\"type\":\"user\",\"uuid\":\"background-user\",\
                 \\"session_id\":\"" <> testSessionId <> "\",\
-                \\"origin\":{\"kind\":\"task_notification\"},\
+                \\"origin\":{\"kind\":\"task-notification\"},\
                 \\"message\":{\"role\":\"user\",\"content\":\"background\"}}"
             backgroundAssistant =
                 "{\"type\":\"assistant\",\"uuid\":\"background-assistant\",\
@@ -402,7 +402,7 @@ spec = describe "query" do
                 "{\"type\":\"result\",\"subtype\":\"success\",\
                 \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
                 \\"uuid\":\"background-result\",\
-                \\"origin\":{\"kind\":\"task_notification\"}}"
+                \\"origin\":{\"kind\":\"task-notification\"}}"
         (result, progress) <- runQueryProgress
             [ topTool
             , nestedText
@@ -565,8 +565,8 @@ spec = describe "query" do
                     ]
             background =
                 "{\"type\":\"user\",\"uuid\":\"background\",\
-                \\"origin\":{\"kind\":\"task_notification\",\
-                \\"task_id\":\"task-1\"},\
+                \\"origin\":{\"kind\":\"task-notification\",\
+                \\"senderTaskId\":\"task-1\"},\
                 \\"message\":{\"role\":\"user\",\"content\":\"background\"}}"
             unknown =
                 "{\"type\":\"future_event\",\"uuid\":\"unknown\",\

@@ -206,14 +206,16 @@ modelUsageToUsage modelUsage =
 -- | Provenance attached to user messages and terminal results.
 data MessageOrigin = MessageOrigin
     { kind :: !Text
-    -- | String-valued identifier fields carried by the origin object.
-    --
-    -- Claude Code adds route-specific identifiers to autonomous messages.
-    -- Keeping the field names as well as their values lets the router remain
-    -- forward compatible when a new autonomous origin kind is introduced.
-    , identifiers :: !(Map Text Text)
+    , server :: !(Maybe Text)
+    , from :: !(Maybe Text)
+    , name :: !(Maybe Text)
+    , fromSession :: !(Maybe Text)
+    , senderTaskId :: !(Maybe Text)
+    , body :: !(Maybe Text)
+    , verifiedPeerPid :: !(Maybe Int)
+    , subkind :: !(Maybe Text)
     -- | The complete origin object for diagnostics and future protocol
-    -- extensions which are not string identifiers.
+    -- extensions.
     , raw :: !RawJson
     } deriving (Eq, Show)
 

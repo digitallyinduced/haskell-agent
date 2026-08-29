@@ -411,49 +411,30 @@ optionalOrigin key =
             Json.VObject -> do
                 raw <- rawJsonDecoder
                 case Json.decodeEither
-                        originStringFieldsDecoder
+                        (originDecoder raw)
                         (rawJsonBytes raw)
                     of
-                    Left _ ->
-                        pure (Just MessageOrigin
-                            { kind = "unclassified"
-                            , identifiers = Map.empty
-                            , raw
-                            })
-                    Right fields ->
-                        pure (Just MessageOrigin
-                            { kind =
-                                fromMaybe "unclassified"
-                                    (Map.lookup "kind" fields)
-                            , identifiers =
-                                Map.filterWithKey
-                                    (\field _ -> isIdentifierField field)
-                                    fields
-                            , raw
-                            })
+                    Left err ->
+                        fail (Text.unpack err.jsonErrorMessage)
+                    Right origin ->
+                        pure (Just origin)
             _ -> pure Nothing)
         >>= pure . (>>= id)
 
--- Origin objects are intentionally extensible. Retain all of their string
--- fields instead of teaching the SDK a closed list of task/agent identifiers.
-originStringFieldsDecoder :: Json.Decoder (Map Text Text)
-originStringFieldsDecoder =
-    Json.objectFold Map.empty \field fields ->
-        Json.withType \case
-            Json.VString -> do
-                value <- Json.text
-                pure $
-                    maybe fields
-                        (\identifier -> Map.insert field identifier fields)
-                        (nonEmptyText value)
-            _ -> pure fields
-
-isIdentifierField :: Text -> Bool
-isIdentifierField field =
-    field == "id"
-        || "_id" `Text.isSuffixOf` field
-        || "Id" `Text.isSuffixOf` field
-        || "ID" `Text.isSuffixOf` field
+originDecoder :: RawJson -> Json.Decoder MessageOrigin
+originDecoder raw = Json.object do
+    kind <- requiredNonEmptyText
+        "kind"
+        "message origin is missing a non-empty string `kind`"
+    server <- optionalNonEmptyText "server"
+    from <- optionalNonEmptyText "from"
+    name <- optionalNonEmptyText "name"
+    fromSession <- optionalNonEmptyText "fromSession"
+    senderTaskId <- optionalNonEmptyText "senderTaskId"
+    body <- optionalText "body"
+    verifiedPeerPid <- optionalNumber "verifiedPeerPid" Json.int
+    subkind <- optionalNonEmptyText "subkind"
+    pure MessageOrigin{..}
 
 requiredText
     :: Text

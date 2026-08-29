@@ -22,6 +22,7 @@ import Claude.Agent.SDK.Types
     , messageParentToolUseId
     , messageUuid
     )
+import Control.Applicative ((<|>))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -56,8 +57,17 @@ data QueryAccumulator = QueryAccumulator
 
 data RouteKey = RouteKey
     { routeKind :: !Text
-    , routeIdentifiers :: !(Map Text Text)
+    , routeIdentity :: !RouteIdentity
     } deriving (Eq, Ord, Show)
+
+data RouteIdentity
+    = SenderTaskRoute !Text
+    | FromSessionRoute !Text
+    | FromRoute !Text
+    | ServerRoute !Text
+    | StartingUserRoute !Text
+    | KindOnlyRoute
+    deriving (Eq, Ord, Show)
 
 data RouteOwner
     = OwnRoute
@@ -351,7 +361,7 @@ routeMessage accumulator message
             then RouteOwn
             else
                 maybe RouteHidden RouteForeign
-                    (resolveForeignRoute accumulator origin)
+                    (resolveForeignRoute accumulator message origin)
     | MessageSystem SystemMessage{subtype = "init"} <- message =
         RouteOwn
     | MessageConversationReset{} <- message =
@@ -378,35 +388,42 @@ messageOrigin = \case
 
 resolveForeignRoute
     :: QueryAccumulator
+    -> Message
     -> MessageOrigin
     -> Maybe RouteKey
-resolveForeignRoute accumulator origin =
-    let requested = RouteKey origin.kind origin.identifiers
-        compatible =
+resolveForeignRoute accumulator message origin =
+    let requested = RouteKey origin.kind (originRouteIdentity message origin)
+        sameKind =
             [ existing
             | existing <- Map.keys accumulator.foreignRoutes
-            , routesCompatible requested existing
+            , existing.routeKind == requested.routeKind
             ]
     in if Map.member requested accumulator.foreignRoutes
         then Just requested
-        else case compatible of
-            [existing] -> Just existing
-            [] -> Just requested
-            _ -> Nothing
+        else
+            if isForeignTurnStart message
+                    || requested.routeIdentity /= KindOnlyRoute
+                then Just requested
+                else case sameKind of
+                    [existing] -> Just existing
+                    _ -> Nothing
 
-routesCompatible :: RouteKey -> RouteKey -> Bool
-routesCompatible left right =
-    left.routeKind == right.routeKind
-        && not (Map.null common)
-        && all
-            (\field -> Map.lookup field left.routeIdentifiers
-                == Map.lookup field right.routeIdentifiers)
-            (Map.keys common)
-  where
-    common =
-        Map.intersection
-            left.routeIdentifiers
-            right.routeIdentifiers
+originRouteIdentity :: Message -> MessageOrigin -> RouteIdentity
+originRouteIdentity message origin =
+    maybe
+        (maybe KindOnlyRoute StartingUserRoute
+            (if isForeignTurnStart message then messageUuid message else Nothing))
+        id
+        ( SenderTaskRoute <$> origin.senderTaskId
+            <|> FromSessionRoute <$> origin.fromSession
+            <|> FromRoute <$> origin.from
+            <|> ServerRoute <$> origin.server
+        )
+
+isForeignTurnStart :: Message -> Bool
+isForeignTurnStart = \case
+    MessageUser{} -> True
+    _ -> False
 
 registerToolOwners
     :: RouteOwner
