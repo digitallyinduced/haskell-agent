@@ -503,6 +503,57 @@ spec = do
                     expectationFailure
                         ("expected rewritten tool output, got " <> show other)
 
+        it "rewrites typed computer screenshots without losing protocol metadata" do
+            let output = ComputerCallOutputItem ComputerCallOutput
+                    { computerOutputItemId = Just "item-1"
+                    , computerOutputCallId = "computer-1"
+                    , screenshotDataUrl =
+                        "data:image/png;base64,"
+                            <> Text.replicate 20_000 "x"
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Just ItemCompleted
+                    , computerOutputExtra = KeyMap.empty
+                    }
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        200
+                        Nothing
+                        [user "keep", output]
+            case reverse trimmed of
+                ComputerCallOutputItem rewritten : _ -> do
+                    rewritten.computerOutputCallId
+                        `shouldBe` "computer-1"
+                    Text.length rewritten.screenshotDataUrl
+                        `shouldSatisfy` (< 1_000)
+                other -> expectationFailure
+                    ("expected rewritten computer output, got " <> show other)
+
+        it "drops paired typed computer output with its oversized call" do
+            let call = ComputerCallItem ComputerCall
+                    { computerCallItemId = Just "item-1"
+                    , computerCallId = "computer-1"
+                    , computerActions =
+                        [TypeAction (Text.replicate 20_000 "x")]
+                    , pendingSafetyChecks = []
+                    , computerCallStatus = Nothing
+                    , computerCallExtra = KeyMap.empty
+                    }
+                output = ComputerCallOutputItem ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "computer-1"
+                    , screenshotDataUrl = "data:image/png;base64,aA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Just ItemCompleted
+                    , computerOutputExtra = KeyMap.empty
+                    }
+                recent = user "recent"
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        100
+                        Nothing
+                        [call, output, recent]
+            trimmed `shouldBe` [recent]
+
         it "truncates oversized messages without rewriting a tiny trailing output" do
             let huge = user (Text.replicate 20_000 "x")
                 tiny = FunctionCallOutputItem FunctionCallOutput

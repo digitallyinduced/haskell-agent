@@ -13,6 +13,7 @@ import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.ComputerUseSpec as ComputerUseSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
@@ -32,6 +33,7 @@ import qualified Agent.CLI.MacOS.NativeLoopEventSpec as NativeLoopEventSpec
 import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
 import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
 import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
+import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
@@ -92,6 +94,7 @@ main = hspec do
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
+    ComputerUseSpec.spec
     ConfigSpec.spec
     CompactionSpec.spec
     ConnectivitySpec.spec
@@ -111,6 +114,7 @@ main = hspec do
     BridgeHeaderSpec.spec
     BridgeFFISpec.spec
     BrowserBridgeFFISpec.spec
+    BridgeSpec.spec
     MarkdownSpec.spec
     McpManagerSpec.spec
     ModelConfigSpec.spec

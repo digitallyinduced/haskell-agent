@@ -28,6 +28,7 @@ import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , canonicalToolName
     )
 import Agent.Tools.Dangerous (shellCommandBlocked)
@@ -155,41 +156,61 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
                     if isPlanFileWrite planActive planPath call
                         then pure (Right True)
                         else do
-                            allowed <- readIORef allowedToolsRef
-                            if Set.member toolName allowed
-                                then pure (Right True)
-                                else case policy of
-                                    ApproveAll -> pure (Right True)
-                                    DenyMutating -> pure (Right readOnly)
-                                    PromptMutating
-                                        | readOnly -> pure (Right True)
-                                        | otherwise -> do
-                                            requestPermission call >>= \case
-                                                Nothing -> pure (Right False)
-                                                Just PermissionAllowOnce ->
+                            if call.callKind == ComputerCallKind
+                                then requestPermission call >>= \case
+                                    Nothing -> pure (Right False)
+                                    Just PermissionDeny -> pure (Right False)
+                                    -- Computer access is deliberately never
+                                    -- cached and bypasses yolo/ApproveAll.
+                                    -- Every provider call must reach the
+                                    -- approval UI, including safety checks.
+                                    Just _ -> pure (Right True)
+                                else do
+                                    allowed <- readIORef allowedToolsRef
+                                    if Set.member toolName allowed
+                                        then pure (Right True)
+                                        else case policy of
+                                            ApproveAll -> pure (Right True)
+                                            DenyMutating ->
+                                                pure (Right readOnly)
+                                            PromptMutating
+                                                | readOnly ->
                                                     pure (Right True)
-                                                Just PermissionAllowAll -> do
-                                                    atomicModifyIORef' policyRef $
-                                                        const (ApproveAll, ())
-                                                    persistAlwaysApprove
-                                                    report $
-                                                        ApprovalSuccess
-                                                            (glyphOk
-                                                                <> "auto-approve on \
-                                                                   \(saved for project)")
-                                                    pure (Right True)
-                                                Just PermissionAllowTool -> do
-                                                    modifyIORef' allowedToolsRef
-                                                        (Set.insert toolName)
-                                                    report $
-                                                        ApprovalSuccess
-                                                            (glyphOk
-                                                                <> "always allow "
-                                                                <> call.name
-                                                                <> " this session")
-                                                    pure (Right True)
-                                                Just PermissionDeny ->
-                                                    pure (Right False)
+                                                | otherwise -> do
+                                                    requestPermission call
+                                                        >>= \case
+                                                            Nothing ->
+                                                                pure (Right False)
+                                                            Just PermissionAllowOnce ->
+                                                                pure (Right True)
+                                                            Just PermissionAllowAll -> do
+                                                                atomicModifyIORef'
+                                                                    policyRef $
+                                                                        const
+                                                                            ( ApproveAll
+                                                                            , ()
+                                                                            )
+                                                                persistAlwaysApprove
+                                                                report $
+                                                                    ApprovalSuccess
+                                                                        (glyphOk
+                                                                            <> "auto-approve on \
+                                                                               \(saved for project)")
+                                                                pure (Right True)
+                                                            Just PermissionAllowTool -> do
+                                                                modifyIORef'
+                                                                    allowedToolsRef
+                                                                    (Set.insert
+                                                                        toolName)
+                                                                report $
+                                                                    ApprovalSuccess
+                                                                        (glyphOk
+                                                                            <> "always allow "
+                                                                            <> call.name
+                                                                            <> " this session")
+                                                                pure (Right True)
+                                                            Just PermissionDeny ->
+                                                                pure (Right False)
 
 planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool
 planModeBlocksCall active planPath readOnly call
@@ -236,6 +257,10 @@ toggleAlwaysApprove policyRef projectRoot = do
         _ -> "auto-approve off (saved for project)")
 
 childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
+childApprove _ _ call
+    | call.callKind == ComputerCallKind =
+        pure $ Left
+            "Computer use requires an explicit parent approval for every call."
 childApprove policy tools call = case policy of
     ApproveAll -> pure (Right True)
     DenyMutating -> do

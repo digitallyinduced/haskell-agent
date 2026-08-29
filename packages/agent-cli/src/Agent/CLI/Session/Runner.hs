@@ -188,7 +188,6 @@ import Agent.Subagents
 import Agent.Subagents.TaskPath (taskPathText)
 import Agent.ToolDispatch
     ( ToolCall(..)
-    , ToolCallKind(..)
     , canonicalToolName
     )
 import Agent.Tools.MultiAgents
@@ -789,15 +788,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 , commitBackendState = writeLiveTranscript conversationRef
                 }
             , loopTools = toolRegistry
-            , loopDispatch =
-                defaultLoopDispatch
-                    { toolDispatchFinalizeOutput = \call output ->
-                        if call.callKind == ComputerCallKind
-                            then pure output
-                            else defaultLoopDispatch.toolDispatchFinalizeOutput
-                                call
-                                output
-                    }
+            , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->

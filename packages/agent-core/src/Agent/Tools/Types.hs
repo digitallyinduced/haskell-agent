@@ -59,6 +59,10 @@ data ToolSchema
     = JsonFunctionSchema ![PropertySchema]
     | RawJsonFunctionSchema !Value
     | FreeformApplyPatchSchema
+    -- | The provider-native computer tool. Keeping this distinct prevents an
+    -- unrelated function or MCP tool named @computer@ from being projected as
+    -- a hosted desktop-control surface.
+    | HostedComputerSchema
     deriving (Eq, Show)
 
 -- | Whether a call may run without generic user approval.
@@ -324,6 +328,7 @@ jsonToolParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> Just parameters
     RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
+    HostedComputerSchema -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.

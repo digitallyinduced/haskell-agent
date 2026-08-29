@@ -49,6 +49,7 @@ import Agent.CLI.Markdown
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
+import Agent.CLI.ComputerUse (summarizeComputerToolCall)
 import Agent.TUI.FencedCode
     ( FenceMarker
     , fenceOpener
@@ -100,9 +101,9 @@ import Agent.TUI.Presentation
     , SearchReplaceLine(..)
     , formatToolOutput
     , parseSearchReplaceDiff
-    , summarizeToolCall
     , toolDetail
     )
+import qualified Agent.TUI.Presentation as Presentation
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -141,6 +142,12 @@ import Agent.TUI.Motion
 import Agent.TUI.TextWidth (splitTerminalGraphemeSuffix)
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
+
+summarizeToolCall :: ToolCall -> Text
+summarizeToolCall call =
+    fromMaybe
+        (Presentation.summarizeToolCall call)
+        (summarizeComputerToolCall call)
 
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool

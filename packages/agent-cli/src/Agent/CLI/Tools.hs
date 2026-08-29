@@ -96,10 +96,10 @@ isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
-schemaFromAppTool dialect tool
-    | tool.appToolName == "computer" =
-        Just (knownResponseTool ToolComputer KeyMap.empty)
-    | otherwise = case tool.appToolSchema of
+schemaFromAppTool dialect tool =
+    case tool.appToolSchema of
+        HostedComputerSchema ->
+            Just (knownResponseTool ToolComputer KeyMap.empty)
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of
                 NoFunctionSchemas ->
@@ -197,6 +197,7 @@ appToolJsonParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> parameters
     RawJsonFunctionSchema _ -> []
     FreeformApplyPatchSchema -> []
+    HostedComputerSchema -> []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

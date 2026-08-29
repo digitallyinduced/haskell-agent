@@ -51,6 +51,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
+import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text

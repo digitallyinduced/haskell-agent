@@ -1,6 +1,7 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.Dialect
     ( claudeCodeDialect
     , codexDialect
@@ -38,15 +39,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
-    it "advertises the reserved computer tool as a built-in" do
-        let computer = jsonAppTool "computer" "Control this computer" []
-                AlwaysPrompt
-                (noArgsTool "computer" (pure (Right "ok")))
-        schemasFromAppTools codexDialect [computer]
+    it "advertises only the dedicated computer tool as a built-in" do
+        schemasFromAppTools codexDialect [computerUseTool]
             `shouldBe`
                 [ webSearchTool
                 , knownResponseTool ToolComputer KeyMap.empty
                 ]
+
+    it "keeps an unrelated function named computer as a function" do
+        let computer = jsonAppTool "computer" "Unrelated MCP function" []
+                AlwaysPrompt
+                (noArgsTool "computer" (pure (Right "ok")))
+        case schemasFromAppTools codexDialect [computer] of
+            [_, FunctionToolValue function] ->
+                function.name `shouldBe` "computer"
+            other -> expectationFailure
+                ("expected ordinary computer function, got " <> show other)
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do

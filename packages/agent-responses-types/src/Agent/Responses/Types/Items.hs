@@ -399,10 +399,12 @@ data ComputerAction
         { clickX      :: !Int
         , clickY      :: !Int
         , clickButton :: !Text
+        , clickKeys   :: ![Text]
         }
     | DoubleClickAction
         { doubleClickX :: !Int
         , doubleClickY :: !Int
+        , doubleClickKeys :: ![Text]
         }
     | TypeAction !Text
     | KeypressAction ![Text]
@@ -411,54 +413,68 @@ data ComputerAction
         , scrollY  :: !Int
         , scrollDx :: !Int
         , scrollDy :: !Int
+        , scrollKeys :: ![Text]
         }
     | MoveAction
         { moveX :: !Int
         , moveY :: !Int
+        , moveKeys :: ![Text]
         }
     | WaitAction !Int
-    | DragAction ![ComputerPoint]
+    | DragAction
+        { dragPath :: ![ComputerPoint]
+        , dragKeys :: ![Text]
+        }
     | UnknownComputerAction !TaggedObject
     deriving stock (Eq, Show)
 
 instance ToJSON ComputerAction where
     toJSON = \case
         ScreenshotAction -> object ["type" .= ("screenshot" :: Text)]
-        ClickAction { clickX, clickY, clickButton } ->
+        ClickAction { clickX, clickY, clickButton, clickKeys } ->
             object
                 [ "type" .= ("click" :: Text)
                 , "x" .= clickX
                 , "y" .= clickY
                 , "button" .= clickButton
+                , "keys" .= clickKeys
                 ]
-        DoubleClickAction { doubleClickX, doubleClickY } ->
+        DoubleClickAction
+            { doubleClickX, doubleClickY, doubleClickKeys } ->
             object
                 [ "type" .= ("double_click" :: Text)
                 , "x" .= doubleClickX
                 , "y" .= doubleClickY
+                , "keys" .= doubleClickKeys
                 ]
         TypeAction value -> object
             [ "type" .= ("type" :: Text), "text" .= value ]
         KeypressAction keys -> object
             [ "type" .= ("keypress" :: Text), "keys" .= keys ]
-        ScrollAction { scrollX, scrollY, scrollDx, scrollDy } ->
+        ScrollAction
+            { scrollX, scrollY, scrollDx, scrollDy, scrollKeys } ->
             object
                 [ "type" .= ("scroll" :: Text)
                 , "x" .= scrollX
                 , "y" .= scrollY
                 , "scroll_x" .= scrollDx
                 , "scroll_y" .= scrollDy
+                , "keys" .= scrollKeys
                 ]
-        MoveAction { moveX, moveY } ->
+        MoveAction { moveX, moveY, moveKeys } ->
             object
                 [ "type" .= ("move" :: Text)
                 , "x" .= moveX
                 , "y" .= moveY
+                , "keys" .= moveKeys
                 ]
         WaitAction milliseconds -> object
             [ "type" .= ("wait" :: Text), "ms" .= milliseconds ]
-        DragAction path -> object
-            [ "type" .= ("drag" :: Text), "path" .= path ]
+        DragAction { dragPath, dragKeys } -> object
+            [ "type" .= ("drag" :: Text)
+            , "path" .= dragPath
+            , "keys" .= dragKeys
+            ]
         UnknownComputerAction value -> toJSON value
 
 instance FromJSON ComputerAction where
@@ -467,17 +483,29 @@ instance FromJSON ComputerAction where
         case tag of
             "screenshot" -> pure ScreenshotAction
             "click" -> ClickAction
-                <$> o .: "x" <*> o .: "y" <*> o .:? "button" .!= "left"
-            "double_click" -> DoubleClickAction <$> o .: "x" <*> o .: "y"
+                <$> o .: "x"
+                <*> o .: "y"
+                <*> o .:? "button" .!= "left"
+                <*> o .:? "keys" .!= []
+            "double_click" -> DoubleClickAction
+                <$> o .: "x"
+                <*> o .: "y"
+                <*> o .:? "keys" .!= []
             "type" -> TypeAction <$> o .: "text"
             "keypress" -> KeypressAction <$> o .: "keys"
             "scroll" -> ScrollAction
                 <$> o .: "x" <*> o .: "y"
                 <*> o .:? "scroll_x" .!= 0
                 <*> o .:? "scroll_y" .!= 0
-            "move" -> MoveAction <$> o .: "x" <*> o .: "y"
+                <*> o .:? "keys" .!= []
+            "move" -> MoveAction
+                <$> o .: "x"
+                <*> o .: "y"
+                <*> o .:? "keys" .!= []
             "wait" -> WaitAction <$> o .:? "ms" .!= 1000
-            "drag" -> DragAction <$> o .:? "path" .!= []
+            "drag" -> DragAction
+                <$> o .:? "path" .!= []
+                <*> o .:? "keys" .!= []
             _ -> pure (UnknownComputerAction TaggedObject
                 { tag
                 , fields = without ["type"] o

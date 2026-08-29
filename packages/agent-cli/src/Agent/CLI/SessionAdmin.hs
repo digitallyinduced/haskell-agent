@@ -10,12 +10,14 @@ module Agent.CLI.SessionAdmin
     , runWaitSession
     , sessionSummaryJSON
     , sessionSummaryWithStatusJSON
+    , sessionToolEvent
     ) where
 
 import Agent.CLI.Database.Storage
     ( postgresStorageCommandEnv
     , runStorageCommand
     )
+import Agent.CLI.ComputerUse (summarizeComputerCall)
 import Agent.CLI.Login
     ( AccountBilling(..)
     , LoginAccount(..)
@@ -51,7 +53,9 @@ import Agent.CLI.SessionLock
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (providerSlug)
 import Agent.Responses.Types
-    ( CustomToolCall(..)
+    ( ComputerCall(..)
+    , ComputerCallOutput(..)
+    , CustomToolCall(..)
     , CustomToolCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
@@ -312,6 +316,20 @@ sessionToolEvent = \case
         Just (toolFinishedJSON result.callId (renderToolValue result.output))
     CustomToolCallOutputItem result ->
         Just (toolFinishedJSON result.callId (renderToolValue result.output))
+    ComputerCallItem call ->
+        Just $
+            toolStartedJSON
+                call.computerCallId
+                "computer"
+                (TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                    Aeson.object
+                        [ "summary" Aeson..= summarizeComputerCall call
+                        ])
+    ComputerCallOutputItem result ->
+        Just
+            (toolFinishedJSON
+                result.computerOutputCallId
+                "Screenshot captured")
     _ -> Nothing
 
 toolStartedJSON :: Text -> Text -> Text -> Aeson.Value

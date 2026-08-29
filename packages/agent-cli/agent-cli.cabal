@@ -349,6 +349,7 @@ test-suite agent-cli-test
     include-dirs:     include
     other-modules:    Agent.CLI.AccountSelectionSpec
                     , Agent.CLI.MacOS.BrowserBridgeFFISpec
+                    , Agent.CLI.MacOS.BridgeSpec
                     , Agent.CLI.MacOS.NativeLoopEventSpec
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.BridgeHeaderSpec
@@ -364,6 +365,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.ComputerUseSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
                     , Agent.CLI.ConnectivitySpec
