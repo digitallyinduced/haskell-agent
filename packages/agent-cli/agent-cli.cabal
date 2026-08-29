@@ -238,6 +238,7 @@ library
                     , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-mcp >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
@@ -463,6 +464,7 @@ test-suite agent-cli-test
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
+                    , agent-mcp
                     , agent-json
                     , agent-codex-dialect
                     , agent-grok-build-dialect
