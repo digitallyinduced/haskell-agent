@@ -70,7 +70,7 @@ spec =
                         (Session.script
                             "CREATE SCHEMA runtime_must_not_create")
                     forbiddenResult `shouldSatisfy` isLeft
-                    fetchedAt <- getCurrentTime
+                    fetchedAt <- normalizePostgresTimestamp <$> getCurrentTime
                     let usageEntry = AccountUsageCacheEntry
                             { accountUsageCacheProvider = "openai"
                             , accountUsageCacheAccountId = "account-1"
