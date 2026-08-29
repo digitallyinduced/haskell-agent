@@ -44,6 +44,7 @@ library
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
     other-modules:    Agent.CLI.AccountPicker
+                    , Agent.CLI.AccountUsageCache
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types

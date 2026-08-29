@@ -8,7 +8,7 @@ import Agent.CLI.AccountPicker
     ( AccountPickerOption(..),
       accountPickerMatches,
       accountPickerRow,
-      loadAllAccountPickerOptions )
+      loadAllAccountPickerOptionsCached )
 import Agent.CLI.AccountSelection ()
 import Agent.CLI.Afk ()
 import Agent.CLI.AgentSessions ()
@@ -203,6 +203,7 @@ handleSelection
             , sessionDialect = dialect
             , sessionParams = paramsRef
             , sessionPersist = persist
+            , sessionDatabasePool = databasePool
             , sessionProjectRoot = projectRoot
             , sessionDraft = draftRef
             , sessionAccountId = accountIdRef
@@ -352,7 +353,7 @@ handleSelection
                 currentAccountId <- readIORef accountIdRef
                 options <- withReplActivity
                     "Loading account usage…"
-                    (loadAllAccountPickerOptions provider)
+                    (loadAllAccountPickerOptionsCached databasePool provider)
                 let initial =
                         fromMaybe 0 $
                             findIndex
@@ -414,7 +415,8 @@ handleSelection
                                             Nothing -> next
                                             Just selectedAccountId -> do
                                                 refreshed <-
-                                                    loadAllAccountPickerOptions
+                                                    loadAllAccountPickerOptionsCached
+                                                        databasePool
                                                         provider
                                                 case listToMaybe
                                                         [ account
