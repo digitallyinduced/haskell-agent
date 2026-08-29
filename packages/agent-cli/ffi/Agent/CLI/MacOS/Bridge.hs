@@ -167,7 +167,7 @@ import Foreign
     , nullFunPtr
     , nullPtr
     )
-import Foreign.C.String (CString, withCStringLen)
+import Foreign.C.String (CString)
 import Foreign.C.Types (CInt(..), CSize(..))
 import System.Directory.OsPath (getHomeDirectory)
 import System.IO
@@ -192,7 +192,7 @@ nonEmptyText value
     | otherwise = Just value
 
 withText :: Text -> (CString -> CSize -> IO a) -> IO a
-withText value action = withCStringLen (Text.unpack value) \(pointer, length) ->
+withText value action = BS.useAsCStringLen (TextEncoding.encodeUtf8 value) \(pointer, length) ->
     action pointer (fromIntegral length)
 
 withOptionalText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
