@@ -731,6 +731,7 @@ spec = do
                         \and **bold *italic* `code`**\n"
                     , "```haskell\nmain = pure ()\n```\n"
                     , "| Key | Value |\n| --- | --- |\n| snake_case | `code` |\n"
+                    , "Key | Value\n--- | ---:\nsnake_case | `code`\n"
                     ]
             forM_ samples \source -> do
                 let expected = stripTerminalControls

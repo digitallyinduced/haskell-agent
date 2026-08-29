@@ -68,16 +68,10 @@ feedLineStart state input =
     in case takeCompleteLine buffered of
         Just (line, rest) ->
             classifyCompleteLine state{blockPending = ""} line rest
-        Nothing
-            | lineNeedsLookahead buffered ->
-                (state{blockPending = buffered}, "")
-            | otherwise ->
-                feedProse
-                    state
-                        { streamMode = StreamProse
-                        , blockPending = ""
-                        }
-                    buffered
+        -- A delimiter can arrive in any later chunk of an outer-pipe-free
+        -- table header. Keep the line reclassifiable until its newline makes
+        -- the block decision final.
+        Nothing -> (state{blockPending = buffered}, "")
 
 classifyCompleteLine
     :: MarkdownStreamState
@@ -290,47 +284,6 @@ completeLines = go []
 
 dropLineEnding :: Text -> Text
 dropLineEnding = Text.dropWhileEnd (== '\n')
-
-lineNeedsLookahead :: Text -> Bool
-lineNeedsLookahead line =
-    let stripped = Text.dropWhile isSpace line
-        markerRun marker = Text.span (== marker) stripped
-        allMarkerOrSpace marker =
-            Text.all (\character -> character == marker || isSpace character)
-                stripped
-    in case Text.uncons stripped of
-        Nothing -> True
-        Just ('#', _) ->
-            let (marks, after) = markerRun '#'
-            in Text.length marks <= 6
-                && (Text.null after || Text.isPrefixOf " " after)
-        Just ('>', _) -> True
-        Just ('|', _) -> True
-        Just ('`', _) ->
-            let (ticks, after) = markerRun '`'
-            in Text.null after || Text.length ticks >= 3
-        Just ('~', _) ->
-            let (tildes, after) = markerRun '~'
-            in Text.null after || Text.length tildes >= 3
-        Just ('+', after) -> Text.null after || Text.isPrefixOf " " after
-        Just ('*', after) ->
-            Text.null after
-                || Text.isPrefixOf " " after
-                || allMarkerOrSpace '*'
-        Just ('-', after) ->
-            Text.null after
-                || Text.isPrefixOf " " after
-                || allMarkerOrSpace '-'
-        Just ('_', _) -> allMarkerOrSpace '_'
-        Just (character, _)
-            | isDigit character ->
-                let (digits, after) = Text.span isDigit stripped
-                in not (Text.null digits)
-                    && ( Text.null after
-                        || after == "."
-                        || Text.isPrefixOf ". " after
-                       )
-        _ -> isPossibleTableHeader line
 
 lineIsBlock :: Text -> Bool
 lineIsBlock line =
