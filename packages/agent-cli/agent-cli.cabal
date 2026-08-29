@@ -250,6 +250,7 @@ foreign-library haskell-agent-bridge
     options:          standalone
     hs-source-dirs:   ffi
     other-modules:    Agent.CLI.MacOS.Bridge
+                    , Agent.CLI.MacOS.NativeLoopEvent
     c-sources:        cbits/HaskellAgentBridgeRuntime.c
     include-dirs:     include
     includes:         HaskellAgentBridge.h
@@ -334,9 +335,11 @@ test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
     ghc-options:      -threaded
-    hs-source-dirs:   test
+    hs-source-dirs:   test ffi
     main-is:          Spec.hs
     other-modules:    Agent.CLI.AccountSelectionSpec
+                    , Agent.CLI.MacOS.NativeLoopEventSpec
+                    , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec

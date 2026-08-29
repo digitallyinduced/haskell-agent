@@ -10,6 +10,9 @@ import Agent.CLI.NativeRuntime
     , newNativeProcessRuntime
     , runNativeAgent
     )
+import Agent.CLI.MacOS.NativeLoopEvent
+    ( encodeNativeLoopEvent
+    )
 import Agent.CLI.ModelConfig (loadModelCatalogAt)
 import Agent.CLI.Models
     ( ModelOption(..)
@@ -60,7 +63,6 @@ import Agent.Store.Postgres
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
-    , ToolCallResult(..)
     )
 import Control.Concurrent (forkFinally)
 import Control.Concurrent.Async
@@ -555,8 +557,11 @@ runNativeTurn callback context processRuntime control start = do
                 case event of
                     TurnFinished _ -> writeIORef completedRef True
                     _ -> pure ()
-                forM_ (nativeLoopEvent control.turnControlId event)
-                    (sendEvent callback context)
+                case encodeNativeLoopEvent control.turnControlId event of
+                    Just bytes -> sendBinaryEvent callback context bytes
+                    Nothing ->
+                        forM_ (nativeLoopEvent control.turnControlId event)
+                            (sendEvent callback context)
             , nativeOnSessionId = \sessionId -> do
                 writeIORef sessionIdRef (Just sessionId)
                 sendEvent callback context $
@@ -803,53 +808,9 @@ finishTurnEvent callback context turnId = \case
 
 nativeLoopEvent :: Text -> LoopEvent -> Maybe Aeson.Value
 nativeLoopEvent turnId = \case
-    ReasoningDelta text ->
-        Just $ Aeson.object
-            [ "event" Aeson..= ("turn.reasoning_delta" :: Text)
-            , "turnId" Aeson..= turnId
-            , "text" Aeson..= text
-            ]
-    TextDelta text ->
-        Just $ Aeson.object
-            [ "event" Aeson..= ("turn.text_delta" :: Text)
-            , "turnId" Aeson..= turnId
-            , "text" Aeson..= text
-            ]
-    ToolStarted call ->
-        let (arguments, truncated) =
-                boundedEventText
-                    (if call.argumentsEncrypted then "" else call.arguments)
-        in Just $ Aeson.object
-            [ "event" Aeson..= ("turn.tool" :: Text)
-            , "turnId" Aeson..= turnId
-            , "tool" Aeson..= Aeson.object
-                [ "type" Aeson..= ("tool_started" :: Text)
-                , "callId" Aeson..= call.callId
-                , "name" Aeson..= call.name
-                , "summary" Aeson..= summarizeToolCall call
-                , "arguments" Aeson..= arguments
-                , "argumentsEncrypted" Aeson..= call.argumentsEncrypted
-                , "truncated" Aeson..= truncated
-                ]
-            ]
-    ToolFinished result ->
-        let (output, truncated) = boundedEventText result.output
-        in Just $ Aeson.object
-            [ "event" Aeson..= ("turn.tool" :: Text)
-            , "turnId" Aeson..= turnId
-            , "tool" Aeson..= Aeson.object
-                [ "type" Aeson..= ("tool_finished" :: Text)
-                , "callId" Aeson..= result.callId
-                , "output" Aeson..= output
-                , "truncated" Aeson..= truncated
-                ]
-            ]
-    ActivityUpdated status ->
-        Just $ turnStatusEvent turnId status
-    WarningRaised warning ->
-        Just $ turnStatusEvent turnId warning
-    ResponseRestarted message ->
-        Just $ turnStatusEvent turnId message
+    ActivityUpdated status -> Just $ turnStatusEvent turnId status
+    WarningRaised warning -> Just $ turnStatusEvent turnId warning
+    ResponseRestarted message -> Just $ turnStatusEvent turnId message
     _ -> Nothing
 
 turnStatusEvent :: Text -> Text -> Aeson.Value
@@ -896,7 +857,7 @@ handleRequest config store root request = do
                 pure $ successEvent current.requestId $
                     Aeson.object
                         [ "runtime" Aeson..= ("haskell" :: Text)
-                        , "protocol" Aeson..= (3 :: Int)
+                        , "protocol" Aeson..= (4 :: Int)
                         ]
             "sessions.list" -> do
                 activeStore <- acquireStore config store
@@ -1137,7 +1098,22 @@ sendEvent :: FunPtr EventCallback -> Ptr () -> Aeson.Value -> IO ()
 sendEvent callback context event =
     void $ tryAny $
         BS.useAsCStringLen (LBS.toStrict (Aeson.encode event)) \(bytes, length) ->
-            invokeEventCallback callback
-                context
-                (castPtr bytes)
-                (fromIntegral length)
+            sendCallbackBytes callback context (castPtr bytes) length
+
+sendBinaryEvent :: FunPtr EventCallback -> Ptr () -> BS.ByteString -> IO ()
+sendBinaryEvent callback context bytes =
+    void $ tryAny $
+        BS.useAsCStringLen bytes \ (pointer, length) ->
+            sendCallbackBytes callback context (castPtr pointer) length
+
+sendCallbackBytes
+    :: FunPtr EventCallback
+    -> Ptr ()
+    -> Ptr Word8
+    -> Int
+    -> IO ()
+sendCallbackBytes callback context bytes length =
+    invokeEventCallback callback
+        context
+        (castPtr bytes)
+        (fromIntegral length)
