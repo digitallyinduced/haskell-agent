@@ -15,6 +15,10 @@ module Agent.OpenAI.WebSocketClient
     , buildWsPayloadWithOptions
     , addTurnStateToPayload
     , buildCodexWsHeaders
+    , WebSocketEndpoint(..)
+    , gatewayWebSocketEndpoint
+    , isGatewayWebSocketCredential
+    , validateGatewayWebSocketUrl
     , CodexTurnState
     , newCodexTurnState
     , codexConnTurnState
@@ -88,7 +92,9 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Read as TextRead
 import qualified Network.WebSockets as WS
+import qualified Network.URI as URI
 import qualified Wuss
+import Text.Read (readMaybe)
 
 --------------------------------------------------------------------------------
 -- Connection handle
@@ -301,23 +307,125 @@ runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
 runConnectionAttemptWithPolicyAndTurnState retryPolicy sharedTurnState
         credential action = do
     let headers = buildCodexWsHeaders credential
-    WebSocket.retryTransientWsConnectWithPolicy
-        retryPolicy
-        \connected ->
+    case gatewayWebSocketEndpoint credential of
+        Left err -> pure (Left (ConnectionError err))
+        Right endpoint ->
+            WebSocket.retryTransientWsConnectWithPolicy
+                retryPolicy
+                \connected ->
+                    runCredentialWebSocket endpoint headers \conn -> do
+                        connected
+                        WebSocket.withWebSocketSession
+                            WebSocket.defaultWebSocketSessionOptions
+                            conn
+                            (\session -> do
+                                turnState <- maybe newCodexTurnState pure sharedTurnState
+                                action (CodexWsConn session turnState) credential)
+
+data WebSocketEndpoint = WebSocketEndpoint
+    { endpointSecure :: !Bool
+    , endpointHost :: !String
+    , endpointPort :: !Int
+    , endpointPath :: !String
+    }
+    deriving stock (Eq, Show)
+
+-- | Parse the endpoint carried by a gateway credential. A non-WebSocket
+-- account id is an ordinary ChatGPT credential. Once the account id declares
+-- @ws://@ or @wss://@, parse failures stay errors so the gateway bearer can
+-- never fall through to the direct ChatGPT endpoint.
+gatewayWebSocketEndpoint
+    :: Credential
+    -> Either Text (Maybe WebSocketEndpoint)
+gatewayWebSocketEndpoint credential
+    | not (isGatewayWebSocketCredential credential) = Right Nothing
+    | otherwise = Just <$> parseEndpoint credential.accountId
+
+parseEndpoint :: Text -> Either Text WebSocketEndpoint
+parseEndpoint raw = do
+    uri <- maybe (Left "invalid gateway WebSocket URL") Right $
+        URI.parseURI (Text.unpack raw)
+    authority <- maybe (Left "gateway WebSocket URL has no host") Right $
+        URI.uriAuthority uri
+    secure <- case URI.uriScheme uri of
+        "wss:" -> Right True
+        "ws:"
+            | localHost (URI.uriRegName authority) -> Right False
+            | otherwise ->
+                Left "insecure gateway WebSocket URLs are allowed only for localhost"
+        _ -> Left "gateway WebSocket URL must use wss"
+    let rawHost = URI.uriRegName authority
+        host = case rawHost of
+            '[' : rest | not (null rest) && last rest == ']' -> init rest
+            _ -> rawHost
+        defaultPort = if secure then 443 else 80
+        port = case URI.uriPort authority of
+            "" -> Right defaultPort
+            ':' : portText -> case readMaybe portText of
+                Just value | value > 0 && value <= 65535 -> Right value
+                _ -> Left "gateway WebSocket URL has an invalid port"
+            _ -> Left "gateway WebSocket URL has an invalid port"
+        path = case URI.uriPath uri of
+            "" -> "/v1/responses"
+            value -> value
+    endpointPort <- port
+    if null host || not (null (URI.uriUserInfo authority))
+        || not (null (URI.uriQuery uri))
+        || not (null (URI.uriFragment uri))
+        then Left "gateway WebSocket URL contains unsupported components"
+        else Right WebSocketEndpoint
+            { endpointSecure = secure
+            , endpointHost = host
+            , endpointPort
+            , endpointPath = path
+            }
+  where
+    localHost rawHost =
+        Text.toLower (Text.pack rawHost)
+            `elem` ["localhost", "127.0.0.1", "::1", "[::1]"]
+
+isGatewayWebSocketCredential :: Credential -> Bool
+isGatewayWebSocketCredential credential =
+    let accountId = Text.toLower (Text.strip credential.accountId)
+     in "wss://" `Text.isPrefixOf` accountId
+            || "ws://" `Text.isPrefixOf` accountId
+
+validateGatewayWebSocketUrl :: Text -> Either Text ()
+validateGatewayWebSocketUrl raw =
+    parseEndpoint raw >> pure ()
+
+runCredentialWebSocket
+    :: Maybe WebSocketEndpoint
+    -> WS.Headers
+    -> (WS.Connection -> IO value)
+    -> IO value
+runCredentialWebSocket endpoint headers action =
+    case endpoint of
+        Nothing ->
             Wuss.runSecureClientWith
                 wsHost
                 443
                 wsPath
                 WS.defaultConnectionOptions
                 headers
-                \conn -> do
-                    connected
-                    WebSocket.withWebSocketSession
-                        WebSocket.defaultWebSocketSessionOptions
-                        conn
-                        (\session -> do
-                            turnState <- maybe newCodexTurnState pure sharedTurnState
-                            action (CodexWsConn session turnState) credential)
+                action
+        Just endpoint
+            | endpoint.endpointSecure ->
+                Wuss.runSecureClientWith
+                    endpoint.endpointHost
+                    (fromIntegral endpoint.endpointPort)
+                    endpoint.endpointPath
+                    WS.defaultConnectionOptions
+                    headers
+                    action
+            | otherwise ->
+                WS.runClientWith
+                    endpoint.endpointHost
+                    endpoint.endpointPort
+                    endpoint.endpointPath
+                    WS.defaultConnectionOptions
+                    headers
+                    action
 
 -- | Pure handshake-header builder exported for transport contract tests.
 buildCodexWsHeaders :: Credential -> WS.Headers
@@ -326,6 +434,7 @@ buildCodexWsHeaders credential =
     ]
     <> [ ("chatgpt-account-id", Text.encodeUtf8 credential.accountId)
        | not (Text.null credential.accountId)
+       , not (isGatewayWebSocketCredential credential)
        ]
     <> [ ("OpenAI-Beta", "responses_websockets=2026-02-06")
        , ("x-codex-beta-features", Text.encodeUtf8 remoteCompactionV2Feature)
