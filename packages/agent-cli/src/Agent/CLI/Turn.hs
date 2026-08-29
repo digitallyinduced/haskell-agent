@@ -12,7 +12,12 @@ module Agent.CLI.Turn
 import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
-import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
+import Agent.CLI.Plan
+    ( ProposedPlanParseError(..)
+    , parseProposedPlan
+    , planDecisionFollowUp
+    , renderProposedPlanParseError
+    )
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
@@ -866,18 +871,31 @@ handleProposedPlan planMode = \case
     Nothing -> pure Nothing
     Just text -> do
         active <- isPlanModeActive planMode
-        case (active, extractProposedPlan text) of
-            (True, Just planBody) -> do
-                _ <- writePlanMarkdown planMode planBody
-                let PlanModeHooks{ planDecideExit = decideExit } = planMode.planHooks
-                decision <- decideExit planBody
-                case decision of
-                    PlanApprove -> do
-                        deactivatePlanMode planMode
-                        pure (planDecisionFollowUp decision)
-                    PlanCancel -> do
-                        deactivatePlanMode planMode
-                        pure Nothing
-                    PlanRequestChanges _ ->
-                        pure (planDecisionFollowUp decision)
+        case (active, parseProposedPlan text) of
+            (True, Right planBody) -> do
+                writePlanMarkdown planMode planBody >>= \case
+                    Left writeError ->
+                        pure $ Just $
+                            "The proposed plan could not be persisted for review: "
+                                <> writeError
+                                <> ". Stay in plan mode and try again after the plan-file error is resolved."
+                    Right () -> do
+                        let PlanModeHooks{ planDecideExit = decideExit } =
+                                planMode.planHooks
+                        decision <- decideExit planBody
+                        case decision of
+                            PlanApprove -> do
+                                deactivatePlanMode planMode
+                                pure (planDecisionFollowUp decision)
+                            PlanCancel -> do
+                                deactivatePlanMode planMode
+                                pure Nothing
+                            PlanRequestChanges _ ->
+                                pure (planDecisionFollowUp decision)
+            (True, Left ProposedPlanNotFound) -> pure Nothing
+            (True, Left parseError) ->
+                pure $ Just $
+                    "The proposed plan could not be reviewed because "
+                        <> renderProposedPlanParseError parseError
+                        <> ". Stay in plan mode and end with exactly one complete, non-nested <proposed_plan>…</proposed_plan> block outside fenced code."
             _ -> pure Nothing

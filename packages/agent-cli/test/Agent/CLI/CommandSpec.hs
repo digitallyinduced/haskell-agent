@@ -256,6 +256,12 @@ spec = do
             parseReplLine "/plan   keep  spaces"
                 `shouldBe` ReplPlan (Just "keep  spaces")
 
+        it "previews the current plan without arguments" do
+            parseReplLine "/view-plan" `shouldBe` ReplViewPlan
+            parseReplLine "  /View-Plan  " `shouldBe` ReplViewPlan
+            parseReplLine "/view-plan now"
+                `shouldBe` ReplCommandError "usage: /view-plan"
+
         it "asks a side question with the full suffix" do
             parseReplLine "/btw why this file?"
                 `shouldBe` ReplBtw "why this file?"
@@ -303,6 +309,7 @@ spec = do
                     , "effort"
                     , "fast"
                     , "plan"
+                    , "view-plan"
                     , "btw"
                     , "recap"
                     , "retry"
@@ -366,6 +373,7 @@ spec = do
                         && "/m" `elem` xs
                         && "/agents" `elem` xs
                         && "/mcp" `elem` xs
+                        && "/view-plan" `elem` xs
                         && "/btw" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
@@ -450,6 +458,7 @@ spec = do
             listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
+            listing `shouldSatisfy` ("/view-plan" `isInfixOf`)
             listing `shouldSatisfy` ("/agents" `isInfixOf`)
             listing `shouldSatisfy` ("/mcp" `isInfixOf`)
             listing `shouldSatisfy` ("/usage" `isInfixOf`)

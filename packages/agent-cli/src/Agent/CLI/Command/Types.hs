@@ -30,6 +30,8 @@ data ReplAction
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
+    | ReplViewPlan
+    -- ^ Preview the current session plan without creating a new approval.
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplRecap

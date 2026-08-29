@@ -1,19 +1,30 @@
 -- | Interactive plan-mode prompts: enter confirmation and approve /
--- request-changes / cancel when a plan is presented.
+-- revise / abandon when a plan is presented.
 module Agent.CLI.Plan
     ( cliPlanHooks
     , PlanEnterChoice(..)
     , PlanEnterState(..)
     , PlanExitState(..)
+    , TerminalPlanReviewState(..)
+    , TerminalPlanReviewDecision(..)
+    , PlanReviewFeedback(..)
+    , PlanLineComment(..)
+    , parsePlanReviewFeedback
     , applyPlanEnterKey
     , applyPlanExitKey
+    , applyTerminalPlanReviewKey
     , initialPlanEnterState
     , initialPlanExitState
+    , initialTerminalPlanReviewState
     , renderPlanEnterFrame
     , renderPlanExitFrame
+    , renderTerminalPlanReviewFrame
+    , ProposedPlanParseError(..)
+    , parseProposedPlan
+    , renderProposedPlanParseError
     , extractProposedPlan
-    , resumedPlanNeedsApproval
     , stripProposedPlan
+    , formatPlanPreview
     , renderPlanMarkdown
     , parsePlanDecisionAnswer
     , planDecisionFollowUp
@@ -43,16 +54,19 @@ import Agent.CLI.Style
     , terminalCyan
     , style
     )
+import Agent.OsPath (toText)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeHooks(..)
     , planApprovedContinuation
     )
+import Control.Applicative ((<|>))
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
 import Data.Char (toLower)
 import Data.IORef (IORef)
-import Data.Maybe (fromMaybe, isJust)
+import Data.List (sortOn)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -62,6 +76,7 @@ import System.Console.ANSI
     )
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin)
+import System.OsPath (OsPath)
 
 -- | Build plan-mode prompts. @escPaused@ pauses the Esc cancel watcher so
 -- arrow keys / single-key answers are not stolen mid-turn.
@@ -82,11 +97,49 @@ data PlanEnterState = PlanEnterState Text Int
 data PlanExitState = PlanExitState Int
     deriving (Eq, Show)
 
+-- | Typed outcomes for the terminal reviewer. The current core hook still
+-- consumes 'PlanDecision'; this type preserves the distinctions needed by the
+-- durable interaction adapter without overloading abandon for a closed UI.
+data TerminalPlanReviewDecision
+    = TerminalPlanApprove
+    | TerminalPlanApproveAnyway
+      -- ^ Advisory validation warnings were explicitly accepted.
+    | TerminalPlanRevise !PlanReviewFeedback
+    | TerminalPlanAbandon
+    | TerminalPlanDefer
+    deriving (Eq, Show)
+
+data TerminalPlanReviewState = TerminalPlanReviewState
+    { terminalReviewWarnings :: ![Text]
+    , terminalReviewIndex :: !Int
+    }
+    deriving (Eq, Show)
+
+data PlanReviewFeedback = PlanReviewFeedback
+    { planFeedbackOverall :: !Text
+    , planFeedbackLineComments :: ![PlanLineComment]
+    }
+    deriving (Eq, Show)
+
+data PlanLineComment = PlanLineComment
+    { planCommentStartLine :: !Int
+    , planCommentEndLine :: !Int
+    , planCommentBody :: !Text
+    }
+    deriving (Eq, Show)
+
 initialPlanEnterState :: Text -> PlanEnterState
 initialPlanEnterState reason = PlanEnterState reason 0
 
 initialPlanExitState :: PlanExitState
 initialPlanExitState = PlanExitState 0
+
+initialTerminalPlanReviewState :: [Text] -> TerminalPlanReviewState
+initialTerminalPlanReviewState warnings =
+    TerminalPlanReviewState
+        { terminalReviewWarnings = warnings
+        , terminalReviewIndex = 0
+        }
 
 confirmEnter :: IO Bool -> Text -> IO Bool
 confirmEnter resolveColor reason = do
@@ -129,6 +182,80 @@ renderPlanEnterFrame color (PlanEnterState reason index) =
             "↑↓/jk or scroll · click/enter · a/y enter · n/q/esc stay"
         ]
 
+-- | Warnings-ready terminal review reducer. This stays separate from the
+-- legacy 'PlanDecision' picker until the durable core hook carries typed
+-- outcomes; notably, Esc/Close defers instead of abandoning the plan.
+applyTerminalPlanReviewKey
+    :: PickerKey
+    -> TerminalPlanReviewState
+    -> Either TerminalPlanReviewDecision TerminalPlanReviewState
+applyTerminalPlanReviewKey key state = case key of
+    PickerKeyCancel -> Left TerminalPlanDefer
+    PickerKeyConfirm -> Left (terminalReviewDecisionAt state)
+    PickerKeyUp ->
+        Right state
+            { terminalReviewIndex =
+                movePlanIndex 4 (-1) state.terminalReviewIndex
+            }
+    PickerKeyDown ->
+        Right state
+            { terminalReviewIndex =
+                movePlanIndex 4 1 state.terminalReviewIndex
+            }
+    PickerKeyChar character -> case toLower character of
+        'a' -> Left (terminalReviewApproveDecision state)
+        'r' -> Left
+            (TerminalPlanRevise
+                (PlanReviewFeedback "" []))
+        's' -> Left
+            (TerminalPlanRevise
+                (PlanReviewFeedback "" []))
+        'b' -> Left TerminalPlanAbandon
+        'q' -> Left TerminalPlanDefer
+        _ -> Right state
+    PickerKeyBackspace -> Right state
+
+terminalReviewDecisionAt
+    :: TerminalPlanReviewState
+    -> TerminalPlanReviewDecision
+terminalReviewDecisionAt state = case state.terminalReviewIndex of
+    0 -> terminalReviewApproveDecision state
+    1 -> TerminalPlanRevise (PlanReviewFeedback "" [])
+    2 -> TerminalPlanAbandon
+    _ -> TerminalPlanDefer
+
+terminalReviewApproveDecision
+    :: TerminalPlanReviewState
+    -> TerminalPlanReviewDecision
+terminalReviewApproveDecision state
+    | null state.terminalReviewWarnings = TerminalPlanApprove
+    | otherwise = TerminalPlanApproveAnyway
+
+renderTerminalPlanReviewFrame
+    :: Bool
+    -> TerminalPlanReviewState
+    -> Text
+renderTerminalPlanReviewFrame color state =
+    Text.intercalate "\n" $
+        [roleWarn color (glyphWarn <> "Ready to implement this plan?")]
+            <> warningRows
+            <> [ renderPlanRow color (selected 0) approveLabel
+               , renderPlanRow color (selected 1) "Revise plan"
+               , renderPlanRow color (selected 2) "Abandon plan"
+               , renderPlanRow color (selected 3) "Close review"
+               , roleMuted color
+                    "↑↓/jk or scroll · click/enter · a approve · r revise · b abandon · q/esc close"
+               ]
+  where
+    selected index = state.terminalReviewIndex == index
+    approveLabel
+        | null state.terminalReviewWarnings = "Approve and implement"
+        | otherwise = "Approve anyway and implement"
+    warningRows =
+        [ roleWarn color ("Warning: " <> warning)
+        | warning <- state.terminalReviewWarnings
+        ]
+
 enterChoiceFromIndex :: Int -> PlanEnterChoice
 enterChoiceFromIndex 0 = PlanEnter
 enterChoiceFromIndex _ = PlanStayNormal
@@ -160,7 +287,7 @@ promptDecision interrupt color = do
             putTextLn stderr (roleSuccess color "plan approved")
             pure PlanApprove
         PlanCancel -> do
-            putTextLn stderr (roleMuted color "plan cancelled")
+            putTextLn stderr (roleMuted color "plan abandoned")
             pure PlanCancel
         PlanRequestChanges _ -> do
             notes <- readChangeNotes interrupt color
@@ -184,10 +311,10 @@ renderPlanExitFrame color (PlanExitState index) =
     Text.intercalate "\n"
         [ roleWarn color (glyphWarn <> "Ready to implement this plan?")
         , renderPlanRow color (index == 0) "Approve and implement"
-        , renderPlanRow color (index == 1) "Request changes"
-        , renderPlanRow color (index == 2) "Cancel plan"
+        , renderPlanRow color (index == 1) "Revise plan"
+        , renderPlanRow color (index == 2) "Abandon plan"
         , roleMuted color
-            "↑↓/jk or scroll · click/enter · a approve · s changes · q/esc cancel"
+            "↑↓/jk or scroll · click/enter · a approve · r revise · q/esc abandon"
         ]
 
 exitChoiceFromIndex :: Int -> PlanDecision
@@ -240,6 +367,63 @@ readChangeNotes interrupt color = do
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
+
+-- | Parse freeform terminal feedback while recognizing line comments of the
+-- form @L12: ...@ or @L12-L15: ...@. Invalid references remain ordinary
+-- overall feedback rather than being silently discarded.
+parsePlanReviewFeedback :: Text -> PlanReviewFeedback
+parsePlanReviewFeedback input =
+    let parsed = map parseFeedbackLine (Text.lines input)
+        comments = mapMaybe fst parsed
+        overall =
+            Text.strip
+                (Text.unlines
+                    [ line
+                    | (Nothing, line) <- parsed
+                    , not (Text.null (Text.strip line))
+                    ])
+    in PlanReviewFeedback
+        { planFeedbackOverall = overall
+        , planFeedbackLineComments = comments
+        }
+
+parseFeedbackLine :: Text -> (Maybe PlanLineComment, Text)
+parseFeedbackLine raw =
+    case Text.breakOn ":" (Text.strip raw) of
+        (reference, suffix)
+            | not (Text.null suffix)
+            , Just (startLine, endLine) <- parseLineReference reference
+            , let body = Text.strip (Text.drop 1 suffix)
+            , not (Text.null body) ->
+                ( Just PlanLineComment
+                    { planCommentStartLine = startLine
+                    , planCommentEndLine = endLine
+                    , planCommentBody = body
+                    }
+                , ""
+                )
+        _ -> (Nothing, raw)
+
+parseLineReference :: Text -> Maybe (Int, Int)
+parseLineReference raw =
+    case Text.splitOn "-" (Text.toUpper (Text.strip raw)) of
+        [single] -> do
+            line <- parsePositiveLine single
+            pure (line, line)
+        [start, end] -> do
+            startLine <- parsePositiveLine start
+            endLine <- parsePositiveLine end
+            if endLine < startLine
+                then Nothing
+                else pure (startLine, endLine)
+        _ -> Nothing
+
+parsePositiveLine :: Text -> Maybe Int
+parsePositiveLine raw = do
+    digits <- Text.stripPrefix "L" raw
+    case reads (Text.unpack digits) of
+        [(line, "")] | line > 0 -> Just line
+        _ -> Nothing
 
 askQuestion :: InterruptState -> IO Bool -> Text -> [Text] -> IO (Maybe Text)
 askQuestion interrupt resolveColor question options = do
@@ -302,14 +486,35 @@ renderPlanMarkdown :: Bool -> Text -> Text
 renderPlanMarkdown color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
+-- | Markdown shown by @/view-plan@. Keeping the empty state explicit avoids
+-- presenting a blank system block and makes it clear which artifact is being
+-- inspected.
+formatPlanPreview :: OsPath -> Text -> Text
+formatPlanPreview path content
+    | Text.null (Text.strip content) =
+        Text.unlines
+            [ "# Plan"
+            , ""
+            , "_No plan has been written yet._"
+            , ""
+            , "Plan file: `" <> toText path <> "`"
+            ]
+    | otherwise =
+        content
+            <> "\n\n---\nPlan file: `"
+            <> toText path
+            <> "`"
+
 parsePlanDecisionAnswer :: Text -> Maybe PlanDecision
 parsePlanDecisionAnswer raw =
     case Text.toLower (Text.strip raw) of
         "approve" -> Just PlanApprove
         "yes" -> Just PlanApprove
         "changes" -> Just (PlanRequestChanges "")
+        "revise" -> Just (PlanRequestChanges "")
         "q" -> Just PlanCancel
         "cancel" -> Just PlanCancel
+        "abandon" -> Just PlanCancel
         "no" -> Just PlanCancel
         answer -> case Text.unpack answer of
             [key] -> planDecisionForKey key
@@ -323,6 +528,7 @@ planDecisionForKey key = case toLower key of
     'c' -> Just (PlanRequestChanges "")
     'r' -> Just (PlanRequestChanges "")
     'n' -> Just PlanCancel
+    'q' -> Just PlanCancel
     _ -> Nothing
 
 -- | Build the synthetic turn that follows a plan decision.
@@ -337,46 +543,224 @@ planDecisionFollowUp (PlanRequestChanges notes) =
         ]
 planDecisionFollowUp PlanCancel = Nothing
 
--- | Pull the first @\<proposed_plan\>…\</proposed_plan\>@ block (Codex).
-extractProposedPlan :: Text -> Maybe Text
-extractProposedPlan text =
-    case Text.breakOn openTag text of
-        (_, afterOpen)
-            | Text.null afterOpen -> Nothing
-            | otherwise ->
-                let rest = Text.drop (Text.length openTag) afterOpen
-                in case Text.breakOn closeTag rest of
-                    (inner, afterClose)
-                        | Text.null afterClose -> Nothing
-                        | otherwise -> Just (Text.strip inner)
-  where
-    openTag = "<proposed_plan>"
-    closeTag = "</proposed_plan>"
+-- | Why a Codex @\<proposed_plan\>@ envelope could not be accepted.
+--
+-- Tags inside fenced Markdown code blocks are deliberately ignored. A valid
+-- proposal contains exactly one complete, non-nested envelope.
+data ProposedPlanParseError
+    = ProposedPlanNotFound
+    | ProposedPlanUnclosed
+    | ProposedPlanUnexpectedClose
+    | ProposedPlanNested
+    | ProposedPlanMultiple
+    deriving (Eq, Show)
 
--- | Whether a resumed transcript ends with a plan that still needs the
--- user's decision.  Codex presents its plan in assistant text rather than
--- through an explicit exit tool, so this is the durable signal available
--- when rebuilding the in-memory plan-mode state on resume.
-resumedPlanNeedsApproval :: [Maybe Text] -> Bool
-resumedPlanNeedsApproval assistantTexts =
-    case reverse [text | Just text <- assistantTexts] of
-        lastText : _ -> isJust (extractProposedPlan lastText)
-        _ -> False
+renderProposedPlanParseError :: ProposedPlanParseError -> Text
+renderProposedPlanParseError = \case
+    ProposedPlanNotFound ->
+        "no <proposed_plan> block was found outside fenced code"
+    ProposedPlanUnclosed ->
+        "the <proposed_plan> block is missing </proposed_plan>"
+    ProposedPlanUnexpectedClose ->
+        "found </proposed_plan> without a matching opening tag"
+    ProposedPlanNested ->
+        "<proposed_plan> blocks must not be nested"
+    ProposedPlanMultiple ->
+        "expected exactly one <proposed_plan> block"
+
+-- | Parse exactly one complete, non-nested proposal outside fenced Markdown
+-- code. Unlike the compatibility 'extractProposedPlan' wrapper, callers can
+-- report the concrete malformed-envelope reason.
+parseProposedPlan :: Text -> Either ProposedPlanParseError Text
+parseProposedPlan text =
+    proposalBody text <$> parseProposedPlanMatch text
+
+-- | Compatibility wrapper for callers that only need presence/absence.
+extractProposedPlan :: Text -> Maybe Text
+extractProposedPlan = either (const Nothing) Just . parseProposedPlan
 
 -- | Remove proposed_plan tags for display after the approval UI shows the body.
 stripProposedPlan :: Text -> Text
 stripProposedPlan text =
-    case Text.breakOn "<proposed_plan>" text of
-        (before, afterOpen)
-            | Text.null afterOpen -> text
-            | otherwise ->
-                let rest = Text.drop (Text.length "<proposed_plan>") afterOpen
-                    (_, afterClose) = Text.breakOn "</proposed_plan>" rest
-                    after =
-                        if Text.null afterClose
-                            then ""
-                            else Text.drop (Text.length "</proposed_plan>") afterClose
-                in Text.strip (before <> after)
+    case parseProposedPlanMatch text of
+        Left _ -> text
+        Right match ->
+            Text.strip
+                ( Text.take match.proposalOpenOffset text
+                    <> Text.drop match.proposalEndOffset text
+                )
+
+data ProposalTagKind = ProposalOpen | ProposalClose
+    deriving (Eq, Show)
+
+data LocatedProposalTag = LocatedProposalTag
+    { proposalTagOffset :: !Int
+    , proposalTagKind :: !ProposalTagKind
+    }
+    deriving (Eq, Show)
+
+data ProposedPlanMatch = ProposedPlanMatch
+    { proposalOpenOffset :: !Int
+    , proposalContentOffset :: !Int
+    , proposalCloseOffset :: !Int
+    , proposalEndOffset :: !Int
+    }
+    deriving (Eq, Show)
+
+data MarkdownFence = MarkdownFence !Char !Int
+    deriving (Eq, Show)
+
+openProposalTag :: Text
+openProposalTag = "<proposed_plan>"
+
+closeProposalTag :: Text
+closeProposalTag = "</proposed_plan>"
+
+parseProposedPlanMatch
+    :: Text
+    -> Either ProposedPlanParseError ProposedPlanMatch
+parseProposedPlanMatch text =
+    go Nothing Nothing (proposalTagsOutsideFences text)
+  where
+    go
+        :: Maybe Int
+        -> Maybe ProposedPlanMatch
+        -> [LocatedProposalTag]
+        -> Either ProposedPlanParseError ProposedPlanMatch
+    go open completed = \case
+        []
+            | Just _ <- open -> Left ProposedPlanUnclosed
+            | Just match <- completed -> Right match
+            | otherwise -> Left ProposedPlanNotFound
+        tag : rest -> case tag.proposalTagKind of
+            ProposalOpen
+                | Just _ <- open -> Left ProposedPlanNested
+                | Just _ <- completed -> Left ProposedPlanMultiple
+                | otherwise ->
+                    go (Just tag.proposalTagOffset) completed rest
+            ProposalClose -> case open of
+                Nothing -> Left ProposedPlanUnexpectedClose
+                Just openOffset ->
+                    let match = ProposedPlanMatch
+                            { proposalOpenOffset = openOffset
+                            , proposalContentOffset =
+                                openOffset + Text.length openProposalTag
+                            , proposalCloseOffset = tag.proposalTagOffset
+                            , proposalEndOffset =
+                                tag.proposalTagOffset
+                                    + Text.length closeProposalTag
+                            }
+                    in go Nothing (Just match) rest
+
+proposalBody :: Text -> ProposedPlanMatch -> Text
+proposalBody text match =
+    Text.strip
+        (Text.take
+            (match.proposalCloseOffset - match.proposalContentOffset)
+            (Text.drop match.proposalContentOffset text))
+
+proposalTagsOutsideFences :: Text -> [LocatedProposalTag]
+proposalTagsOutsideFences =
+    go 0 Nothing . Text.splitOn "\n"
+  where
+    go _ _ [] = []
+    go offset fence (line : rest) =
+        let nextOffset = offset + Text.length line + 1
+        in case fence of
+            Nothing -> case openingFence line of
+                Just opened -> go nextOffset (Just opened) rest
+                Nothing ->
+                    proposalTagsOnLine offset line
+                        <> go nextOffset Nothing rest
+            Just opened
+                | closesFence opened line ->
+                    go nextOffset Nothing rest
+                | otherwise ->
+                    go nextOffset fence rest
+
+proposalTagsOnLine :: Int -> Text -> [LocatedProposalTag]
+proposalTagsOnLine base line =
+    sortOn (.proposalTagOffset)
+        (locate ProposalOpen openProposalTag <> locate ProposalClose closeProposalTag)
+  where
+    locate kind needle =
+        [ LocatedProposalTag
+            { proposalTagOffset = base + Text.length prefix
+            , proposalTagKind = kind
+            }
+        | (prefix, _) <- Text.breakOnAll needle line
+        ]
+
+openingFence :: Text -> Maybe MarkdownFence
+openingFence line = do
+    rest <- fenceLineStart line
+    (marker, _) <- Text.uncons rest
+    if marker /= '`' && marker /= '~'
+        then Nothing
+        else
+            let width = Text.length (Text.takeWhile (== marker) rest)
+            in if width >= 3
+                then Just (MarkdownFence marker width)
+                else Nothing
+
+closesFence :: MarkdownFence -> Text -> Bool
+closesFence (MarkdownFence marker openingWidth) line =
+    case fenceLineStart line of
+        Nothing -> False
+        Just rest ->
+            let width = Text.length (Text.takeWhile (== marker) rest)
+                trailing = Text.drop width rest
+            in width >= openingWidth
+                && Text.all isFenceTrailingSpace trailing
+
+-- Conservatively recognize fences inside block quotes, list items, and
+-- indented code. False negatives here could authorize a proposal example as
+-- the real plan, while a false positive merely asks the model to restate it.
+fenceLineStart :: Text -> Maybe Text
+fenceLineStart = Just . stripContainers . dropIndent
+  where
+    dropIndent = Text.dropWhile isIndent
+    isIndent character = character == ' ' || character == '\t'
+
+    stripContainers input
+        | Just rest <- Text.stripPrefix ">" input =
+            stripContainers (dropIndent rest)
+        | Just rest <- stripListMarker input =
+            stripContainers (dropIndent rest)
+        | otherwise = input
+
+stripListMarker :: Text -> Maybe Text
+stripListMarker input =
+    bullet <|> ordered
+  where
+    bullet = do
+        (marker, rest) <- Text.uncons input
+        if marker `elem` ['-', '+', '*'] && startsWithIndent rest
+            then Just rest
+            else Nothing
+    ordered =
+        let (digits, suffix) = Text.span isAsciiDigit input
+        in if Text.null digits || Text.length digits > 9
+            then Nothing
+            else do
+                (marker, rest) <- Text.uncons suffix
+                if marker `elem` ['.', ')'] && startsWithIndent rest
+                    then Just rest
+                    else Nothing
+
+startsWithIndent :: Text -> Bool
+startsWithIndent text =
+    case Text.uncons text of
+        Just (character, _) -> character == ' ' || character == '\t'
+        Nothing -> False
+
+isAsciiDigit :: Char -> Bool
+isAsciiDigit character =
+    character >= '0' && character <= '9'
+
+isFenceTrailingSpace :: Char -> Bool
+isFenceTrailingSpace char =
+    char == ' ' || char == '\t' || char == '\r'
 
 putTextLn :: Handle -> Text -> IO ()
 putTextLn handle text = do

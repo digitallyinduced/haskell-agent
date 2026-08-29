@@ -75,7 +75,6 @@ import Agent.CLI.PendingInputs
     ( enqueuePendingInput, newPendingInputs )
 import Agent.CLI.Plan
     ( cliPlanHooks
-    , resumedPlanNeedsApproval
     )
 import Agent.CLI.Prompt ( subscriptionSubagentModelGuidance )
 import Agent.CLI.PromptHooks
@@ -115,8 +114,7 @@ import Agent.CLI.Session
       Persistence(PersistenceDisabled),
       SessionHandle(sessionDir, sessionMeta),
       SessionMeta(metaId, metaTransportModel, metaProvider,
-                  metaConnection, metaModel, metaDialect, metaEffort),
-      SessionTurn(turnAssistantText) )
+                  metaConnection, metaModel, metaDialect, metaEffort) )
 import Agent.CLI.Session.Attachments ( putImagePreview )
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ()
@@ -206,7 +204,6 @@ import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planSessionDir),
-      activatePlanMode,
       PlanModeHooks(planAskQuestion, PlanModeHooks, planConfirmEnter,
                     planDecideExit),
       PlanDecision(PlanCancel) )
@@ -866,12 +863,6 @@ runAgentTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
         planMode = coding.codingPlanMode
-        resumedPlanPending =
-            case resumed of
-                Just (_, turns) ->
-                    resumedPlanNeedsApproval
-                        (map (.turnAssistantText) turns)
-                Nothing -> False
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
             writeIORef planMode.planSessionDir (Just dir)
@@ -899,7 +890,6 @@ runAgentTools
                                                     (join (readIORef codeModeCloseRef)
                                                         `finally`
                                                             cleanupScratch)))))
-    when resumedPlanPending (activatePlanMode planMode)
     runAgentSession
         loaded
         learnAboutUserRequested

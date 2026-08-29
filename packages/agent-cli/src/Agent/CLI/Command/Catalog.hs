@@ -12,6 +12,7 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
+    , cmd "view-plan" [] "/view-plan" "Preview the current session plan" False
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
     , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False

@@ -28,7 +28,7 @@ import Agent.CLI.Command
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
                  ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
-                 ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
+                 ReplToggleAlwaysApprove, ReplCompact, ReplPlan, ReplViewPlan,
                  ReplBtw, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplLogin, ReplUsage, ReplReloadAuth,
@@ -64,7 +64,7 @@ import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models ()
 import Agent.CLI.Options ( ApprovalPolicy )
 import Agent.CLI.PendingInputs ()
-import Agent.CLI.Plan ()
+import Agent.CLI.Plan ( formatPlanPreview, renderPlanMarkdown )
 import Agent.CLI.Progress ()
 import Agent.CLI.Project ()
 import Agent.CLI.Prompt ()
@@ -192,6 +192,7 @@ import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef, planSessionDir),
       activatePlanMode,
+      readPlanMarkdown,
       planFilePath,
       PlanModeState(PlanPending) )
 import Agent.Tools.Secret ()
@@ -669,6 +670,18 @@ handleReplLine
                             Just providerSwitch ->
                                 pure (RunSwitchProvider providerSwitch)
                             Nothing -> continue
+                    ReplViewPlan -> do
+                        content <- readPlanMarkdown planMode
+                        path <- planFilePath planMode
+                        let preview = formatPlanPreview path content
+                        case fullscreen of
+                            Just runtime ->
+                                emitUiEvent runtime (UiSystemMessage preview)
+                            Nothing -> do
+                                color <- resolveColor stdout
+                                Text.putStrLn
+                                    (renderPlanMarkdown color preview)
+                        continue
                     ReplBtw question -> do
                         runBtwQuestion True env question
                         continue

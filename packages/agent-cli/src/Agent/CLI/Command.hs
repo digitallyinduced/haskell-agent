@@ -223,6 +223,10 @@ parseSlash catalog raw line = case Text.words line of
                         Text.strip (Text.drop (Text.length command) line)
                 in ReplPlan
                     (if Text.null description then Nothing else Just description)
+            "view-plan" ->
+                if null args
+                    then ReplViewPlan
+                    else ReplCommandError "usage: /view-plan"
             "btw" ->
                 let question =
                         Text.strip (Text.drop (Text.length command) line)

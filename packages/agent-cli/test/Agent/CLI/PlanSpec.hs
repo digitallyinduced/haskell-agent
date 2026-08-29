@@ -4,6 +4,7 @@ import Agent.CLI.Plan
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Tools.PlanMode (PlanDecision(..))
 import qualified Data.Text as Text
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
@@ -17,6 +18,8 @@ spec = do
             applyPlanEnterKey (PickerKeyChar 'Y') state
                 `shouldBe` Left PlanEnter
             applyPlanEnterKey (PickerKeyChar 'n') state
+                `shouldBe` Left PlanStayNormal
+            applyPlanEnterKey (PickerKeyChar 'q') state
                 `shouldBe` Left PlanStayNormal
             applyPlanEnterKey PickerKeyCancel state
                 `shouldBe` Left PlanStayNormal
@@ -42,6 +45,8 @@ spec = do
                 `shouldBe` replicate 3 (Left (PlanRequestChanges ""))
             applyPlanExitKey (PickerKeyChar 'n') initialPlanExitState
                 `shouldBe` Left PlanCancel
+            applyPlanExitKey (PickerKeyChar 'q') initialPlanExitState
+                `shouldBe` Left PlanCancel
             applyPlanExitKey PickerKeyCancel initialPlanExitState
                 `shouldBe` Left PlanCancel
             case applyPlanExitKey PickerKeyDown initialPlanExitState of
@@ -53,43 +58,141 @@ spec = do
         it "renders all decisions and keyboard hints" do
             let frame = renderPlanExitFrame False initialPlanExitState
             frame `shouldSatisfy` Text.isInfixOf "› Approve and implement"
-            frame `shouldSatisfy` Text.isInfixOf "Request changes"
-            frame `shouldSatisfy` Text.isInfixOf "q/esc cancel"
+            frame `shouldSatisfy` Text.isInfixOf "Revise plan"
+            frame `shouldSatisfy` Text.isInfixOf "Abandon plan"
+            frame `shouldSatisfy` Text.isInfixOf "q/esc abandon"
 
-    describe "extractProposedPlan" do
+    describe "typed terminal plan review" do
+        it "requires approve-anyway acknowledgement when warnings exist" do
+            let state =
+                    initialTerminalPlanReviewState
+                        ["Verification section is missing."]
+                frame = renderTerminalPlanReviewFrame False state
+            frame `shouldSatisfy`
+                Text.isInfixOf "Approve anyway and implement"
+            frame `shouldSatisfy`
+                Text.isInfixOf "Verification section is missing"
+            applyTerminalPlanReviewKey (PickerKeyChar 'a') state
+                `shouldBe` Left TerminalPlanApproveAnyway
+            applyTerminalPlanReviewKey
+                (PickerKeyChar 'a')
+                (initialTerminalPlanReviewState [])
+                `shouldBe` Left TerminalPlanApprove
+
+        it "distinguishes revise, abandon, and close/defer" do
+            let state = initialTerminalPlanReviewState []
+                emptyFeedback = PlanReviewFeedback "" []
+            applyTerminalPlanReviewKey (PickerKeyChar 'r') state
+                `shouldBe` Left (TerminalPlanRevise emptyFeedback)
+            applyTerminalPlanReviewKey (PickerKeyChar 'b') state
+                `shouldBe` Left TerminalPlanAbandon
+            applyTerminalPlanReviewKey PickerKeyCancel state
+                `shouldBe` Left TerminalPlanDefer
+            applyTerminalPlanReviewKey (PickerKeyChar 'q') state
+                `shouldBe` Left TerminalPlanDefer
+
+        it "navigates all four decisions" do
+            let state = initialTerminalPlanReviewState []
+            case applyTerminalPlanReviewKey PickerKeyUp state of
+                Left _ -> expectationFailure "up unexpectedly selected"
+                Right closeState ->
+                    applyTerminalPlanReviewKey PickerKeyConfirm closeState
+                        `shouldBe` Left TerminalPlanDefer
+
+    describe "parsePlanReviewFeedback" do
+        it "separates line and range comments from overall feedback" do
+            parsePlanReviewFeedback
+                "Please simplify this.\nL12: Explain the retry.\n\
+                \L20-L23: Add exact tests."
+                `shouldBe` PlanReviewFeedback
+                    { planFeedbackOverall = "Please simplify this."
+                    , planFeedbackLineComments =
+                        [ PlanLineComment 12 12 "Explain the retry."
+                        , PlanLineComment 20 23 "Add exact tests."
+                        ]
+                    }
+
+        it "keeps malformed or descending references as overall feedback" do
+            parsePlanReviewFeedback
+                "L0: invalid\nL9-L3: backwards\nL4:"
+                `shouldBe` PlanReviewFeedback
+                    { planFeedbackOverall =
+                        "L0: invalid\nL9-L3: backwards\nL4:"
+                    , planFeedbackLineComments = []
+                    }
+
+    describe "parseProposedPlan" do
         it "pulls the inner markdown from a proposed_plan block" do
-            extractProposedPlan
+            parseProposedPlan
                 "intro\n<proposed_plan>\n# Title\n\nbody\n</proposed_plan>\nout"
-                `shouldBe` Just "# Title\n\nbody"
+                `shouldBe` Right "# Title\n\nbody"
 
-        it "returns Nothing without a closed block" do
-            extractProposedPlan "no plan here" `shouldBe` Nothing
-            extractProposedPlan "<proposed_plan>\nunclosed" `shouldBe` Nothing
+        it "reports missing and unclosed blocks explicitly" do
+            parseProposedPlan "no plan here"
+                `shouldBe` Left ProposedPlanNotFound
+            parseProposedPlan "<proposed_plan>\nunclosed"
+                `shouldBe` Left ProposedPlanUnclosed
 
-    describe "resumedPlanNeedsApproval" do
-        it "restores approval when the latest assistant turn is a proposal" do
-            resumedPlanNeedsApproval
-                [ Just "earlier"
-                , Just "<proposed_plan>\n# Plan\n</proposed_plan>"
-                ]
-                `shouldBe` True
+        it "ignores proposal-looking tags inside backtick fences" do
+            parseProposedPlan
+                "```xml\n<proposed_plan>fake</proposed_plan>\n```\n\
+                \<proposed_plan>real</proposed_plan>"
+                `shouldBe` Right "real"
 
-        it "does not restore approval after implementation continues" do
-            resumedPlanNeedsApproval
-                [ Just "<proposed_plan>\n# Plan\n</proposed_plan>"
-                , Just "Implementation complete."
-                ]
-                `shouldBe` False
+        it "ignores proposal-looking tags inside tilde fences" do
+            parseProposedPlan
+                "~~~\n<proposed_plan>fake</proposed_plan>\n~~~~\n\
+                \<proposed_plan>real</proposed_plan>"
+                `shouldBe` Right "real"
 
-        it "ignores turns without assistant text" do
-            resumedPlanNeedsApproval [Nothing, Just "ordinary answer"]
-                `shouldBe` False
+        it "ignores fenced examples nested in quotes and lists" do
+            parseProposedPlan
+                "> ```xml\n> <proposed_plan>quoted</proposed_plan>\n> ```\n\
+                \- example\n\
+                \  ~~~xml\n\
+                \  <proposed_plan>listed</proposed_plan>\n\
+                \  ~~~\n\
+                \<proposed_plan>real</proposed_plan>"
+                `shouldBe` Right "real"
+
+        it "rejects nested and multiple blocks" do
+            parseProposedPlan
+                "<proposed_plan>outer <proposed_plan>inner</proposed_plan></proposed_plan>"
+                `shouldBe` Left ProposedPlanNested
+            parseProposedPlan
+                "<proposed_plan>one</proposed_plan>\n\
+                \<proposed_plan>two</proposed_plan>"
+                `shouldBe` Left ProposedPlanMultiple
+
+        it "rejects an unmatched closing tag" do
+            parseProposedPlan "</proposed_plan>"
+                `shouldBe` Left ProposedPlanUnexpectedClose
+
+        it "keeps a compatibility Maybe wrapper" do
+            extractProposedPlan "<proposed_plan>ok</proposed_plan>"
+                `shouldBe` Just "ok"
+            extractProposedPlan "<proposed_plan>broken"
+                `shouldBe` Nothing
 
     describe "stripProposedPlan" do
         it "removes the tagged block and keeps surrounding text" do
             stripProposedPlan
                 "before\n<proposed_plan>\nplan\n</proposed_plan>\nafter"
                 `shouldBe` "before\n\nafter"
+
+        it "does not strip proposal examples inside fenced code" do
+            stripProposedPlan
+                "```xml\n<proposed_plan>example</proposed_plan>\n```\n\
+                \before\n<proposed_plan>real</proposed_plan>\nafter"
+                `shouldBe`
+                    "```xml\n<proposed_plan>example</proposed_plan>\n```\n\
+                    \before\n\nafter"
+
+        it "leaves malformed output intact" do
+            let malformed =
+                    "<proposed_plan>one</proposed_plan>\n\
+                    \<proposed_plan>two</proposed_plan>"
+            stripProposedPlan malformed `shouldBe` malformed
 
     describe "renderPlanMarkdown" do
         it "leaves plan Markdown unchanged when color is off" do
@@ -100,6 +203,22 @@ spec = do
             let out = renderPlanMarkdown True "# Plan"
             out `shouldSatisfy` Text.isInfixOf "Plan"
             out `shouldSatisfy` (not . Text.isInfixOf "# Plan")
+
+    describe "formatPlanPreview" do
+        let path = unsafeEncodeUtf "/tmp/session/plan.md"
+
+        it "renders an explicit empty state and path" do
+            let preview = formatPlanPreview path " \n"
+            preview `shouldSatisfy`
+                Text.isInfixOf "No plan has been written yet"
+            preview `shouldSatisfy`
+                Text.isInfixOf "/tmp/session/plan.md"
+
+        it "preserves plan markdown and identifies its file" do
+            formatPlanPreview path "# Plan\n\n- verify"
+                `shouldBe`
+                    "# Plan\n\n- verify\n\n---\n\
+                    \Plan file: `/tmp/session/plan.md`"
 
     describe "parsePlanDecisionAnswer" do
         it "maps approve / changes / cancel aliases" do
