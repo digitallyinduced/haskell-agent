@@ -1,120 +1,64 @@
 module Agent.MCP.Supervisor where
 
 
-import Agent.Tools.IO (terminateProcessGroup)
-import Agent.Tools.Types
-    ( AppTool(..)
-    , ApprovalRule(..)
-    , ToolExecutionPolicy(..)
-    , ToolSchema(..)
-    )
-import Agent.ToolDispatch (typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
-import Control.Concurrent.Async
-    ( Async
-    , asyncWithUnmask
-    , cancel
-    , mapConcurrently
-    , waitCatch
-    )
-import Control.Concurrent.QSem
-    ( newQSem
-    , signalQSem
-    , waitQSem
-    )
-import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
-    , modifyMVar_
-    , newMVar
-    , withMVar
-    )
-import Control.Concurrent.STM
-    ( STM
-    , TMVar
-    , TVar
-    , atomically
-    , modifyTVar'
-    , newEmptyTMVar
-    , newEmptyTMVarIO
-    , newTVarIO
-    , readTMVar
-    , readTVar
-    , readTVarIO
-    , takeTMVar
-    , tryPutTMVar
-    , writeTVar
-    )
-import Control.Exception.Safe
-    ( SomeException
-    , displayException
-    , bracket_
-    , finally
-    , mask
-    , onException
-    , throwIO
-    , tryAny
-    )
-import Control.Monad (forM, unless, void, when)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isAlphaNum)
-import Data.IORef
-    ( IORef
-    , atomicModifyIORef'
-    , newIORef
-    , readIORef
-    )
-import qualified Data.IntMap.Strict as IntMap
-import qualified Data.Map.Strict as Map
-import Data.List (find, sortOn)
-import Data.Maybe (catMaybes, isJust)
-import Data.Ord (Down(..))
-import Data.Scientific (floatingOrInteger)
-import qualified Data.Set as Set
-import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
-import Data.Text.Encoding.Error (lenientDecode)
-import qualified Data.Vector as Vector
-import System.Environment (getEnvironment)
-import System.Directory (getCurrentDirectory)
-import System.IO
-    ( BufferMode(..)
-    , Handle
-    , hClose
-    , hFlush
-    , hSetBinaryMode
-    , hSetBuffering
-    )
-import System.Posix.Types (ProcessGroupID)
-import System.Process
-    ( CreateProcess(..)
-    , ProcessHandle
-    , StdStream(..)
-    , createProcess
-    , getPid
-    , proc
-    )
-import System.Timeout (timeout)
-import Agent.MCP.Types
-import Agent.MCP.Client (exceptionSummary, mcpClientStatus)
+import Agent.MCP.Client (closeMcpClient, exceptionSummary)
 import Agent.MCP.Fleet
     ( closeMcpFleet
     , mcpFleetStatuses
     , resolveEffectiveCwds
     , sameServerConfigs
-    , startMcpFleetProgressive
-    , startMcpFleetWithProgress
+    , startMcpFleetProgressiveHooks
+    , startMcpFleetWithProgressHooks
     )
+import Agent.MCP.Types
+import Control.Concurrent.Async
+    ( asyncWithUnmask
+    , cancel
+    , waitCatch
+    )
+import Control.Concurrent.MVar
+    ( modifyMVar
+    , modifyMVar_
+    , newMVar
+    )
+import Control.Concurrent.STM
+    ( TMVar
+    , atomically
+    , newEmptyTMVarIO
+    , readTMVar
+    , tryPutTMVar
+    )
+import Control.Exception.Safe
+    ( mask
+    , onException
+    , tryAny
+    )
+import Control.Monad (unless, void)
+import Data.IORef
+    ( atomicModifyIORef'
+    , newIORef
+    )
+import Data.List (find)
+import Data.Text (Text)
+import qualified Data.Text as Text
+
 newMcpSupervisor :: IO McpSupervisor
-newMcpSupervisor =
-    McpSupervisor <$> newMVar McpSupervisorState
+newMcpSupervisor = newMcpSupervisorWith defaultMcpHostHooks
+
+-- | A supervisor whose fleets share the given host hooks (elicitation UI,
+-- client identity).
+newMcpSupervisorWith :: McpHostHooks -> IO McpSupervisor
+newMcpSupervisorWith hooks = do
+    state <- newMVar McpSupervisorState
         { supervisorClosed = False
         , supervisorNextLeaseId = 1
         , supervisorEntries = []
         , supervisorPending = []
+        }
+    pure McpSupervisor
+        { supervisorState = state
+        , supervisorHooks = hooks
         }
 
 acquireMcpFleet
@@ -123,7 +67,7 @@ acquireMcpFleet
     -> IO McpFleetLease
 acquireMcpFleet supervisor configs =
     resolveEffectiveCwds configs >>= acquireMcpFleetWith supervisor False
-        (startMcpFleetWithProgress (const (pure ())))
+        (startMcpFleetWithProgressHooks supervisor.supervisorHooks (const (pure ())))
 
 acquireMcpFleetWithProgress
     :: McpSupervisor
@@ -132,7 +76,7 @@ acquireMcpFleetWithProgress
     -> IO McpFleetLease
 acquireMcpFleetWithProgress supervisor report configs =
     resolveEffectiveCwds configs >>= acquireMcpFleetWith supervisor False
-        (startMcpFleetWithProgress report)
+        (startMcpFleetWithProgressHooks supervisor.supervisorHooks report)
 
 acquireMcpFleetProgressive
     :: McpSupervisor
@@ -141,7 +85,7 @@ acquireMcpFleetProgressive
     -> IO McpFleetLease
 acquireMcpFleetProgressive supervisor report configs =
     resolveEffectiveCwds configs >>= acquireMcpFleetWith supervisor True
-        (startMcpFleetProgressive report)
+        (startMcpFleetProgressiveHooks supervisor.supervisorHooks report)
 
 acquireMcpFleetWith
     :: McpSupervisor

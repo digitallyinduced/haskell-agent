@@ -32,6 +32,7 @@ import Agent.CLI.Style
     )
 import Agent.MCP (McpToolRegistration(..))
 import Agent.Tools.Types (AppTool(..))
+import Agent.MCP (McpProtocolPreference(..))
 import Data.Char (isAlphaNum, isSpace, toLower)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
@@ -320,6 +321,8 @@ promptNewServer config =
                                         , mcpEnv = Map.empty
                                         , mcpStartupTimeoutSeconds = 30
                                         , mcpRequestTimeoutSeconds = 60
+                                        , mcpOAuth = Nothing
+                                        , mcpProtocol = McpProtocolAuto
                                         }
                                     )
 

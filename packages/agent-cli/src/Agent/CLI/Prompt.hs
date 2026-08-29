@@ -1,6 +1,8 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
-    ( codexEnvironmentContext
+    ( appendMcpInstructions
+    , codexEnvironmentContext
+    , mcpInstructionsGuidance
     , secretInputGuidance
     , subscriptionSubagentModelGuidance
     , sessionTempGuidance
@@ -203,6 +205,22 @@ secretInputGuidance available
             , "- Pass that path to a consumer that supports file input and delete the file promptly after use."
             , "- Never read, print, summarize, or otherwise expose the secret file contents."
             ]
+
+-- | Natural-language guidance advertised by MCP servers, appended verbatim
+-- under a heading per server.
+mcpInstructionsGuidance :: [(Text, Text)] -> Text
+mcpInstructionsGuidance [] = ""
+mcpInstructionsGuidance instructions =
+    Text.intercalate "\n\n" $
+        "MCP server instructions:"
+            : [ "## " <> name <> "\n" <> body
+              | (name, body) <- instructions
+              ]
+
+appendMcpInstructions :: [(Text, Text)] -> Text -> Text
+appendMcpInstructions [] base = base
+appendMcpInstructions instructions base =
+    base <> "\n\n" <> mcpInstructionsGuidance instructions
 
 learnedSkillGuidance :: Set Text -> Text
 learnedSkillGuidance available

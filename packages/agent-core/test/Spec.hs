@@ -9,6 +9,7 @@ import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.MCPSpec as MCPSpec
+import qualified Agent.MCP.OAuthSpec as MCPOAuthSpec
 import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
@@ -47,6 +48,7 @@ main = hspec do
     JsonTextSpec.spec
     LoopSpec.spec
     MCPSpec.spec
+    MCPOAuthSpec.spec
     OsPathSpec.spec
     ProjectInstructionsSpec.spec
     ProviderOptionsSpec.spec

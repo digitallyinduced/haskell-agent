@@ -745,18 +745,19 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 today <- utctDay <$> getCurrentTime
                 let enabledTools = activeShellTools ghciEnabled bashEnabled
                     enabledNames = map (.appToolName) enabledTools
-                    instructionText = case codexCatalogSession of
-                        Just catalog ->
-                            catalog.catalogInstructionsFor
-                                enabledNames sessionTmp
-                        Nothing ->
-                            systemPromptForTools
-                                dialect
-                                enabledNames
-                                cwd
-                                sessionTmp
-                                today
-                                (isOneShot options)
+                    instructionText =
+                        appendMcpInstructions mcpInstructions case codexCatalogSession of
+                            Just catalog ->
+                                catalog.catalogInstructionsFor
+                                    enabledNames sessionTmp
+                            Nothing ->
+                                systemPromptForTools
+                                    dialect
+                                    enabledNames
+                                    cwd
+                                    sessionTmp
+                                    today
+                                    (isOneShot options)
                     toolSchemas = schemasFromAppTools dialect enabledTools
                 modifyIORef' paramsRef
                     (setRequestInstructionsAndTools
@@ -894,6 +895,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionHome = home
             , sessionMcpRegistrations = mcpRegistrations
             , sessionMcpWarnings = mcpWarnings
+            , sessionMcpFleet = mcpFleet
             , sessionSetTempDir = setSessionTempDir
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool

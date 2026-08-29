@@ -50,6 +50,11 @@ library
                     , Agent.ReasoningEffort
                     , Agent.Loop
                     , Agent.MCP
+                    , Agent.MCP.Client
+                    , Agent.MCP.Elicitation
+                    , Agent.MCP.Fleet
+                    , Agent.MCP.Supervisor
+                    , Agent.MCP.Types
                     , Agent.MCP.OAuth
                     , Agent.JsonText
                     , Agent.OsPath
@@ -93,10 +98,6 @@ library
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Loop.Internal
-                    , Agent.MCP.Client
-                    , Agent.MCP.Fleet
-                    , Agent.MCP.Supervisor
-                    , Agent.MCP.Types
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
@@ -222,6 +223,7 @@ test-suite agent-core-test
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
                     , Agent.MCPSpec
+                    , Agent.MCP.OAuthSpec
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec

@@ -24,7 +24,7 @@ import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
 import Agent.Loop (LoopConfig, TokenUsage)
-import Agent.MCP (McpToolRegistration)
+import Agent.MCP (McpFleet, McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.OpenAI.Models.Types (ModelInfo)
@@ -68,6 +68,7 @@ data SessionEnv = SessionEnv
     , sessionHome :: !OsPath
     , sessionMcpRegistrations :: ![McpToolRegistration]
     , sessionMcpWarnings :: ![Text]
+    , sessionMcpFleet :: !(Maybe McpFleet)
     , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
