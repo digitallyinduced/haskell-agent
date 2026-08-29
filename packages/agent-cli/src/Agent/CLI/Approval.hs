@@ -12,6 +12,7 @@ module Agent.CLI.Approval
     , childApprove
     , planApproval
     , resolveApprovalPrompt
+    , setApprovalPolicy
     , toggleAlwaysApprove
     ) where
 
@@ -198,6 +199,18 @@ toggleAlwaysApprove policyRef projectRoot = do
     pure (case next of
         ApproveAll -> "auto-approve on (saved for project)"
         _ -> "auto-approve off (saved for project)")
+
+-- | Set the interactive approval policy and persist the compatible
+-- project-wide auto-approve flag. The on-disk format predates the
+-- read-only policy, so only 'ApproveAll' is persisted as enabled.
+setApprovalPolicy :: IORef ApprovalPolicy -> OsPath -> ApprovalPolicy -> IO Text
+setApprovalPolicy policyRef projectRoot policy = do
+    atomicModifyIORef' policyRef (const (policy, ()))
+    saveProjectAutoApprove projectRoot (policy == ApproveAll)
+    pure $ case policy of
+        ApproveAll -> "full access enabled (saved for project)"
+        PromptMutating -> "ask before changes (saved for project)"
+        DenyMutating -> "read-only enabled for this session"
 
 childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
 childApprove policy tools call = case policy of
