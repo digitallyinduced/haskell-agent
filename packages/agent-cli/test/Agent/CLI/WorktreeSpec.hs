@@ -4,6 +4,7 @@ import Agent.CLI.Config
 import Agent.CLI.Worktree
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (dropWhileEnd, isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -118,7 +119,13 @@ spec = describe "Agent.CLI.Worktree" do
                 latest <- git updater ["rev-parse", "HEAD"]
                 stale `shouldNotBe` latest
 
-                path <- expectRight =<< createManagedWorktree home repo
+                progressRef <- newIORef []
+                path <- expectRight
+                    =<< createManagedWorktreeWithProgress
+                        (\progress ->
+                            modifyIORef' progressRef (<> [progress]))
+                        home
+                        repo
 
                 git path ["rev-parse", "HEAD"] `shouldReturn` latest
                 git repo ["rev-parse", "refs/remotes/origin/master"]
@@ -130,6 +137,19 @@ spec = describe "Agent.CLI.Worktree" do
                 git path ["rev-parse", "--abbrev-ref", "HEAD"]
                     `shouldReturn` toFilePath (takeFileName path)
                 temporaryFetchRefs repo `shouldReturn` ""
+                progress <- readIORef progressRef
+                progress `shouldBe`
+                    [ WorktreeInspectingRepository
+                    , WorktreeCheckingRemote "origin"
+                    , WorktreeFetchingRemote "origin" "refs/heads/master"
+                    , WorktreeCreating
+                    ]
+                map worktreeProgressMessage progress `shouldBe`
+                    [ "Inspecting Git repository…"
+                    , "Checking Git remote origin…"
+                    , "Fetching latest from origin/master…"
+                    , "Creating worktree…"
+                    ]
 
         it "uses local HEAD when latest-upstream fetching is disabled" $
             withTempRemoteRepo \repo updater ->

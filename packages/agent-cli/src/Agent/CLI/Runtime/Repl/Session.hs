@@ -121,7 +121,8 @@ import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createManagedWorktree )
+import Agent.CLI.Worktree
+    ( createManagedWorktreeWithProgress, worktreeProgressMessage )
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect ( dialectId, dialectSlug )
@@ -512,8 +513,11 @@ handleSessionAction
                                                         Right message ->
                                                             finishAfk message
     ReplWorktree -> do
-        result <- withReplActivity "Creating worktree…" $
-            createManagedWorktree env.sessionHome cwd
+        result <- withReplActivity \report ->
+            createManagedWorktreeWithProgress
+                (report . worktreeProgressMessage)
+                env.sessionHome
+                cwd
         case result of
             Left err -> do
                 color <- resolveColor stderr
@@ -650,13 +654,15 @@ handleSessionAction
         ShellBash -> "bash"
         ShellBoth -> "ghci + bash"
         ShellNone -> "none"
-    withReplActivity message action = do
+    withReplActivity action =
+        action reportReplActivity `finally` clearReplActivity
+    reportReplActivity message =
         case fullscreen of
             Nothing -> renderEvent render (ActivityUpdated message)
             Just runtime ->
                 emitUiEvent runtime
                     (UiSetNotice (Just (progressNotice message)))
-        action `finally`
-            case fullscreen of
-                Nothing -> clearThinking render
-                Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
+    clearReplActivity =
+        case fullscreen of
+            Nothing -> clearThinking render
+            Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
