@@ -13,12 +13,12 @@ module Agent.Tools.FileSystem
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (relativeDisplayPath, toText, unsafeToFilePath)
-import Agent.Tools.Types (ToolEnv(..))
+import Agent.Tools.Types (ToolEnv(..), addToolAllowedRoot)
 import Control.Exception.Safe (SomeException, try, tryAny, tryIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
-import Data.IORef (atomicModifyIORef', readIORef)
+import Data.IORef (readIORef)
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory.OsPath
@@ -83,7 +83,7 @@ resolveWithRoots env requested extraRoots = do
                                 Right False ->
                                     pure $ Left (outsideRootsMessage requested)
                                 Right True -> do
-                                    addAllowedRoot env requestedRoot
+                                    addToolAllowedRoot env requestedRoot
                                     resolveWithRootsAttempt env requested extraRoots >>= \case
                                         Right value -> pure (Right value)
                                         Left _ -> pure $
@@ -145,11 +145,6 @@ nearestExistingDirectory path = do
                 in if equalFilePath parent directory
                     then pure Nothing
                     else go parent
-
-addAllowedRoot :: ToolEnv -> OsPath -> IO ()
-addAllowedRoot env root =
-    atomicModifyIORef' env.toolAllowedRoots \roots ->
-        (if any (equalFilePath root) roots then roots else roots <> [root], ())
 
 resolveMissing :: OsPath -> IO (Either Text OsPath)
 resolveMissing path = do

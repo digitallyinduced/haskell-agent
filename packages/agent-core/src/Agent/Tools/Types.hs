@@ -5,6 +5,7 @@ module Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
+    , addToolAllowedRoot
     , defaultToolEnv
     , setToolRootAccessRequest
     , setToolSkillRoots
@@ -49,11 +50,15 @@ import Agent.Tools.Scheduling
 import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
-import Data.IORef (IORef, newIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.OsPath (OsPath, dropTrailingPathSeparator)
+import System.OsPath
+    ( OsPath
+    , dropTrailingPathSeparator
+    , equalFilePath
+    )
 
 -- | Provider-facing schema. The sum prevents freeform tools from carrying
 -- meaningless JSON parameters.
@@ -150,6 +155,13 @@ defaultToolEnv cwd = do
 -- approval and return whether the requested root may be added.
 setToolRootAccessRequest :: ToolEnv -> Maybe (OsPath -> IO Bool) -> IO ()
 setToolRootAccessRequest env = writeIORef env.toolRootAccessRequest
+
+-- | Add a canonical directory to the roots available for this session.
+-- Duplicate roots are ignored so repeated approvals remain idempotent.
+addToolAllowedRoot :: ToolEnv -> OsPath -> IO ()
+addToolAllowedRoot env root =
+    atomicModifyIORef' env.toolAllowedRoots \roots ->
+        (if any (equalFilePath root) roots then roots else roots <> [root], ())
 
 -- | Replace the directories exposed for the current skill catalog.
 setToolSkillRoots :: ToolEnv -> [OsPath] -> IO ()
