@@ -161,6 +161,12 @@ spec = do
             output `shouldSatisfy` Text.isInfixOf "─"
             output `shouldSatisfy` (not . Text.isInfixOf "|")
 
+        it "streams ordinary prose before its newline" do
+            let (state1, first) = streamMarkdown "hello" emptyRenderState
+                (_state2, second) = streamMarkdown " world" state1
+            first `shouldBe` ""
+            first <> second `shouldSatisfy` Text.isInfixOf "hello world"
+
     describe "summarizeToolCall" do
         it "uses English verbs and argument highlights" do
             summarizeToolCall (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")

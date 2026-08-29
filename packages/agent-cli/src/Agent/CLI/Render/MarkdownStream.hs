@@ -19,7 +19,7 @@ import Agent.TUI.FencedCode
     )
 import qualified Agent.TUI.Markdown.Block as Block
 import Agent.TUI.TextWidth (splitTerminalGraphemeSuffix)
-import Data.Char (isDigit, isSpace)
+import Data.Char (isDigit, isSpace, isUpper)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -68,10 +68,16 @@ feedLineStart state input =
     in case takeCompleteLine buffered of
         Just (line, rest) ->
             classifyCompleteLine state{blockPending = ""} line rest
-        -- A delimiter can arrive in any later chunk of an outer-pipe-free
-        -- table header. Keep the line reclassifiable until its newline makes
-        -- the block decision final.
-        Nothing -> (state{blockPending = buffered}, "")
+        Nothing
+            | lineNeedsLookahead buffered ->
+                (state{blockPending = buffered}, "")
+            | otherwise ->
+                feedProse
+                    state
+                        { streamMode = StreamProse
+                        , blockPending = ""
+                        }
+                    buffered
 
 classifyCompleteLine
     :: MarkdownStreamState
@@ -284,6 +290,60 @@ completeLines = go []
 
 dropLineEnding :: Text -> Text
 dropLineEnding = Text.dropWhileEnd (== '\n')
+
+lineNeedsLookahead :: Text -> Bool
+lineNeedsLookahead line =
+    let stripped = Text.dropWhile isSpace line
+        markerRun marker = Text.span (== marker) stripped
+        allMarkerOrSpace marker =
+            Text.all (\character -> character == marker || isSpace character)
+                stripped
+    in case Text.uncons stripped of
+        Nothing -> True
+        Just ('#', _) ->
+            let (marks, after) = markerRun '#'
+            in Text.length marks <= 6
+                && (Text.null after || Text.isPrefixOf " " after)
+        Just ('>', _) -> True
+        Just ('|', _) -> True
+        Just ('`', _) ->
+            let (ticks, after) = markerRun '`'
+            in Text.null after || Text.length ticks >= 3
+        Just ('~', _) ->
+            let (tildes, after) = markerRun '~'
+            in Text.null after || Text.length tildes >= 3
+        Just ('+', after) -> Text.null after || Text.isPrefixOf " " after
+        Just ('*', after) ->
+            Text.null after
+                || Text.isPrefixOf " " after
+                || allMarkerOrSpace '*'
+        Just ('-', after) ->
+            Text.null after
+                || Text.isPrefixOf " " after
+                || allMarkerOrSpace '-'
+        Just ('_', _) -> allMarkerOrSpace '_'
+        Just (character, _)
+            | isDigit character ->
+                let (digits, after) = Text.span isDigit stripped
+                in not (Text.null digits)
+                    && ( Text.null after
+                        || after == "."
+                        || Text.isPrefixOf ". " after
+                       )
+        _ ->
+            isPossibleTableHeader line
+                || plausibleTableHeaderPrefix stripped
+
+-- Before the first pipe, a table header is indistinguishable from prose.
+-- Retain a single cell label (including common title-cased multiword labels),
+-- but release ordinary lowercase multiword prose promptly.
+plausibleTableHeaderPrefix :: Text -> Bool
+plausibleTableHeaderPrefix stripped = case Text.words stripped of
+    [] -> True
+    [_] -> True
+    words_ -> all startsUpper words_
+  where
+    startsUpper word = maybe False (isUpper . fst) (Text.uncons word)
 
 lineIsBlock :: Text -> Bool
 lineIsBlock line =
