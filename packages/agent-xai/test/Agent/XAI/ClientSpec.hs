@@ -52,6 +52,8 @@ spec = do
                 `shouldBe` Just grokClientIdentifier
             lookup "x-grok-client-version" request.headers
                 `shouldBe` Just defaultGrokClientVersion
+            lookup "x-grok-client-mode" request.headers
+                `shouldBe` Just "interactive"
             lookup "User-Agent" request.headers
                 `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
             requestModel request `shouldBe` Just "grok-4.6"
