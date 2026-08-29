@@ -10,9 +10,9 @@ import Agent.OpenAI.WebSocketClient
     ( CodexTurnState
     , newCodexTurnState
     , sendWsRequestWithEvents
-    , withCodexWsRetryingUsingTurnState
+    , withCodexWsCredentialUsingTurnState
     )
-import Agent.Provider (TokenProvider)
+import Agent.Provider (TokenProvider, runWithTokenProvider)
 import Agent.Responses.Types (ResponseCreateParams)
 
 -- | Each submission is its own logical turn with disposable connections.
@@ -34,11 +34,16 @@ freshOpenAiBackendWithTurnState
     :: Bool -> CodexTurnState -> TokenProvider
     -> IO ResponseCreateParams -> Backend
 freshOpenAiBackendWithTurnState showRawReasoning turnState provider getParams =
-    openAiBackendWithReasoningVisibility
-        showRawReasoning
-        (\request previousResponseId onStreamEvent ->
-            withCodexWsRetryingUsingTurnState provider turnState
-                \conn _credential ->
-                    sendWsRequestWithEvents conn request
-                        previousResponseId onStreamEvent)
-        getParams
+    Backend \state previous inputs onEvent ->
+        runWithTokenProvider provider \credential ->
+            let Backend submit =
+                    openAiBackendWithReasoningVisibility
+                        showRawReasoning
+                        (\request previousResponseId onStreamEvent ->
+                            withCodexWsCredentialUsingTurnState
+                                credential turnState
+                                \conn _activeCredential ->
+                                    sendWsRequestWithEvents conn request
+                                        previousResponseId onStreamEvent)
+                        getParams
+            in submit state previous inputs onEvent

@@ -829,6 +829,36 @@ spec = do
             observedEvents <- readIORef events
             reverse observedEvents `shouldBe` [TextDelta "partial"]
 
+        it "blocks credential failover after hidden output was streamed" do
+            transcript <- newIORef []
+            events <- newIORef []
+            let exhausted = ProviderError UsageLimitReached
+                    "usage exhausted" (Just 120)
+                send _request _previous onEvent = do
+                    onEvent ResponseOutputItemAddedEvent
+                        { item = functionCallItem "fc-1" "shell" "{}"
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left exhausted)
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe` Left (ProviderError
+                (UnknownErrorType "replay_unsafe")
+                ( "provider failed after model output; refusing to replay: "
+                    <> Text.pack (show exhausted)
+                )
+                Nothing)
+            recorded <- reverse <$> readIORef events
+            [() | ToolStarted started <- recorded, started.callId == "fc-1"]
+                `shouldBe` [()]
+            filter (not . isToolStartedEvent) recorded `shouldBe`
+                [ActivityUpdated "Writing shell call…"]
+
         it "resubmits after a mid-response socket drop behind a restart boundary" do
             attempts <- newIORef (0 :: Int)
             transcript <- newIORef []
