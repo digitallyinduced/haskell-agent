@@ -992,6 +992,7 @@ ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
             (mimePointer == nullPtr && mimeLength > 0)
                 || (bytesPointer == nullPtr && bytesLength > 0)
                 || mimeLength == 0
+                || bytesLength == 0
         then pure Nothing
         else do
             mimeBytes <- BS.packCStringLen
