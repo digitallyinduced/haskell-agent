@@ -25,6 +25,11 @@ import Agent.Dialect
     , PromptStyle(..)
     , dialectPromptStyle
     )
+import Agent.OpenAI.ImageGeneration
+    ( imageGenerationNamespace
+    , imageGenerationNamespaceDescription
+    , imageGenerationToolName
+    )
 import Agent.OpenAI.Models
     ( ModelInfo(..)
     , ModelsClientConfig(..)
@@ -49,7 +54,7 @@ import Agent.Provider
     , getNextToken
     , tokenProviderBillingMode
     )
-import Agent.ToolDispatch (ToolCall(..))
+import Agent.ToolDispatch (ToolCall(..), ToolCallResult)
 import Agent.Tools.CodeMode.Host
     ( ImageDetailVisibility(..)
     , codeModeWorkerPath
@@ -78,7 +83,8 @@ import System.OsPath (OsPath)
 
 -- | Late-bound nested dispatcher for code-mode tool calls.
 newtype CodeModeNestedSlot =
-    CodeModeNestedSlot (IORef (ToolCall -> IO (Either Text Text)))
+    CodeModeNestedSlot
+        (IORef (ToolCall -> IO (Either Text ToolCallResult)))
 
 newCodeModeNestedSlot :: IO CodeModeNestedSlot
 newCodeModeNestedSlot =
@@ -88,14 +94,14 @@ newCodeModeNestedSlot =
 
 setCodeModeNestedInvoke
     :: CodeModeNestedSlot
-    -> (ToolCall -> IO (Either Text Text))
+    -> (ToolCall -> IO (Either Text ToolCallResult))
     -> IO ()
 setCodeModeNestedInvoke (CodeModeNestedSlot ref) = writeIORef ref
 
 invokeThroughSlot
     :: CodeModeNestedSlot
     -> ToolCall
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolCallResult)
 invokeThroughSlot (CodeModeNestedSlot ref) call = do
     invoke <- readIORef ref
     invoke call
@@ -267,11 +273,16 @@ nestedSpecFor :: AppTool -> CodeModeNestedSpec
 nestedSpecFor tool = CodeModeNestedSpec
     { nestedSpecTool = tool
     , nestedSpecNamespace =
-        if tool.appToolName `elem` multiAgentToolNames
+        if tool.appToolName == imageGenerationToolName
             then Just CodeModeNamespace
+                { namespaceName = imageGenerationNamespace
+                , namespaceDescription = imageGenerationNamespaceDescription
+                }
+            else if tool.appToolName `elem` multiAgentToolNames
+                then Just CodeModeNamespace
                 { namespaceName = multiAgentNamespace
                 , namespaceDescription =
                     "Tools for spawning and managing sub-agents."
                 }
-            else Nothing
+                else Nothing
     }

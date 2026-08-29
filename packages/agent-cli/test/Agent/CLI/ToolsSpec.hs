@@ -253,6 +253,36 @@ spec = describe "schemasFromAppTools" do
                 namespace.name `shouldBe` "collaboration"
             other -> expectationFailure ("expected namespace tool, got " <> show other)
 
+    it "emits imagegen in the reserved image_gen namespace with its raw schema" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "prompt" Aeson..= Aeson.object
+                        ["type" Aeson..= ("string" :: Text)]
+                    ]
+                , "required" Aeson..= (["prompt"] :: [Text])
+                , "additionalProperties" Aeson..= False
+                ]
+            imagegen = rawJsonAppTool
+                "imagegen"
+                "Generate an image."
+                parameters
+                AlwaysAllowed
+                (noArgsTool "imagegen" (pure (Right "ok")))
+        case schemasFromAppTools codexDialect [imagegen] of
+            [_, NamespaceToolValue namespace] -> do
+                namespace.name `shouldBe` "image_gen"
+                case namespace.tools of
+                    [FunctionToolValue tool] -> do
+                        tool.name `shouldBe` "imagegen"
+                        tool.strict `shouldBe` Just False
+                        tool.parameters `shouldBe`
+                            Just (rawJsonValue parameters)
+                    other -> expectationFailure
+                        ("expected one imagegen function, got " <> show other)
+            other -> expectationFailure
+                ("expected image_gen namespace, got " <> show other)
+
     it "omits an empty required list from reserved collaboration schemas" do
         let wait = jsonAppTool "wait_agent" "Wait."
                 [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]

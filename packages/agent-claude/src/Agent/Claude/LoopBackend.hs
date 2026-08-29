@@ -345,13 +345,12 @@ collectTurnInputs inputs = do
             [userText]
         UserMultimodalFiles{userText} ->
             [userText]
-        CompletedTool
-            (ToolDispatch.ToolCallResult resultCallId resultOutput _) ->
+        CompletedTool result ->
             pure $
                 "Host tool result for "
-                    <> resultCallId
+                    <> result.callId
                     <> ":\n"
-                    <> resultOutput
+                    <> result.output
     inputImages = \case
         UserMultimodal{userImages} -> userImages
         UserMultimodalFiles{userImages} -> userImages

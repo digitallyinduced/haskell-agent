@@ -97,6 +97,7 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policy, allTools,
+                     recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
                      mcpInstructions, mcpFleet,
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
@@ -233,6 +234,8 @@ runAgentSession
     activeSelectionRef
     agentTypesRef
     allTools
+    recordImageGenerationInputs
+    clearImageGenerationHistory
     bashEnabledRef
     catalog
     checkStartupUsageInBackground
@@ -543,6 +546,8 @@ runAgentSession
                                 , dialect
                                 , policy
                                 , allTools = registryTools
+                                , recordImageGenerationInputs
+                                , clearImageGenerationHistory
                                 , suspendGhci = coding.codingSuspendGhci
                                 , grokRuntime = coding.codingGrokRuntime
                                 , mcpRegistrations =
