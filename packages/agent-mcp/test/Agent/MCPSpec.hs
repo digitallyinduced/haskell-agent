@@ -57,6 +57,7 @@ import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
+    , listDirectory
     , removeDirectoryRecursive
     , removeFile
     , withCurrentDirectory
@@ -272,6 +273,23 @@ spec = describe "Agent.MCP" do
                 updates <- readIORef progress
                 updates `shouldContain` [["first", "second"]]
                 last updates `shouldBe` []
+
+    it "starts other servers while a progress callback is stalled" $
+        withConcurrentFakeServer \script barrier -> do
+            started <- timeout 5000000 $
+                startMcpFleetWithProgress
+                    (\case
+                        [_] -> waitForConcurrentStarts barrier
+                        _ -> pure ())
+                    [ concurrentConfig script barrier "first"
+                    , concurrentConfig script barrier "second"
+                    ]
+            case started of
+                Nothing ->
+                    expectationFailure
+                        "fleet startup deadlocked behind the progress callback"
+                Just fleet ->
+                    bracket (pure fleet) closeMcpFleet \_ -> pure ()
 
     it "reports failed configured servers without hiding healthy ones" $
         withFakeServer \script -> do
@@ -767,6 +785,18 @@ waitForCatalogEntry fleet name = go (300 :: Int)
     go remaining = do
         entries <- readTVarIO fleet.mcpFleetCatalog
         if Map.member name entries
+            then pure ()
+            else threadDelay 10000 >> go (remaining - 1)
+
+waitForConcurrentStarts :: FilePath -> IO ()
+waitForConcurrentStarts barrier = go (300 :: Int)
+  where
+    go 0 =
+        expectationFailure
+            "other MCP servers did not start while progress reporting was blocked"
+    go remaining = do
+        starts <- listDirectory barrier
+        if length starts >= 2
             then pure ()
             else threadDelay 10000 >> go (remaining - 1)
 
