@@ -23,6 +23,7 @@ import Agent.CLI
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.CLI.Status (formatTokenUsageOrZero)
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
@@ -358,6 +359,9 @@ spec = do
     describe "formatTokenUsage" do
         it "omits empty totals" do
             formatTokenUsage emptyTokenUsage `shouldBe` ""
+
+        it "formats fresh-session zeroes with arrows when required" do
+            formatTokenUsageOrZero emptyTokenUsage `shouldBe` "0 ↓ · 0 ↑"
 
         it "formats compact input/output counts with arrows" do
             formatTokenUsage TokenUsage

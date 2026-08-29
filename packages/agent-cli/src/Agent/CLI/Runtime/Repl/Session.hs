@@ -108,7 +108,7 @@ import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth ()
 import Agent.CLI.Startup.Format ()
 import Agent.CLI.StartupContext ()
-import Agent.CLI.Status ( formatTokenUsage )
+import Agent.CLI.Status ( formatTokenUsageOrZero )
 import Agent.CLI.Style
     ( cliWindowTitle, glyphOk, glyphSession, roleError, roleMuted )
 import Agent.CLI.Subagents.Runtime ()
@@ -427,11 +427,7 @@ handleSessionAction
         let toolNames =
                 Set.toAscList
                     slashCatalog.slashCatalogToolNames
-            usageText =
-                let formatted = formatTokenUsage usage
-                in if Text.null formatted
-                    then "0 in · 0 out"
-                    else formatted
+            usageText = formatTokenUsageOrZero usage
             message = Text.unlines $
                 [ "session: "
                     <> fromMaybe "(not persisted)" sessionId

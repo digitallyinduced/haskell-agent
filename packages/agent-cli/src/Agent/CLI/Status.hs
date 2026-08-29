@@ -4,6 +4,7 @@ module Agent.CLI.Status
     , cycleReplInteraction
     , formatReplStatusLine
     , formatTokenUsage
+    , formatTokenUsageOrZero
     , formatEstimatedTokensPerSecond
     , formatTokensPerSecond
     , formatUsageWithRate
@@ -113,6 +114,14 @@ formatTokenUsage usage
         | usage.cachedTokens > 0 =
             " · " <> formatTokenCount usage.cachedTokens <> " ↻"
         | otherwise = ""
+
+-- | Format token totals for contexts that must show fresh-session zeroes.
+formatTokenUsageOrZero :: TokenUsage -> Text
+formatTokenUsageOrZero usage =
+    let formatted = formatTokenUsage usage
+    in if Text.null formatted
+        then "0 ↓ · 0 ↑"
+        else formatted
 
 -- | Session totals plus a generation rate: @1.2k ↓ · 340 ↑ · 42 ◈/s@.
 formatUsageWithRate :: TokenUsage -> Maybe Double -> Text
