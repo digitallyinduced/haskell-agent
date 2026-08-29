@@ -495,6 +495,13 @@ ha_account_oauth_poll providerBytes (CSize providerLength) urlBytes (CSize urlLe
     userBytes (CSize userLength) authIdBytes (CSize authIdLength)
     deviceBytes (CSize deviceLength) pollInterval expires callback context
     | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull
+        [ (providerBytes, providerLength)
+        , (urlBytes, urlLength)
+        , (userBytes, userLength)
+        , (authIdBytes, authIdLength)
+        , (deviceBytes, deviceLength)
+        ] = pure 2
     | otherwise = do
         provider <- decodeInput providerBytes providerLength
         url <- decodeInput urlBytes urlLength
@@ -518,6 +525,8 @@ ha_account_api_key_connect
     -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
 ha_account_api_key_connect providerBytes (CSize providerLength) keyBytes (CSize keyLength) callback context
     | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull
+        [ (providerBytes, providerLength), (keyBytes, keyLength) ] = pure 2
     | otherwise = do
         provider <- decodeInput providerBytes providerLength
         key <- decodeInput keyBytes keyLength
@@ -531,6 +540,7 @@ ha_account_set_enabled
     :: Ptr Word8 -> CSize -> CInt -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
 ha_account_set_enabled idBytes (CSize idLength) enabled callback context
     | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
     | otherwise = do
         managedId <- decodeInput idBytes idLength
         _ <- forkIO do
@@ -542,12 +552,17 @@ ha_account_delete
     :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
 ha_account_delete idBytes (CSize idLength) callback context
     | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
     | otherwise = do
         managedId <- decodeInput idBytes idLength
         _ <- forkIO do
             deleteManagedCredential managedId
                 >>= invokeStoreResult callback context
         pure 0
+
+anyNonEmptyNull :: [(Ptr Word8, Word64)] -> Bool
+anyNonEmptyNull = any \(pointer, length) ->
+    pointer == nullPtr && length > 0
 
 withAccountStrings :: LoginAccount -> (CString -> CSize -> CString -> CSize
     -> CString -> CSize -> CString -> CSize -> CString -> CSize
