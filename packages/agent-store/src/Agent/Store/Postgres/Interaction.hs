@@ -18,6 +18,8 @@ module Agent.Store.Postgres.Interaction
     , InteractionResolutionRequest(..)
     , InteractionDelivery(..)
     , InteractionDeliveryRequest(..)
+    , InteractionDeliveryIntent(..)
+    , InteractionDeliveryPreparation(..)
     , InteractionPublishResult(..)
     , InteractionResolveResult(..)
     , InteractionDeliveryResult(..)
@@ -31,6 +33,8 @@ module Agent.Store.Postgres.Interaction
     , listUndeliveredSessionInteractions
     , resolveSessionInteraction
     , markSessionInteractionDelivered
+    , prepareSessionInteractionDeliveryTransaction
+    , commitSessionInteractionDeliveryTransaction
     ) where
 
 import Data.ByteString (ByteString)
@@ -60,6 +64,23 @@ data InteractionOrigin = InteractionOrigin
     { interactionOriginToolName :: !Text
     , interactionOriginCallId :: !Text
     }
+    deriving (Eq, Show)
+
+-- | The delivery fields known before the containing session turn receives its
+-- durable index.  'appendSessionTurnIndexedAndDeliver' supplies the session key
+-- and allocated turn index inside the same transaction.
+data InteractionDeliveryIntent = InteractionDeliveryIntent
+    { interactionDeliveryIntentInteractionId :: !Text
+    , interactionDeliveryIntentKind :: !Text
+    , interactionDeliveryIntentDeliveredAt :: !UTCTime
+    }
+    deriving (Eq, Show)
+
+-- | Result of locking and checking an interaction before an atomic turn
+-- append.  A blocked result must not append a second transcript turn.
+data InteractionDeliveryPreparation
+    = InteractionDeliveryReady
+    | InteractionDeliveryBlocked !InteractionDeliveryResult
     deriving (Eq, Show)
 
 data InteractionRequest = InteractionRequest
@@ -521,95 +542,153 @@ markSessionInteractionDelivered pool request =
         Left err -> pure (Left (StoreDataError err))
         Right () ->
             runInteractionWrite pool do
-                _ <- Transaction.statement
-                    (interactionDeliveryLockKey request)
-                    interactionLockStatement
-                stored <- Transaction.statement
-                    ( request.interactionDeliveryRequestSessionKey
-                    , request.interactionDeliveryRequestInteractionId
-                    )
-                    loadInteractionByIdStatement
-                case stored of
-                    Nothing -> pure (Right InteractionDeliveryNotFound)
-                    Just row -> case decodeInteractionRow row of
-                        Left err -> pure (Left err)
-                        Right interaction ->
-                            case
-                                ( interaction.sessionInteractionResolution
-                                , interaction.sessionInteractionDelivery
-                                ) of
-                                (Nothing, _) ->
-                                    pure (Right InteractionDeliveryUnresolved)
-                                (_, Just delivery) ->
-                                    pure
-                                        (Right
-                                            InteractionDeliveryObserved
-                                                { interactionDeliveryInserted =
-                                                    False
-                                                , interactionDeliveryValue =
-                                                    delivery
-                                                })
-                                (Just _, Nothing) -> do
-                                    turnExists <- Transaction.statement
-                                        ( request.interactionDeliveryRequestSessionKey
-                                        , request.interactionDeliveryRequestTurnIndex
-                                        )
-                                        sessionTurnExistsStatement
-                                    if not turnExists
-                                        then
-                                            pure
-                                                (Right
-                                                    InteractionDeliveryTurnNotFound)
-                                        else do
-                                            inserted <- Transaction.statement
-                                                request
-                                                insertDeliveryStatement
-                                            case inserted of
-                                                Nothing -> do
-                                                    observed <-
-                                                        Transaction.statement
-                                                            ( request.interactionDeliveryRequestSessionKey
-                                                            , request.interactionDeliveryRequestInteractionId
-                                                            )
-                                                            loadInteractionByIdStatement
-                                                    case observed of
-                                                        Nothing ->
-                                                            pure
-                                                                (Right
-                                                                    InteractionDeliveryNotFound)
-                                                        Just observedRow ->
-                                                            case
-                                                                decodeInteractionRow
-                                                                    observedRow
-                                                            of
-                                                                Left err ->
-                                                                    pure (Left err)
-                                                                Right observedInteraction ->
-                                                                    case
-                                                                        observedInteraction.sessionInteractionDelivery
-                                                                    of
-                                                                        Nothing ->
-                                                                            pure
-                                                                                (Left
-                                                                                    "interaction delivery conflict did not expose a delivery")
-                                                                        Just delivery ->
-                                                                            pure
-                                                                                (Right
-                                                                                    InteractionDeliveryObserved
-                                                                                        { interactionDeliveryInserted =
-                                                                                            False
-                                                                                        , interactionDeliveryValue =
-                                                                                            delivery
-                                                                                        })
-                                                Just delivery ->
-                                                    pure
-                                                        (Right
-                                                            InteractionDeliveryObserved
-                                                                { interactionDeliveryInserted =
-                                                                    True
-                                                                , interactionDeliveryValue =
-                                                                    delivery
-                                                                })
+                let intent = deliveryIntentFromRequest request
+                prepared <-
+                    prepareSessionInteractionDeliveryTransaction
+                        request.interactionDeliveryRequestSessionKey
+                        intent
+                case prepared of
+                    Left err -> pure (Left err)
+                    Right (InteractionDeliveryBlocked result) ->
+                        pure (Right result)
+                    Right InteractionDeliveryReady -> do
+                        turnExists <- Transaction.statement
+                            ( request.interactionDeliveryRequestSessionKey
+                            , request.interactionDeliveryRequestTurnIndex
+                            )
+                            sessionTurnExistsStatement
+                        if not turnExists
+                            then
+                                pure
+                                    (Right
+                                        InteractionDeliveryTurnNotFound)
+                            else
+                                commitSessionInteractionDeliveryTransaction
+                                    request.interactionDeliveryRequestSessionKey
+                                    request.interactionDeliveryRequestTurnIndex
+                                    intent
+
+-- | Lock and inspect an interaction in the caller's write transaction.
+--
+-- The lock spans the caller's subsequent turn append and delivery insert.
+-- Seeing an existing delivery returns it as a blocked result, which makes a
+-- retry after an unknown commit outcome idempotent.
+prepareSessionInteractionDeliveryTransaction
+    :: Text
+    -> InteractionDeliveryIntent
+    -> Transaction.Transaction
+        (Either Text InteractionDeliveryPreparation)
+prepareSessionInteractionDeliveryTransaction sessionKey intent =
+    case validateDeliveryIntent sessionKey intent of
+        Left err -> pure (Left err)
+        Right () -> do
+            _ <- Transaction.statement
+                (interactionDeliveryIntentLockKey sessionKey intent)
+                interactionLockStatement
+            active <- Transaction.statement
+                sessionKey
+                activeSessionExistsStatement
+            if not active
+                then
+                    pure
+                        (Right
+                            (InteractionDeliveryBlocked
+                                InteractionDeliveryNotFound))
+                else do
+                    stored <- Transaction.statement
+                        (sessionKey, intent.interactionDeliveryIntentInteractionId)
+                        loadInteractionByIdStatement
+                    case stored of
+                        Nothing ->
+                            pure
+                                (Right
+                                    (InteractionDeliveryBlocked
+                                        InteractionDeliveryNotFound))
+                        Just row -> case decodeInteractionRow row of
+                            Left err -> pure (Left err)
+                            Right interaction ->
+                                case
+                                    ( interaction.sessionInteractionResolution
+                                    , interaction.sessionInteractionDelivery
+                                    ) of
+                                    (Nothing, _) ->
+                                        pure
+                                            (Right
+                                                (InteractionDeliveryBlocked
+                                                    InteractionDeliveryUnresolved))
+                                    (_, Just delivery) ->
+                                        pure
+                                            (Right
+                                                (InteractionDeliveryBlocked
+                                                    InteractionDeliveryObserved
+                                                        { interactionDeliveryInserted =
+                                                            False
+                                                        , interactionDeliveryValue =
+                                                            delivery
+                                                        }))
+                                    (Just _, Nothing) ->
+                                        pure (Right InteractionDeliveryReady)
+
+-- | Insert the immutable delivery fact after the caller has appended the
+-- referenced turn in the same transaction and while holding the preparation
+-- lock.
+commitSessionInteractionDeliveryTransaction
+    :: Text
+    -> Int64
+    -> InteractionDeliveryIntent
+    -> Transaction.Transaction (Either Text InteractionDeliveryResult)
+commitSessionInteractionDeliveryTransaction sessionKey turnIndex intent = do
+    let request = InteractionDeliveryRequest
+            { interactionDeliveryRequestSessionKey = sessionKey
+            , interactionDeliveryRequestInteractionId =
+                intent.interactionDeliveryIntentInteractionId
+            , interactionDeliveryRequestKind =
+                intent.interactionDeliveryIntentKind
+            , interactionDeliveryRequestTurnIndex = turnIndex
+            , interactionDeliveryRequestDeliveredAt =
+                intent.interactionDeliveryIntentDeliveredAt
+            }
+    case validateDeliveryRequest request of
+        Left err -> pure (Left err)
+        Right () -> do
+            inserted <- Transaction.statement
+                request
+                insertDeliveryStatement
+            case inserted of
+                Just delivery ->
+                    pure
+                        (Right
+                            InteractionDeliveryObserved
+                                { interactionDeliveryInserted = True
+                                , interactionDeliveryValue = delivery
+                                })
+                Nothing -> do
+                    observed <- Transaction.statement
+                        ( sessionKey
+                        , intent.interactionDeliveryIntentInteractionId
+                        )
+                        loadInteractionByIdStatement
+                    case observed of
+                        Nothing ->
+                            pure
+                                (Right InteractionDeliveryNotFound)
+                        Just row -> case decodeInteractionRow row of
+                            Left err -> pure (Left err)
+                            Right interaction ->
+                                case interaction.sessionInteractionDelivery of
+                                    Nothing ->
+                                        pure
+                                            (Left
+                                                "interaction delivery insert did not expose a delivery")
+                                    Just delivery ->
+                                        pure
+                                            (Right
+                                                InteractionDeliveryObserved
+                                                    { interactionDeliveryInserted =
+                                                        False
+                                                    , interactionDeliveryValue =
+                                                        delivery
+                                                    })
 
 data InteractionRow = InteractionRow
     { rowInteractionId :: !Text
@@ -908,6 +987,18 @@ requestOriginCall :: InteractionRequest -> Maybe Text
 requestOriginCall request =
     (.interactionOriginCallId) <$> request.interactionRequestOrigin
 
+deliveryIntentFromRequest
+    :: InteractionDeliveryRequest
+    -> InteractionDeliveryIntent
+deliveryIntentFromRequest request = InteractionDeliveryIntent
+    { interactionDeliveryIntentInteractionId =
+        request.interactionDeliveryRequestInteractionId
+    , interactionDeliveryIntentKind =
+        request.interactionDeliveryRequestKind
+    , interactionDeliveryIntentDeliveredAt =
+        request.interactionDeliveryRequestDeliveredAt
+    }
+
 decodeInteractionRow :: InteractionRow -> Either Text SessionInteraction
 decodeInteractionRow row = do
     origin <- decodeOrigin row
@@ -1113,6 +1204,18 @@ validateDeliveryRequest request = do
         then Left "interaction delivery turn index must be non-negative"
         else Right ()
 
+validateDeliveryIntent
+    :: Text
+    -> InteractionDeliveryIntent
+    -> Either Text ()
+validateDeliveryIntent sessionKey intent = do
+    validateLookup
+        sessionKey
+        intent.interactionDeliveryIntentInteractionId
+    validateKind
+        "interaction delivery kind"
+        intent.interactionDeliveryIntentKind
+
 validateLookup :: Text -> Text -> Either Text ()
 validateLookup sessionKey interactionId = do
     validateSessionKey sessionKey
@@ -1199,13 +1302,22 @@ interactionResolutionLockKey request =
         <> ":"
         <> request.interactionResolutionRequestInteractionId
 
-interactionDeliveryLockKey :: InteractionDeliveryRequest -> Text
-interactionDeliveryLockKey request =
+interactionDeliveryIntentLockKey
+    :: Text
+    -> InteractionDeliveryIntent
+    -> Text
+interactionDeliveryIntentLockKey sessionKey intent =
+    interactionDeliveryLockKeyFor
+        sessionKey
+        intent.interactionDeliveryIntentInteractionId
+
+interactionDeliveryLockKeyFor :: Text -> Text -> Text
+interactionDeliveryLockKeyFor sessionKey interactionId =
     "delivery:"
         <> Text.pack
             (show
-                (Text.length request.interactionDeliveryRequestSessionKey))
+                (Text.length sessionKey))
         <> ":"
-        <> request.interactionDeliveryRequestSessionKey
+        <> sessionKey
         <> ":"
-        <> request.interactionDeliveryRequestInteractionId
+        <> interactionId

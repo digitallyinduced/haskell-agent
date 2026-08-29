@@ -17,6 +17,7 @@ module Agent.Store.Postgres.Session
     , replaceSessionMetadata
     , appendSessionTurn
     , appendSessionTurnIndexed
+    , appendSessionTurnIndexedAndDeliver
     , loadSession
     , loadSessionWithImplementation
     , loadSessions

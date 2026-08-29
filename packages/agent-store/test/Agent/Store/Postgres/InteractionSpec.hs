@@ -6,6 +6,7 @@ import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (finally)
 import qualified Data.ByteString as ByteString
 import Data.Either (isLeft)
+import Data.Foldable (toList)
 import Data.List (nub)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime)
@@ -26,9 +27,12 @@ import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Session
     ( SessionMetadata(..)
     , SessionTurn(..)
+    , StoredSession(..)
+    , StoredTurn(..)
     , TranscriptEffect(..)
-    , appendSessionTurnIndexed
+    , appendSessionTurnIndexedAndDeliver
     , createSession
+    , loadSession
     )
 import Agent.Store.Types (StoreError(..))
 
@@ -138,6 +142,26 @@ exerciseInteractions pool = do
         , interactionDeliveryRequestDeliveredAt = later
         }
         `shouldReturn` Right InteractionDeliveryUnresolved
+    let intent = InteractionDeliveryIntent
+            { interactionDeliveryIntentInteractionId =
+                interaction.sessionInteractionId
+            , interactionDeliveryIntentKind = "tool_output"
+            , interactionDeliveryIntentDeliveredAt = later
+            }
+    appendSessionTurnIndexedAndDeliver
+        pool
+        (testTurn later)
+        metadata
+        intent
+        `shouldReturn`
+            Right (Nothing, InteractionDeliveryUnresolved)
+    loadSession pool "interaction-session" >>= \case
+        Right (Just stored) ->
+            toList stored.storedTurns `shouldBe` []
+        other ->
+            expectationFailure
+                ("unexpected session after blocked atomic append: "
+                    <> show other)
 
     let candidate index =
             InteractionResolutionRequest
@@ -196,16 +220,45 @@ exerciseInteractions pool = do
     markSessionInteractionDelivered pool deliveryRequest
         `shouldReturn` Right InteractionDeliveryTurnNotFound
 
-    appendSessionTurnIndexed pool (testTurn later) metadata
-        `shouldReturn` Right (Just 0)
-    delivered <- markSessionInteractionDelivered pool deliveryRequest
+    atomic <- appendSessionTurnIndexedAndDeliver
+        pool
+        (testTurn later)
+        metadata
+        intent
+    delivered <- case atomic of
+        Right (Just 0, result) -> pure (Right result)
+        other -> do
+            expectationFailure
+                ("unexpected atomic append result: " <> show other)
+            fail "expected atomic append and delivery"
     delivery <- expectDelivered True delivered
     delivery.interactionDeliveryTurnIndex `shouldBe` 0
-    repeated <- markSessionInteractionDelivered pool deliveryRequest
-        { interactionDeliveryRequestKind = "synthetic_continuation"
-        }
-    repeatedDelivery <- expectDelivered False repeated
+
+    -- Simulate a caller that crashed after PostgreSQL committed but before it
+    -- observed the return value.  Retrying sees the immutable delivery and
+    -- must not append another turn.
+    replayed <- appendSessionTurnIndexedAndDeliver
+        pool
+        (testTurn later)
+        metadata
+        intent
+    repeatedDelivery <- case replayed of
+        Right (Nothing, result) -> expectDelivered False (Right result)
+        other -> do
+            expectationFailure
+                ("unexpected atomic replay result: " <> show other)
+            fail "expected delivery-only replay"
     repeatedDelivery `shouldBe` delivery
+    loadSession pool "interaction-session" >>= \case
+        Right (Just stored) ->
+            map
+                (\storedTurn ->
+                    storedTurn.storedTurn.sessionTurnUserText)
+                (toList stored.storedTurns)
+                `shouldBe` ["approved plan"]
+        other ->
+            expectationFailure
+                ("unexpected session after atomic replay: " <> show other)
     listUndeliveredSessionInteractions pool "interaction-session"
         `shouldReturn` Right []
     loadSessionInteraction

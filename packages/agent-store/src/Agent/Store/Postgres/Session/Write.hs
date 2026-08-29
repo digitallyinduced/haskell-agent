@@ -9,6 +9,7 @@ module Agent.Store.Postgres.Session.Write
     , replaceSessionMetadata
     , appendSessionTurn
     , appendSessionTurnIndexed
+    , appendSessionTurnIndexedAndDeliver
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
@@ -30,9 +31,17 @@ import Agent.Store.Postgres.Connection
     , withSession
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Interaction
+    ( InteractionDelivery(..)
+    , InteractionDeliveryIntent
+    , InteractionDeliveryPreparation(..)
+    , InteractionDeliveryResult(..)
+    , commitSessionInteractionDeliveryTransaction
+    , prepareSessionInteractionDeliveryTransaction
+    )
 import Agent.Store.Postgres.Session.Types
 import Agent.Store.Postgres.SessionItem (insertResponseItems)
-import Agent.Store.Types (StoreError)
+import Agent.Store.Types (StoreError(..))
 
 createSession
     :: StorePool
@@ -131,6 +140,118 @@ appendSessionTurnIndexed pool turn metadata =
                         insertTurnStatement
                     insertResponseItems turnId turn.sessionTurnItems
                     pure (Just turnIndex)
+
+-- | Append a turn and record that it consumed an interaction response in one
+-- PostgreSQL transaction.
+--
+-- The interaction is locked before the session projection changes.  If an
+-- earlier attempt committed but its caller did not observe the result, the
+-- existing immutable delivery is returned with a @Nothing@ append result and
+-- no duplicate turn is written.
+appendSessionTurnIndexedAndDeliver
+    :: StorePool
+    -> SessionTurn
+    -> SessionMetadata
+    -> InteractionDeliveryIntent
+    -> IO
+        (Either
+            StoreError
+            (Maybe Int64, InteractionDeliveryResult))
+appendSessionTurnIndexedAndDeliver pool turn metadata intent =
+    withSession pool
+        (Transactions.transaction
+            Transactions.Serializable
+            Transactions.Write
+            do
+                _ <- Transaction.statement
+                    metadata.sessionMetadataKey
+                    blockingAdvisoryLockStatement
+                prepared <-
+                    prepareSessionInteractionDeliveryTransaction
+                        metadata.sessionMetadataKey
+                        intent
+                case prepared of
+                    Left err -> pure (Left err)
+                    Right (InteractionDeliveryBlocked result) ->
+                        pure (Right (Nothing, result))
+                    Right InteractionDeliveryReady -> do
+                        changed <- Transaction.statement
+                            metadata
+                            appendProjectionStatement
+                        case changed of
+                            Nothing ->
+                                pure
+                                    (Right
+                                        ( Nothing
+                                        , InteractionDeliveryNotFound
+                                        ))
+                            Just (sessionId, sequence, turnIndex) -> do
+                                eventId <- Transaction.statement
+                                    EventInsert
+                                        { eventInsertSessionId = sessionId
+                                        , eventInsertSequence = sequence
+                                        , eventInsertKind = "turn.appended"
+                                        , eventInsertOccurredAt =
+                                            turn.sessionTurnOccurredAt
+                                        }
+                                    insertEventStatement
+                                turnId <- Transaction.statement
+                                    TurnInsert
+                                        { turnInsertSessionId = sessionId
+                                        , turnInsertEventId = eventId
+                                        , turnInsertIndex = turnIndex
+                                        , turnInsertEventSequence = sequence
+                                        , turnInsertTurn = turn
+                                        }
+                                    insertTurnStatement
+                                insertResponseItems
+                                    turnId
+                                    turn.sessionTurnItems
+                                delivered <-
+                                    commitSessionInteractionDeliveryTransaction
+                                        metadata.sessionMetadataKey
+                                        turnIndex
+                                        intent
+                                case delivered of
+                                    Left err ->
+                                        condemnAtomicAppend err
+                                    Right result@InteractionDeliveryObserved
+                                        { interactionDeliveryInserted = True
+                                        , interactionDeliveryValue
+                                        }
+                                            | interactionDeliveryValue.interactionDeliveryTurnIndex
+                                                == turnIndex ->
+                                                    pure
+                                                        (Right
+                                                            ( Just turnIndex
+                                                            , result
+                                                            ))
+                                            | otherwise ->
+                                                condemnAtomicAppend
+                                                    "interaction delivery references a different turn than the atomic append"
+                                    Right _ ->
+                                        condemnAtomicAppend
+                                            "interaction delivery was not inserted with the atomic turn append"
+        )
+        >>= pure . flattenAtomicAppendResult
+
+flattenAtomicAppendResult
+    :: Either
+        StoreError
+        (Either Text (Maybe Int64, InteractionDeliveryResult))
+    -> Either StoreError (Maybe Int64, InteractionDeliveryResult)
+flattenAtomicAppendResult = \case
+    Left err -> Left err
+    Right (Left err) -> Left (StoreDataError err)
+    Right (Right value) -> Right value
+
+condemnAtomicAppend
+    :: Text
+    -> Transaction.Transaction
+        (Either Text (Maybe Int64, InteractionDeliveryResult))
+condemnAtomicAppend err = do
+    Transaction.condemn
+    pure (Left err)
 
 deleteSession
     :: StorePool
