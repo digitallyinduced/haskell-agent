@@ -19,24 +19,17 @@ module Agent.CLI.McpAdmin
 import Agent.CLI.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
-    , harnessConfigPath
-    , loadHarnessConfig
-    , saveHarnessConfig
+    , loadHarnessConfigSnapshot
+    , modifyHarnessConfig
     )
-import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Control.Monad (when)
+import Data.Bifunctor (first)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Word (Word64)
-import System.Directory.OsPath (doesFileExist, getModificationTime)
-import System.OsPath
-    ( OsPath
-    , unsafeEncodeUtf
-    , (</>)
-    )
+import System.OsPath (OsPath)
 
 data McpAdminError
     = McpAdminConflict !Word64
@@ -139,13 +132,12 @@ restartMcpAdminServer
     -> Text
     -> IO (Either McpAdminError (McpAdminSnapshot McpAdminServer))
 restartMcpAdminServer home expected name =
-    withPrivateFileLock (adminLockPath home) do
-        readMcpAdminServer home name >>= \case
-            Left err -> pure (Left err)
-            Right snapshot
-                | snapshot.mcpAdminRevision /= expected ->
-                    pure (Left (McpAdminConflict snapshot.mcpAdminRevision))
-                | otherwise -> pure (Right snapshot)
+    readMcpAdminServer home name >>= \case
+        Left err -> pure (Left err)
+        Right snapshot
+            | snapshot.mcpAdminRevision /= expected ->
+                pure (Left (McpAdminConflict snapshot.mcpAdminRevision))
+            | otherwise -> pure (Right snapshot)
 
 editMcpAdminServer
     :: OsPath
@@ -211,10 +203,9 @@ loadSnapshot
     -> (HarnessConfig -> a)
     -> IO (Either McpAdminError (McpAdminSnapshot a))
 loadSnapshot home project =
-    loadHarnessConfig home >>= \case
+    loadHarnessConfigSnapshot home >>= \case
         Left err -> pure (Left (McpAdminInvalid err))
-        Right config -> do
-            revision <- configRevision home
+        Right (revision, config) ->
             pure (Right McpAdminSnapshot
                 { mcpAdminRevision = revision
                 , mcpAdminValue = project config
@@ -226,46 +217,36 @@ mutate
     -> (HarnessConfig -> Either McpAdminError (HarnessConfig, a))
     -> IO (Either McpAdminError (McpAdminSnapshot a))
 mutate home expected change =
-    withPrivateFileLock (adminLockPath home) do
-        loaded <- loadHarnessConfig home
-        case loaded of
-            Left err -> pure (Left (McpAdminInvalid err))
-            Right config -> do
-                current <- configRevision home
-                if expected /= current
-                    then pure (Left (McpAdminConflict current))
-                    else case change config of
-                        Left err -> pure (Left err)
-                        Right (updated, value) ->
-                            saveHarnessConfig home updated >>= \case
-                                Left err ->
-                                    pure (Left (McpAdminInvalid err))
-                                Right () -> do
-                                    revision <- configRevision home
-                                    pure (Right McpAdminSnapshot
-                                        { mcpAdminRevision = revision
-                                        , mcpAdminValue = value
-                                        })
-
-adminLockPath :: OsPath -> OsPath
-adminLockPath home =
-    home
-        </> unsafeEncodeUtf ".haskell-agent"
-        </> unsafeEncodeUtf "config.admin.lock"
-
--- Atomic config replacement changes the inode timestamp. The nanosecond token
--- detects native and existing-CLI edits without deriving any public value from
--- the (potentially secret-bearing) config bytes.
-configRevision :: OsPath -> IO Word64
-configRevision home = do
-    let path = harnessConfigPath home
-    exists <- doesFileExist path
-    if not exists
-        then pure 0
-        else do
-            modified <- getModificationTime path
-            pure . fromIntegral . max (0 :: Integer) . floor $
-                utcTimeToPOSIXSeconds modified * 1000000000
+    modifyHarnessConfig home
+        (\current config ->
+            if expected /= current
+                then Left ("conflict:" <> Text.pack (show current))
+                else first renderMutationError (change config))
+        >>= \case
+                Left err -> pure (Left (parseMutationError err))
+                Right (revision, _, value) ->
+                    pure (Right McpAdminSnapshot
+                        { mcpAdminRevision = revision
+                        , mcpAdminValue = value
+                        })
+  where
+    renderMutationError = \case
+        McpAdminNotFound name -> "not-found:" <> name
+        McpAdminAlreadyExists name -> "exists:" <> name
+        McpAdminInvalid err -> "invalid:" <> err
+        McpAdminConflict revision ->
+            "conflict:" <> Text.pack (show revision)
+    parseMutationError err
+        | Just raw <- Text.stripPrefix "conflict:" err
+        , [(revision, "")] <- reads (Text.unpack raw) =
+            McpAdminConflict revision
+        | Just name <- Text.stripPrefix "not-found:" err =
+            McpAdminNotFound name
+        | Just name <- Text.stripPrefix "exists:" err =
+            McpAdminAlreadyExists name
+        | Just invalid <- Text.stripPrefix "invalid:" err =
+            McpAdminInvalid invalid
+        | otherwise = McpAdminInvalid err
 
 publicServer :: Text -> McpServerConfig -> McpAdminServer
 publicServer name server = McpAdminServer
