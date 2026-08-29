@@ -960,15 +960,19 @@ ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
             engine <- deRefStablePtr stable
             turnIDBytes <- BS.packCStringLen
                 (castPtr turnID, fromIntegral turnIDLength)
-            turnIDText <- either (const (fail "invalid turn ID UTF-8")) pure
-                (TextEncoding.decodeUtf8' turnIDBytes)
-            images <- mapM peekImage
+            let turnIDText = TextEncoding.decodeUtf8' turnIDBytes
+            imageResults <- mapM peekImage
                 [0 .. fromIntegral imageCount - 1]
-            atomically $ modifyTVar' engine.engineStagedImages
-                (Map.insertWith (flip (<>)) turnIDText images)
+            case (turnIDText, sequence imageResults) of
+                (Right turnIDValue, Just images) -> do
+                    atomically $ modifyTVar' engine.engineStagedImages
+                        (Map.insertWith (flip (<>)) turnIDValue images)
+                    pure True
+                _ -> pure False
         pure $ case accepted of
-            Left _ -> 4
-            Right () -> 0
+            Left _ -> 3
+            Right False -> 4
+            Right True -> 0
   where
     pointerSize = sizeOf (nullPtr :: Ptr ())
     sizeSize = sizeOf (undefined :: CSize)
@@ -988,18 +992,19 @@ ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
             (mimePointer == nullPtr && mimeLength > 0)
                 || (bytesPointer == nullPtr && bytesLength > 0)
                 || mimeLength == 0
-        then fail "invalid image attachment"
+        then pure Nothing
         else do
             mimeBytes <- BS.packCStringLen
                 (castPtr mimePointer, fromIntegral mimeLength)
-            mime <- either (const (fail "invalid MIME UTF-8")) pure
-                (TextEncoding.decodeUtf8' mimeBytes)
+            let mime = TextEncoding.decodeUtf8' mimeBytes
             bytes <- BS.packCStringLen
                 (castPtr bytesPointer, fromIntegral bytesLength)
-            pure ImageAttachment
-                { imageMime = mime
-                , imageBytes = bytes
-                }
+            pure $ case mime of
+                Left _ -> Nothing
+                Right mimeValue -> Just ImageAttachment
+                    { imageMime = mimeValue
+                    , imageBytes = bytes
+                    }
 
 ha_engine_destroy :: Ptr () -> IO ()
 ha_engine_destroy pointer
