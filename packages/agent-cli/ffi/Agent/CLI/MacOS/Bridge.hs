@@ -470,21 +470,25 @@ ha_account_oauth_start providerBytes (CSize providerLength) callback context
     | otherwise = do
         provider <- decodeInput providerBytes providerLength
         _ <- forkIO do
-            startAccountOAuth AccountProviderRequest
-                { accountProvider = provider } >>= \case
-                    Left err -> withText err $ \errorPtr errorLength ->
-                        invokeAccountOAuthStartCallback callback context
-                            (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 0 0
-                            errorPtr errorLength
-                    Right value -> case parseChallenge value of
-                        Nothing -> withText "invalid OAuth challenge"
-                            (\errorPtr errorLength ->
-                                invokeAccountOAuthStartCallback callback context
-                                    (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                                    0 0 errorPtr errorLength)
-                        Just challenge ->
-                            withChallengeStrings challenge
-                                (invokeAccountOAuthStartCallback callback context 0)
+            tryAny (startAccountOAuth AccountProviderRequest
+                { accountProvider = provider }) >>= \case
+                Left exception -> withText (Text.pack (show exception)) $ \errorPtr errorLength ->
+                    invokeAccountOAuthStartCallback callback context
+                        (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 0 0
+                        errorPtr errorLength
+                Right (Left err) -> withText err $ \errorPtr errorLength ->
+                    invokeAccountOAuthStartCallback callback context
+                        (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 0 0
+                        errorPtr errorLength
+                Right (Right value) -> case parseChallenge value of
+                    Nothing -> withText "invalid OAuth challenge"
+                        (\errorPtr errorLength ->
+                            invokeAccountOAuthStartCallback callback context
+                                (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                                0 0 errorPtr errorLength)
+                    Just challenge ->
+                        withChallengeStrings challenge
+                            (invokeAccountOAuthStartCallback callback context 0)
         pure 0
 
 ha_account_oauth_poll
@@ -509,7 +513,7 @@ ha_account_oauth_poll providerBytes (CSize providerLength) urlBytes (CSize urlLe
         authId <- decodeInput authIdBytes authIdLength
         device <- decodeInput deviceBytes deviceLength
         _ <- forkIO do
-            pollAccountOAuth AccountOAuthPollRequest
+            tryAny (pollAccountOAuth AccountOAuthPollRequest
                 { oauthPollProvider = provider
                 , oauthPollVerificationUrl = nonEmptyText url
                 , oauthPollUserCode = nonEmptyText user
@@ -517,7 +521,9 @@ ha_account_oauth_poll providerBytes (CSize providerLength) urlBytes (CSize urlLe
                 , oauthPollDeviceCode = nonEmptyText device
                 , oauthPollIntervalSeconds = Just (fromIntegral pollInterval)
                 , oauthPollExpiresInSeconds = Just (fromIntegral expires)
-                } >>= invokeResult callback context
+                }) >>= \case
+                    Left exception -> invokeExceptionResult callback context exception
+                    Right result -> invokeResult callback context result
         pure 0
 
 ha_account_api_key_connect
@@ -531,9 +537,11 @@ ha_account_api_key_connect providerBytes (CSize providerLength) keyBytes (CSize 
         provider <- decodeInput providerBytes providerLength
         key <- decodeInput keyBytes keyLength
         _ <- forkIO do
-            connectAccountAPIKey AccountAPIKeyRequest
+            tryAny (connectAccountAPIKey AccountAPIKeyRequest
                 { accountAPIKeyProvider = provider, accountAPIKey = key }
-                >>= invokeResult callback context
+                ) >>= \case
+                    Left exception -> invokeExceptionResult callback context exception
+                    Right result -> invokeResult callback context result
         pure 0
 
 ha_account_set_enabled
@@ -544,8 +552,10 @@ ha_account_set_enabled idBytes (CSize idLength) enabled callback context
     | otherwise = do
         managedId <- decodeInput idBytes idLength
         _ <- forkIO do
-            setManagedCredentialEnabled managedId (enabled /= 0)
-                >>= invokeStoreResult callback context
+            tryAny (setManagedCredentialEnabled managedId (enabled /= 0))
+                >>= \case
+                    Left exception -> invokeExceptionResult callback context exception
+                    Right result -> invokeStoreResult callback context result
         pure 0
 
 ha_account_delete
@@ -556,8 +566,9 @@ ha_account_delete idBytes (CSize idLength) callback context
     | otherwise = do
         managedId <- decodeInput idBytes idLength
         _ <- forkIO do
-            deleteManagedCredential managedId
-                >>= invokeStoreResult callback context
+            tryAny (deleteManagedCredential managedId) >>= \case
+                Left exception -> invokeExceptionResult callback context exception
+                Right result -> invokeStoreResult callback context result
         pure 0
 
 anyNonEmptyNull :: [(Ptr Word8, Word64)] -> Bool
@@ -638,6 +649,13 @@ invokeStoreResult callback context result = case result of
         invokeAccountResultCallback callback context (-1)
             nullPtr 0 errorPtr errorLength
     Right () -> invokeAccountResultCallback callback context 0 nullPtr 0 nullPtr 0
+
+invokeExceptionResult :: FunPtr AccountResultCallback -> Ptr ()
+    -> SomeException -> IO ()
+invokeExceptionResult callback context exception =
+    withText (Text.pack (show exception)) $ \errorPtr errorLength ->
+        invokeAccountResultCallback callback context (-1)
+            nullPtr 0 errorPtr errorLength
 
 ha_engine_create :: FunPtr EventCallback -> Ptr () -> IO (Ptr ())
 ha_engine_create callback context
