@@ -29,6 +29,9 @@ import qualified Hasql.Transaction.Sessions as Transactions
 import Agent.Store.Postgres.Hasql (mkStatement)
 
 import Agent.Store.Postgres.Connection
+import Agent.Store.Postgres.Interaction
+    ( interactionMigrationStatements
+    )
 import Agent.Store.Postgres.Scope (customSchemaStatements)
 import Agent.Store.Postgres.Session
     ( sessionSchemaStatements
@@ -175,6 +178,11 @@ coreMigrations =
               \ harness.session_response_content_parts\
               \ ADD COLUMN IF NOT EXISTS image_bytes bytea"
             ]
+        }
+    , Migration
+        { migrationVersion = 11
+        , migrationName = "durable pending session interactions"
+        , migrationStatements = interactionMigrationStatements
         }
     ]
 

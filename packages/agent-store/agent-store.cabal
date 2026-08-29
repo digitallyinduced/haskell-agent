@@ -43,6 +43,7 @@ library
                     , Agent.Store.Postgres.Config
                     , Agent.Store.Postgres.Connection
                     , Agent.Store.Postgres.Custom
+                    , Agent.Store.Postgres.Interaction
                     , Agent.Store.Postgres.Managed
                     , Agent.Store.Postgres.Migrations
                     , Agent.Store.Postgres.Scope
@@ -167,6 +168,7 @@ test-suite agent-store-test
     main-is:          Spec.hs
     other-modules:    Agent.Store.Postgres.ConfigSpec
                     , Agent.Store.Postgres.CustomSpec
+                    , Agent.Store.Postgres.InteractionSpec
                     , Agent.Store.Postgres.ManagedSpec
                     , Agent.Store.PoolCacheSpec
                     , Agent.Store.Postgres.ScopeSpec

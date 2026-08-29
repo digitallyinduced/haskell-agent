@@ -7,6 +7,9 @@ module Agent.Store.Postgres.Session.Schema
 
 import Data.ByteString (ByteString)
 
+import Agent.Store.Postgres.Interaction
+    ( interactionSchemaStatements
+    )
 import Agent.Store.Postgres.SessionItem
     ( sessionItemSchemaStatements
     )
@@ -151,6 +154,7 @@ sessionSchemaStatements =
        \ BEFORE UPDATE OR DELETE ON harness.session_turns\
        \ FOR EACH ROW EXECUTE FUNCTION harness.reject_session_fact_mutation()"
        ]
+    <> interactionSchemaStatements
 
 -- | Trigram indexes that make the substring branches of conversation search
 -- indexable. Without them the @ILIKE@ fallbacks in 'searchTurnsStatement'

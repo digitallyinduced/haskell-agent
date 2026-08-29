@@ -6,6 +6,7 @@ import Test.Hspec (hspec)
 
 import qualified Agent.Store.Postgres.ConfigSpec as ConfigSpec
 import qualified Agent.Store.Postgres.CustomSpec as CustomSpec
+import qualified Agent.Store.Postgres.InteractionSpec as InteractionSpec
 import qualified Agent.Store.Postgres.ManagedSpec as ManagedSpec
 import qualified Agent.Store.PoolCacheSpec as PoolCacheSpec
 import qualified Agent.Store.Postgres.ScopeSpec as ScopeSpec
@@ -18,6 +19,7 @@ main = hspec do
     ConfigSpec.spec
     ScopeSpec.spec
     CustomSpec.spec
+    InteractionSpec.spec
     SessionSpec.spec
     SkillSpec.spec
     ManagedSpec.spec
