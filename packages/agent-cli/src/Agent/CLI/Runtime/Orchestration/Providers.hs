@@ -655,6 +655,7 @@ runAgentProviders
                                     (unsafeToFilePath cwd))
                                     { permission
                                     , safeMode = True
+                                    , transport = claudeAuth.transport
                                     }
                             compactRunner _ =
                                 pure $ Left

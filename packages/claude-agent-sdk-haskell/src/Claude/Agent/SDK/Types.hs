@@ -112,7 +112,18 @@ data ClaudeAgentOptions = ClaudeAgentOptions
     -- records are routine. The limit only guards against a runaway process,
     -- so it should stay far above any legitimate record.
     , maxBufferSizeBytes :: !Int
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+-- The exact child environment can contain provider credentials. Keep the
+-- useful process identity in diagnostics without rendering environment
+-- values (or the many prompt/session options that may contain user data).
+instance Show ClaudeAgentOptions where
+    show options =
+        "ClaudeAgentOptions { executable = "
+            <> show options.executable
+            <> ", cwd = "
+            <> show options.cwd
+            <> ", environment = <redacted>, ... }"
 
 defaultClaudeAgentOptions :: FilePath -> FilePath -> ClaudeAgentOptions
 defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions

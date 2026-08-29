@@ -7,6 +7,7 @@ module Agent.Claude.Internal.Messages
     , emptyClaudeEventState
     , claudeEventStateHasActivity
     , interpretClaudeTurn
+    , interpretClaudeTurnWithCredentialValidation
     , streamClaudeProgress
     , streamClaudeMessage
     , remainingClaudeEvents
@@ -392,10 +393,19 @@ interpretClaudeTurn
     :: [Message]
     -> ResultMessage
     -> Either Text CompletedClaudeTurn
-interpretClaudeTurn messages result = do
+interpretClaudeTurn = interpretClaudeTurnWithCredentialValidation True
+
+interpretClaudeTurnWithCredentialValidation
+    :: Bool
+    -> [Message]
+    -> ResultMessage
+    -> Either Text CompletedClaudeTurn
+interpretClaudeTurnWithCredentialValidation validateCredential messages result = do
     let visibleMessages =
             filter (not . messageHasParentToolUseId) messages
-    validateSubscriptionSource visibleMessages
+    if validateCredential
+        then validateSubscriptionSource visibleMessages
+        else Right ()
     let
         liveEvents = concatMap messageLiveEvents visibleMessages
         -- Claude Code's result text is only the last text block; the

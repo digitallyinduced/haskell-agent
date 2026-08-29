@@ -9,6 +9,9 @@ module Agent.Claude.Auth
 import Agent.Claude.Internal.Environment
     ( sanitizedClaudeEnvironment
     )
+import Agent.Claude.Transport
+    ( ClaudeCodeTransport(..)
+    )
 import qualified Agent.Json.Decode as Json
 import Control.Exception.Safe (displayException, tryAny)
 import Data.ByteString (ByteString)
@@ -29,6 +32,7 @@ data ClaudeCodeAuth = ClaudeCodeAuth
     { executable :: FilePath
     , accountLabel :: Text
     , subscriptionType :: Maybe Text
+    , transport :: ClaudeCodeTransport
     } deriving (Eq, Show)
 
 -- | Verify that the installed Claude Code CLI is signed into a first-party
@@ -36,8 +40,33 @@ data ClaudeCodeAuth = ClaudeCodeAuth
 -- reads or returns credential material.
 loadClaudeCodeAuth :: IO (Either Text ClaudeCodeAuth)
 loadClaudeCodeAuth = do
-    resolved <- resolveClaudeExecutable
-    case resolved of
+    gatewayUrl <- nonEmptyEnvironment "HASKELL_AGENT_GATEWAY_URL"
+    gatewayToken <- nonEmptyEnvironment "HASKELL_AGENT_GATEWAY_TOKEN"
+    case (gatewayUrl, gatewayToken) of
+        (Nothing, Nothing) -> loadLocalClaudeCodeAuth
+        (Just url, Just token) ->
+            resolveClaudeExecutable >>= \case
+                Left err -> pure (Left err)
+                Right executablePath ->
+                    pure $
+                        Right ClaudeCodeAuth
+                            { executable = executablePath
+                            , accountLabel = "Claude via gateway"
+                            , subscriptionType = Nothing
+                            , transport =
+                                ClaudeCodeGateway
+                                    { gatewayBaseUrl = url
+                                    , gatewayToken = token
+                                    }
+                            }
+        _ ->
+            pure $
+                Left
+                    "Claude gateway mode requires both HASKELL_AGENT_GATEWAY_URL and HASKELL_AGENT_GATEWAY_TOKEN."
+
+loadLocalClaudeCodeAuth :: IO (Either Text ClaudeCodeAuth)
+loadLocalClaudeCodeAuth =
+    resolveClaudeExecutable >>= \case
         Left err -> pure (Left err)
         Right executablePath -> do
             cleanEnvironment <- sanitizedClaudeEnvironment
@@ -63,6 +92,10 @@ loadClaudeCodeAuth = do
                     parseClaudeCodeAuthStatus
                         executablePath
                         (TextEncoding.encodeUtf8 (Text.pack stdoutText))
+
+nonEmptyEnvironment :: String -> IO (Maybe Text)
+nonEmptyEnvironment name =
+    lookupEnv name >>= pure . (>>= nonEmptyText . Text.pack)
 
 parseClaudeCodeAuthStatus
     :: FilePath
@@ -96,6 +129,7 @@ parseClaudeCodeAuthStatus executablePath bytes =
                             ]
                             ("Claude Code (" <> subscription <> ")")
                     , subscriptionType = Just subscription
+                    , transport = ClaudeCodeLocalSubscription
                     }
 
 data AuthStatus = AuthStatus
