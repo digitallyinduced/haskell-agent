@@ -260,6 +260,7 @@ foreign-library haskell-agent-bridge
     other-modules:    Agent.CLI.MacOS.Bridge
                     , Agent.CLI.MacOS.EngineMailbox
                     , Agent.CLI.MacOS.NativeLoopEvent
+                    , Agent.CLI.MacOS.TaskScheduler
     c-sources:        cbits/HaskellAgentBridgeRuntime.c
     include-dirs:     include
     includes:         HaskellAgentBridge.h
@@ -360,6 +361,8 @@ test-suite agent-cli-test
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.BridgeHeaderSpec
                     , Agent.CLI.MacOS.BridgeFFISpec
+                    , Agent.CLI.MacOS.TaskScheduler
+                    , Agent.CLI.MacOS.TaskSchedulerSpec
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
@@ -473,6 +476,7 @@ test-suite agent-cli-test
     if os(darwin)
         c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
                     , test/cbits/HaskellAgentBridgeImageSmoke.c
+                    , test/cbits/HaskellAgentBridgeTaskSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
         other-modules: Agent.CLI.MacOS.Bridge
 
