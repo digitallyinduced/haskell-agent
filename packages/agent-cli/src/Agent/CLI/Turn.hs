@@ -352,8 +352,12 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
         persistIncomplete
-            :: [ResponseItem] -> Text -> Maybe TurnOutput -> IO ()
-        persistIncomplete retainedItems errorText maybeTurn = case persist of
+            :: [ResponseItem]
+            -> Text
+            -> Maybe TurnOutput
+            -> Maybe Text
+            -> IO ()
+        persistIncomplete retainedItems errorText maybeTurn displayAssistant = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
@@ -363,7 +367,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 let turn = SessionTurn
                         { turnAt = now
                         , turnUserText = promptText
-                        , turnAssistantText = maybeTurn >>= (.assistantText)
+                        , turnAssistantText =
+                            case displayAssistant of
+                                Just text -> Just text
+                                Nothing -> maybeTurn >>= (.assistantText)
                         , turnError = Just errorText
                         , turnResponseId = (.responseId) <$> maybeTurn
                         , turnEffect = TranscriptAppend
@@ -421,10 +428,14 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         (formatLoopErrorColored color cancelled)
                     putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
+            let partialAssistant =
+                    fmap stripBracketedTimestamps
+                        execution.executionVisibleAssistantText
             persistIncomplete
                 (inputOnlyTurnItems committedPrepared)
                 "cancelled"
                 Nothing
+                partialAssistant
             pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -489,6 +500,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     persistIncomplete (inputOnlyTurnItems committedPrepared)
                         (formatLoopErrorPersistedAt finishedAt err)
                         maybeIncompleteTurn
+                        Nothing
                     planState <- readIORef planMode.planStateRef
                     pure $ TurnFailed PendingTurn
                         { pendingPromptText = promptText

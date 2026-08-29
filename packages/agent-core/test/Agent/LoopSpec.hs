@@ -1251,6 +1251,23 @@ spec = describe "runLoop" do
         result <- runLoop config0 Nothing "go"
         result `shouldBe` Left (LoopCancelled [])
 
+    it "retains assistant text streamed before submitTurn is cancelled" do
+        started <- newEmptyMVar
+        config0 <- testConfig $ Backend \_state _prev _inputs onEvent -> do
+            onEvent (TextDelta "visible ")
+            onEvent (TextDelta "partial")
+            putMVar started ()
+            threadDelay 2000000
+            error "cancel should stop the backend"
+        let cancelFlag = config0.loopCancel
+        _ <- forkIO do
+            takeMVar started
+            requestCancel cancelFlag
+        execution <- runLoopInputsDetailed config0 Nothing [UserMessage "go"]
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        execution.executionVisibleAssistantText
+            `shouldBe` Just "visible partial"
+
     it "does not clear a cancel requested before the loop starts" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
