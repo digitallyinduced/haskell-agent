@@ -1,5 +1,4 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
-{-# LANGUAGE FieldSelectors #-}
 
 module Agent.CLI.MacOS.Bridge () where
 
@@ -14,6 +13,31 @@ import Agent.CLI.NativeRuntime
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     )
+import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.CLI.Login
+    ( AccountBilling(..)
+    , LoginAccount(..)
+    , discoverLoginAccounts
+    , loginAccountSelectionId
+    , storeConnectedCredential
+    )
+import Agent.CLI.CredentialStore
+    ( ManagedAuthKind(..)
+    , deleteManagedCredential
+    , setManagedCredentialEnabled
+    )
+import Agent.CLI.Auth
+    ( GrokAuthState(..)
+    , grokAuthStateToJson
+    , openAIOAuthClientId
+    , openaiAuthStateFromJson
+    , xaiOAuthClientId
+    )
+import qualified Agent.OpenAI.Login as OpenAILogin
+import qualified Agent.OpenAI.Auth as OpenAIAuth
+import qualified Agent.OpenAI.Auth.Types as OpenAIAuthTypes
+import qualified Agent.XAI.Auth as XAIAuth
+import qualified Agent.OpenRouter.Usage as OpenRouter
 import Agent.CLI.ModelConfig (loadModelCatalogAt)
 import Agent.CLI.Models
     ( ModelOption(..)
@@ -46,14 +70,13 @@ import Agent.CLI.Session
     , sessionsRoot
     )
 import Agent.CLI.SessionAdmin
-    ( accountSummariesJSON
-    , loadSessionPageJSON
+    ( loadSessionPageJSON
     , managedPostgresConfigForHome
     , sessionSummaryWithStatusJSON
     )
 import Agent.Loop (LoopEvent(..))
 import Agent.Dialect (dialectSlug)
-import Agent.Provider (Provider(..), providerSlug)
+import Agent.Provider (Provider(..), providerSlug, parseProvider, BillingMode(..))
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
     , Store
@@ -61,16 +84,11 @@ import Agent.Store.Postgres
     , openStore
     , trustedPool
     )
-import Agent.Store.Postgres.UsageCache
-    ( AccountUsageCacheEntry(..)
-    , loadAccountUsageCache
-    , upsertAccountUsageCache
-    )
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
     )
-import Control.Concurrent (forkFinally)
+import Control.Concurrent (forkFinally, forkIO)
 import Control.Concurrent.Async
     ( Async
     , cancel
@@ -135,7 +153,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (addUTCTime, getCurrentTime)
-import Data.Word (Word8)
+import Data.Word (Word8, Word64)
 import Foreign
     ( FunPtr
     , Ptr
@@ -149,6 +167,7 @@ import Foreign
     , nullFunPtr
     , nullPtr
     )
+import Foreign.C.String (CString)
 import Foreign.C.Types (CInt(..), CSize(..))
 import System.Directory.OsPath (getHomeDirectory)
 import System.IO
@@ -161,10 +180,54 @@ import System.OsPath
     , unsafeEncodeUtf
     )
 
+decodeInput :: Ptr Word8 -> Word64 -> IO Text
+decodeInput pointer length
+    | pointer == nullPtr || length == 0 = pure ""
+    | otherwise = TextEncoding.decodeUtf8 <$> BS.packCStringLen
+        (castPtr pointer, fromIntegral length)
+
+nonEmptyText :: Text -> Maybe Text
+nonEmptyText value
+    | Text.null value = Nothing
+    | otherwise = Just value
+
+withText :: Text -> (CString -> CSize -> IO a) -> IO a
+withText value action = BS.useAsCStringLen (TextEncoding.encodeUtf8 value) \(pointer, length) ->
+    action pointer (fromIntegral length)
+
+withOptionalText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
+withOptionalText value action = withText (fromMaybe "" value) action
+
 type EventCallback = Ptr () -> Ptr Word8 -> CSize -> IO ()
+
+type AccountListCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CInt -> CInt -> CString -> CSize -> IO ()
+
+type AccountResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
+
+type AccountOAuthStartCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> CInt -> CInt
+    -> CString -> CSize -> IO ()
 
 foreign import ccall "dynamic"
     invokeEventCallback :: FunPtr EventCallback -> EventCallback
+
+foreign import ccall "dynamic"
+    invokeAccountListCallback
+        :: FunPtr AccountListCallback -> AccountListCallback
+
+foreign import ccall "dynamic"
+    invokeAccountResultCallback
+        :: FunPtr AccountResultCallback -> AccountResultCallback
+
+foreign import ccall "dynamic"
+    invokeAccountOAuthStartCallback
+        :: FunPtr AccountOAuthStartCallback -> AccountOAuthStartCallback
 
 data BridgeRequest = BridgeRequest
     { requestId :: !Text
@@ -299,6 +362,25 @@ instance Aeson.FromJSON ModelsListRequest where
             <$> object .: "cwd"
             <*> object .:? "sessionId"
 
+data AccountProviderRequest = AccountProviderRequest
+    { accountProvider :: !Text
+    }
+
+data AccountOAuthPollRequest = AccountOAuthPollRequest
+    { oauthPollProvider :: !Text
+    , oauthPollVerificationUrl :: !(Maybe Text)
+    , oauthPollUserCode :: !(Maybe Text)
+    , oauthPollDeviceAuthId :: !(Maybe Text)
+    , oauthPollDeviceCode :: !(Maybe Text)
+    , oauthPollIntervalSeconds :: !(Maybe Int)
+    , oauthPollExpiresInSeconds :: !(Maybe Int)
+    }
+
+data AccountAPIKeyRequest = AccountAPIKeyRequest
+    { accountAPIKeyProvider :: !Text
+    , accountAPIKey :: !Text
+    }
+
 data EngineCommand
     = EngineRequest !BridgeRequest
     | EngineStop
@@ -335,6 +417,245 @@ foreign export ccall ha_engine_send_json
 
 foreign export ccall ha_engine_destroy
     :: Ptr () -> IO ()
+
+foreign export ccall ha_accounts_list
+    :: FunPtr AccountListCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_account_oauth_start
+    :: Ptr Word8 -> CSize -> FunPtr AccountOAuthStartCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_account_oauth_poll
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> CInt
+    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_account_api_key_connect
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_account_set_enabled
+    :: Ptr Word8 -> CSize -> CInt
+    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_account_delete
+    :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+
+ha_accounts_list :: FunPtr AccountListCallback -> Ptr () -> IO CInt
+ha_accounts_list callback context
+    | callback == nullFunPtr = pure 1
+    | otherwise = do
+        _ <- forkIO do
+            tryAny discoverLoginAccounts >>= \case
+                Left exception ->
+                    withText (Text.pack (show exception)) $ \errorPtr errorLength ->
+                        invokeAccountListCallback callback context (-1)
+                            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                            nullPtr 0 nullPtr 0 nullPtr 0
+                            0 0 errorPtr errorLength
+                Right accounts -> do
+                    forM_ accounts \account ->
+                        withAccountStrings account $
+                            invokeAccountListCallback callback context 0
+                    invokeAccountListCallback callback context 1
+                        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                        0 0 nullPtr 0
+        pure 0
+
+ha_account_oauth_start
+    :: Ptr Word8 -> CSize -> FunPtr AccountOAuthStartCallback -> Ptr () -> IO CInt
+ha_account_oauth_start providerBytes (CSize providerLength) callback context
+    | callback == nullFunPtr = pure 1
+    | providerBytes == nullPtr && providerLength > 0 = pure 2
+    | otherwise = do
+        provider <- decodeInput providerBytes providerLength
+        _ <- forkIO do
+            tryAny (startAccountOAuth AccountProviderRequest
+                { accountProvider = provider }) >>= \case
+                Left exception -> withText (Text.pack (show exception)) $ \errorPtr errorLength ->
+                    invokeAccountOAuthStartCallback callback context
+                        (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 0 0
+                        errorPtr errorLength
+                Right (Left err) -> withText err $ \errorPtr errorLength ->
+                    invokeAccountOAuthStartCallback callback context
+                        (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 0 0
+                        errorPtr errorLength
+                Right (Right value) -> case parseChallenge value of
+                    Nothing -> withText "invalid OAuth challenge"
+                        (\errorPtr errorLength ->
+                            invokeAccountOAuthStartCallback callback context
+                                (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                                0 0 errorPtr errorLength)
+                    Just challenge ->
+                        withChallengeStrings challenge
+                            (invokeAccountOAuthStartCallback callback context 0)
+        pure 0
+
+ha_account_oauth_poll
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> CInt
+    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+ha_account_oauth_poll providerBytes (CSize providerLength) urlBytes (CSize urlLength)
+    userBytes (CSize userLength) authIdBytes (CSize authIdLength)
+    deviceBytes (CSize deviceLength) pollInterval expires callback context
+    | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull
+        [ (providerBytes, providerLength)
+        , (urlBytes, urlLength)
+        , (userBytes, userLength)
+        , (authIdBytes, authIdLength)
+        , (deviceBytes, deviceLength)
+        ] = pure 2
+    | otherwise = do
+        provider <- decodeInput providerBytes providerLength
+        url <- decodeInput urlBytes urlLength
+        user <- decodeInput userBytes userLength
+        authId <- decodeInput authIdBytes authIdLength
+        device <- decodeInput deviceBytes deviceLength
+        _ <- forkIO do
+            tryAny (pollAccountOAuth AccountOAuthPollRequest
+                { oauthPollProvider = provider
+                , oauthPollVerificationUrl = nonEmptyText url
+                , oauthPollUserCode = nonEmptyText user
+                , oauthPollDeviceAuthId = nonEmptyText authId
+                , oauthPollDeviceCode = nonEmptyText device
+                , oauthPollIntervalSeconds = Just (fromIntegral pollInterval)
+                , oauthPollExpiresInSeconds = Just (fromIntegral expires)
+                }) >>= \case
+                    Left exception -> invokeExceptionResult callback context exception
+                    Right result -> invokeResult callback context result
+        pure 0
+
+ha_account_api_key_connect
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+ha_account_api_key_connect providerBytes (CSize providerLength) keyBytes (CSize keyLength) callback context
+    | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull
+        [ (providerBytes, providerLength), (keyBytes, keyLength) ] = pure 2
+    | otherwise = do
+        provider <- decodeInput providerBytes providerLength
+        key <- decodeInput keyBytes keyLength
+        _ <- forkIO do
+            tryAny (connectAccountAPIKey AccountAPIKeyRequest
+                { accountAPIKeyProvider = provider, accountAPIKey = key }
+                ) >>= \case
+                    Left exception -> invokeExceptionResult callback context exception
+                    Right result -> invokeResult callback context result
+        pure 0
+
+ha_account_set_enabled
+    :: Ptr Word8 -> CSize -> CInt -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+ha_account_set_enabled idBytes (CSize idLength) enabled callback context
+    | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
+    | otherwise = do
+        managedId <- decodeInput idBytes idLength
+        _ <- forkIO do
+            tryAny (setManagedCredentialEnabled managedId (enabled /= 0))
+                >>= \case
+                    Left exception -> invokeExceptionResult callback context exception
+                    Right result -> invokeStoreResult callback context result
+        pure 0
+
+ha_account_delete
+    :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
+ha_account_delete idBytes (CSize idLength) callback context
+    | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
+    | otherwise = do
+        managedId <- decodeInput idBytes idLength
+        _ <- forkIO do
+            tryAny (deleteManagedCredential managedId) >>= \case
+                Left exception -> invokeExceptionResult callback context exception
+                Right result -> invokeStoreResult callback context result
+        pure 0
+
+anyNonEmptyNull :: [(Ptr Word8, Word64)] -> Bool
+anyNonEmptyNull = any \(pointer, length) ->
+    pointer == nullPtr && length > 0
+
+withAccountStrings :: LoginAccount -> (CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> CString -> CSize
+    -> CInt -> CInt -> CString -> CSize -> IO a) -> IO a
+withAccountStrings account action =
+    withText (providerSlug account.loginProvider) $ \provider providerLength ->
+    withText (billingText account.loginBilling) $ \billing billingLength ->
+    withText (loginAccountSelectionId account) $ \selection selectionLength ->
+    withText account.loginAccountId $ \accountId accountIdLength ->
+    withText account.loginLabel $ \label labelLength ->
+    withText account.loginSource $ \source sourceLength ->
+        withText account.loginSource $ \detail detailLength ->
+        withOptionalText account.loginManagedId $ \managedId managedLength ->
+        action provider providerLength billing billingLength
+            selection selectionLength accountId accountIdLength label labelLength
+            detail detailLength managedId managedLength source sourceLength
+            (if account.loginEnabled then 1 else 0)
+            (if account.loginManagedId == Nothing then 0 else 1)
+            nullPtr 0
+
+billingText :: AccountBilling -> Text
+billingText = \case
+    SubscriptionBilling _ -> "subscription"
+    ApiCreditsBilling -> "api"
+
+parseChallenge :: Aeson.Value
+    -> Maybe (Text, Text, Maybe Text, Maybe Text, Int, Int)
+parseChallenge = Aeson.parseMaybe $ Aeson.withObject "challenge" \object ->
+    (,,,,,)
+        <$> object Aeson..: "verificationUrl"
+        <*> object Aeson..: "userCode"
+        <*> object Aeson..:? "deviceAuthId"
+        <*> object Aeson..:? "deviceCode"
+        <*> (object Aeson..:? "pollIntervalSeconds" Aeson..!= 5)
+        <*> (object Aeson..:? "expiresInSeconds" Aeson..!= 0)
+
+withChallengeStrings
+    :: (Text, Text, Maybe Text, Maybe Text, Int, Int)
+    -> (CString -> CSize -> CString -> CSize -> CString -> CSize -> CString -> CSize
+        -> CInt -> CInt -> CString -> CSize -> IO a)
+    -> IO a
+withChallengeStrings (url, user, authId, device, interval, expires) action =
+    withText url $ \urlPtr urlLength ->
+    withText user $ \userPtr userLength ->
+    withOptionalText authId $ \authPtr authLength ->
+    withOptionalText device $ \devicePtr deviceLength ->
+        action urlPtr urlLength userPtr userLength authPtr authLength
+            devicePtr deviceLength (fromIntegral interval) (fromIntegral expires)
+            nullPtr 0
+
+invokeResult :: FunPtr AccountResultCallback -> Ptr ()
+    -> Either Text Aeson.Value -> IO ()
+invokeResult callback context result = case result of
+    Left errorText -> withText errorText $ \errorPtr errorLength ->
+        invokeAccountResultCallback callback context (-1)
+            nullPtr 0 errorPtr errorLength
+    Right value ->
+        let status = Aeson.parseMaybe (Aeson.withObject "result"
+                (\object -> object Aeson..: "status")) value
+            accountId = Aeson.parseMaybe (Aeson.withObject "result"
+                (\object -> object Aeson..:? "accountID")) value >>= id
+        in case status of
+            Just ("pending" :: Text) ->
+                invokeAccountResultCallback callback context 1 nullPtr 0 nullPtr 0
+            _ -> withOptionalText accountId $ \idPtr idLength ->
+                invokeAccountResultCallback callback context 0 idPtr idLength nullPtr 0
+
+invokeStoreResult :: FunPtr AccountResultCallback -> Ptr ()
+    -> Either Text () -> IO ()
+invokeStoreResult callback context result = case result of
+    Left errorText -> withText errorText $ \errorPtr errorLength ->
+        invokeAccountResultCallback callback context (-1)
+            nullPtr 0 errorPtr errorLength
+    Right () -> invokeAccountResultCallback callback context 0 nullPtr 0 nullPtr 0
+
+invokeExceptionResult :: FunPtr AccountResultCallback -> Ptr ()
+    -> SomeException -> IO ()
+invokeExceptionResult callback context exception =
+    withText (Text.pack (show exception)) $ \errorPtr errorLength ->
+        invokeAccountResultCallback callback context (-1)
+            nullPtr 0 errorPtr errorLength
 
 ha_engine_create :: FunPtr EventCallback -> Ptr () -> IO (Ptr ())
 ha_engine_create callback context
@@ -946,11 +1267,6 @@ handleRequest config store root request = do
                             (failureEvent current.requestId)
                             (const (successEvent current.requestId True))
                             changed
-            "accounts.list" -> do
-                activeStore <- acquireStore config store
-                accounts <- cachedAccountSummaries activeStore
-                pure $ successEvent current.requestId
-                    accounts
             "turn.agents" ->
                 pure $ successEvent current.requestId ([] :: [Aeson.Value])
             "models.list" ->
@@ -971,48 +1287,6 @@ handleRequest config store root request = do
             method ->
                 pure $ failureEvent current.requestId
                     ("unknown method: " <> method)
-
-cachedAccountSummaries :: Store -> IO [Aeson.Value]
-cachedAccountSummaries store = do
-    let pool = trustedPool store
-    cached <- loadAccountUsageCache pool accountCacheProvider accountCacheKey
-    now <- getCurrentTime
-    case cached of
-        Right (Just entry)
-            | Just accounts <- decodeAccountCache entry.accountUsageCachePayload -> do
-                if entry.accountUsageCacheExpiresAt <= now
-                    then void $ forkFinally
-                        (refreshAccountCache store)
-                        (const (pure ()))
-                    else pure ()
-                pure accounts
-        _ -> refreshAccountCache store
-
-refreshAccountCache :: Store -> IO [Aeson.Value]
-refreshAccountCache store = do
-    accounts <- accountSummariesJSON
-    fetchedAt <- getCurrentTime
-    let payload = TextEncoding.decodeUtf8 $
-            LBS.toStrict (Aeson.encode accounts)
-        entry = AccountUsageCacheEntry
-            { accountUsageCacheProvider = accountCacheProvider
-            , accountUsageCacheAccountId = accountCacheKey
-            , accountUsageCachePayload = payload
-            , accountUsageCacheFetchedAt = fetchedAt
-            , accountUsageCacheExpiresAt = addUTCTime 300 fetchedAt
-            }
-    void $ upsertAccountUsageCache (trustedPool store) entry
-    pure accounts
-
-decodeAccountCache :: Text -> Maybe [Aeson.Value]
-decodeAccountCache =
-    Aeson.decodeStrict' . TextEncoding.encodeUtf8
-
-accountCacheProvider :: Text
-accountCacheProvider = "macos-bridge"
-
-accountCacheKey :: Text
-accountCacheKey = "account-summaries-v1"
 
 loadNativeModelCatalog
     :: Store
@@ -1108,6 +1382,174 @@ parseParams request =
     case Aeson.parseEither Aeson.parseJSON request.requestParams of
         Left err -> Left (Text.pack err)
         Right value -> Right value
+
+startAccountOAuth
+    :: AccountProviderRequest
+    -> IO (Either Text Aeson.Value)
+startAccountOAuth request =
+    case parseProvider request.accountProvider of
+        Just OpenAIProvider -> do
+            clientId <- openAIOAuthClientId <$> lookupNonEmpty
+                "OPENAI_OAUTH_CLIENT_ID"
+            OpenAILogin.requestDeviceCode
+                (OpenAILogin.defaultLoginOptions clientId) >>= \case
+                    Left err -> pure (Left err)
+                    Right code -> pure $ Right (Aeson.object
+                        [ "provider" Aeson..= ("openai" :: Text)
+                        , "verificationUrl" Aeson..= code.verificationUrl
+                        , "userCode" Aeson..= code.userCode
+                        , "deviceAuthId" Aeson..= code.deviceAuthId
+                        , "pollIntervalSeconds" Aeson..=
+                            code.pollIntervalSeconds
+                        ])
+        Just XAIProvider -> do
+            clientId <- xaiOAuthClientId <$> lookupNonEmpty
+                "XAI_OAUTH_CLIENT_ID"
+            XAIAuth.requestDeviceAuthorization
+                (XAIAuth.defaultOAuthOptions clientId) >>= \case
+                    Left err -> pure (Left err)
+                    Right code -> pure $ Right (Aeson.object
+                        [ "provider" Aeson..= ("xai" :: Text)
+                        , "verificationUrl" Aeson..= code.verificationUrl
+                        , "userCode" Aeson..= code.userCode
+                        , "deviceCode" Aeson..= code.deviceCode
+                        , "pollIntervalSeconds" Aeson..=
+                            code.pollIntervalSeconds
+                        , "expiresInSeconds" Aeson..=
+                            code.expiresInSeconds
+                        ])
+        _ -> pure (Left "OAuth account connection is not supported for this provider")
+
+pollAccountOAuth
+    :: AccountOAuthPollRequest
+    -> IO (Either Text Aeson.Value)
+pollAccountOAuth request =
+    case parseProvider request.oauthPollProvider of
+        Just OpenAIProvider -> case
+            (request.oauthPollVerificationUrl, request.oauthPollUserCode,
+                request.oauthPollDeviceAuthId) of
+            (Just url, Just userCode, Just authId) ->
+                do
+                    clientId <- openAIOAuthClientId <$> lookupNonEmpty
+                        "OPENAI_OAUTH_CLIENT_ID"
+                    OpenAILogin.pollDeviceCode
+                        (OpenAILogin.defaultLoginOptions clientId)
+                        OpenAILogin.DeviceCode
+                            { OpenAILogin.verificationUrl = Text.unpack url
+                            , OpenAILogin.userCode = userCode
+                            , OpenAILogin.deviceAuthId = authId
+                            , OpenAILogin.pollIntervalSeconds =
+                                fromMaybe 5 request.oauthPollIntervalSeconds
+                            } >>= \case
+                            Left err -> pure (Left err)
+                            Right Nothing -> pure $ Right
+                                (Aeson.object ["status" Aeson..= ("pending" :: Text)])
+                            Right (Just authJson) -> do
+                                now <- getCurrentTime
+                                case openaiAuthStateFromJson now
+                                    (Aeson.encode authJson) of
+                                    Nothing -> pure (Left
+                                        "OpenAI returned invalid account data")
+                                    Just auth -> do
+                                        let accountId =
+                                                case auth of
+                                                    OpenAIAuthTypes.AuthState
+                                                        _ _ value _ _ -> value
+                                        stored <- storeConnectedCredential
+                                            False OpenAIProvider
+                                                accountId
+                                            "ChatGPT" SubscriptionBilled
+                                            ManagedOpenAIAuthJson
+                                            (TextEncoding.decodeUtf8
+                                                (LBS.toStrict
+                                                    (Aeson.encode authJson)))
+                                        pure $ if stored
+                                            then Right (Aeson.object
+                                                [ "status" Aeson..=
+                                                    ("connected" :: Text)
+                                                , "accountID" Aeson..=
+                                                    auth.accountId
+                                                ])
+                                            else Left "could not store account"
+            _ -> pure (Left "OAuth challenge is missing required fields")
+        Just XAIProvider -> case
+            (request.oauthPollUserCode, request.oauthPollDeviceCode) of
+            (Just _, Just deviceCode) -> do
+                clientId <- xaiOAuthClientId <$> lookupNonEmpty
+                    "XAI_OAUTH_CLIENT_ID"
+                let challenge = XAIAuth.DeviceAuthorization
+                        { XAIAuth.deviceCode = deviceCode
+                        , XAIAuth.userCode = fromMaybe "" request.oauthPollUserCode
+                        , XAIAuth.verificationUrl =
+                            fromMaybe "" request.oauthPollVerificationUrl
+                        , XAIAuth.pollIntervalSeconds =
+                            fromMaybe 5 request.oauthPollIntervalSeconds
+                        , XAIAuth.expiresInSeconds =
+                            request.oauthPollExpiresInSeconds
+                        }
+                XAIAuth.pollDeviceAuthorization
+                    (XAIAuth.defaultOAuthOptions clientId) challenge >>= \case
+                        Left err -> pure (Left err)
+                        Right Nothing -> pure $ Right
+                            (Aeson.object ["status" Aeson..= ("pending" :: Text)])
+                        Right (Just tokens) -> do
+                            now <- getCurrentTime
+                            let accountId = fromMaybe "grok"
+                                    (XAIAuth.accountIdFromAccessToken
+                                        tokens.accessToken)
+                                label = fromMaybe "Grok" $
+                                    (tokens.idToken >>= XAIAuth.emailFromToken)
+                                    <|> XAIAuth.emailFromToken tokens.accessToken
+                                authJson = grokAuthStateToJson GrokAuthState
+                                    { grokAccessToken = tokens.accessToken
+                                    , grokRefreshToken = tokens.refreshToken
+                                    , grokIdToken = tokens.idToken
+                                    , grokExpiresAt =
+                                        ((`addUTCTime` now) . fromIntegral
+                                            <$> tokens.expiresInSeconds)
+                                    }
+                            case tokens.refreshToken of
+                                Nothing -> pure (Left
+                                    "Grok login did not return a refresh token")
+                                Just _ -> do
+                                    stored <- storeConnectedCredential
+                                        False XAIProvider accountId label
+                                        SubscriptionBilled ManagedGrokAuthJson
+                                        (TextEncoding.decodeUtf8
+                                            (LBS.toStrict
+                                                (Aeson.encode authJson)))
+                                    pure $ if stored
+                                        then Right (Aeson.object
+                                            [ "status" Aeson..=
+                                                ("connected" :: Text)
+                                            , "accountID" Aeson..= accountId
+                                            ])
+                                        else Left "could not store account"
+            _ -> pure (Left "OAuth challenge is missing required fields")
+        _ -> pure (Left "OAuth account connection is not supported for this provider")
+
+connectAccountAPIKey
+    :: AccountAPIKeyRequest
+    -> IO (Either Text Aeson.Value)
+connectAccountAPIKey request =
+    case parseProvider request.accountAPIKeyProvider of
+        Just OpenRouterProvider
+            | not (Text.null (Text.strip request.accountAPIKey)) ->
+                OpenRouter.fetchOpenRouterUsage request.accountAPIKey >>= \case
+                    Left err -> pure (Left ("OpenRouter rejected the key: " <> err))
+                    Right usage -> do
+                        let accountId = fromMaybe "openrouter" usage.keyLabel
+                            label = fromMaybe "OpenRouter" usage.keyLabel
+                        stored <- storeConnectedCredential
+                            False OpenRouterProvider accountId label ApiBilled
+                            ManagedBearerToken request.accountAPIKey
+                        pure $ if stored
+                            then Right (Aeson.object
+                                [ "status" Aeson..= ("connected" :: Text)
+                                , "accountID" Aeson..= accountId
+                                ])
+                            else Left "could not store account"
+        _ -> pure (Left "API-key connections are supported for OpenRouter")
 
 acquireStore :: ManagedPostgresConfig -> MVar (Maybe Store) -> IO Store
 acquireStore config state =

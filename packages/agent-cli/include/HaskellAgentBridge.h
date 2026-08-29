@@ -25,6 +25,58 @@ typedef void (*ha_event_callback)(
     size_t length
 );
 
+/*
+ * Account list callbacks use status 0 for an item, 1 for end-of-list, and
+ * -1 for an error. Item strings include disabled managed credentials and
+ * externally discovered accounts.
+ */
+typedef void (*ha_account_list_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *provider, size_t provider_length,
+    const uint8_t *billing, size_t billing_length,
+    const uint8_t *selection_id, size_t selection_id_length,
+    const uint8_t *account_id, size_t account_id_length,
+    const uint8_t *label, size_t label_length,
+    const uint8_t *detail, size_t detail_length,
+    const uint8_t *managed_id, size_t managed_id_length,
+    const uint8_t *source, size_t source_length,
+    int32_t enabled,
+    int32_t can_manage,
+    const uint8_t *error, size_t error_length
+);
+
+/*
+ * Result callbacks use status 0 for success, 1 when OAuth polling remains
+ * pending, and -1 for an error.
+ */
+typedef void (*ha_account_result_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *account_id,
+    size_t account_id_length,
+    const uint8_t *error,
+    size_t error_length
+);
+
+/* OAuth start callbacks use status 0 for a challenge and -1 for an error. */
+typedef void (*ha_account_oauth_start_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *verification_url,
+    size_t verification_url_length,
+    const uint8_t *user_code,
+    size_t user_code_length,
+    const uint8_t *device_auth_id,
+    size_t device_auth_id_length,
+    const uint8_t *device_code,
+    size_t device_code_length,
+    int32_t poll_interval_seconds,
+    int32_t expires_in_seconds,
+    const uint8_t *error,
+    size_t error_length
+);
+
 /* Runtime calls are process-global and reference counted. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
@@ -42,6 +94,56 @@ int32_t ha_engine_send_json(
     size_t length
 );
 void ha_engine_destroy(void *engine);
+
+/*
+ * Account operations use typed callbacks. Callback buffers are valid only
+ * during the callback and must be copied by the caller. All functions return
+ * 0 when accepted, or a nonzero error before starting the worker.
+ */
+int32_t ha_accounts_list(ha_account_list_callback callback, void *context);
+int32_t ha_account_oauth_start(
+    const uint8_t *provider,
+    size_t provider_length,
+    ha_account_oauth_start_callback callback,
+    void *context
+);
+int32_t ha_account_oauth_poll(
+    const uint8_t *provider,
+    size_t provider_length,
+    const uint8_t *verification_url,
+    size_t verification_url_length,
+    const uint8_t *user_code,
+    size_t user_code_length,
+    const uint8_t *device_auth_id,
+    size_t device_auth_id_length,
+    const uint8_t *device_code,
+    size_t device_code_length,
+    int32_t poll_interval_seconds,
+    int32_t expires_in_seconds,
+    ha_account_result_callback callback,
+    void *context
+);
+int32_t ha_account_api_key_connect(
+    const uint8_t *provider,
+    size_t provider_length,
+    const uint8_t *api_key,
+    size_t api_key_length,
+    ha_account_result_callback callback,
+    void *context
+);
+int32_t ha_account_set_enabled(
+    const uint8_t *managed_id,
+    size_t managed_id_length,
+    int32_t enabled,
+    ha_account_result_callback callback,
+    void *context
+);
+int32_t ha_account_delete(
+    const uint8_t *managed_id,
+    size_t managed_id_length,
+    ha_account_result_callback callback,
+    void *context
+);
 
 #ifdef __cplusplus
 }

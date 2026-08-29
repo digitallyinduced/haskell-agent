@@ -16,9 +16,11 @@ import Agent.CLI.Database.Storage
     ( postgresStorageCommandEnv
     , runStorageCommand
     )
-import Agent.CLI.AccountPicker
-    ( AccountPickerOption(..)
-    , loadAllAccountPickerOptions
+import Agent.CLI.Login
+    ( AccountBilling(..)
+    , LoginAccount(..)
+    , discoverLoginAccounts
+    , loginAccountSelectionId
     )
 import Agent.CLI.Options
     ( SessionOutputFormat(..)
@@ -47,7 +49,7 @@ import Agent.CLI.SessionLock
     , sessionLockPath
     )
 import Agent.OsPath (unsafeToFilePath)
-import Agent.Provider (BillingMode(..), Provider(..), providerSlug)
+import Agent.Provider (providerSlug)
 import Agent.Responses.Types
     ( CustomToolCall(..)
     , CustomToolCallOutput(..)
@@ -258,29 +260,22 @@ sessionSummaryJSONWithState running locked archived meta =
         ]
 
 accountSummariesJSON :: IO [Aeson.Value]
-accountSummariesJSON = do
-    options <- loadAllAccountPickerOptions OpenAIProvider
-    pure (mapMaybe accountOptionJSON options)
+accountSummariesJSON = map accountJSON <$> discoverLoginAccounts
   where
-    accountOptionJSON = \case
-        AccountPickerAccount
-            provider
-            billing
-            selectionId
-            accountId
-            label
-            detail ->
-                Just $ Aeson.object
-                    [ "provider" Aeson..= providerSlug provider
-                    , "billing" Aeson..= case billing of
-                        SubscriptionBilled -> ("subscription" :: Text)
-                        ApiBilled -> "api"
-                    , "selectionID" Aeson..= selectionId
-                    , "accountID" Aeson..= accountId
-                    , "label" Aeson..= label
-                    , "detail" Aeson..= detail
-                    ]
-        AccountPickerConnect _ -> Nothing
+    accountJSON account = Aeson.object
+        [ "provider" Aeson..= providerSlug account.loginProvider
+        , "billing" Aeson..= case account.loginBilling of
+            SubscriptionBilling _ -> ("subscription" :: Text)
+            ApiCreditsBilling -> "api"
+        , "selectionID" Aeson..= loginAccountSelectionId account
+        , "accountID" Aeson..= account.loginAccountId
+        , "label" Aeson..= account.loginLabel
+        , "detail" Aeson..= account.loginSource
+        , "managedID" Aeson..= account.loginManagedId
+        , "source" Aeson..= account.loginSource
+        , "enabled" Aeson..= account.loginEnabled
+        , "canManage" Aeson..= maybe False (const True) account.loginManagedId
+        ]
 
 -- Keep native transcript hydration independent from provider response items.
 -- Those can contain large tool payloads that this view does not render.
