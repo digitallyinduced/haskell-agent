@@ -5,10 +5,12 @@ import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolHandler
     , customToolCall
     , dispatchToolCall
+    , textTool
     , typedTool
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -19,6 +21,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     )
 import Control.Concurrent
@@ -595,6 +598,41 @@ spec = describe "code-mode Bun host" do
             "text(await tools.double({\"value\": 21}));"
         result `shouldSatisfy` Text.isInfixOf "42"
         readIORef approvals `shouldReturn` 1
+        toolSet.closeCodeModeToolSet
+
+    it "passes freeform nested tool input without JSON encoding" do
+        received <- newIORef Nothing
+        worker <- codeModeWorkerPath
+        let patch = "*** Begin Patch\n*** End Patch"
+            patchTool = freeformApplyPatchAppToolWithExecution
+                "apply_patch"
+                "Apply a patch."
+                AlwaysReadOnly
+                TurnSequential
+                (textTool "apply_patch" \input -> do
+                    writeIORef received (Just input)
+                    pure (Right "applied"))
+            invoke call = do
+                call.callKind `shouldBe` CustomCallKind
+                result <- dispatchToolCall
+                    defaultLoopDispatch
+                    [toolHandlerOf patchTool]
+                    call
+                pure (Right result.output)
+        created <- newCodeModeToolSet
+            CodeOnlyToolMode
+            ImageDetailVisible
+            worker
+            invoke
+            [plainNested patchTool]
+        toolSet <- either
+            (\err -> expectationFailure (show err) >> fail "unreachable")
+            pure
+            created
+        result <- runRegisteredExec toolSet
+            "text(await tools.apply_patch(\"*** Begin Patch\\n*** End Patch\"));"
+        result `shouldSatisfy` Text.isInfixOf "applied"
+        readIORef received `shouldReturn` Just patch
         toolSet.closeCodeModeToolSet
 
     it "expands nested declarations only in code-only mode" do

@@ -282,27 +282,34 @@ runNestedTool invoke nextInvocation nested codeName arguments =
     case Map.lookup codeName nested of
         Nothing -> pure (Left
             ("tool is not available in this cell: " <> codeName))
-        Just tool -> do
-            invocation <- atomicModifyIORef' nextInvocation
-                \current ->
-                    let next = current + 1
-                    in (next, next)
-            let call = ToolCall
-                    { callId =
-                        "code-mode:"
-                            <> Text.pack (show invocation)
-                            <> ":"
-                            <> codeName
-                    , name = tool.nestedRuntimeName
-                    , arguments =
-                        TextEncoding.decodeUtf8 . LBS.toStrict $
-                            encode arguments
-                    , callKind = tool.nestedCallKind
-                    , argumentsEncrypted = False
-                    }
-            invoke call >>= \case
-                Left err -> pure (Left err)
-                Right output -> pure (Right (String output))
+        Just tool -> either (pure . Left) (invokeTool tool)
+            (nestedToolArguments tool.nestedCallKind arguments)
+  where
+    invokeTool :: NestedTool -> Text -> IO (Either Text Value)
+    invokeTool tool callArguments = do
+        invocation <- atomicModifyIORef' nextInvocation
+            \current ->
+                let next = current + 1
+                in (next, next)
+        result <- invoke ToolCall
+            { callId =
+                "code-mode:"
+                    <> Text.pack (show invocation)
+                    <> ":"
+                    <> codeName
+            , name = tool.nestedRuntimeName
+            , arguments = callArguments
+            , callKind = tool.nestedCallKind
+            , argumentsEncrypted = False
+            }
+        pure (String <$> result)
+
+nestedToolArguments :: ToolCallKind -> Value -> Either Text Text
+nestedToolArguments CustomCallKind = \case
+    String input -> Right input
+    _ -> Left "freeform tool calls require a string input"
+nestedToolArguments _ =
+    Right . TextEncoding.decodeUtf8 . LBS.toStrict . encode
 
 newtype ExecArgs = ExecArgs { source :: Text }
 
