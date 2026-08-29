@@ -121,7 +121,7 @@ import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createWorktree, worktreeRoot )
+import Agent.CLI.Worktree ( createManagedWorktree )
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect ( dialectId, dialectSlug )
@@ -513,7 +513,7 @@ handleSessionAction
                                                             finishAfk message
     ReplWorktree -> do
         result <- withReplActivity "Creating worktree…" $
-            createWorktree cwd (worktreeRoot env.sessionHome)
+            createManagedWorktree env.sessionHome cwd
         case result of
             Left err -> do
                 color <- resolveColor stderr

@@ -160,7 +160,7 @@ import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
     ( closeWebFetchRuntime, newWebFetchRuntime, webFetchRuntimeTool )
 import Agent.CLI.Worktree
-    ( createWorktree, removeWorktree, worktreeRoot )
+    ( createManagedWorktree, removeWorktree )
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect ( dialectForId, DialectId(GrokBuildDialect) )
@@ -521,7 +521,7 @@ runAgentTools
             enqueuePendingInput pendingNotices (AgentMessage message)
             pure (Right "queued")
         createSubagentWorktree source =
-            createWorktree source (worktreeRoot home) >>= \case
+            createManagedWorktree home source >>= \case
                 Left err -> pure (Left err)
                 Right path -> pure $ Right SubagentWorktree
                     { subagentWorktreePath = path
