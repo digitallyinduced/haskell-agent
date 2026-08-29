@@ -13,6 +13,7 @@ module Agent.CLI.GatewayClient
     , runGatewayCommand
     , saveGatewayCredentialAt
     , showGatewayStatus
+    , validateBaseUrl
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
@@ -277,7 +278,7 @@ validateBaseUrl :: Text -> Either Text Text
 validateBaseUrl raw
     | Text.null base = Left "Gateway URL cannot be empty."
     | "https://" `Text.isPrefixOf` lower = Right base
-    | any (`Text.isPrefixOf` lower)
+    | any localOrigin
         [ "http://127.0.0.1"
         , "http://localhost"
         , "http://[::1]"
@@ -286,6 +287,10 @@ validateBaseUrl raw
   where
     base = Text.dropWhileEnd (== '/') (Text.strip raw)
     lower = Text.toLower base
+    localOrigin origin =
+        lower == origin
+            || (origin <> ":") `Text.isPrefixOf` lower
+            || (origin <> "/") `Text.isPrefixOf` lower
 
 openBrowser :: Text -> IO Bool
 openBrowser url = do
