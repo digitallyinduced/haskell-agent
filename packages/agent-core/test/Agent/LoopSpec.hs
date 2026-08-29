@@ -936,6 +936,80 @@ spec = describe "runLoop" do
         execution.executionResult
             `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
+    it "exposes tool results awaiting submission after a later transport failure" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Left (ConnectionError "down")
+            ]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionPendingInputs `shouldBe`
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
+
+    it "exposes the initial inputs while nothing has committed" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions [Left (ConnectionError "down")]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionPendingInputs `shouldBe` [UserMessage "hello"]
+
+    it "leaves nothing pending once a response commits without tool calls" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-1" [] (Just "done"))]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionPendingInputs `shouldBe` []
+
+    it "leaves nothing pending after an incomplete response" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right (emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing)
+                { completion = TurnIncomplete
+                    { incompleteReason = "max_output_tokens"
+                    , incompleteReasoningTokens = Nothing
+                    }
+                }
+            ]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe` []
+        case execution.executionResult of
+            Left (LoopIncomplete turn) -> turn.responseId `shouldBe` "resp-1"
+            other -> expectationFailure ("expected LoopIncomplete, got " <> show other)
+
+    it "keeps completed tool results pending when cancelled during the next model step" do
+        started <- newEmptyMVar
+        calls <- newIORef (0 :: Int)
+        config0 <- testConfig $ Backend \state _prev _inputs _onEvent -> do
+            call <- atomicModifyIORef' calls \n -> (n + 1, n + 1)
+            if call == 1
+                then pure $ Right BackendResult
+                    { backendOutput = emptyTurnOutput "resp-1"
+                        [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                        Nothing
+                    , backendState = state <> [stateMarker]
+                    }
+                else do
+                    putMVar started ()
+                    threadDelay maxBound
+                    error "cancel should stop the backend"
+        let cancelFlag = config0.loopCancel
+        _ <- forkIO do
+            takeMVar started
+            requestCancel cancelFlag
+        execution <- runLoopInputsDetailed config0 Nothing [UserMessage "go"]
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe`
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
+
     it "retains committed state when a later callback throws" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -1265,8 +1339,40 @@ spec = describe "runLoop" do
             requestCancel cancelFlag
         execution <- runLoopInputsDetailed config0 Nothing [UserMessage "go"]
         execution.executionResult `shouldBe` Left (LoopCancelled [])
-        execution.executionVisibleAssistantText
+        execution.executionUncommittedAssistantText
             `shouldBe` Just "visible partial"
+
+    it "reports only assistant text streamed since the last committed response" do
+        started <- newEmptyMVar
+        calls <- newIORef (0 :: Int)
+        config0 <- testConfig $ Backend \state _prev _inputs onEvent -> do
+            call <- atomicModifyIORef' calls \n -> (n + 1, n + 1)
+            if call == 1
+                then do
+                    onEvent (TextDelta "committed text")
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "resp-1"
+                            [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                            (Just "committed text")
+                        , backendState = state <> [stateMarker]
+                        }
+                else do
+                    onEvent (TextDelta "dropped attempt")
+                    onEvent (ResponseRestarted "reconnecting")
+                    onEvent (TextDelta "partial ")
+                    onEvent (TextDelta "answer")
+                    putMVar started ()
+                    threadDelay maxBound
+                    error "cancel should stop the backend"
+        let cancelFlag = config0.loopCancel
+        _ <- forkIO do
+            takeMVar started
+            requestCancel cancelFlag
+        execution <- runLoopInputsDetailed config0 Nothing [UserMessage "go"]
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionUncommittedAssistantText
+            `shouldBe` Just "dropped attempt\n\npartial answer"
 
     it "does not clear a cancel requested before the loop starts" do
         submissions <- newIORef []

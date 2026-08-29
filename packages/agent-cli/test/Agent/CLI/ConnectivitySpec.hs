@@ -11,6 +11,7 @@ import Agent.CLI.PendingInputs
     , withPendingInputs
     )
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.ToolDispatch (functionToolCall)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -146,6 +147,34 @@ spec = describe "withConnectionRecovery" do
                 "Connection interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
             , TextDelta "complete"
             ]
+
+    it "restarts a submission after a streamed tool call was announced" do
+        attempts <- newIORef (0 :: Int)
+        events <- newIORef []
+        let call = functionToolCall "call-1" "shell" "{}"
+            backend = withConnectionRecoveryUsing
+                (\_ -> pure ())
+                (Backend \state _ _ onEvent -> do
+                    attempt <- atomicModifyIORef' attempts
+                        \n -> (n + 1, n + 1)
+                    if attempt == 1
+                        then do
+                            onEvent (ToolStarted call)
+                            pure (Left (ConnectionError "dropped"))
+                        else pure (Right
+                            BackendResult
+                                { backendOutput =
+                                    emptyTurnOutput "response" [] (Just "done")
+                                , backendState = state
+                                }))
+        _ <- backend.submitTurn [] Nothing []
+            (\event -> modifyIORef' events (<> [event]))
+        readIORef attempts `shouldReturn` 2
+        recorded <- readIORef events
+        [message | ResponseRestarted message <- recorded]
+            `shouldBe`
+                [ "Connection interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+                ]
 
     it "does not duplicate queued inputs across reconnect attempts" do
         attempts <- newIORef (0 :: Int)

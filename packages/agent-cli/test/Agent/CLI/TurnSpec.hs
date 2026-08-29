@@ -1,27 +1,39 @@
 module Agent.CLI.TurnSpec (spec) where
 
 import Agent.CLI.Turn
-    ( IncompleteTurnCheckpoint(..)
-    , checkpointIncompleteTurn
-    , grokFirstTurnPrefix
+    ( grokFirstTurnPrefix
     , grokFrameLastUserInput
     , grokUserQuery
     , restorePlanStateAfterIncomplete
     )
 import Agent.CLI.TurnState
 import Agent.CLI.Compaction (AutomaticCompactionBoundary(..))
+import Agent.Error (ApiError(..))
 import Agent.Loop
     ( ImageAttachment(..)
+    , LoopError(..)
+    , LoopExecution(..)
+    , LoopProgress(..)
     , TokenUsage(..)
+    , TurnCompletion(..)
     , TurnInput(..)
+    , TurnOutput(..)
+    , emptyTurnOutput
     )
-import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.LoopBackend (toolResultToItem, turnInputsToItems)
 import Agent.Responses.Types
-    ( ResponseContentPart(..)
+    ( FunctionCall(..)
+    , ItemStatus(..)
+    , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
     , MessageContent(..)
     , ResponseRole(..)
+    )
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , functionToolCall
     )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
@@ -30,8 +42,9 @@ import Agent.Tools.PlanMode
     , newPlanModeEnv
     )
 import Data.IORef (readIORef, writeIORef)
-import Data.Time.Calendar (fromGregorian)
+import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Calendar (fromGregorian)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
@@ -67,20 +80,24 @@ spec = do
                         prepared
                         ConversationProviderUnavailable
 
-        it "retains only inputs and invalidates the response chain on cancel" do
-            let final = applyConversationPatch
-                    (finishConversation prepared ConversationCancelled)
+        it "retains the interrupted turn's items and invalidates the response chain on cancel" do
+            let retained =
+                    inputOnlyTurnItems prepared
+                        <> [functionCallItem "c1" "shell" "{}" Nothing]
+                final = applyConversationPatch
+                    (finishConversation prepared (ConversationCancelled retained))
                     runningState
             final.conversationPreviousResponseId `shouldBe` Nothing
-            final.conversationTranscript
-                `shouldBe` history <> inputOnlyTurnItems prepared
+            final.conversationTranscript `shouldBe` history <> retained
             final.conversationStartupContext `shouldBe` Just "newer skills"
             final.conversationUsage `shouldBe` priorUsage
             final.conversationLastAssistant `shouldBe` Just "old answer"
 
-        it "uses the same input-only checkpoint for terminal failures" do
-            finishConversation prepared ConversationFailed
-                `shouldBe` finishConversation prepared ConversationCancelled
+        it "uses the same checkpoint transition for terminal failures" do
+            let retained = inputOnlyTurnItems prepared
+            finishConversation prepared (ConversationFailed retained)
+                `shouldBe`
+                    finishConversation prepared (ConversationCancelled retained)
 
         it "retains failed multimodal input exactly once for retry" do
             let image = ImageAttachment "image/png" "png-bytes"
@@ -93,7 +110,8 @@ spec = do
                 final = applyConversationPatch
                     (finishConversation
                         multimodalPrepared
-                        ConversationFailed)
+                        (ConversationFailed
+                            (inputOnlyTurnItems multimodalPrepared)))
                     runningState
             final.conversationTranscript
                 `shouldBe`
@@ -161,14 +179,22 @@ spec = do
                             })
                         prepared
                 expected = checkpoint <> turnInputsToItems pending
+                retained =
+                    interruptedTurnItems
+                        committed
+                        (uncommittedExecution committed)
+                        TurnAbortedByUser
                 cancelled =
                     applyConversationPatch
-                        (finishConversation committed ConversationCancelled)
+                        (finishConversation committed
+                            (ConversationCancelled retained))
                         runningState
                 failed =
                     applyConversationPatch
-                        (finishConversation committed ConversationFailed)
+                        (finishConversation committed
+                            (ConversationFailed retained))
                         runningState
+            retained `shouldBe` []
             cancelled.conversationTranscript `shouldBe` expected
             failed.conversationTranscript `shouldBe` expected
             inputOnlyTurnItems committed `shouldBe` []
@@ -197,42 +223,156 @@ spec = do
         it "leaves ordinary turns unchanged when no compaction committed" do
             rebasePreparedTurn Nothing prepared `shouldBe` prepared
 
-    describe "checkpointIncompleteTurn" do
-        it "describes the complete input-only checkpoint transition" do
-            let history = turnInputsToItems [UserMessage "earlier"]
-                inputs = [UserMessage "build failed [2026-08-23 13:10 CEST]"]
-                retained = turnInputsToItems inputs
-            checkpointIncompleteTurn history inputs `shouldBe`
-                IncompleteTurnCheckpoint
-                    { checkpointTranscript = history <> retained
-                    , checkpointTurnItems = retained
-                    , checkpointPreviousResponseId = Nothing
-                    }
+    describe "interruptedTurnItems" do
+        it "retains only the prepared inputs while nothing committed" do
+            interruptedTurnItems
+                prepared
+                (uncommittedExecution prepared)
+                TurnAbortedByUser
+                `shouldBe` inputOnlyTurnItems prepared
 
-        it "does not retain partial assistant or tool state" do
-            let history = turnInputsToItems [UserMessage "earlier"]
-                partialAssistant =
-                    MessageItem ResponseMessage
-                        { messageId = Just "partial"
-                        , content =
-                            MessageContentParts
-                                [ OutputTextPart
-                                    "partial answer"
-                                    Nothing
-                                    Nothing
-                                ]
-                        , role = RoleAssistant
-                        , status = Nothing
-                        , phase = Nothing
-                        , passthrough = Nothing
-                        }
-                inputs = [UserMessage "fix the failure"]
-                partialTranscript = history <> [partialAssistant]
-                checkpoint = checkpointIncompleteTurn history inputs
-            checkpoint.checkpointTranscript
-                `shouldNotBe` partialTranscript <> turnInputsToItems inputs
-            checkpoint.checkpointTranscript
-                `shouldBe` history <> turnInputsToItems inputs
+        it "keeps committed steps and queued results and closes unanswered calls on cancel" do
+            let inputs = inputOnlyTurnItems prepared
+                calls =
+                    [ functionCallItem "c1" "read" "{\"path\":\"a\"}" Nothing
+                    , functionCallItem "c2" "shell" "{\"cmd\":\"ls\"}" Nothing
+                    ]
+                result = ToolCallResult "c1" "contents of a" FunctionCallKind
+                execution = LoopExecution
+                    { executionState =
+                        history <> inputs <> [assistantMessage "checking"] <> calls
+                    , executionPendingInputs = [CompletedTool result]
+                    , executionUncommittedAssistantText = Nothing
+                    , executionProgress = ResponseCommitted
+                    , executionResult = Left (LoopCancelled [result])
+                    }
+            interruptedTurnItems prepared execution TurnAbortedByUser
+                `shouldBe`
+                    inputs
+                        <> [assistantMessage "checking"]
+                        <> calls
+                        <> [ toolResultToItem result
+                           , toolResultToItem
+                                (ToolCallResult
+                                    "c2"
+                                    "Tool `shell` was interrupted: the user cancelled the turn. It was not run, or was stopped before finishing and may have partially executed."
+                                    FunctionCallKind)
+                           ]
+                        <> turnInputsToItems [UserMessage turnAbortedNote]
+
+        it "drops a call cut off mid-arguments by an incomplete response but keeps complete ones" do
+            let inputs = inputOnlyTurnItems prepared
+                complete = functionCallItem "c-ok" "read" "{\"path\":\"a\"}" Nothing
+                truncated =
+                    functionCallItem "c-cut" "shell" "{\"cmd\":\"ls"
+                        (Just ItemIncomplete)
+                turn =
+                    (emptyTurnOutput "resp-cut"
+                        [ functionToolCall "c-ok" "read" "{\"path\":\"a\"}"
+                        , functionToolCall "c-cut" "shell" "{\"cmd\":\"ls"
+                        ]
+                        (Just "partial"))
+                        { completion = TurnIncomplete "max_output_tokens" Nothing }
+                execution = LoopExecution
+                    { executionState =
+                        history <> inputs
+                            <> [assistantMessage "partial", complete, truncated]
+                    , executionPendingInputs = []
+                    , executionUncommittedAssistantText = Nothing
+                    , executionProgress = ResponseCommitted
+                    , executionResult = Left (LoopIncomplete turn)
+                    }
+            interruptedTurnItems
+                prepared
+                execution
+                (TurnAbortedByFailure "the response was cut off (max_output_tokens)")
+                `shouldBe`
+                    inputs
+                        <> [assistantMessage "partial", complete]
+                        <> [ toolResultToItem
+                                (ToolCallResult
+                                    "c-ok"
+                                    "Tool `read` was not executed: the response was cut off (max_output_tokens)."
+                                    FunctionCallKind)
+                           ]
+
+        it "drops a call whose arguments never became valid JSON even without a status" do
+            let inputs = inputOnlyTurnItems prepared
+                truncated =
+                    functionCallItem "c-cut" "shell" "{\"cmd\":\"ls" Nothing
+                turn =
+                    (emptyTurnOutput "resp-cut"
+                        [functionToolCall "c-cut" "shell" "{\"cmd\":\"ls"]
+                        Nothing)
+                        { completion = TurnIncomplete "max_output_tokens" Nothing }
+                execution = LoopExecution
+                    { executionState = history <> inputs <> [truncated]
+                    , executionPendingInputs = []
+                    , executionUncommittedAssistantText = Nothing
+                    , executionProgress = ResponseCommitted
+                    , executionResult = Left (LoopIncomplete turn)
+                    }
+            interruptedTurnItems
+                prepared
+                execution
+                (TurnAbortedByFailure "the response was cut off (max_output_tokens)")
+                `shouldBe` inputs
+
+        it "keeps queued results after a transport failure without adding the aborted note" do
+            let inputs = inputOnlyTurnItems prepared
+                call = functionCallItem "c1" "read" "{}" Nothing
+                result = ToolCallResult "c1" "done" FunctionCallKind
+                execution = LoopExecution
+                    { executionState = history <> inputs <> [call]
+                    , executionPendingInputs = [CompletedTool result]
+                    , executionUncommittedAssistantText = Nothing
+                    , executionProgress = ResponseCommitted
+                    , executionResult =
+                        Left (LoopTransport (ConnectionError "down"))
+                    }
+            interruptedTurnItems
+                prepared
+                execution
+                (TurnAbortedByFailure "the provider request failed")
+                `shouldBe` inputs <> [call, toolResultToItem result]
+
+        it "falls back to the prepared inputs when committed state does not extend the prepared history" do
+            let rebased = prepared
+                    { preparedBeforeItems =
+                        turnInputsToItems [UserMessage "compacted"]
+                    , preparedTurnInputs = [UserMessage "pending"]
+                    }
+                execution = LoopExecution
+                    { executionState =
+                        history
+                            <> inputOnlyTurnItems prepared
+                            <> [functionCallItem "c1" "read" "{}" Nothing]
+                    , executionPendingInputs = []
+                    , executionUncommittedAssistantText = Nothing
+                    , executionProgress = ResponseCommitted
+                    , executionResult =
+                        Left (LoopTransport (ConnectionError "down"))
+                    }
+            interruptedTurnItems rebased execution TurnAbortedByUser
+                `shouldBe` turnInputsToItems [UserMessage "pending"]
+
+        it "does not add the aborted note when the model produced nothing" do
+            let execution = LoopExecution
+                    { executionState = history <> inputOnlyTurnItems prepared
+                    , executionPendingInputs = []
+                    , executionUncommittedAssistantText = Nothing
+                    , executionProgress = ResponseCommitted
+                    , executionResult = Left (LoopCancelled [])
+                    }
+            interruptedTurnItems prepared execution TurnAbortedByUser
+                `shouldBe` inputOnlyTurnItems prepared
+
+    describe "turnAbortedNote" do
+        it "is recognised as generated context rather than user steering" do
+            isTurnAbortedNote turnAbortedNote `shouldBe` True
+            isTurnAbortedNote "  <turn_aborted>custom</turn_aborted>"
+                `shouldBe` True
+            isTurnAbortedNote "fix it" `shouldBe` False
 
     describe "restorePlanStateAfterIncomplete" do
         it "undoes an agent-initiated plan-mode entry after cancellation" do
@@ -327,3 +467,37 @@ runningState = ConversationState
     , conversationUsage = priorUsage
     , conversationLastAssistant = Just "old answer"
     }
+
+-- | A loop run that failed before any response committed.
+uncommittedExecution :: PreparedTurn -> LoopExecution
+uncommittedExecution turn = LoopExecution
+    { executionState = turn.preparedBeforeItems
+    , executionPendingInputs = turn.preparedTurnInputs
+    , executionUncommittedAssistantText = Nothing
+    , executionProgress = NoResponseCommitted
+    , executionResult = Left (LoopTransport (ConnectionError "down"))
+    }
+
+functionCallItem :: Text -> Text -> Text -> Maybe ItemStatus -> ResponseItem
+functionCallItem callId name arguments status =
+    FunctionCallItem FunctionCall
+        { itemId = Just ("fc-" <> callId)
+        , callId
+        , name
+        , namespace = Nothing
+        , provider = Nothing
+        , arguments
+        , encryptedFunctionArgs = Nothing
+        , status
+        }
+
+assistantMessage :: Text -> ResponseItem
+assistantMessage text =
+    MessageItem ResponseMessage
+        { messageId = Just ("msg-" <> text)
+        , content = MessageContentParts [OutputTextPart text Nothing Nothing]
+        , role = RoleAssistant
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        }

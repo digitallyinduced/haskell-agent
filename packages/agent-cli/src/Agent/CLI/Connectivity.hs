@@ -116,6 +116,11 @@ isStreamOutput :: LoopEvent -> Bool
 isStreamOutput = \case
     TextDelta _ -> True
     ReasoningDelta _ -> True
+    -- A tool call announced from the stream is already a visible running
+    -- block; the replayed attempt must close it with the same restart
+    -- boundary that text output gets.
+    ToolStarted _ -> True
+    ToolUpdated _ -> True
     _ -> False
 
 connectionWaitingMessage :: Int -> Text

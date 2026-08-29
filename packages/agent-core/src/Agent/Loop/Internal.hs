@@ -219,11 +219,20 @@ data LoopProgress
 
 data LoopExecution = LoopExecution
     { executionState :: ![ResponseItem]
+    -- | Inputs the loop accepted after the last committed response but never
+    -- submitted successfully: the tool results (and any steering) queued for
+    -- the next model step, or the initial inputs while nothing has committed.
+    -- Callers that checkpoint an interrupted turn retain the tool results here
+    -- next to 'executionState'. Steering stays unacknowledged until a later
+    -- commit and must not be duplicated from this field.
+    , executionPendingInputs :: ![TurnInput]
     , executionProgress :: !LoopProgress
-    -- | Assistant text exposed by streaming events during this execution.
-    -- This is display metadata only: callers must not add it to backend state
-    -- when a submission did not commit.
-    , executionVisibleAssistantText :: !(Maybe Text)
+    -- | Assistant text streamed since the last committed response: the sample
+    -- that never committed plus restarted attempts of the same step. Text of
+    -- committed samples is already represented by assistant messages in
+    -- 'executionState'. This is display metadata only: callers must not add
+    -- it to backend state.
+    , executionUncommittedAssistantText :: !(Maybe Text)
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
 
@@ -456,19 +465,17 @@ runLoopInputsUnsafe
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
-    visibleTextRef <- newIORef ([], [])
+    uncommittedTextRef <- newIORef ([], [])
     initialSteering <- config0.loopReadSteering
+    pendingRef <- newIORef (firstInputs <> initialSteering)
     withAsync (runLoopEventPump eventPump) \eventWorker -> do
         let recordVisible event =
-                modifyIORef' visibleTextRef \(finished, current) ->
+                modifyIORef' uncommittedTextRef \(finished, current) ->
                     case event of
                         TextDelta delta -> (finished, delta : current)
+                        -- A restarted attempt stays visible, marked failed,
+                        -- until a later response commits or the turn ends.
                         ResponseRestarted _ -> finishCurrent finished current
-                        TurnFinished turn ->
-                            finishCurrent finished
-                                (if null current
-                                    then maybe [] pure turn.assistantText
-                                    else current)
                         ResponseAttemptDiscarded -> (finished, [])
                         _ -> (finished, current)
             finishCurrent finished current
@@ -486,18 +493,20 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 -> IO LoopExecution
             finish state progress result = do
                 writeIORef progressRef (state, progress)
-                (finishedChunks, currentChunks) <- readIORef visibleTextRef
-                let visibleText = Text.intercalate "\n\n" $
+                pending <- readIORef pendingRef
+                (finishedChunks, currentChunks) <- readIORef uncommittedTextRef
+                let uncommittedText = Text.intercalate "\n\n" $
                         filter (not . Text.null) $
                             map (Text.concat . reverse)
                                 (reverse finishedChunks <> [currentChunks])
                 pure LoopExecution
                     { executionState = state
+                    , executionPendingInputs = pending
                     , executionProgress = progress
-                    , executionVisibleAssistantText =
-                        if Text.null visibleText
+                    , executionUncommittedAssistantText =
+                        if Text.null uncommittedText
                             then Nothing
-                            else Just visibleText
+                            else Just uncommittedText
                     , executionResult = result
                     }
             finishCursor
@@ -527,6 +536,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             go cursor = do
                 writeIORef progressRef
                     (cursor.cursorState, cursor.cursorProgress)
+                writeIORef pendingRef cursor.cursorInputs
                 if cursor.cursorTurnsUsed >= config.loopMaxTurns
                     then finishCursor cursor $ case cursor.cursorLastOutput of
                         Just turn -> Left (LoopMaxTurns turn)
@@ -594,6 +604,10 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             continueCommitted cursor turn = do
                 writeIORef progressRef
                     (cursor.cursorState, ResponseCommitted)
+                -- The committed response absorbed every input submitted with
+                -- it, and its assistant text now lives in the committed state.
+                writeIORef pendingRef []
+                writeIORef uncommittedTextRef ([], [])
                 protect cursor do
                     -- A cancel that landed during submitTurn after the race chose
                     -- Right still counts, but its returned state is committed.
@@ -614,6 +628,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         if null turn.toolCalls
                                             then pure []
                                             else runToolCalls config turn.toolCalls
+                                    writeIORef pendingRef (map CompletedTool results)
                                     cancelledAfter <-
                                         isCancelled config.loopCancel
                                     if cancelledAfter

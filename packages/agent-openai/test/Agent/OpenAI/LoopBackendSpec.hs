@@ -1270,7 +1270,7 @@ spec = do
             readIORef fallbackActive `shouldReturn` True
             readIORef fallbackCalls `shouldReturn` 0
 
-        it "does not replay after a non-visible output item was received" do
+        it "replays over the fallback transport after only hidden output streamed" do
             fallbackActive <- newIORef False
             primaryCalls <- newIORef (0 :: Int)
             fallbackCalls <- newIORef (0 :: Int)
@@ -1301,11 +1301,47 @@ spec = do
                         fallbackActive primary fallback
             result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
-            result `shouldBe` Left
-                (replayUnsafeModelFailure connectionFailure)
-            readIORef fallbackActive `shouldReturn` False
+            -- The dead socket committed nothing, so the hidden partial item
+            -- does not block the replay; only visible deltas would.
+            fmap (.assistantText) result `shouldBe` Right (Just "duplicate")
+            readIORef fallbackActive `shouldReturn` True
             readIORef primaryCalls `shouldReturn` 1
-            readIORef fallbackCalls `shouldReturn` 0
+            readIORef fallbackCalls `shouldReturn` 1
+
+        it "closes an announced tool block before replaying over the fallback" do
+            fallbackActive <- newIORef False
+            events <- newIORef []
+            transcript <- newIORef []
+            let call = functionToolCall "fc-1" "shell" "{}"
+                sendPrimary _request _previous onEvent = do
+                    onEvent ResponseOutputItemAddedEvent
+                        { item = functionCallItem "fc-1" "shell" "{}"
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left (ConnectionError "socket closed"))
+                primary = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    sendPrimary
+                    (pure baseParams)
+                fallback = Backend \state _previous _inputs onEvent -> do
+                    onEvent (TextDelta "replayed")
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "replayed")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (\event -> modifyIORef' events (<> [event]))
+            fmap (.assistantText) result `shouldBe` Right (Just "replayed")
+            recorded <- readIORef events
+            [() | ToolStarted started <- recorded, started.callId == call.callId]
+                `shouldBe` [()]
+            dropWhile (/= ResponseAttemptDiscarded) recorded
+                `shouldBe` [ResponseAttemptDiscarded, TextDelta "replayed"]
 
         it "falls back immediately after a websocket connection-limit error" do
             fallbackActive <- newIORef False
@@ -1725,14 +1761,6 @@ replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
 replayUnsafeAuxiliaryFailure failure =
     ProviderError (UnknownErrorType "replay_unsafe")
         ( "provider failed after auxiliary response output; refusing to replay: "
-            <> Text.pack (show failure)
-        )
-        Nothing
-
-replayUnsafeModelFailure :: ApiError -> ApiError
-replayUnsafeModelFailure failure =
-    ProviderError (UnknownErrorType "replay_unsafe")
-        ( "provider failed after model output; refusing to replay: "
             <> Text.pack (show failure)
         )
         Nothing

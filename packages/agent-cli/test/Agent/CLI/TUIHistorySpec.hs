@@ -374,6 +374,70 @@ spec = describe "bounded fullscreen history window" do
                 , (BlockError, "cancelled", BlockFailed)
                 ]
 
+    it "shows the uncommitted partial text after the retained steps of a cancelled turn" do
+        let turnValue =
+                (sessionTurn TranscriptAppend "stop here"
+                    [ userMessage "stop here"
+                    , assistantMessage "checking first"
+                    , FunctionCallItem FunctionCall
+                        { itemId = Nothing
+                        , callId = "call-1"
+                        , name = "shell_command"
+                        , namespace = Nothing
+                        , provider = Nothing
+                        , arguments = "{\"command\":\"pwd\"}"
+                        , encryptedFunctionArgs = Nothing
+                        , status = Nothing
+                        }
+                    , FunctionCallOutputItem FunctionCallOutput
+                        { itemId = Nothing
+                        , callId = "call-1"
+                        , name = Nothing
+                        , namespace = Nothing
+                        , provider = Nothing
+                        , output = rawJsonFromEncoding
+                            (Aeson.toEncoding ("/tmp/project" :: Text.Text))
+                        , status = Nothing
+                        }
+                    ])
+                    { turnAssistantText = Just "already visible"
+                    , turnError = Just "cancelled"
+                    }
+            blocks = toList $
+                (sessionHistoryTurn (20 :: Int) turnValue).historyTurnBlocks
+            summarize block =
+                ( block.blockKind
+                , if block.blockKind == BlockShell then "" else block.blockBody
+                , block.blockState
+                )
+        map summarize blocks
+            `shouldBe`
+                [ (BlockUser, "stop here", BlockComplete)
+                , (BlockAssistant, "checking first", BlockComplete)
+                , (BlockShell, "", BlockComplete)
+                , (BlockAssistant, "already visible", BlockComplete)
+                , (BlockError, "cancelled", BlockFailed)
+                ]
+
+    it "does not repeat the committed text of an incomplete response" do
+        let turnValue =
+                (sessionTurn TranscriptAppend "explain"
+                    [userMessage "explain", assistantMessage "partial answer"])
+                    { turnAssistantText = Just "partial answer"
+                    , turnError = Just "Response incomplete: max_output_tokens."
+                    }
+            blocks = toList $
+                (sessionHistoryTurn (21 :: Int) turnValue).historyTurnBlocks
+        map (\block -> (block.blockKind, block.blockBody, block.blockState)) blocks
+            `shouldBe`
+                [ (BlockUser, "explain", BlockComplete)
+                , (BlockAssistant, "partial answer", BlockComplete)
+                , ( BlockError
+                  , "Response incomplete: max_output_tokens."
+                  , BlockFailed
+                  )
+                ]
+
     it "does not rematerialise the compacted prefix of replacement turns" do
         let projected =
                 sessionHistoryTurn
