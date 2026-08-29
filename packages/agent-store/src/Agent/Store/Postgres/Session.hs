@@ -20,6 +20,7 @@ module Agent.Store.Postgres.Session
     , StoredTurn(..)
     , LegacySession(..)
     , ConversationSearchResult(..)
+    , NativeConversationSearchResult(..)
     , sessionSchemaStatements
     , createSession
     , replaceSessionMetadata
@@ -42,6 +43,7 @@ module Agent.Store.Postgres.Session
     , listSessionArchiveKeys
     , setSessionArchived
     , searchConversationTurns
+    , searchNativeConversations
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
@@ -79,6 +81,23 @@ data SessionLegacyTarget = SessionLegacyTarget
     , sessionLegacyConnection :: !Text
     , sessionLegacyEffectiveModel :: !Text
     , sessionLegacyDialect :: !Text
+    }
+    deriving (Eq, Show)
+
+data NativeConversationSearchResult = NativeConversationSearchResult
+    { nativeSearchSessionId :: !Text
+    , nativeSearchTitle :: !Text
+    , nativeSearchCwd :: !Text
+    , nativeSearchProvider :: !Text
+    , nativeSearchModel :: !Text
+    , nativeSearchUpdatedAt :: !UTCTime
+    , nativeSearchArchived :: !Bool
+    , nativeSearchTurnIndex :: !(Maybe Int64)
+    , nativeSearchOccurredAt :: !(Maybe UTCTime)
+    , nativeSearchRole :: !(Maybe Text)
+    , nativeSearchUserText :: !(Maybe Text)
+    , nativeSearchAssistantText :: !(Maybe Text)
+    , nativeSearchRank :: !Double
     }
     deriving (Eq, Show)
 
@@ -727,6 +746,15 @@ searchConversationTurns pool query limit =
         HasqlSession.statement
             (query, fromIntegral (max 1 (min 100 limit)))
             searchTurnsStatement
+
+searchNativeConversations
+    :: StorePool -> Text -> Int
+    -> IO (Either StoreError [NativeConversationSearchResult])
+searchNativeConversations pool query limit =
+    withSession pool $
+        HasqlSession.statement
+            (query, fromIntegral (max 1 (min 100 limit)))
+            searchNativeConversationsStatement
 
 deleteSession
     :: StorePool
@@ -1460,6 +1488,52 @@ searchTurnsStatement = mkStatement
             <*> Decoders.column (Decoders.nonNullable Decoders.int8)
             <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
             <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.float8))
+    True
+
+searchNativeConversationsStatement
+    :: Statement (Text, Int64) [NativeConversationSearchResult]
+searchNativeConversationsStatement = mkStatement
+    "WITH query AS (SELECT websearch_to_tsquery('english', $1) AS ts,\
+    \ lower(btrim($1)) AS needle), candidates AS (\
+    \ SELECT s.session_key,s.title,s.cwd,s.provider,s.model_id,s.updated_at,\
+    \ s.archived_at IS NOT NULL,NULL::bigint,NULL::timestamptz,NULL::text,\
+    \ NULL::text,NULL::text,CASE WHEN lower(s.title)=query.needle THEN 1000::float8\
+    \ WHEN lower(s.title) LIKE query.needle || '%' THEN 800::float8\
+    \ WHEN s.title ILIKE '%' || $1 || '%' THEN 600::float8\
+    \ WHEN s.cwd ILIKE '%' || $1 || '%' THEN 400::float8 ELSE 300::float8 END\
+    \ FROM harness.sessions s CROSS JOIN query WHERE s.deleted_at IS NULL AND (\
+    \ s.title ILIKE '%' || $1 || '%' OR s.cwd ILIKE '%' || $1 || '%' OR\
+    \ s.provider ILIKE '%' || $1 || '%' OR s.model_id ILIKE '%' || $1 || '%')\
+    \ UNION ALL\
+    \ SELECT s.session_key,s.title,s.cwd,s.provider,s.model_id,s.updated_at,\
+    \ s.archived_at IS NOT NULL,t.turn_index,t.occurred_at,\
+    \ CASE WHEN t.user_text ILIKE '%' || $1 || '%' OR\
+    \ to_tsvector('english',coalesce(t.user_text,'')) @@ query.ts\
+    \ THEN 'user' ELSE 'assistant' END,\
+    \ t.user_text,t.assistant_text,\
+    \ (100 + ts_rank_cd(t.search_vector,query.ts)*100)::float8\
+    \ FROM harness.session_turns t JOIN harness.sessions s ON s.session_id=t.session_id\
+    \ CROSS JOIN query WHERE s.deleted_at IS NULL AND (\
+    \ t.search_vector @@ query.ts OR t.user_text ILIKE '%' || $1 || '%' OR\
+    \ coalesce(t.assistant_text,'') ILIKE '%' || $1 || '%'))\
+    \ SELECT * FROM candidates ORDER BY 13 DESC,6 DESC,9 DESC NULLS LAST LIMIT $2"
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8)) )
+    (Decoders.rowList $
+        NativeConversationSearchResult
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nullable Decoders.int8)
+            <*> Decoders.column (Decoders.nullable Decoders.timestamptz)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
             <*> Decoders.column (Decoders.nullable Decoders.text)
             <*> Decoders.column (Decoders.nonNullable Decoders.float8))
     True

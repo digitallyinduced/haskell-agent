@@ -10,6 +10,10 @@ import Agent.CLI.NativeRuntime
     , newNativeProcessRuntime
     , runNativeAgent
     )
+import Agent.Store.Postgres.Session
+    ( NativeConversationSearchResult(..)
+    , searchNativeConversations
+    )
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     )
@@ -157,7 +161,7 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Word (Word8, Word64)
 import Foreign
@@ -174,7 +178,7 @@ import Foreign
     , nullPtr
     )
 import Foreign.C.String (CString)
-import Foreign.C.Types (CInt(..), CLLong(..), CSize(..))
+import Foreign.C.Types (CDouble(..), CInt(..), CLLong(..), CSize(..))
 import System.Directory.OsPath (getHomeDirectory)
 import System.IO
     ( IOMode(WriteMode)
@@ -224,6 +228,23 @@ type AccountOAuthStartCallback =
     -> CString -> CSize -> CString -> CSize -> CInt -> CInt
     -> CString -> CSize -> IO ()
 
+-- Status is 0 for a result, 1 for completion, and -1 for failure. Every
+-- pointer is callback-scoped UTF-8. A turn index of -1 denotes a metadata hit;
+-- role is 0 (metadata), 1 (user), or 2 (assistant).
+type SearchCallback =
+    Ptr () -> CInt
+    -> Ptr Word8 -> CSize -- session id
+    -> Ptr Word8 -> CSize -- title
+    -> Ptr Word8 -> CSize -- cwd
+    -> Ptr Word8 -> CSize -- provider
+    -> Ptr Word8 -> CSize -- model
+    -> Int64 -> CInt -> Int64 -> Int64 -> CInt
+    -> Ptr Word8 -> CSize -- user
+    -> Ptr Word8 -> CSize -- assistant
+    -> CDouble
+    -> Ptr Word8 -> CSize -- error
+    -> IO ()
+
 foreign import ccall "dynamic"
     invokeEventCallback :: FunPtr EventCallback -> EventCallback
 
@@ -242,6 +263,9 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeAccountOAuthStartCallback
         :: FunPtr AccountOAuthStartCallback -> AccountOAuthStartCallback
+
+foreign import ccall "dynamic"
+    invokeSearchCallback :: FunPtr SearchCallback -> SearchCallback
 
 data BridgeRequest = BridgeRequest
     { requestId :: !Text
@@ -397,6 +421,7 @@ data AccountAPIKeyRequest = AccountAPIKeyRequest
 
 data EngineCommand
     = EngineRequest !BridgeRequest
+    | EngineSearch !Text !Int !(FunPtr SearchCallback) !(Ptr ())
     | EngineStop
 
 data Engine = Engine
@@ -713,6 +738,10 @@ invokeExceptionResult callback context exception =
         invokeAccountResultCallback callback context (-1)
             nullPtr 0 errorPtr errorLength
 
+foreign export ccall ha_engine_search_conversations
+    :: Ptr () -> Ptr Word8 -> CSize -> CSize
+    -> FunPtr SearchCallback -> Ptr () -> IO CInt
+
 ha_engine_create :: FunPtr EventCallback -> Ptr () -> IO (Ptr ())
 ha_engine_create callback context
     | callback == nullFunPtr = pure nullPtr
@@ -766,6 +795,33 @@ ha_engine_send_json pointer bytes (CSize length)
             Right False -> 4
             Right True -> 0
 
+ha_engine_search_conversations
+    :: Ptr () -> Ptr Word8 -> CSize -> CSize
+    -> FunPtr SearchCallback -> Ptr () -> IO CInt
+ha_engine_search_conversations pointer bytes (CSize length) rawLimit callback context
+    | pointer == nullPtr = pure 1
+    | callback == nullFunPtr = pure 2
+    | bytes == nullPtr || length == 0 = pure 2
+    | otherwise = do
+        accepted <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            payload <- BS.packCStringLen (castPtr bytes, fromIntegral length)
+            case TextEncoding.decodeUtf8' payload of
+                Left _ -> pure False
+                Right query
+                    | Text.null (Text.strip query) -> pure False
+                    | otherwise -> do
+                        let requested = fromIntegral rawLimit :: Integer
+                            limit = fromInteger (max 1 (min 100 requested))
+                        atomically $ writeTQueue engine.engineCommands
+                            (EngineSearch query limit callback context)
+                        pure True
+        pure $ case accepted of
+            Left _ -> 3
+            Right False -> 2
+            Right True -> 0
+
 ha_engine_destroy :: Ptr () -> IO ()
 ha_engine_destroy pointer
     | pointer == nullPtr = pure ()
@@ -812,6 +868,10 @@ idleLoop
 idleLoop callback context config store root processRuntime commands =
     atomically (readTQueue commands) >>= \case
         EngineStop -> pure ()
+        EngineSearch query limit searchCallback searchContext -> do
+            runConversationSearch
+                config store query limit searchCallback searchContext
+            continue
         EngineRequest request
             | request.requestMethod == "turn.start" ->
                 case (parseParams request
@@ -889,6 +949,11 @@ activeLoop callback context config store root commands control running =
             cancelTurn control
             cancel running
             pure ActiveStop
+        Left (EngineSearch query limit searchCallback searchContext) -> do
+            runConversationSearch
+                config store query limit searchCallback searchContext
+            activeLoop
+                callback context config store root commands control running
         Left (EngineRequest request) -> do
             if request.requestMethod == "turn.cancel"
               then
@@ -926,6 +991,90 @@ activeLoop callback context config store root commands control running =
                 commands
                 control
                 running
+
+runConversationSearch
+    :: ManagedPostgresConfig
+    -> MVar (Maybe Store)
+    -> Text
+    -> Int
+    -> FunPtr SearchCallback
+    -> Ptr ()
+    -> IO ()
+runConversationSearch config store query limit callback context = do
+    outcome <- tryAny do
+        activeStore <- acquireStore config store
+        searchNativeConversations (trustedPool activeStore) query limit
+    case outcome of
+        Left exception ->
+            sendSearchFailure callback context (Text.pack (show exception))
+        Right (Left err) ->
+            sendSearchFailure callback context (renderStoreError err)
+        Right (Right results) -> do
+            forM_ results (sendSearchResult callback context)
+            invokeSearchCallback callback context
+                1 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                0 0 (-1) 0 0 nullPtr 0 nullPtr 0 0 nullPtr 0
+
+sendSearchFailure :: FunPtr SearchCallback -> Ptr () -> Text -> IO ()
+sendSearchFailure callback context message =
+    withTextBytes message \errorPointer errorLength ->
+        invokeSearchCallback callback context
+            (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            0 0 (-1) 0 0 nullPtr 0 nullPtr 0 0
+            errorPointer errorLength
+
+sendSearchResult
+    :: FunPtr SearchCallback
+    -> Ptr ()
+    -> NativeConversationSearchResult
+    -> IO ()
+sendSearchResult callback context result =
+    withTextBytes result.nativeSearchSessionId \sessionPointer sessionLength ->
+    withTextBytes result.nativeSearchTitle \titlePointer titleLength ->
+    withTextBytes result.nativeSearchCwd \cwdPointer cwdLength ->
+    withTextBytes result.nativeSearchProvider \providerPointer providerLength ->
+    withTextBytes result.nativeSearchModel \modelPointer modelLength ->
+    withMaybeTextBytes result.nativeSearchUserText \userPointer userLength ->
+    withMaybeTextBytes result.nativeSearchAssistantText
+        \assistantPointer assistantLength ->
+            invokeSearchCallback callback context
+                0
+                sessionPointer sessionLength
+                titlePointer titleLength
+                cwdPointer cwdLength
+                providerPointer providerLength
+                modelPointer modelLength
+                (epochMilliseconds result.nativeSearchUpdatedAt)
+                (if result.nativeSearchArchived then 1 else 0)
+                (fromMaybe (-1) result.nativeSearchTurnIndex)
+                (maybe 0 epochMilliseconds result.nativeSearchOccurredAt)
+                (searchRoleCode result.nativeSearchRole)
+                userPointer userLength
+                assistantPointer assistantLength
+                (realToFrac result.nativeSearchRank)
+                nullPtr 0
+
+withTextBytes :: Text -> (Ptr Word8 -> CSize -> IO a) -> IO a
+withTextBytes value action =
+    BS.useAsCStringLen (TextEncoding.encodeUtf8 value) \(pointer, length) ->
+        action (castPtr pointer) (fromIntegral length)
+
+withMaybeTextBytes
+    :: Maybe Text
+    -> (Ptr Word8 -> CSize -> IO a)
+    -> IO a
+withMaybeTextBytes Nothing action = action nullPtr 0
+withMaybeTextBytes (Just value) action = withTextBytes value action
+
+epochMilliseconds :: UTCTime -> Int64
+epochMilliseconds =
+    floor . (* 1000) . utcTimeToPOSIXSeconds
+
+searchRoleCode :: Maybe Text -> CInt
+searchRoleCode = \case
+    Just "user" -> 1
+    Just "assistant" -> 2
+    _ -> 0
 
 runNativeTurn
     :: FunPtr EventCallback
