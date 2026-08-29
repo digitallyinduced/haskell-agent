@@ -257,6 +257,42 @@ spec = describe "runLoop" do
                 , tokenUsage = emptyTokenUsage
                 }
 
+    it "wakes a producer blocked on a full queue when the sink fails" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendStarted <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                putMVar backendStarted ()
+                mapM_ (const (onEvent (WarningRaised "queued")))
+                    [1 .. 300 :: Int]
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                TurnStarted -> do
+                    putMVar sinkStarted ()
+                    takeMVar releaseSink
+                    Exception.throwIO (userError "renderer exploded")
+                _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            takeMVar backendStarted
+            timeout 100000 (takeMVar backendFinished)
+                `shouldReturn` Nothing
+            putMVar releaseSink ()
+            timeout 1000000 (wait running)
+                `shouldReturn`
+                    Just
+                        (Left
+                            (LoopUnexpected
+                                "user error (renderer exploded)"))
+
     it "coalesces adjacent deltas while preserving event boundaries" do
         sinkStarted <- newEmptyMVar
         releaseSink <- newEmptyMVar
