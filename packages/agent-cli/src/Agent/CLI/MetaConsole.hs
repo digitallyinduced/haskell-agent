@@ -77,11 +77,13 @@ data MetaAction
     | MetaRemoveMcp !Text
     | MetaSetMcpEnabled !Text !Bool
     | MetaLoginMcpOAuth !Text
+    | MetaSetMcpSecretEnv !Text !Text
     | MetaSetMcpInitStrategy !McpInitStrategy
     | MetaSetWebFetch !MetaWebFetchUpdate
     | MetaSetLspEnabled !Bool
     | MetaUpsertLsp !MetaLspServer
     | MetaRemoveLsp !Text
+    | MetaSetLspSecretEnv !Text !Text
     | MetaSetMaxConcurrentAgents !(Maybe Int)
     | MetaClarify !Text
     | MetaInform !Text
@@ -182,6 +184,12 @@ instance Aeson.FromJSON MetaAction where
                 rejectUnknownKeys "mcp_oauth_login"
                     ["type", "name"] object
                 MetaLoginMcpOAuth <$> object .: "name"
+            "mcp_set_secret_env" -> do
+                rejectUnknownKeys "mcp_set_secret_env"
+                    ["type", "name", "key"] object
+                MetaSetMcpSecretEnv
+                    <$> object .: "name"
+                    <*> object .: "key"
             "set_mcp_init_strategy" -> do
                 rejectUnknownKeys "set_mcp_init_strategy"
                     ["type", "strategy"] object
@@ -210,6 +218,12 @@ instance Aeson.FromJSON MetaAction where
             "lsp_remove" -> do
                 rejectUnknownKeys "lsp_remove" ["type", "name"] object
                 MetaRemoveLsp <$> object .: "name"
+            "lsp_set_secret_env" -> do
+                rejectUnknownKeys "lsp_set_secret_env"
+                    ["type", "name", "key"] object
+                MetaSetLspSecretEnv
+                    <$> object .: "name"
+                    <*> object .: "key"
             "set_max_concurrent_agents" -> do
                 rejectUnknownKeys "set_max_concurrent_agents"
                     ["type", "limit"] object
@@ -356,11 +370,17 @@ validateAction = \case
     MetaRemoveMcp name -> validateConfigName "MCP server" name
     MetaSetMcpEnabled name _ -> validateConfigName "MCP server" name
     MetaLoginMcpOAuth name -> validateConfigName "MCP server" name
+    MetaSetMcpSecretEnv name key -> do
+        validateConfigName "MCP server" name
+        validateEnvKey key
     MetaSetMcpInitStrategy _ -> pure ()
     MetaSetWebFetch update -> validateWebFetchUpdate update
     MetaSetLspEnabled _ -> pure ()
     MetaUpsertLsp server -> validateLspServer server
     MetaRemoveLsp name -> validateConfigName "LSP server" name
+    MetaSetLspSecretEnv name key -> do
+        validateConfigName "LSP server" name
+        validateEnvKey key
     MetaSetMaxConcurrentAgents limit ->
         case limit of
             Just value | value < 1 ->
@@ -498,6 +518,31 @@ validateConfigName label name = do
     validNameCharacter character =
         isAlphaNum character || character `elem` (".-_" :: String)
 
+validateEnvKey :: Text -> Either Text ()
+validateEnvKey key = do
+    requireNonBlank "environment variable key" key
+    when (Text.length key > 256) $
+        Left "environment variable key must be at most 256 characters"
+    case Text.uncons key of
+        Just (first, rest)
+            | (isAsciiLetter first || first == '_')
+                && Text.all
+                    (\character ->
+                        isAsciiLetter character
+                            || isAsciiDigit character
+                            || character == '_')
+                    rest ->
+                        pure ()
+        _ ->
+            Left
+                "environment variable key must match [A-Za-z_][A-Za-z0-9_]*"
+  where
+    isAsciiLetter character =
+        ('a' <= character && character <= 'z')
+            || ('A' <= character && character <= 'Z')
+    isAsciiDigit character =
+        '0' <= character && character <= '9'
+
 requireNonBlank :: Text -> Text -> Either Text ()
 requireNonBlank label value =
     when (not (nonBlank value)) (Left (label <> " must not be empty"))
@@ -549,6 +594,7 @@ validateMcpConflicts actions =
         MetaRemoveMcp name -> [name]
         MetaSetMcpEnabled name _ -> [name]
         MetaLoginMcpOAuth name -> [name]
+        MetaSetMcpSecretEnv name _ -> [name]
         _ -> []
     validateName name = do
         let targeting = filter ((name `elem`) . mcpTarget) actions
@@ -556,10 +602,16 @@ validateMcpConflicts actions =
             upserts = length (filter isUpsert targeting)
             enables = length (filter isEnable targeting)
             oauths = length (filter isOAuth targeting)
+            secretKeys =
+                [ key
+                | MetaSetMcpSecretEnv _ key <- targeting
+                ]
         when (removes > 0 && length targeting > 1) $
             Left ("MCP server " <> name <> " is removed and also modified")
         when (upserts > 1 || enables > 1 || oauths > 1) $
             Left ("MCP server " <> name <> " has duplicate actions")
+        when (length secretKeys /= length (nub secretKeys)) $
+            Left ("MCP server " <> name <> " has duplicate secret environment actions")
     isRemove MetaRemoveMcp{} = True
     isRemove _ = False
     isUpsert MetaUpsertMcp{} = True
@@ -576,10 +628,26 @@ validateLspConflicts actions =
     lspTarget = \case
         MetaUpsertLsp server -> [server.metaLspName]
         MetaRemoveLsp name -> [name]
+        MetaSetLspSecretEnv name _ -> [name]
         _ -> []
-    validateName name =
-        when (length (filter ((name `elem`) . lspTarget) actions) > 1) $
-            Left ("LSP server " <> name <> " has conflicting actions")
+    validateName name = do
+        let targeting = filter ((name `elem`) . lspTarget) actions
+            removes = length (filter isRemove targeting)
+            upserts = length (filter isUpsert targeting)
+            secretKeys =
+                [ key
+                | MetaSetLspSecretEnv _ key <- targeting
+                ]
+        when (removes > 0 && length targeting > 1) $
+            Left ("LSP server " <> name <> " is removed and also modified")
+        when (removes > 1 || upserts > 1) $
+            Left ("LSP server " <> name <> " has duplicate actions")
+        when (length secretKeys /= length (nub secretKeys)) $
+            Left ("LSP server " <> name <> " has duplicate secret environment actions")
+    isRemove MetaRemoveLsp{} = True
+    isRemove _ = False
+    isUpsert MetaUpsertLsp{} = True
+    isUpsert _ = False
 
 -- | Human-readable, secret-free action preview for approval prompts.
 metaActionPreview :: MetaAction -> Text
@@ -602,6 +670,12 @@ metaActionPreview = \case
             <> " MCP server " <> quote name
     MetaLoginMcpOAuth name ->
         "Connect OAuth for MCP server " <> quote name
+    MetaSetMcpSecretEnv name key ->
+        "Set secret environment variable "
+            <> quote key
+            <> " for MCP server "
+            <> quote name
+            <> " (value will be prompted securely)"
     MetaSetMcpInitStrategy strategy ->
         "Set MCP initialization strategy to " <> mcpInitStrategyText strategy
     MetaSetWebFetch update ->
@@ -611,6 +685,12 @@ metaActionPreview = \case
     MetaUpsertLsp server ->
         "Add or update LSP server " <> quote server.metaLspName
     MetaRemoveLsp name -> "Remove LSP server " <> quote name
+    MetaSetLspSecretEnv name key ->
+        "Set secret environment variable "
+            <> quote key
+            <> " for LSP server "
+            <> quote name
+            <> " (value will be prompted securely)"
     MetaSetMaxConcurrentAgents limit ->
         "Set maximum concurrent agents to "
             <> maybe "the default" (Text.pack . show) limit
@@ -709,11 +789,13 @@ metaConsolePrompt context request =
         , "    {\"type\":\"mcp_remove\",\"name\":\"NAME\"},"
         , "    {\"type\":\"mcp_set_enabled\",\"name\":\"NAME\",\"enabled\":true},"
         , "    {\"type\":\"mcp_oauth_login\",\"name\":\"NAME\"},"
+        , "    {\"type\":\"mcp_set_secret_env\",\"name\":\"NAME\",\"key\":\"API_TOKEN\"},"
         , "    {\"type\":\"set_mcp_init_strategy\",\"strategy\":\"auto|progressive|blocking\"},"
         , "    {\"type\":\"set_web_fetch\",\"enabled\":true,\"allowedDomains\":[\"example.com\"],\"timeoutSeconds\":60,\"maxContentBytes\":10485760,\"maxInlineBytes\":100000},"
         , "    {\"type\":\"set_lsp_enabled\",\"enabled\":true},"
         , "    {\"type\":\"lsp_upsert\",\"name\":\"haskell\",\"command\":\"haskell-language-server-wrapper\",\"args\":[\"--lsp\"],\"extensionToLanguage\":{\"hs\":\"haskell\"},\"workspaceFolder\":null,\"startupTimeoutMilliseconds\":15000,\"shutdownTimeoutMilliseconds\":5000},"
         , "    {\"type\":\"lsp_remove\",\"name\":\"NAME\"},"
+        , "    {\"type\":\"lsp_set_secret_env\",\"name\":\"NAME\",\"key\":\"API_TOKEN\"},"
         , "    {\"type\":\"set_max_concurrent_agents\",\"limit\":4},"
         , "    {\"type\":\"clarify\",\"question\":\"...\"},"
         , "    {\"type\":\"inform\",\"message\":\"...\"}"
@@ -721,6 +803,7 @@ metaConsolePrompt context request =
         , "}"
         , ""
         , "Omit optional fields rather than guessing. Never emit env, clientSecret, token, password, apiKey, or credential fields."
+        , "Secret environment actions carry only name and key; the host securely prompts for the value. Never add a value field."
         , "Allowed session_command forms: /model MODEL, /effort LEVEL, /fast, /shell MODE, /codemod, /always-approve, /agents limit N, /skills reload."
         ]
 

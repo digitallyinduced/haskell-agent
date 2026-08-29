@@ -74,6 +74,23 @@ spec = do
                 `shouldSatisfy` \case
                     Left err -> "unknown field" `Text.isInfixOf` err
                     Right _ -> False
+            decodeMetaPlan
+                "{\"summary\":\"secret value\",\"actions\":[{\"type\":\"mcp_set_secret_env\",\"name\":\"docs\",\"key\":\"API_TOKEN\",\"value\":\"secret\"}]}"
+                `shouldSatisfy` \case
+                    Left err -> "unknown field" `Text.isInfixOf` err
+                    Right _ -> False
+
+        it "validates secret environment variable keys" do
+            decodeMetaPlan
+                "{\"summary\":\"bad key\",\"actions\":[{\"type\":\"lsp_set_secret_env\",\"name\":\"haskell\",\"key\":\"\"}]}"
+                `shouldSatisfy` \case
+                    Left err -> "must not be empty" `Text.isInfixOf` err
+                    Right _ -> False
+            decodeMetaPlan
+                "{\"summary\":\"bad key\",\"actions\":[{\"type\":\"mcp_set_secret_env\",\"name\":\"docs\",\"key\":\"API-TOKEN\"}]}"
+                `shouldSatisfy` \case
+                    Left err -> "[A-Za-z_][A-Za-z0-9_]*" `Text.isInfixOf` err
+                    Right _ -> False
 
         it "allows OAuth scopes only on remote MCP servers" do
             decodeMetaPlan
@@ -122,20 +139,25 @@ spec = do
                             , "{\"type\":\"mcp_remove\",\"name\":\"old-mcp\"},"
                             , "{\"type\":\"mcp_set_enabled\",\"name\":\"docs\",\"enabled\":false},"
                             , "{\"type\":\"mcp_oauth_login\",\"name\":\"docs\"},"
+                            , "{\"type\":\"mcp_set_secret_env\",\"name\":\"docs\",\"key\":\"DOCS_TOKEN\"},"
                             , "{\"type\":\"set_mcp_init_strategy\",\"strategy\":\"progressive\"},"
                             , "{\"type\":\"set_web_fetch\",\"enabled\":true,\"allowedDomains\":[\"example.com\"],\"timeoutSeconds\":15},"
                             , "{\"type\":\"set_lsp_enabled\",\"enabled\":true},"
                             , "{\"type\":\"lsp_upsert\",\"name\":\"haskell\",\"command\":\"hls\",\"extensionToLanguage\":{\"hs\":\"haskell\"}},"
+                            , "{\"type\":\"lsp_set_secret_env\",\"name\":\"haskell\",\"key\":\"HLS_TOKEN\"},"
                             , "{\"type\":\"lsp_remove\",\"name\":\"old-lsp\"},"
-                            , "{\"type\":\"set_max_concurrent_agents\",\"limit\":null},"
-                            , "{\"type\":\"inform\",\"message\":\"Configuration is ready\"}"
+                            , "{\"type\":\"set_max_concurrent_agents\",\"limit\":null}"
                             , "]}"
                             ])
             result `shouldSatisfy` \case
                 Right MetaPlan{metaActions} ->
-                    length metaActions == 11
+                    length metaActions == 12
                         && MetaSessionCommand "/effort high" `elem` metaActions
                         && MetaLoginMcpOAuth "docs" `elem` metaActions
+                        && MetaSetMcpSecretEnv "docs" "DOCS_TOKEN"
+                            `elem` metaActions
+                        && MetaSetLspSecretEnv "haskell" "HLS_TOKEN"
+                            `elem` metaActions
                         && MetaSetMaxConcurrentAgents Nothing `elem` metaActions
                 Left _ -> False
 
@@ -203,6 +225,13 @@ spec = do
             preview `shouldSatisfy` Text.isInfixOf "'docs'"
             preview `shouldSatisfy` Text.isInfixOf "'npx'"
             preview `shouldNotSatisfy` Text.isInfixOf "sensitive"
+
+        it "previews secret prompts without carrying a value" do
+            let preview =
+                    metaActionPreview
+                        (MetaSetMcpSecretEnv "docs" "API_TOKEN")
+            preview `shouldSatisfy` Text.isInfixOf "'API_TOKEN'"
+            preview `shouldSatisfy` Text.isInfixOf "prompted securely"
 
     describe "runMetaConsoleWithCancel" do
         it "uses empty private state, strips tools, disables storage, and repairs JSON once" do
