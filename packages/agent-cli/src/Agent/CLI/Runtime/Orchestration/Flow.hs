@@ -145,7 +145,7 @@ import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createWorktree, worktreeRoot )
+import Agent.CLI.Worktree ( createManagedWorktree )
 import Agent.Cancel ( requestCancel )
 import Agent.Claude ()
 import Agent.Dialect ()
@@ -704,7 +704,7 @@ prepareAgentIterationTracked
                                 Just _ -> pure ()
                                 Nothing ->
                                     putTextLn stderrHandle "Creating worktree…"
-                            createWorktree source (worktreeRoot home)
+                            createManagedWorktree home source
                                 >>= either
                                     (\err -> do
                                         mapM_ releaseSessionLock resumeLock
