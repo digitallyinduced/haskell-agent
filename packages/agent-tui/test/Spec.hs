@@ -8,7 +8,9 @@ import qualified Agent.TUI.MarkdownSpec as MarkdownSpec
 import qualified Agent.TUI.MotionSpec as MotionSpec
 import qualified Agent.TUI.ModelSpec as ModelSpec
 import qualified Agent.TUI.ModelPropertySpec as ModelPropertySpec
+import qualified Agent.TUI.PlanReviewSpec as PlanReviewSpec
 import qualified Agent.TUI.PresentationSpec as PresentationSpec
+import qualified Agent.TUI.QuestionnaireSpec as QuestionnaireSpec
 import qualified Agent.TUI.ThemeSpec as ThemeSpec
 import qualified Agent.TUI.TextWidthSpec as TextWidthSpec
 import Test.Hspec (hspec)
@@ -23,6 +25,8 @@ main = hspec do
     MotionSpec.spec
     ModelSpec.spec
     ModelPropertySpec.spec
+    PlanReviewSpec.spec
     PresentationSpec.spec
+    QuestionnaireSpec.spec
     ThemeSpec.spec
     TextWidthSpec.spec
