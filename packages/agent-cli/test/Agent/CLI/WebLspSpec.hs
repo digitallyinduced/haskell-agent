@@ -16,6 +16,12 @@ import Agent.Tools.Types
     , defaultToolEnv
     , setToolSessionTmp
     )
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async
+    ( cancel
+    , waitCatch
+    , withAsync
+    )
 import Control.Exception.Safe (bracket)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
@@ -25,7 +31,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import System.Directory
-    ( getTemporaryDirectory
+    ( doesFileExist
+    , getTemporaryDirectory
     , removeDirectoryRecursive
     )
 import System.Directory.OsPath (createDirectoryIfMissing)
@@ -271,6 +278,47 @@ spec = describe "web_fetch and LSP runtime support" do
                     expectationFailure
                         "failed language server must not advertise lsp"
 
+    it "closes an LSP client when startup is cancelled during initialization" $
+        withTempDir "agent-lsp-cancelled-" \directory -> do
+            let root = unsafeEncodeUtf directory
+                script = directory FilePath.</> "blocking-lsp.sh"
+                started = directory FilePath.</> "initialize-started"
+                stopped = directory FilePath.</> "process-stopped"
+                source = directory FilePath.</> "Test.hs"
+            writeFile script (blockingLspScript started stopped)
+            writeFile source "module Test where\nmain = pure ()\n"
+            env <- defaultToolEnv root
+            setToolSessionTmp env (Just root)
+            let server = LspServerConfig
+                    { lspCommand = "/bin/sh"
+                    , lspArgs =
+                        [ Text.pack script
+                        , Text.pack started
+                        , Text.pack stopped
+                        ]
+                    , lspEnv = Map.empty
+                    , lspExtensionToLanguage =
+                        Map.singleton ".hs" "haskell"
+                    , lspInitializationOptions = Nothing
+                    , lspSettings = Nothing
+                    , lspWorkspaceFolder = Nothing
+                    , lspStartupTimeoutMilliseconds = 30_000
+                    , lspShutdownTimeoutMilliseconds = 100
+                    }
+                config = LspConfig
+                    { lspEnabled = True
+                    , lspServers = Map.singleton "blocking" server
+                    }
+            withAsync (newLspRuntime config env) \startup -> do
+                waitForFile started
+                cancel startup
+                waitCatch startup >>= \case
+                    Left _ -> pure ()
+                    Right _ ->
+                        expectationFailure
+                            "cancelled LSP startup unexpectedly completed"
+                waitForFile stopped
+
 configJson :: LBS.ByteString
 configJson =
     Aeson.encode $
@@ -345,6 +393,16 @@ mockLspScript =
         , "read_frame"
         ]
 
+blockingLspScript :: FilePath -> FilePath -> String
+blockingLspScript _started _stopped =
+    unlines
+        [ "started=$1"
+        , "stopped=$2"
+        , "echo started > \"$started\""
+        , "while IFS= read -r line; do :; done"
+        , "echo stopped > \"$stopped\""
+        ]
+
 callLsp :: AppTool -> Aeson.Value -> IO ToolCallResult
 callLsp tool arguments =
     dispatchToolCall
@@ -366,3 +424,13 @@ withTempDir prefix action = do
         (mkdtemp (root FilePath.</> prefix))
         removeDirectoryRecursive
         action
+
+waitForFile :: FilePath -> IO ()
+waitForFile path = go (100 :: Int)
+  where
+    go 0 = expectationFailure ("timed out waiting for " <> path)
+    go attempts = do
+        exists <- doesFileExist path
+        if exists
+            then pure ()
+            else threadDelay 20_000 >> go (attempts - 1)
