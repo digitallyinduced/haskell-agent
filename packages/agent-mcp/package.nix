@@ -7,7 +7,7 @@
 mkDerivation {
   pname = "agent-mcp";
   version = "0.1.0.0";
-  src = packages/agent-mcp;
+  src = ./.;
   libraryHaskellDepends = [
     aeson agent-core agent-json agent-process async base
     base64-bytestring bytestring containers directory filelock filepath

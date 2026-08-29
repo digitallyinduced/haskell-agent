@@ -39,6 +39,7 @@ library
                     , Agent.MCP.Client
                     , Agent.MCP.Elicitation
                     , Agent.MCP.Fleet
+                    , Agent.MCP.InProcess
                     , Agent.MCP.Supervisor
                     , Agent.MCP.Types
                     , Agent.MCP.OAuth
@@ -75,6 +76,7 @@ test-suite agent-mcp-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.MCPSpec
+                    , Agent.MCP.InProcessSpec
                     , Agent.MCP.OAuthSpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core

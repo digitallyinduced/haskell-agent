@@ -4,6 +4,7 @@ module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolDispatchOutcome(..)
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -17,7 +18,9 @@ module Agent.ToolDispatch
     , canonicalToolName
     , canonicalToolArguments
     , dispatchToolCall
+    , dispatchToolCallDetailed
     , dispatchToolHandler
+    , dispatchToolHandlerDetailed
     , handlerName
     , toolArgumentsValue
     , decodeToolArguments
@@ -75,6 +78,16 @@ data ToolCallResult = ToolCallResult
     { callId :: !Text
     , output :: !Text
     , callKind :: !ToolCallKind
+    } deriving (Eq, Show)
+
+-- | A dispatched result together with its protocol-neutral success bit.
+--
+-- Provider adapters such as an in-process MCP server must not infer failure
+-- from the rendered output: callers are free to customize that rendering, and
+-- successful tools may legitimately return text beginning with @"Error:"@.
+data ToolDispatchOutcome = ToolDispatchOutcome
+    { toolDispatchResult :: !ToolCallResult
+    , toolDispatchSucceeded :: !Bool
     } deriving (Eq, Show)
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
@@ -147,7 +160,16 @@ noArgsTool = NoArgsTool
 
 dispatchToolCall :: ToolDispatchConfig -> [ToolHandler] -> ToolCall -> IO ToolCallResult
 dispatchToolCall config handlers call =
-    dispatchToolHandler config (findHandler call.name handlers) call
+    (.toolDispatchResult) <$>
+        dispatchToolCallDetailed config handlers call
+
+dispatchToolCallDetailed
+    :: ToolDispatchConfig
+    -> [ToolHandler]
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchToolCallDetailed config handlers call =
+    dispatchToolHandlerDetailed config (findHandler call.name handlers) call
 
 -- | Dispatch with an already-resolved handler. Registries should prefer this
 -- entry point so canonical-name lookup and uniqueness checks happen once.
@@ -157,6 +179,18 @@ dispatchToolHandler
     -> ToolCall
     -> IO ToolCallResult
 dispatchToolHandler config maybeHandler call = do
+    (.toolDispatchResult) <$>
+        dispatchToolHandlerDetailed config maybeHandler call
+
+-- | Detailed dispatch entry point for protocol adapters which need to preserve
+-- the handler's success/failure distinction independently of output
+-- formatting.
+dispatchToolHandlerDetailed
+    :: ToolDispatchConfig
+    -> Maybe ToolHandler
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchToolHandlerDetailed config maybeHandler call = do
     let callName = call.name
         input = canonicalToolArguments call.name call.arguments
         runTool = case maybeHandler of
@@ -183,10 +217,18 @@ dispatchToolHandler config maybeHandler call = do
             Left exception -> do
                 _ <- tryAny (config.toolDispatchOnException callName exception)
                 pure resultOutput
-    pure ToolCallResult
-        { callId = call.callId
-        , output = finalizedOutput
-        , callKind = call.callKind
+    let dispatchedResult = ToolCallResult
+            { callId = call.callId
+            , output = finalizedOutput
+            , callKind = call.callKind
+            }
+        succeeded = case result of
+            Right (Right _) -> True
+            Right (Left _) -> False
+            Left _ -> False
+    pure ToolDispatchOutcome
+        { toolDispatchResult = dispatchedResult
+        , toolDispatchSucceeded = succeeded
         }
 
 toolArgumentsValue :: Text -> Text
