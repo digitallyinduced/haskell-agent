@@ -247,6 +247,8 @@ executable agent-cli
 
 foreign-library haskell-agent-bridge
     import:           common-options
+    if !os(darwin)
+        buildable:    False
     type:             native-shared
     options:          standalone
     hs-source-dirs:   ffi
@@ -342,9 +344,12 @@ test-suite agent-cli-test
     ghc-options:      -threaded
     hs-source-dirs:   test ffi
     main-is:          Spec.hs
+    include-dirs:     include
     other-modules:    Agent.CLI.AccountSelectionSpec
                     , Agent.CLI.MacOS.NativeLoopEventSpec
                     , Agent.CLI.MacOS.NativeLoopEvent
+                    , Agent.CLI.MacOS.BridgeHeaderSpec
+                    , Agent.CLI.MacOS.BridgeFFISpec
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
@@ -450,6 +455,10 @@ test-suite agent-cli-test
                     , transformers
                     , unix
                     , vty >= 6.4 && < 7
+    if os(darwin)
+        c-sources:    test/cbits/HaskellAgentBridgeImageSmoke.c
+                    , cbits/HaskellAgentBridgeRuntime.c
+        other-modules: Agent.CLI.MacOS.Bridge
 
 benchmark image-preview-latency-bench
     import:           common-options
