@@ -10,6 +10,7 @@ import Agent.ToolDispatch
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.PlanMode
 import Agent.Tools.PlanMode.Document
+import Agent.Tools.PlanMode.Persistence
 import Agent.Tools.PlanMode.Tracker
 import Agent.Tools.Types
     ( AppTool(..)
@@ -17,20 +18,23 @@ import Agent.Tools.Types
     , ToolBatchPhase(..)
     , jsonToolParameters
     )
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, tryAny)
 import qualified Data.ByteString as BS
-import Data.Either (isLeft)
+import qualified Data.ByteString.Lazy as LBS
+import Data.Either (isLeft, isRight)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( createFileLink
+    , doesFileExist
     , getTemporaryDirectory
+    , removeFile
     , removeDirectoryRecursive
     )
 import System.FilePath ((</>))
-import System.OsPath (unsafeEncodeUtf)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import System.Posix.Files
     ( accessModes
     , fileMode
@@ -70,9 +74,10 @@ spec = describe "Agent.Tools.PlanMode" do
     it "exposes non-breaking session attachment accessors" do
         withTempPlan \env -> do
             readPlanSessionDir env `shouldReturn` Nothing
-            attachPlanSessionDir env (fromFilePath "/tmp/attached-session")
+            attachPlanSessionDir env env.planFallbackDir
+                `shouldReturn` Right ()
             readPlanSessionDir env `shouldReturn`
-                Just (fromFilePath "/tmp/attached-session")
+                Just env.planFallbackDir
             setPlanSessionDir env Nothing
             readPlanSessionDir env `shouldReturn` Nothing
 
@@ -263,6 +268,136 @@ spec = describe "Agent.Tools.PlanMode" do
                 reminded.trackerRevision + 1
             restored.trackerEverActivated `shouldBe` True
 
+    describe "durable plan tracker" do
+        it "round-trips the versioned tracker including pending digest fields" do
+            let tracker = expectBeginExit
+                    "approval-1"
+                    validDigest
+                    (notePlanReminder
+                        (activatePlanTracker initialPlanTracker))
+            encoded <- expectRight (encodePlanTracker tracker)
+            decodePlanTracker (LBS.toStrict encoded)
+                `shouldBe` Right tracker
+
+        it "treats a missing legacy sidecar as inactive" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    statePath = planTrackerStateFilePath directory
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                readPlanModeState env `shouldReturn` PlanInactive
+                readPlanTracker env `shouldReturn` initialPlanTracker
+                doesFileExist (pathText statePath) `shouldReturn` False
+
+        it "persists pre-attach state and restores reminders and revisions" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                activatePlanMode env
+                updateResult <-
+                    updatePlanTracker env (Right . notePlanReminder)
+                updateResult `shouldSatisfy` isRight
+                expected <- readPlanTracker env
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                stateStatus <-
+                    getFileStatus
+                        (pathText (planTrackerStateFilePath directory))
+                fileMode stateStatus `intersectFileModes` accessModes
+                    `shouldBe` 0o600
+                resumed <- newPlanModeEnv directory Nothing
+                attachPlanSessionDir resumed directory `shouldReturn` Right ()
+                readPlanModeState resumed `shouldReturn` PlanActive
+                readPlanTracker resumed `shouldReturn` expected
+
+        it "persists and restores an exit-pending approval digest" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                activatePlanMode env
+                updateResult <- updatePlanTracker env
+                    (beginExitText "approval-1" validDigest)
+                updateResult `shouldSatisfy` isRight
+                expected <- readPlanTracker env
+                resumed <- newPlanModeEnv directory Nothing
+                attachPlanSessionDir resumed directory `shouldReturn` Right ()
+                readPlanTracker resumed `shouldReturn` expected
+                isPlanModeActive resumed `shouldReturn` True
+
+        it "normalizes transient restart fields and advances the revision" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    persisted =
+                        bufferPlanActivation
+                            (activatePlanTracker initialPlanTracker)
+                writePlanTrackerState directory persisted `shouldReturn` Right ()
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                restored <- readPlanTracker env
+                restored.trackerBufferedActivation `shouldBe` False
+                restored.trackerRevision `shouldBe`
+                    persisted.trackerRevision + 1
+                readPlanTrackerState directory
+                    `shouldReturn` Right (Just restored)
+
+        it "returns corrupt state as a startup error" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    statePath = planTrackerStateFilePath directory
+                BS.writeFile (pathText statePath) "{not-json"
+                result <- attachPlanSessionDir env directory
+                result `shouldSatisfy` either
+                    (Text.isInfixOf "invalid plan-mode state JSON")
+                    (const False)
+                readPlanSessionDir env `shouldReturn` Nothing
+                readPlanModeState env `shouldReturn` PlanInactive
+
+        it "refuses a symbolic-link state file" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    statePath = planTrackerStateFilePath directory
+                    target = pathText directory </> "outside-state.json"
+                writeFile target "{}"
+                createFileLink target (pathText statePath)
+                result <- attachPlanSessionDir env directory
+                result `shouldSatisfy`
+                    either
+                        (Text.isInfixOf "symbolic-link")
+                        (const False)
+
+        it "loads a successfully attached directory only once" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    statePath = planTrackerStateFilePath directory
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                activatePlanMode env
+                before <- readPlanTracker env
+                BS.writeFile (pathText statePath) "{broken"
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                readPlanTracker env `shouldReturn` before
+
+        it "keeps a restrictive transition active when persistence fails" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    statePath = planTrackerStateFilePath directory
+                    target = pathText directory </> "outside-state.json"
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                writeFile target "{}"
+                createFileLink target (pathText statePath)
+                activation <- tryAny (activatePlanMode env)
+                activation `shouldSatisfy` isLeft
+                isPlanModeActive env `shouldReturn` True
+
+        it "does not relax active mode when persistence fails" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    statePath = planTrackerStateFilePath directory
+                    target = pathText directory </> "outside-state.json"
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                activatePlanMode env
+                removeFile (pathText statePath)
+                writeFile target "{}"
+                createFileLink target (pathText statePath)
+                deactivation <- tryAny (deactivatePlanMode env)
+                deactivation `shouldSatisfy` isLeft
+                isPlanModeActive env `shouldReturn` True
+
     describe "ask_user_question" do
         it "advertises the structured Grok Build questions schema" do
             withTempPlan \env -> do
@@ -412,6 +547,28 @@ expectRight = \case
     Left err -> do
         expectationFailure ("expected Right, got Left " <> show err)
         fail "unreachable after expectation failure"
+
+validDigest :: PlanDigest
+validDigest = PlanDigest (Text.replicate 64 "a")
+
+beginExitText
+    :: Text
+    -> PlanDigest
+    -> PlanTracker
+    -> Either Text PlanTracker
+beginExitText requestKey digest tracker =
+    case beginPlanExit requestKey digest tracker of
+        Left err -> Left (Text.pack (show err))
+        Right value -> Right value
+
+expectBeginExit :: Text -> PlanDigest -> PlanTracker -> PlanTracker
+expectBeginExit requestKey digest tracker =
+    case beginPlanExit requestKey digest tracker of
+        Left err -> error ("unexpected plan exit failure: " <> show err)
+        Right value -> value
+
+pathText :: OsPath -> FilePath
+pathText = Text.unpack . toText
 
 testDispatchConfig :: ToolDispatchConfig
 testDispatchConfig = ToolDispatchConfig

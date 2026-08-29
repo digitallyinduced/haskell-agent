@@ -87,6 +87,7 @@ library
                     , Agent.Tools.PlanMode
                     , Agent.Tools.PlanMode.Document
                     , Agent.Tools.PlanMode.File
+                    , Agent.Tools.PlanMode.Persistence
                     , Agent.Tools.PlanMode.Tracker
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling

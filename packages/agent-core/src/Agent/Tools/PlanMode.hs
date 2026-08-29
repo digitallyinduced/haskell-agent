@@ -23,6 +23,9 @@ module Agent.Tools.PlanMode
     , readPlanSessionDir
     , setPlanSessionDir
     , attachPlanSessionDir
+    , readPlanTracker
+    , updatePlanTracker
+    , restrictPlanTracker
     , isPlanModeActive
     , activatePlanMode
     , deactivatePlanMode
@@ -69,8 +72,29 @@ import Agent.Tools.PlanMode.File
     , renderPlanFileError
     , writePlanFile
     )
+import Agent.Tools.PlanMode.Persistence
+    ( readPlanTrackerState
+    , validatePlanTracker
+    , writePlanTrackerState
+    )
+import Agent.Tools.PlanMode.Tracker
+    ( PlanTracker(..)
+    , PlanTrackerPhase(..)
+    , activatePlanTracker
+    , deactivatePlanTracker
+    , initialPlanTracker
+    , normalizePlanTrackerAfterRestart
+    , requestPlanActivation
+    )
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (throwString)
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar
+    , newMVar
+    , readMVar
+    )
+import Control.Exception.Safe (displayException, throwString, tryIO)
+import Control.Monad (when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -104,6 +128,12 @@ data PlanModeEnv = PlanModeEnv
     , planSessionDir :: !(IORef (Maybe OsPath))
     , planFallbackDir :: !OsPath
     , planHooks :: !PlanModeHooks
+    , planTrackerRuntime :: !(MVar PlanTrackerRuntime)
+    }
+
+data PlanTrackerRuntime = PlanTrackerRuntime
+    { runtimeTracker :: !PlanTracker
+    , runtimeAttachedDir :: !(Maybe OsPath)
     }
 
 data PlanModeHooks = PlanModeHooks
@@ -129,11 +159,16 @@ newPlanModeEnv :: OsPath -> Maybe PlanModeHooks -> IO PlanModeEnv
 newPlanModeEnv fallbackDir hooks = do
     stateRef <- newIORef PlanInactive
     sessionRef <- newIORef Nothing
+    trackerRuntime <- newMVar PlanTrackerRuntime
+        { runtimeTracker = initialPlanTracker
+        , runtimeAttachedDir = Nothing
+        }
     pure PlanModeEnv
         { planStateRef = stateRef
         , planSessionDir = sessionRef
         , planFallbackDir = fallbackDir
         , planHooks = fromMaybe defaultHooks hooks
+        , planTrackerRuntime = trackerRuntime
         }
 
 planFilePath :: PlanModeEnv -> IO OsPath
@@ -150,7 +185,14 @@ readPlanModeState = readIORef . (.planStateRef)
 -- | Compatibility setter while callers migrate from direct 'IORef' access to
 -- the durable tracker. New code should keep state transitions in one owner.
 writePlanModeState :: PlanModeEnv -> PlanModeState -> IO ()
-writePlanModeState env = writeIORef env.planStateRef
+writePlanModeState env target = do
+    let transition tracker = Right (legacyStateTransition target tracker)
+        apply
+            | target == PlanActive = restrictPlanTracker
+            | otherwise = updatePlanTracker
+    apply env transition >>= \case
+        Left err -> throwString (Text.unpack err)
+        Right _ -> pure ()
 
 readPlanSessionDir :: PlanModeEnv -> IO (Maybe OsPath)
 readPlanSessionDir = readIORef . (.planSessionDir)
@@ -158,8 +200,165 @@ readPlanSessionDir = readIORef . (.planSessionDir)
 setPlanSessionDir :: PlanModeEnv -> Maybe OsPath -> IO ()
 setPlanSessionDir env = writeIORef env.planSessionDir
 
-attachPlanSessionDir :: PlanModeEnv -> OsPath -> IO ()
-attachPlanSessionDir env = setPlanSessionDir env . Just
+-- | Attach durable plan state to a session directory exactly once. A missing
+-- sidecar is a legacy inactive session unless an in-memory pre-attach mode
+-- transition already occurred, in which case that transition is persisted.
+-- Corrupt or unreadable state is returned as a startup error.
+attachPlanSessionDir :: PlanModeEnv -> OsPath -> IO (Either Text ())
+attachPlanSessionDir env rawDirectory = do
+    tryIO (canonicalizePath rawDirectory) >>= \case
+        Left err ->
+            pure
+                (Left
+                    ("could not resolve plan-mode session directory: "
+                        <> Text.pack (displayException err)))
+        Right directory ->
+            modifyMVar env.planTrackerRuntime \runtime ->
+                case runtime.runtimeAttachedDir of
+                    Just attached
+                        | equalFilePath attached directory -> do
+                            setPlanSessionDir env (Just directory)
+                            pure (runtime, Right ())
+                        | otherwise ->
+                            pure
+                                ( runtime
+                                , Left
+                                    ("plan mode is already attached to "
+                                        <> toText attached)
+                                )
+                    Nothing ->
+                        readPlanTrackerState directory >>= \case
+                            Left err -> pure (runtime, Left err)
+                            Right persisted -> do
+                                legacyState <- readIORef env.planStateRef
+                                let selected = case persisted of
+                                        Just tracker ->
+                                            normalizePlanTrackerAfterRestart tracker
+                                        Nothing ->
+                                            mergeLegacyState
+                                                legacyState
+                                                runtime.runtimeTracker
+                                    shouldWrite =
+                                        maybe
+                                            (selected /= initialPlanTracker)
+                                            (/= selected)
+                                            persisted
+                                    restricted = trackerRestricts selected
+                                when restricted $
+                                    mirrorTrackerState env selected
+                                persistedResult <-
+                                    if shouldWrite
+                                        then
+                                            writePlanTrackerState
+                                                directory
+                                                selected
+                                        else pure (Right ())
+                                case persistedResult of
+                                    Left err ->
+                                        pure
+                                            ( if restricted
+                                                then runtime
+                                                    { runtimeTracker = selected }
+                                                else runtime
+                                            , Left err
+                                            )
+                                    Right () -> do
+                                        mirrorTrackerState env selected
+                                        setPlanSessionDir env (Just directory)
+                                        pure
+                                            ( runtime
+                                                { runtimeTracker = selected
+                                                , runtimeAttachedDir =
+                                                    Just directory
+                                                }
+                                            , Right ()
+                                            )
+
+readPlanTracker :: PlanModeEnv -> IO PlanTracker
+readPlanTracker env =
+    (.runtimeTracker) <$> readMVar env.planTrackerRuntime
+
+-- | Persist a candidate before exposing it. Persistence failure leaves the
+-- previous tracker and restrictions intact, which is appropriate for reminder
+-- updates, approval resolution, and any transition that might relax policy.
+updatePlanTracker
+    :: PlanModeEnv
+    -> (PlanTracker -> Either Text PlanTracker)
+    -> IO (Either Text PlanTracker)
+updatePlanTracker = changePlanTracker PersistBeforeExpose
+
+-- | Expose a more restrictive candidate before persistence. If persistence
+-- fails, the new restriction remains active in memory and the caller receives
+-- the error.
+restrictPlanTracker
+    :: PlanModeEnv
+    -> (PlanTracker -> Either Text PlanTracker)
+    -> IO (Either Text PlanTracker)
+restrictPlanTracker = changePlanTracker ExposeBeforePersist
+
+data TrackerCommitOrder
+    = PersistBeforeExpose
+    | ExposeBeforePersist
+
+changePlanTracker
+    :: TrackerCommitOrder
+    -> PlanModeEnv
+    -> (PlanTracker -> Either Text PlanTracker)
+    -> IO (Either Text PlanTracker)
+changePlanTracker order env transition =
+    modifyMVar env.planTrackerRuntime \runtime ->
+        case transition runtime.runtimeTracker of
+            Left err -> pure (runtime, Left err)
+            Right candidate
+                | Left err <- validatePlanTracker candidate ->
+                    pure (runtime, Left err)
+                | otherwise ->
+                    case
+                        ( effectiveCommitOrder
+                            order
+                            runtime.runtimeTracker
+                            candidate
+                        , runtime.runtimeAttachedDir
+                        )
+                    of
+                        (_, Nothing) -> do
+                            mirrorTrackerState env candidate
+                            pure
+                                ( runtime { runtimeTracker = candidate }
+                                , Right candidate
+                                )
+                        (PersistBeforeExpose, Just directory) ->
+                            writePlanTrackerState directory candidate >>= \case
+                                Left err -> pure (runtime, Left err)
+                                Right () -> do
+                                    mirrorTrackerState env candidate
+                                    pure
+                                        ( runtime { runtimeTracker = candidate }
+                                        , Right candidate
+                                        )
+                        (ExposeBeforePersist, Just directory) -> do
+                            mirrorTrackerState env candidate
+                            writePlanTrackerState directory candidate >>= \case
+                                Left err ->
+                                    pure
+                                        ( runtime { runtimeTracker = candidate }
+                                        , Left err
+                                        )
+                                Right () ->
+                                    pure
+                                        ( runtime { runtimeTracker = candidate }
+                                        , Right candidate
+                                        )
+
+effectiveCommitOrder
+    :: TrackerCommitOrder
+    -> PlanTracker
+    -> PlanTracker
+    -> TrackerCommitOrder
+effectiveCommitOrder requested previous candidate
+    | not (trackerRestricts previous) && trackerRestricts candidate =
+        requested
+    | otherwise = PersistBeforeExpose
 
 isPlanModeActive :: PlanModeEnv -> IO Bool
 isPlanModeActive env = (== PlanActive) <$> readPlanModeState env
@@ -169,6 +368,32 @@ activatePlanMode env = writePlanModeState env PlanActive
 
 deactivatePlanMode :: PlanModeEnv -> IO ()
 deactivatePlanMode env = writePlanModeState env PlanInactive
+
+legacyStateTransition :: PlanModeState -> PlanTracker -> PlanTracker
+legacyStateTransition = \case
+    PlanInactive -> deactivatePlanTracker False
+    PlanPending ->
+        requestPlanActivation . deactivatePlanTracker False
+    PlanActive -> activatePlanTracker
+
+mergeLegacyState :: PlanModeState -> PlanTracker -> PlanTracker
+mergeLegacyState legacy tracker
+    | tracker /= initialPlanTracker = tracker
+    | otherwise = case legacy of
+        PlanInactive -> tracker
+        _ -> legacyStateTransition legacy tracker
+
+trackerRestricts :: PlanTracker -> Bool
+trackerRestricts tracker =
+    tracker.trackerPhase `elem` [TrackerActive, TrackerExitPending]
+
+mirrorTrackerState :: PlanModeEnv -> PlanTracker -> IO ()
+mirrorTrackerState env tracker =
+    writeIORef env.planStateRef $ case tracker.trackerPhase of
+        TrackerInactive -> PlanInactive
+        TrackerPending -> PlanPending
+        TrackerActive -> PlanActive
+        TrackerExitPending -> PlanActive
 
 readPlanMarkdown :: PlanModeEnv -> IO Text
 readPlanMarkdown env =

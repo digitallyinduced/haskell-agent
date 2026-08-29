@@ -268,17 +268,13 @@ restorePlanTrackerIfRevision expectedRevision snapshot current
 -- activation is kept pending; an exit remains write-restricted and replayable.
 normalizePlanTrackerAfterRestart :: PlanTracker -> PlanTracker
 normalizePlanTrackerAfterRestart tracker =
-    case tracker.trackerPhase of
-        TrackerExitPending ->
-            tracker
-                { trackerBufferedActivation = False
-                , trackerExitNoticePending = False
-                }
-        _ ->
-            tracker
-                { trackerBufferedActivation = False
-                , trackerExitNoticePending = False
-                }
+    let normalized = tracker
+            { trackerBufferedActivation = False
+            , trackerExitNoticePending = False
+            }
+    in if normalized == tracker
+        then tracker
+        else bumpRevision normalized
 
 bumpRevision :: PlanTracker -> PlanTracker
 bumpRevision tracker =
