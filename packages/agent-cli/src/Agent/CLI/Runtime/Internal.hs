@@ -25,6 +25,7 @@ module Agent.CLI.Runtime.Internal
 
 import Agent.CLI.AgentSessions
     ( closeSessionThreadManager, newSessionThreadManager )
+import Agent.CLI.GatewayClient (runGatewayCommand)
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
 import Agent.CLI.McpOAuth (loginMcp, logoutMcp)
@@ -135,6 +136,7 @@ devMainResume resumeId = do
             color <- resolveColor stderr
             runLoginManager color
             pure DevQuit
+        Right (Gateway command) -> runGatewayCommand command >> pure DevQuit
         Right (Mcp (McpLogin url)) -> loginMcp url >> pure DevQuit
         Right (Mcp (McpLogout url)) -> logoutMcp url >> pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
@@ -159,6 +161,7 @@ run = do
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
+        Right (Gateway command) -> runGatewayCommand command
         Right (Mcp (McpLogin url)) -> loginMcp url
         Right (Mcp (McpLogout url)) -> logoutMcp url
         Right ListSessions -> runListSessions

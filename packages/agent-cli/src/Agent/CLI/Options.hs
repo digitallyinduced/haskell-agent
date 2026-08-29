@@ -4,6 +4,7 @@ module Agent.CLI.Options
     , ApprovalPolicy(..)
     , CliOptions(..)
     , Command(..)
+    , GatewayCommand(..)
     , McpCommand(..)
     , ScreenMode(..)
     , StorageCommand(..)
@@ -41,6 +42,7 @@ data Command
     = ShowHelp
     | ShowVersion
     | Login
+    | Gateway GatewayCommand
     | Mcp McpCommand
     | ListSessions
     | ShowSession Text
@@ -48,6 +50,12 @@ data Command
     | ImportSession (Maybe OsPath)
     | Storage StorageCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data GatewayCommand
+    = GatewayConnect Text
+    | GatewayStatus
+    | GatewayDisconnect
     deriving (Eq, Show)
 
 data McpCommand
@@ -210,7 +218,8 @@ parseArgs args
 
 isRunInvocation :: [String] -> Bool
 isRunInvocation = \case
-    command : _ -> command `notElem` ["login", "sessions", "storage"]
+    command : _ ->
+        command `notElem` ["gateway", "login", "mcp", "sessions", "storage"]
     [] -> True
 
 parserPreferences :: Options.ParserPrefs
@@ -231,6 +240,9 @@ commandParser =
         ( Options.command "login"
             (Options.info (pure Login)
                 (Options.progDesc "Manage provider credentials"))
+            <> Options.command "gateway"
+                (Options.info gatewayParser
+                    (Options.progDesc "Connect this agent to an LLM gateway"))
             <> Options.command "sessions"
                 (Options.info sessionsParser
                     (Options.progDesc "Administer persisted sessions"))
@@ -242,6 +254,25 @@ commandParser =
                     (Options.progDesc "Administer managed PostgreSQL storage"))
         )
         Options.<|> (RunAgent <$> runOptionsParser)
+
+gatewayParser :: Options.Parser Command
+gatewayParser = Gateway <$> Options.hsubparser
+    ( Options.command "connect"
+        (Options.info
+            (GatewayConnect . Text.pack
+                <$> Options.strOption
+                    ( Options.long "url"
+                        <> Options.metavar "HTTPS_URL"
+                        <> Options.help "Gateway base URL"
+                    ))
+            (Options.progDesc "Authorize this installation with a gateway user"))
+    <> Options.command "status"
+        (Options.info (pure GatewayStatus)
+            (Options.progDesc "Show the connected gateway"))
+    <> Options.command "disconnect"
+        (Options.info (pure GatewayDisconnect)
+            (Options.progDesc "Remove the saved gateway credential"))
+    )
 
 sessionsParser :: Options.Parser Command
 sessionsParser =
