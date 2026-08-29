@@ -42,6 +42,16 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     )
 import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.Interaction
+    ( InteractionOrigin(..)
+    , InteractionResolution(..)
+    , InteractionResolutionRequest(..)
+    , InteractionResolveResult(..)
+    , SessionInteraction(..)
+    , listOpenSessionInteractions
+    , resolveSessionInteraction
+    )
+import Agent.Store.Types (renderStoreError)
 import Agent.CLI.SessionLock
     ( sessionLockIsActive
     , sessionLockPath
@@ -64,8 +74,10 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
     ( AppTool
+    , PlanModeCapability(..)
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withPlanModeCapability
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -101,6 +113,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import Data.Time.Clock (getCurrentTime)
 import System.Directory
     ( findExecutable
     , removeFile
@@ -774,6 +787,7 @@ agentSessionTools env =
     [ createAgentSessionTool env
     , readAgentSessionTool env
     , sendAgentSessionMessageTool env
+    , respondAgentSessionInteractionTool env
     ]
 
 data CreateAgentSessionArgs = CreateAgentSessionArgs
@@ -905,17 +919,33 @@ runReadAgentSession env args =
                     Left err -> pure (Left err)
                     Right page -> do
                         status <- env.toolsSessionStatus args.sessionId
+                        pending <-
+                            listOpenSessionInteractions
+                                env.toolsPool
+                                args.sessionId
                         activity <-
                             if status == "running"
                                 then loadSessionActivity
                                     env.toolsRoot args.sessionId
                                 else pure Nothing
-                        pure $ Right $
-                            renderAgentSession
-                                meta
-                                status
-                                activity
-                                (map snd page.pageTurns)
+                        pure do
+                            interactions <-
+                                either
+                                    (Left
+                                        . ("could not load pending interactions: " <>)
+                                        . renderStoreError)
+                                    Right
+                                    pending
+                            let displayStatus
+                                    | null interactions = status
+                                    | otherwise = "awaiting input"
+                            Right $
+                                renderAgentSession
+                                    meta
+                                    displayStatus
+                                    activity
+                                    (map snd page.pageTurns)
+                                    <> renderPendingInteractions interactions
 
 data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
     { sessionId :: Text
@@ -962,6 +992,132 @@ runSendAgentSessionMessage env args
                         env
                         (sessionHandle env.toolsPool env.toolsRoot meta)
                         args.message
+
+data RespondAgentSessionInteractionArgs =
+    RespondAgentSessionInteractionArgs
+        { sessionId :: Text
+        , interactionId :: Text
+        , response :: Text
+        }
+
+respondAgentSessionInteractionArgsDecoder
+    :: Hermes.Decoder RespondAgentSessionInteractionArgs
+respondAgentSessionInteractionArgsDecoder = Hermes.object $
+    RespondAgentSessionInteractionArgs
+        <$> Hermes.atKey "session_id" Hermes.text
+        <*> Hermes.atKey "interaction_id" Hermes.text
+        <*> Hermes.atKey "response" Hermes.text
+
+respondAgentSessionInteractionTool :: AgentSessionToolsEnv -> AppTool
+respondAgentSessionInteractionTool env =
+    withPlanModeCapability PlanModeInteraction $
+    jsonTool
+    "respond_agent_session_interaction"
+    "Resolve a pending approval or question for a persisted agent session. The first valid response wins; concurrent responders observe the winning response."
+    [ PropertySchema "session_id" PropertyString True $ Just
+        "Persisted target session id."
+    , PropertySchema "interaction_id" PropertyString True $ Just
+        "Pending interaction id shown by read_agent_session."
+    , PropertySchema "response" PropertyString True $ Just
+        "Typed response payload requested by the interaction (for example approve, revise feedback, abandon, defer, or question answers)."
+    ]
+    False
+    TurnSequential
+    (typedTool
+        "respond_agent_session_interaction"
+        respondAgentSessionInteractionArgsDecoder
+        (runRespondAgentSessionInteraction env))
+
+runRespondAgentSessionInteraction
+    :: AgentSessionToolsEnv
+    -> RespondAgentSessionInteractionArgs
+    -> IO (Either Text Text)
+runRespondAgentSessionInteraction env args
+    | Text.null (Text.strip args.response) =
+        pure
+            (Left
+                "respond_agent_session_interaction requires a non-empty response")
+    | otherwise = do
+        now <- getCurrentTime
+        current <- env.toolsCurrentSessionId
+        let responder =
+                "agent-session:"
+                    <> fromMaybe "external" current
+        resolveSessionInteraction
+            env.toolsPool
+            InteractionResolutionRequest
+                { interactionResolutionRequestSessionKey = args.sessionId
+                , interactionResolutionRequestInteractionId =
+                    args.interactionId
+                , interactionResolutionRequestPayloadVersion = 1
+                , interactionResolutionRequestPayload =
+                    Text.strip args.response
+                , interactionResolutionRequestResponder = responder
+                , interactionResolutionRequestResolvedAt = now
+                }
+            >>= \case
+                Left err ->
+                    pure
+                        (Left
+                            ("could not resolve session interaction: "
+                                <> renderStoreError err))
+                Right InteractionResolveNotFound ->
+                    pure
+                        (Left
+                            "session interaction was not found or its session is inactive")
+                Right InteractionResolveObserved
+                    { interactionResolveWon
+                    , interactionResolveValue
+                    } ->
+                        pure . Right $
+                            (if interactionResolveWon
+                                then "Response accepted."
+                                else "Another responder answered first.")
+                                <> "\nWinning response: "
+                                <> interactionResolveValue.interactionResolutionPayload
+
+renderPendingInteractions :: [SessionInteraction] -> Text
+renderPendingInteractions [] = ""
+renderPendingInteractions interactions =
+    "\n\nPending interactions:\n"
+        <> Text.intercalate
+            "\n\n"
+            (map renderInteraction interactions)
+  where
+    renderInteraction interaction =
+        Text.unlines $
+            [ "Interaction: " <> interaction.sessionInteractionId
+            , "Kind: " <> interaction.sessionInteractionKind
+            , "Request key: " <> interaction.sessionInteractionRequestKey
+            ]
+                <> maybe
+                    []
+                    (\origin ->
+                        [ "Origin: "
+                            <> origin.interactionOriginToolName
+                            <> " ("
+                            <> origin.interactionOriginCallId
+                            <> ")"
+                        ])
+                    interaction.sessionInteractionOrigin
+                <> [ "Request:"
+                   , indentInteractionPayload
+                        interaction.sessionInteractionPayload
+                   ]
+
+indentInteractionPayload :: Text -> Text
+indentInteractionPayload payload =
+    Text.unlines
+        [ "  " <> line
+        | line <- Text.lines (truncateInteractionPayload payload)
+        ]
+
+truncateInteractionPayload :: Text -> Text
+truncateInteractionPayload payload
+    | Text.length payload <= 16000 = payload
+    | otherwise =
+        Text.take 16000 payload
+            <> "\n… (interaction payload truncated)"
 
 launchToolSessionTurn
     :: AgentSessionToolsEnv
