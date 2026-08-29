@@ -267,11 +267,11 @@ int32_t ha_engine_stage_turn_options(
 /*
  * Install or replace the engine's interactive callback. Passing NULL clears
  * it; future interaction requests then use safe decline/cancel defaults.
- * The callback and context must remain valid until replaced, cleared, or
- * ha_engine_destroy returns. Replacement, clearing, and destruction must be
- * serialized with callback execution; do not release callback storage until
- * an in-flight callback has returned. Returns 0 on success, 1 for a null
- * engine, and 3 for an internal failure.
+ * Replacing or clearing waits for an in-flight callback to return, cancels all
+ * interactions still awaiting answers, and then makes the old callback/context
+ * safe to release. Do not call this function reentrantly from the callback.
+ * Engine destruction must still be serialized with all API calls. Returns 0
+ * on success, 1 for a null engine, and 3 for an internal failure.
  */
 int32_t ha_engine_set_interaction_callback(
     void *engine,

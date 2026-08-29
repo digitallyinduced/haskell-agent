@@ -1,6 +1,13 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module Agent.CLI.MacOS.Bridge () where
+module Agent.CLI.MacOS.Bridge
+    ( NativeInteractionResolution(..)
+    , PendingInteraction(..)
+    , cancelPendingInteractions
+    , discardStagedTurn
+    , resolvePendingInteraction
+    , turnStartCleanupId
+    ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
 import Agent.CLI.NativeRuntime
@@ -146,9 +153,11 @@ import Control.Concurrent.MVar
     , newMVar
     , putMVar
     , readMVar
+    , withMVar
     )
 import Control.Concurrent.STM
-    ( TMVar
+    ( STM
+    , TMVar
     , TQueue
     , TVar
     , atomically
@@ -170,6 +179,7 @@ import Control.Exception.Safe
     ( SomeException
     , bracket
     , finally
+    , onException
     , tryAny
     )
 import Control.Monad
@@ -432,6 +442,30 @@ instance Aeson.FromJSON TurnStart where
             (_, _, Just _, Just _) -> pure start
             _ -> fail "provider and model must be supplied together"
 
+turnStartCleanupId :: Text -> Aeson.Value -> Text
+turnStartCleanupId requestId params =
+    fromMaybe requestId $
+        Aeson.parseMaybe
+            (Aeson.withObject "TurnStartCleanup" (.:? "turnId"))
+            params
+            >>= id
+            >>= nonBlank
+  where
+    nonBlank value
+        | Text.null (Text.strip value) = Nothing
+        | otherwise = Just value
+
+discardStagedTurn
+    :: Text
+    -> Aeson.Value
+    -> TVar (Map Text a)
+    -> TVar (Map Text b)
+    -> STM ()
+discardStagedTurn requestId params stagedImages stagedOptions = do
+    let cleanupId = turnStartCleanupId requestId params
+    modifyTVar' stagedImages (Map.delete cleanupId)
+    modifyTVar' stagedOptions (Map.delete cleanupId)
+
 data TurnReference = TurnReference
     { turnReferenceId :: !Text
     }
@@ -523,6 +557,46 @@ data PendingInteraction = PendingInteraction
     , pendingInteractionWaiter :: !(TMVar NativeInteractionResolution)
     }
 
+resolvePendingInteraction
+    :: TVar (Map (Text, Text) PendingInteraction)
+    -> (Text, Text)
+    -> NativeInteractionResolution
+    -> STM Bool
+resolvePendingInteraction pendingRef key resolution = do
+    pending <- readTVar pendingRef
+    case Map.lookup key pending of
+        Nothing -> pure False
+        Just interaction@PendingInteraction
+            { pendingInteractionOptionCount = optionCount
+            }
+            | resolution.interactionSelectedIndex < (-1)
+                || resolution.interactionSelectedIndex >= optionCount ->
+                pure False
+            | otherwise -> do
+                published <- tryPutTMVar
+                    interaction.pendingInteractionWaiter
+                    resolution
+                when published $
+                    writeTVar pendingRef (Map.delete key pending)
+                pure published
+
+cancelPendingInteractions
+    :: TVar (Map (Text, Text) PendingInteraction)
+    -> STM ()
+cancelPendingInteractions pendingRef = do
+    pending <- readTVar pendingRef
+    writeTVar pendingRef Map.empty
+    forM_ (Map.elems pending) \interaction ->
+        void $ tryPutTMVar
+            interaction.pendingInteractionWaiter
+            cancelledInteractionResolution
+
+cancelledInteractionResolution :: NativeInteractionResolution
+cancelledInteractionResolution = NativeInteractionResolution
+    { interactionSelectedIndex = -1
+    , interactionCustomText = Nothing
+    }
+
 data InteractionCallbackTarget = InteractionCallbackTarget
     { interactionTargetCallback :: !(FunPtr InteractionCallback)
     , interactionTargetContext :: !(Ptr ())
@@ -530,6 +604,7 @@ data InteractionCallbackTarget = InteractionCallbackTarget
 
 data InteractionRuntime = InteractionRuntime
     { interactionCallbackTarget :: !(TVar (Maybe InteractionCallbackTarget))
+    , interactionCallbackLock :: !(MVar ())
     , interactionPending
         :: !(TVar (Map (Text, Text) PendingInteraction))
     }
@@ -987,9 +1062,11 @@ ha_engine_create callback context
             stagedImages <- newTVarIO Map.empty
             stagedTurnOptions <- newTVarIO Map.empty
             interactionTarget <- newTVarIO Nothing
+            interactionLock <- newMVar ()
             pendingInteractions <- newTVarIO Map.empty
             let interactions = InteractionRuntime
                     { interactionCallbackTarget = interactionTarget
+                    , interactionCallbackLock = interactionLock
                     , interactionPending = pendingInteractions
                     }
             _ <- forkFinally
@@ -1229,14 +1306,19 @@ ha_engine_set_interaction_callback pointer callback callbackContext
         result <- tryAny do
             let stable = castPtrToStablePtr pointer :: StablePtr Engine
             engine <- deRefStablePtr stable
-            atomically $ writeTVar
-                engine.engineInteractions.interactionCallbackTarget
-                (if callback == nullFunPtr
-                    then Nothing
-                    else Just InteractionCallbackTarget
-                        { interactionTargetCallback = callback
-                        , interactionTargetContext = callbackContext
-                        })
+            withMVar
+                engine.engineInteractions.interactionCallbackLock
+                \_ -> atomically do
+                    writeTVar
+                        engine.engineInteractions.interactionCallbackTarget
+                        (if callback == nullFunPtr
+                            then Nothing
+                            else Just InteractionCallbackTarget
+                                { interactionTargetCallback = callback
+                                , interactionTargetContext = callbackContext
+                                })
+                    cancelPendingInteractions
+                        engine.engineInteractions.interactionPending
         pure $ either (const 3) (const 0) result
 
 ha_engine_resolve_interaction
@@ -1280,37 +1362,15 @@ ha_engine_resolve_interaction
               of
                 (Right turnIDText, Right interactionIDText, Right custom) ->
                     fmap (\published -> if published then 0 else 4) $
-                    atomically do
-                        pending <- readTVar pendingRef
-                        case Map.lookup
-                            (turnIDText, interactionIDText)
-                            pending of
-                                Nothing -> pure False
-                                Just interaction@PendingInteraction
-                                    { pendingInteractionOptionCount =
-                                        optionCount
+                        atomically $
+                            resolvePendingInteraction
+                                pendingRef
+                                (turnIDText, interactionIDText)
+                                NativeInteractionResolution
+                                    { interactionSelectedIndex =
+                                        selectedIndexValue
+                                    , interactionCustomText = custom
                                     }
-                                    | selectedIndexValue < (-1)
-                                        || selectedIndexValue >= optionCount ->
-                                        pure False
-                                    | otherwise -> do
-                                        published <- tryPutTMVar
-                                            interaction.pendingInteractionWaiter
-                                            NativeInteractionResolution
-                                                { interactionSelectedIndex =
-                                                    selectedIndexValue
-                                                , interactionCustomText =
-                                                    custom
-                                                }
-                                        when published $
-                                            writeTVar
-                                                pendingRef
-                                                (Map.delete
-                                                    ( turnIDText
-                                                    , interactionIDText
-                                                    )
-                                                    pending)
-                                        pure published
                 _ -> pure 2
         pure $ case result of
             Left _ -> 3
@@ -1402,10 +1462,11 @@ idleLoop
                 case (parseParams request
                     :: Either Text TurnStart) of
                     Left err -> do
-                        atomically $ modifyTVar' stagedImages
-                            (Map.delete request.requestId)
-                        atomically $ modifyTVar' stagedTurnOptions
-                            (Map.delete request.requestId)
+                        atomically $ discardStagedTurn
+                            request.requestId
+                            request.requestParams
+                            stagedImages
+                            stagedTurnOptions
                         sendEvent callback context
                             (failureEvent request.requestId err)
                         continue
@@ -1893,43 +1954,59 @@ requestNativeInteraction
     -> [Text]
     -> IO (Maybe NativeInteractionResolution)
 requestNativeInteraction control interactions kind prompt options = do
-    target <- readTVarIO interactions.interactionCallbackTarget
-    case target of
+    waiter <- newEmptyTMVarIO
+    registration <-
+        withMVar interactions.interactionCallbackLock \_ -> do
+            registered <- atomically do
+                target <- readTVar interactions.interactionCallbackTarget
+                case target of
+                    Nothing -> pure Nothing
+                    Just callbackTarget -> do
+                        interactionID <- register waiter
+                        pure (Just (callbackTarget, interactionID))
+            forM_ registered \(callbackTarget, interactionID) ->
+                sendNativeInteraction
+                    callbackTarget
+                    control.turnControlId
+                    interactionID
+                    kind
+                    prompt
+                    options
+                    `onException`
+                        atomically
+                            (modifyTVar'
+                                interactions.interactionPending
+                                (Map.delete
+                                    (control.turnControlId, interactionID)))
+            pure registered
+    case registration of
         Nothing -> pure Nothing
-        Just callbackTarget -> do
-            waiter <- newEmptyTMVarIO
-            interactionID <- atomically do
-                current <- readTVar control.turnControlInteractionCounter
-                let next = current + 1
-                    interactionID =
-                        control.turnControlId
-                            <> "-interaction-"
-                            <> Text.pack (show next)
-                writeTVar control.turnControlInteractionCounter next
-                modifyTVar'
-                    interactions.interactionPending
-                    (Map.insert
-                        (control.turnControlId, interactionID)
-                        PendingInteraction
-                            { pendingInteractionOptionCount =
-                                length options
-                            , pendingInteractionWaiter = waiter
-                            })
-                pure interactionID
+        Just (_, interactionID) -> do
             let cleanup =
                     atomically $ modifyTVar'
                         interactions.interactionPending
                         (Map.delete
                             (control.turnControlId, interactionID))
-            (sendNativeInteraction
-                callbackTarget
-                control.turnControlId
-                interactionID
-                kind
-                prompt
-                options
-                >> Just <$> atomically (takeTMVar waiter))
+            (Just <$> atomically (takeTMVar waiter))
                 `finally` cleanup
+  where
+    register waiter = do
+        current <- readTVar control.turnControlInteractionCounter
+        let next = current + 1
+            interactionID =
+                control.turnControlId
+                    <> "-interaction-"
+                    <> Text.pack (show next)
+        writeTVar control.turnControlInteractionCounter next
+        modifyTVar'
+            interactions.interactionPending
+            (Map.insert
+                (control.turnControlId, interactionID)
+                PendingInteraction
+                    { pendingInteractionOptionCount = length options
+                    , pendingInteractionWaiter = waiter
+                    })
+        pure interactionID
 
 sendNativeInteraction
     :: InteractionCallbackTarget
@@ -2048,10 +2125,7 @@ cancelTurn control = do
         pure (map (.pendingInteractionWaiter) (Map.elems owned))
     atomically $
         forM_ interactionWaiters \waiter ->
-            void $ tryPutTMVar waiter NativeInteractionResolution
-                { interactionSelectedIndex = -1
-                , interactionCustomText = Nothing
-                }
+            void $ tryPutTMVar waiter cancelledInteractionResolution
 
 requestApproval
     :: FunPtr EventCallback
