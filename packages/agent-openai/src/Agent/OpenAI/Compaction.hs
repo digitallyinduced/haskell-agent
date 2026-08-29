@@ -331,35 +331,29 @@ protocolDropUnits items =
         | otherwise =
             case item of
                 FunctionCallItem call ->
-                    let outputIndex =
-                            findOutputIndex
-                                outputIndices
-                                paired
-                                index
-                                (FunctionOutputKey, call.callId)
-                        nextPaired = maybe paired (`Set.insert` paired) outputIndex
-                    in DropUnit (index : maybe [] pure outputIndex)
-                        : go outputIndices nextPaired rest
+                    dropCallUnit
+                        outputIndices
+                        paired
+                        index
+                        rest
+                        FunctionOutputKey
+                        call.callId
                 CustomToolCallItem call ->
-                    let outputIndex =
-                            findOutputIndex
-                                outputIndices
-                                paired
-                                index
-                                (CustomToolOutputKey, call.callId)
-                        nextPaired = maybe paired (`Set.insert` paired) outputIndex
-                    in DropUnit (index : maybe [] pure outputIndex)
-                        : go outputIndices nextPaired rest
+                    dropCallUnit
+                        outputIndices
+                        paired
+                        index
+                        rest
+                        CustomToolOutputKey
+                        call.callId
                 ComputerCallItem call ->
-                    let outputIndex =
-                            findOutputIndex
-                                outputIndices
-                                paired
-                                index
-                                (ComputerOutputKey, call.computerCallId)
-                        nextPaired = maybe paired (`Set.insert` paired) outputIndex
-                    in DropUnit (index : maybe [] pure outputIndex)
-                        : go outputIndices nextPaired rest
+                    dropCallUnit
+                        outputIndices
+                        paired
+                        index
+                        rest
+                        ComputerOutputKey
+                        call.computerCallId
                 KnownResponseItem itemType tagged
                     | Just outputType <- pairedOutputType itemType ->
                         DropUnit
@@ -384,6 +378,17 @@ protocolDropUnits items =
                             : go outputIndices paired rest
                 _ ->
                     DropUnit [index] : go outputIndices paired rest
+
+    dropCallUnit outputIndices paired index rest outputType rawId =
+        let outputIndex =
+                findOutputIndex
+                    outputIndices
+                    paired
+                    index
+                    (outputType, rawId)
+            nextPaired = maybe paired (`Set.insert` paired) outputIndex
+        in DropUnit (index : maybe [] pure outputIndex)
+            : go outputIndices nextPaired rest
 
     findOutputIndex outputIndices paired minIndex (outputType, rawId) =
         case nonEmptyIdentifiers [rawId] of
