@@ -984,27 +984,31 @@ spec = describe "runLoop" do
             Left (LoopIncomplete turn) -> turn.responseId `shouldBe` "resp-1"
             other -> expectationFailure ("expected LoopIncomplete, got " <> show other)
 
-    it "keeps completed tool results pending after a soft cancel" do
-        submissions <- newIORef []
-        backend <- scriptedBackend submissions
-            [ Right $ emptyTurnOutput "resp-1"
-                [functionToolCall "c1" "slow" "{}"]
-                Nothing
-            ]
-        config0 <- testConfig backend
-        let cancel = case config0 of
-                LoopConfig{loopCancel = c} -> c
-            config = config0
-                { loopTools = registryFromHandlers
-                    [ noArgsTool "slow" do
-                        requestCancel cancel
-                        pure (Right "partial work")
-                    ]
-                }
-        execution <- runLoopInputsDetailed config Nothing [UserMessage "go"]
-        let result = ToolCallResult "c1" "partial work" FunctionCallKind
-        execution.executionResult `shouldBe` Left (LoopCancelled [result])
-        execution.executionPendingInputs `shouldBe` [CompletedTool result]
+    it "keeps completed tool results pending when cancelled during the next model step" do
+        started <- newEmptyMVar
+        calls <- newIORef (0 :: Int)
+        config0 <- testConfig $ Backend \state _prev _inputs _onEvent -> do
+            call <- atomicModifyIORef' calls \n -> (n + 1, n + 1)
+            if call == 1
+                then pure $ Right BackendResult
+                    { backendOutput = emptyTurnOutput "resp-1"
+                        [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                        Nothing
+                    , backendState = state <> [stateMarker]
+                    }
+                else do
+                    putMVar started ()
+                    threadDelay maxBound
+                    error "cancel should stop the backend"
+        let cancelFlag = config0.loopCancel
+        _ <- forkIO do
+            takeMVar started
+            requestCancel cancelFlag
+        execution <- runLoopInputsDetailed config0 Nothing [UserMessage "go"]
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe`
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
 
     it "retains committed state when a later callback throws" do
         submissions <- newIORef []
@@ -1225,7 +1229,9 @@ spec = describe "runLoop" do
             ]
 
 
-    it "returns LoopCancelled when the cancel flag is set during tools" do
+    it "cancels an in-flight tool when the cancel flag is set" do
+        started <- newEmptyMVar
+        stopped <- newEmptyMVar
         submissions <- newIORef []
         backend <- scriptedBackend submissions
             [ Right $ emptyTurnOutput "resp-1"
@@ -1237,16 +1243,19 @@ spec = describe "runLoop" do
                 LoopConfig{loopCancel = c} -> c
             handlers =
                 [ noArgsTool "slow" do
-                    requestCancel cancel
-                    threadDelay 10000
-                    pure (Right "should-not-continue")
+                    Exception.finally
+                        (putMVar started ()
+                            >> threadDelay maxBound
+                            >> pure (Right "should-not-continue"))
+                        (putMVar stopped ())
                 ]
             config = config0 { loopTools = registryFromHandlers handlers }
-        result <- runLoop config Nothing "go"
-        case result of
-            Left (LoopCancelled results) ->
-                results `shouldNotBe` []
-            other -> expectationFailure ("expected LoopCancelled, got " <> show other)
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar started
+            requestCancel cancel
+            timeout 1000000 (wait running)
+                `shouldReturn` Just (Left (LoopCancelled []))
+            tryReadMVar stopped `shouldReturn` Just ()
 
     it "does not render a rejected tool when approval cancels the turn" do
         events <- newIORef []
@@ -1315,6 +1324,55 @@ spec = describe "runLoop" do
             requestCancel cancel
         result <- runLoop config0 Nothing "go"
         result `shouldBe` Left (LoopCancelled [])
+
+    it "retains assistant text streamed before submitTurn is cancelled" do
+        started <- newEmptyMVar
+        config0 <- testConfig $ Backend \_state _prev _inputs onEvent -> do
+            onEvent (TextDelta "visible ")
+            onEvent (TextDelta "partial")
+            putMVar started ()
+            threadDelay 2000000
+            error "cancel should stop the backend"
+        let cancelFlag = config0.loopCancel
+        _ <- forkIO do
+            takeMVar started
+            requestCancel cancelFlag
+        execution <- runLoopInputsDetailed config0 Nothing [UserMessage "go"]
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        execution.executionUncommittedAssistantText
+            `shouldBe` Just "visible partial"
+
+    it "reports only assistant text streamed since the last committed response" do
+        started <- newEmptyMVar
+        calls <- newIORef (0 :: Int)
+        config0 <- testConfig $ Backend \state _prev _inputs onEvent -> do
+            call <- atomicModifyIORef' calls \n -> (n + 1, n + 1)
+            if call == 1
+                then do
+                    onEvent (TextDelta "committed text")
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "resp-1"
+                            [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                            (Just "committed text")
+                        , backendState = state <> [stateMarker]
+                        }
+                else do
+                    onEvent (TextDelta "dropped attempt")
+                    onEvent (ResponseRestarted "reconnecting")
+                    onEvent (TextDelta "partial ")
+                    onEvent (TextDelta "answer")
+                    putMVar started ()
+                    threadDelay maxBound
+                    error "cancel should stop the backend"
+        let cancelFlag = config0.loopCancel
+        _ <- forkIO do
+            takeMVar started
+            requestCancel cancelFlag
+        execution <- runLoopInputsDetailed config0 Nothing [UserMessage "go"]
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionUncommittedAssistantText
+            `shouldBe` Just "dropped attempt\n\npartial answer"
 
     it "does not clear a cancel requested before the loop starts" do
         submissions <- newIORef []

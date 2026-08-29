@@ -351,8 +351,12 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
         persistIncomplete
-            :: [ResponseItem] -> Text -> Maybe TurnOutput -> IO ()
-        persistIncomplete retainedItems errorText maybeTurn = case persist of
+            :: [ResponseItem]
+            -> Text
+            -> Maybe TurnOutput
+            -> Maybe Text
+            -> IO ()
+        persistIncomplete retainedItems errorText maybeTurn displayAssistant = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
@@ -362,7 +366,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 let turn = SessionTurn
                         { turnAt = now
                         , turnUserText = promptText
-                        , turnAssistantText = maybeTurn >>= (.assistantText)
+                        , turnAssistantText =
+                            case displayAssistant of
+                                Just text -> Just text
+                                Nothing -> maybeTurn >>= (.assistantText)
                         , turnError = Just errorText
                         , turnResponseId = (.responseId) <$> maybeTurn
                         , turnEffect = TranscriptAppend
@@ -426,7 +433,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         (formatLoopErrorColored color cancelled)
                     putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
+            -- Text of the sample that never committed is display-only: it
+            -- reaches the durable turn but not the model transcript.
             persistIncomplete retained "cancelled" Nothing
+                (uncommittedAssistantText execution)
             pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -499,6 +509,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     persistIncomplete retained
                         (formatLoopErrorPersistedAt finishedAt err)
                         maybeIncompleteTurn
+                        (uncommittedAssistantText execution)
                     planState <- readIORef planMode.planStateRef
                     pure $ TurnFailed PendingTurn
                         { pendingPromptText = promptText
@@ -758,6 +769,10 @@ isPendingPersistence :: PersistenceState -> Bool
 isPendingPersistence = \case
     PersistencePending _ _ _ -> True
     PersistenceActive _ -> False
+
+uncommittedAssistantText :: LoopExecution -> Maybe Text
+uncommittedAssistantText execution =
+    fmap stripBracketedTimestamps execution.executionUncommittedAssistantText
 
 -- | Short reason recorded on the synthetic outputs of tool calls a failed
 -- turn never executed.

@@ -229,6 +229,14 @@ The built-in `ask_secret` tool reads secrets through a masked prompt and gives
 the model only a private temporary-file path, keeping values out of chat and
 tool arguments. Files are removed when the tool runtime closes.
 
+### Inline images
+
+The built-in `show_image` tool displays an image file (PNG, JPEG, GIF, BMP,
+TIFF) inline in the conversation next to the tool call: Kitty, Ghostty,
+WezTerm, and iTerm2 draw the bitmap natively, other terminals get a
+true-colour text approximation. The image is shown to the user only; it is
+not added to the model context.
+
 ## Ideas and direction
 
 Why an independent harness matters, why code and Haskell are useful

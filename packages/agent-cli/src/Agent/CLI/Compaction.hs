@@ -325,22 +325,10 @@ installCompactOutcome
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-installCompactOutcome previous transcript contextTokens runCompact focus =
-    mask \restore -> do
-        result <- restore (runCompact focus)
-        case result of
-            Left _ -> pure ()
-            Right outcome -> do
-                writeIORef previous Nothing
-                writeIORef transcript outcome.compactHistory
-                case contextTokens of
-                    Nothing -> pure ()
-                    Just ref ->
-                        writeIORef ref $ Just $
-                            estimatedOccupancy
-                                outcome.compactAfterTokens
-                                (length outcome.compactHistory)
-        pure result
+installCompactOutcome previous transcript =
+    installCompactionOutcome \outcome -> do
+        writeIORef previous Nothing
+        writeIORef transcript outcome.compactHistory
 
 installLiveCompactOutcome
     :: IORef LiveConversation
@@ -348,14 +336,24 @@ installLiveCompactOutcome
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-installLiveCompactOutcome conversationRef contextTokens runCompact focus =
+installLiveCompactOutcome conversationRef =
+    installCompactionOutcome \outcome -> do
+        writeLivePreviousResponseId conversationRef Nothing
+        writeLiveTranscript conversationRef outcome.compactHistory
+
+installCompactionOutcome
+    :: (CompactOutcome -> IO ())
+    -> Maybe (IORef (Maybe OccupancySnapshot))
+    -> (Maybe Text -> IO (Either Text CompactOutcome))
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+installCompactionOutcome installState contextTokens runCompact focus =
     mask \restore -> do
         result <- restore (runCompact focus)
         case result of
             Left _ -> pure ()
             Right outcome -> do
-                writeLivePreviousResponseId conversationRef Nothing
-                writeLiveTranscript conversationRef outcome.compactHistory
+                installState outcome
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->

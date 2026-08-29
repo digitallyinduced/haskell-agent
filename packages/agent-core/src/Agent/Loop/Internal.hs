@@ -67,7 +67,7 @@ import Control.Monad (void)
 import Data.Aeson (ToJSON(..), object, (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
@@ -227,6 +227,12 @@ data LoopExecution = LoopExecution
     -- commit and must not be duplicated from this field.
     , executionPendingInputs :: ![TurnInput]
     , executionProgress :: !LoopProgress
+    -- | Assistant text streamed since the last committed response: the sample
+    -- that never committed plus restarted attempts of the same step. Text of
+    -- committed samples is already represented by assistant messages in
+    -- 'executionState'. This is display metadata only: callers must not add
+    -- it to backend state.
+    , executionUncommittedAssistantText :: !(Maybe Text)
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
 
@@ -400,19 +406,43 @@ runLoopInputsUnsafe
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
+    uncommittedTextRef <- newIORef ([], [])
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
     withAsync (runLoopEventPump eventPump) \eventWorker -> do
-        let config = config0
-                { loopOnEvent = emitLoopEvent eventPump
+        let recordVisible event =
+                modifyIORef' uncommittedTextRef \(finished, current) ->
+                    case event of
+                        TextDelta delta -> (finished, delta : current)
+                        -- A restarted attempt stays visible, marked failed,
+                        -- until a later response commits or the turn ends.
+                        ResponseRestarted _ -> finishCurrent finished current
+                        ResponseAttemptDiscarded -> (finished, [])
+                        _ -> (finished, current)
+            finishCurrent finished current
+                | null current = (finished, [])
+                | otherwise = (current : finished, [])
+            config = config0
+                { loopOnEvent = \event -> do
+                    recordVisible event
+                    emitLoopEvent eventPump event
                 }
             finish state progress result = do
                 writeIORef progressRef (state, progress)
                 pending <- readIORef pendingRef
+                (finishedChunks, currentChunks) <- readIORef uncommittedTextRef
+                let uncommittedText = Text.intercalate "\n\n" $
+                        filter (not . Text.null) $
+                            map (Text.concat . reverse)
+                                (reverse finishedChunks <> [currentChunks])
                 pure LoopExecution
                     { executionState = state
                     , executionPendingInputs = pending
                     , executionProgress = progress
+                    , executionUncommittedAssistantText =
+                        if Text.null uncommittedText
+                            then Nothing
+                            else Just uncommittedText
                     , executionResult = result
                     }
             unexpected state progress exception =
@@ -478,8 +508,10 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             continueCommitted state turn turnsUsed steeringCount usageAcc
                     emptyContinuations = do
                 writeIORef progressRef (state, ResponseCommitted)
-                -- The committed response absorbed every input submitted with it.
+                -- The committed response absorbed every input submitted with
+                -- it, and its assistant text now lives in the committed state.
                 writeIORef pendingRef []
+                writeIORef uncommittedTextRef ([], [])
                 protect state ResponseCommitted do
                     -- A cancel that landed during submitTurn after the race chose
                     -- Right still counts, but its returned state is committed.
@@ -845,26 +877,31 @@ runToolCalls config calls = do
                     (\scheduled ->
                         IntSet.notMember scheduled.index readyIndexes)
                     remaining
-        batchResults <-
-            mapConcurrently
+        raced <- race
+            (waitCancel config.loopCancel)
+            (mapConcurrently
                 (\scheduled -> do
                     result <-
                         runPreparedToolCall config scheduled.prepared
                     pure (fmap (\value -> (scheduled.index, value)) result))
-                ready
-        let completed' =
-                foldr
-                    (\result acc ->
-                        maybe
-                            acc
-                            (\(index, value) -> IntMap.insert index value acc)
-                            result)
-                    completed
-                    batchResults
-        cancelled <- isCancelled config.loopCancel
-        if cancelled
-            then pure (IntMap.elems completed')
-            else go pending completed'
+                ready)
+        case raced of
+            Left () ->
+                -- 'race' cancels and joins the structured concurrent batch,
+                -- so no tool handler survives the cancelled turn.
+                pure (IntMap.elems completed)
+            Right batchResults -> do
+                let completed' =
+                        foldr
+                            (\result acc ->
+                                maybe
+                                    acc
+                                    (\(index, value) ->
+                                        IntMap.insert index value acc)
+                                    result)
+                            completed
+                            batchResults
+                go pending completed'
 
 data IndexedPreparedToolCall = IndexedPreparedToolCall
     { index :: !Int

@@ -660,3 +660,34 @@ conversationBlocks target state =
             maybe [] (toList . (.uiBlocks)) (conversationUiForTarget target state)
         AgentNative _ ->
             maybe [] (toList . (.uiBlocks)) (conversationUiForTarget target state)
+
+-- | Resolve the transcript block that carries an agent-displayed image.
+-- Nested code-mode calls run under synthetic @code-mode:@ call ids that never
+-- own a block, so they attach to the newest in-flight tool block: the exec
+-- cell that invoked them.
+toolImageBlockId :: Text -> UiState -> Maybe BlockId
+toolImageBlockId callId ui =
+    case blockForCall callId of
+        Just block -> Just block.blockId
+        Nothing ->
+            case Seq.findIndexR ((== Just callId) . (.blockCallId)) ui.uiBlocks of
+                Just index -> (.blockId) <$> Seq.lookup index ui.uiBlocks
+                Nothing -> newestRunningTool
+  where
+    blockForCall wanted = do
+        (blockIndex, _) <- Map.lookup wanted ui.uiToolCalls
+        block <- Seq.lookup blockIndex ui.uiBlocks
+        if block.blockCallId == Just wanted
+            then Just block
+            else Nothing
+    newestRunningTool =
+        case
+            [ block.blockId
+            | (active, _) <- Map.toList ui.uiToolCalls
+            , Just block <- [blockForCall active]
+            , block.blockState == BlockRunning
+            , block.blockKind `elem` [BlockTool, BlockShell]
+            ]
+        of
+            [] -> Nothing
+            candidates -> Just (maximum candidates)

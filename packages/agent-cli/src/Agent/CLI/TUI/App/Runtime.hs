@@ -141,6 +141,10 @@ import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Agent.CLI.Notification
+    ( AttentionRequest(PermissionRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -168,7 +172,7 @@ import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
 import System.Environment (lookupEnv)
 import System.Info (os)
-import System.IO (stdout)
+import System.IO (stderr, stdout)
 import System.Posix.Process (getProcessID)
 import System.Process (callProcess)
 
@@ -571,6 +575,23 @@ commitFullscreenImagePreviews runtime images = do
     -- terminals retain the encoded attachment for a viewport-aware placement.
     enqueueAppEvent runtime (AppCommitImagePreviews prepared)
 
+-- | Attach an agent-displayed image to the tool block that produced it. The
+-- preview is prepared on the calling tool thread: ANSI previews force the
+-- sampled bitmap here so the Brick draw thread never decodes an image.
+showFullscreenToolImage
+    :: FullscreenRuntime
+    -> Text
+    -> ImageAttachment
+    -> IO (Either Text ())
+showFullscreenToolImage runtime callId image =
+    case prepareTuiImagePreview image of
+        Left err -> pure (Left ("cannot decode image: " <> err))
+        Right preview -> do
+            unless runtime.runtimeNativeImagePreviews $
+                void $ pure $! pixelAt preview.previewSample 0 0
+            enqueueAppEvent runtime (AppToolImage callId preview)
+            pure (Right ())
+
 prepareFullscreenImagePreviews
     :: FullscreenRuntime
     -> [ImageAttachment]
@@ -803,6 +824,7 @@ requestFullscreenPermission
 requestFullscreenPermission runtime workspace call = do
     reply <- newEmptyTMVarIO
     let summary = permissionToolCallPromptRelative workspace call
+    notifyAttention stderr PermissionRequested
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 

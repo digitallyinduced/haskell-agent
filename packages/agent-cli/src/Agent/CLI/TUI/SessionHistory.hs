@@ -123,14 +123,21 @@ addRegularTurn items state turn =
         -- block above; later user messages are mid-turn steering and must stay
         -- visible after the live turn is replaced by durable history.
         withItems =
-            foldl' projectItem withUser (dropWhile isUserMessage items)
-        withAssistant =
-            if hasAssistantBlock withItems
-                then withItems
-                else case turn.turnAssistantText of
-                    Nothing -> withItems
-                    Just text ->
-                        reduceUi (UiAssistantHistory text) withItems
+            completeProjectedStreams
+                (foldl' projectItem withUser (dropWhile isUserMessage items))
+        -- A successful turn stores its final assistant text, which its items
+        -- already project. An interrupted turn stores the text of the sample
+        -- that never committed, which its retained items cannot contain; an
+        -- incomplete response repeats its committed text instead, so skip
+        -- text that an existing block already shows.
+        withAssistant = case turn.turnAssistantText of
+            Nothing -> withItems
+            Just text
+                | turn.turnError == Nothing && hasAssistantBlock withItems ->
+                    withItems
+                | hasAssistantBlockText text withItems -> withItems
+                | otherwise ->
+                    reduceUi (UiAssistantHistory text) withItems
         terminalState =
             if turn.turnError == Nothing
                 then BlockComplete
@@ -249,6 +256,30 @@ hasAssistantBlock =
         (\block ->
             block.blockKind == BlockAssistant
                 && not (Text.null (Text.strip block.blockBody)))
+        . toList
+        . (.uiBlocks)
+
+-- | Items are committed history: an assistant message projected through text
+-- deltas is complete whatever state the turn itself ended in, and must not be
+-- marked failed next to the uncommitted text of an interrupted turn.
+completeProjectedStreams :: UiState -> UiState
+completeProjectedStreams state =
+    state
+        { uiBlocks =
+            fmap
+                (\block ->
+                    if block.blockState == BlockStreaming
+                        then block { blockState = BlockComplete }
+                        else block)
+                state.uiBlocks
+        }
+
+hasAssistantBlockText :: Text.Text -> UiState -> Bool
+hasAssistantBlockText text =
+    any
+        (\block ->
+            block.blockKind == BlockAssistant
+                && Text.strip block.blockBody == Text.strip text)
         . toList
         . (.uiBlocks)
 

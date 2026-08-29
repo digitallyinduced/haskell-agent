@@ -125,6 +125,7 @@ import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
                       subagentOptions, subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
+                      subagentAllowedRoots, subagentRootAccessRequest,
                       subagentParams, subagentMcpTools, subagentRegistry,
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
@@ -172,7 +173,9 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
 import Agent.Tools.Types
-    ( AppTool(appToolName), ToolEnv(toolSkillRoots, toolSessionTmp) )
+    ( AppTool(appToolName)
+    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
+    )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ()
 import Control.Concurrent.Async ( waitSTM, withAsync )
@@ -414,6 +417,8 @@ runAgentSession
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentSkillRoots = toolEnv.toolSkillRoots
+                , subagentAllowedRoots = toolEnv.toolAllowedRoots
+                , subagentRootAccessRequest = toolEnv.toolRootAccessRequest
                 , subagentParams = paramsRef
                 , subagentMcpTools = mcpTools
                 , subagentRegistry = registry

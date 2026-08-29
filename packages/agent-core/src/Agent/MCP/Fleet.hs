@@ -815,6 +815,28 @@ callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
                                         replacement.catalogTool
                                         arguments
 
+callCatalogTool
+    :: McpFleet
+    -> Text
+    -> RawJson
+    -> IO (Either Text Text)
+callCatalogTool fleet name toolArguments = do
+    entries <- readTVarIO fleet.mcpFleetCatalog
+    case Map.lookup name entries of
+        Just entry ->
+            callCatalogEntryWithReconnect
+                fleet
+                name
+                entry
+                toolArguments
+        Nothing -> do
+            statuses <- mcpFleetStatuses fleet
+            pure . Left $
+                if any isConnecting statuses
+                    then
+                        "MCP tool is not available yet; one or more servers are still connecting"
+                    else "Unknown MCP tool: " <> name
+
 reconnectCatalogEntry
     :: McpFleet
     -> Text
@@ -893,19 +915,8 @@ mcpCallTool fleet = AppTool
         , "additionalProperties" .= False
         ]
     , appToolHandler = typedTool "mcp_call" callArgumentsDecoder
-        \(name, toolArguments) -> do
-                entries <- readTVarIO fleet.mcpFleetCatalog
-                case Map.lookup name entries of
-                    Just entry ->
-                        callCatalogEntryWithReconnect
-                            fleet name entry toolArguments
-                    Nothing -> do
-                        statuses <- mcpFleetStatuses fleet
-                        pure . Left $
-                            if any isConnecting statuses
-                                then
-                                    "MCP tool is not available yet; one or more servers are still connecting"
-                                else "Unknown MCP tool: " <> name
+        \(name, toolArguments) ->
+            callCatalogTool fleet name toolArguments
     , appToolApproval =
         ClassifyReadOnly (catalogCallIsReadOnly fleet callArgumentsDecoder)
     , appToolExecution = TurnSequential
@@ -933,19 +944,8 @@ grokUseTool fleet = AppTool
         , "additionalProperties" .= False
         ]
     , appToolHandler = typedTool "use_tool" grokCallArgumentsDecoder
-        \(name, toolArguments) -> do
-                entries <- readTVarIO fleet.mcpFleetCatalog
-                case Map.lookup name entries of
-                    Just entry ->
-                        callCatalogEntryWithReconnect
-                            fleet name entry toolArguments
-                    Nothing -> do
-                        statuses <- mcpFleetStatuses fleet
-                        pure . Left $
-                            if any isConnecting statuses
-                                then
-                                    "MCP tool is not available yet; one or more servers are still connecting"
-                                else "Unknown MCP tool: " <> name
+        \(name, toolArguments) ->
+            callCatalogTool fleet name toolArguments
     , appToolApproval =
         ClassifyReadOnly (catalogCallIsReadOnly fleet grokCallArgumentsDecoder)
     , appToolExecution = TurnSequential

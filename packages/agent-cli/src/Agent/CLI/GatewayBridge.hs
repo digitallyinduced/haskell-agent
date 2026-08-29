@@ -9,6 +9,7 @@ module Agent.CLI.GatewayBridge
     , managedGatewayTools
     , newManagedLoopEventPublisher
     , requestManagedApproval
+    , requestManagedRootAccess
     , managedBridgeRequestsDirectory
     , managedBridgeResponsesDirectory
     , managedBridgeActivityPath
@@ -20,7 +21,7 @@ import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.Loop (LoopEvent(..))
-import Agent.OsPath (unsafeToFilePath)
+import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.TextBuffer
     ( TextBuffer
     , appendTextBuffer
@@ -389,6 +390,20 @@ requestManagedApproval request call =
                 Right "deny" -> pure (Just PermissionDeny)
                 _ -> pure Nothing
             _ -> pure Nothing
+
+requestManagedRootAccess :: ManagedTurnRequest -> OsPath -> IO Bool
+requestManagedRootAccess request root =
+    performBridgeRequest
+        request
+        "filesystem-access"
+        "filesystem_access"
+        (object ["path" .= toText root])
+        (30 * 60 * 1_000_000) >>= \case
+            Right raw ->
+                case Hermes.decodeEither Hermes.text (rawJsonBytes raw) of
+                    Right "allow" -> pure True
+                    _ -> pure False
+            Left _ -> pure False
 
 data ManagedActivityAccumulator = ManagedActivityAccumulator
     { accumulatorKind :: !Text

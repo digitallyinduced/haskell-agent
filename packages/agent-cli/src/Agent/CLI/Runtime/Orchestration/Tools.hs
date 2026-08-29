@@ -80,7 +80,7 @@ import Agent.CLI.Plan
 import Agent.CLI.Project ( saveRememberedModel )
 import Agent.CLI.Prompt ( subscriptionSubagentModelGuidance )
 import Agent.CLI.PromptHooks
-    ( fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
+    ( fullscreenAwareImageHooks, fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
 import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch ()
 import Agent.CLI.ProviderAvailability ()
@@ -118,13 +118,14 @@ import Agent.CLI.Session
       SessionMeta(metaId, metaTransportModel, metaProvider,
                   metaConnection, metaModel, metaDialect, metaEffort),
       SessionTurn(turnAssistantText) )
-import Agent.CLI.Session.Attachments ()
+import Agent.CLI.Session.Attachments ( putImagePreview )
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ()
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
-                     startupFinished, startupDatabaseStore) )
+                     startupFinished, startupDatabaseStore,
+                     startupSessionState) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, loadPrompt, reservedSessionId )
 import Agent.CLI.SessionAdmin ()
@@ -134,7 +135,7 @@ import Agent.CLI.SessionLock
       releaseSessionLock,
       sessionLockFilePath,
       sessionLockPath )
-import Agent.CLI.SessionState ()
+import Agent.CLI.SessionState ( SessionState(sessionPreviewId) )
 import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth
@@ -212,6 +213,8 @@ import Agent.Tools.PlanMode
       PlanDecision(PlanCancel) )
 import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
+import Agent.Tools.ShowImage
+    ( ImageDisplayHooks(..), ImageDisplayRequest(..) )
 import Agent.Tools.Types ( setToolSessionTmp )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
@@ -342,6 +345,19 @@ runAgentTools
             | isOneShot options || not isTty = Nothing
             | otherwise =
                 Just (fullscreenAwareSecretHooks uiRuntimeRef baseSecretHooks)
+        -- Outside the retained TUI, agent-displayed images print inline with
+        -- the same graphics path as pasted attachments.
+        baseImageHooks = ImageDisplayHooks \request -> do
+            color <- resolveColor stderrHandle
+            putImagePreview
+                startup.startupSessionState.sessionPreviewId
+                color
+                [request.displayImage]
+            pure (Right ())
+        imageHooks
+            | not isTty = Nothing
+            | otherwise =
+                Just (fullscreenAwareImageHooks uiRuntimeRef baseImageHooks)
         provider = loaded.loadedProvider
         fallbackModel =
             fromMaybe
@@ -687,6 +703,7 @@ runAgentTools
             toolEnv
             (Just planHooks)
             secretHooks
+            imageHooks
             multiCtx
             agentTypesRef
             `onException`

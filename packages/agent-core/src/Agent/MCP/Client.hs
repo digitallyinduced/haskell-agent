@@ -1047,17 +1047,20 @@ collectHeaderParams root = case root of
     _ -> Right []
   where
     walkObject path fields =
-        concat <$> forM (KeyMap.toList fields) \(key, value) ->
-            if Key.toText key == "properties"
-                then case value of
-                    Object properties ->
-                        concat <$> forM (KeyMap.toList properties) \(name, property) ->
-                            walkProperty (path <> [Key.toText name]) property
-                    _ -> Right []
-                else if containsHeaderAnnotation value
-                    then Left ("x-mcp-header under \"" <> Key.toText key
-                        <> "\" is not statically reachable from the schema root")
-                    else Right []
+        concat <$> forM (KeyMap.toList fields) (walkField path)
+
+    walkField path (key, value)
+        | Key.toText key == "properties" = walkProperties path value
+        | containsHeaderAnnotation value =
+            Left ("x-mcp-header under \"" <> Key.toText key
+                <> "\" is not statically reachable from the schema root")
+        | otherwise = Right []
+
+    walkProperties path = \case
+        Object properties ->
+            concat <$> forM (KeyMap.toList properties) \(name, property) ->
+                walkProperty (path <> [Key.toText name]) property
+        _ -> Right []
 
     walkProperty path property = case property of
         Object fields -> do
