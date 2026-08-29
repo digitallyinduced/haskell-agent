@@ -491,10 +491,12 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
   where
     tryPrimary state previousResponseId inputs onEvent = do
         emittedModelOutput <- newIORef False
+        announcedToolCall <- newIORef False
         result <- primary.submitTurn state previousResponseId inputs \event -> do
-            if isModelOutput event
-                then writeIORef emittedModelOutput True
-                else pure ()
+            when (isModelOutput event) $
+                writeIORef emittedModelOutput True
+            when (isToolAnnouncement event) $
+                writeIORef announcedToolCall True
             onEvent event
         case result of
             Left err
@@ -503,13 +505,23 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
                     emitted <- readIORef emittedModelOutput
                     if emitted
                         then pure result
-                        else fallback.submitTurn
-                            state previousResponseId inputs onEvent
+                        else do
+                            -- A tool block the dead socket announced must not
+                            -- linger as running next to the replayed attempt.
+                            announced <- readIORef announcedToolCall
+                            when announced (onEvent ResponseAttemptDiscarded)
+                            fallback.submitTurn
+                                state previousResponseId inputs onEvent
             _ -> pure result
 
     isModelOutput = \case
         TextDelta {} -> True
         ReasoningDelta {} -> True
+        _ -> False
+
+    isToolAnnouncement = \case
+        ToolStarted {} -> True
+        ToolUpdated {} -> True
         _ -> False
 
 -- | Errors that indicate the Codex Responses WebSocket transport is
@@ -663,7 +675,7 @@ openAiBackendWithRetryPolicyAndReasoningVisibility
                                 go emittedRawOutput emittedVisibleOutput nextStatus
                     | emitted -> do
                         visible <- readIORef emittedVisibleOutput
-                        pure $ if visible
+                        pure $ if visible || isConnectionFailure apiError
                             then result
                             else Left (replayUnsafeError "model output" apiError)
                 _ -> pure result
@@ -671,6 +683,14 @@ openAiBackendWithRetryPolicyAndReasoningVisibility
     isVisibleModelOutput = \case
         TextDelta{} -> True
         ReasoningDelta{} -> True
+        _ -> False
+
+    -- A dropped socket commits nothing on either side, so the connection
+    -- recovery wrapper may resubmit the request even when only hidden output
+    -- (a tool-call announcement, raw reasoning) had streamed. Codex likewise
+    -- reconnects and resends the same request instead of failing the turn.
+    isConnectionFailure = \case
+        ConnectionError{} -> True
         _ -> False
 
 transientStreamingResultPolicy :: RetryPolicyM IO

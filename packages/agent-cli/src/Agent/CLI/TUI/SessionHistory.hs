@@ -13,6 +13,7 @@ import Agent.CLI.Session
     , SessionTurnPage(..)
     )
 import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.CLI.TurnState (isTurnAbortedNote)
 import Agent.Json (RawJson, rawJsonBytes)
 import qualified Agent.Json.Decode as Hermes
 import Agent.CLI.TUI.History
@@ -233,8 +234,9 @@ isUserMessage = \case
     _ -> False
 
 isGeneratedUserText :: Text.Text -> Bool
-isGeneratedUserText =
-    Text.isPrefixOf "# Skill instructions: " . Text.stripStart
+isGeneratedUserText text =
+    Text.isPrefixOf "# Skill instructions: " (Text.stripStart text)
+        || isTurnAbortedNote text
 
 appendText :: (Text.Text -> UiEvent) -> Text.Text -> UiState -> UiState
 appendText event text state

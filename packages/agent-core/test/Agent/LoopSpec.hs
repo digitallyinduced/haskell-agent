@@ -936,6 +936,76 @@ spec = describe "runLoop" do
         execution.executionResult
             `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
+    it "exposes tool results awaiting submission after a later transport failure" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Left (ConnectionError "down")
+            ]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionPendingInputs `shouldBe`
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
+
+    it "exposes the initial inputs while nothing has committed" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions [Left (ConnectionError "down")]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionPendingInputs `shouldBe` [UserMessage "hello"]
+
+    it "leaves nothing pending once a response commits without tool calls" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-1" [] (Just "done"))]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionPendingInputs `shouldBe` []
+
+    it "leaves nothing pending after an incomplete response" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right (emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing)
+                { completion = TurnIncomplete
+                    { incompleteReason = "max_output_tokens"
+                    , incompleteReasoningTokens = Nothing
+                    }
+                }
+            ]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe` []
+        case execution.executionResult of
+            Left (LoopIncomplete turn) -> turn.responseId `shouldBe` "resp-1"
+            other -> expectationFailure ("expected LoopIncomplete, got " <> show other)
+
+    it "keeps completed tool results pending after a soft cancel" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "slow" "{}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let cancel = case config0 of
+                LoopConfig{loopCancel = c} -> c
+            config = config0
+                { loopTools = registryFromHandlers
+                    [ noArgsTool "slow" do
+                        requestCancel cancel
+                        pure (Right "partial work")
+                    ]
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "go"]
+        let result = ToolCallResult "c1" "partial work" FunctionCallKind
+        execution.executionResult `shouldBe` Left (LoopCancelled [result])
+        execution.executionPendingInputs `shouldBe` [CompletedTool result]
+
     it "retains committed state when a later callback throws" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions

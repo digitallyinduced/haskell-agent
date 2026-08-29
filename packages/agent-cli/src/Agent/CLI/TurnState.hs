@@ -6,29 +6,57 @@ module Agent.CLI.TurnState
     , ConversationPatch(..)
     , PreparedTurn(..)
     , ConversationOutcome(..)
+    , TurnAbort(..)
     , applyConversationPatch
     , finishConversation
     , inputOnlyTurnItems
+    , interruptedTurnItems
+    , isTurnAbortedNote
     , rebasePreparedTurn
     , restoreStartupContext
+    , turnAbortedNote
     , turnInputsWithContext
     , turnNewItems
     , turnReplacesTranscript
     ) where
 
 import Agent.Loop
-    ( TokenUsage
+    ( LoopError(..)
+    , LoopExecution(..)
+    , LoopProgress(..)
+    , TokenUsage
     , TurnInput(..)
+    , TurnOutput(..)
     , addTokenUsage
     , emptyTokenUsage
     )
 import Agent.CLI.Compaction.Types
     ( AutomaticCompactionBoundary(..)
     )
-import Agent.Responses.LoopBackend (turnInputsToItems)
-import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.LoopBackend
+    ( responseItemToToolCall
+    , toolResultToItem
+    , turnInputsToItems
+    )
+import Agent.Responses.Types
+    ( ComputerCallOutput(..)
+    , CustomToolCall(..)
+    , CustomToolCallOutput(..)
+    , FunctionCall(..)
+    , FunctionCallOutput(..)
+    , ItemStatus(..)
+    , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
+    )
+import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
+import qualified Data.Aeson as Aeson
 import Data.List (isPrefixOf)
+import Data.Maybe (isJust)
+import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 
 data ConversationState = ConversationState
     { conversationPreviousResponseId :: !(Maybe Text)
@@ -68,11 +96,21 @@ data PreparedTurn = PreparedTurn
 
 data ConversationOutcome
     = ConversationRestarted
-    | ConversationCancelled
-    | ConversationFailed
+    -- | The turn stopped before its final response. Carries the items the
+    -- turn keeps after 'preparedBeforeItems'; see 'interruptedTurnItems'.
+    | ConversationCancelled ![ResponseItem]
+    | ConversationFailed ![ResponseItem]
     | ConversationInterrupted
     | ConversationProviderUnavailable
     | ConversationCompleted !Text !TokenUsage !(Maybe Text)
+    deriving (Eq, Show)
+
+-- | Why a turn stopped before its final response. Tool calls the loop never
+-- ran are closed with a synthetic output naming this reason, so the
+-- transcript stays replayable and the model cannot assume they executed.
+data TurnAbort
+    = TurnAbortedByUser
+    | TurnAbortedByFailure !Text
     deriving (Eq, Show)
 
 turnInputsWithContext
@@ -89,6 +127,144 @@ turnInputsWithContext planReminder startup inputs =
 
 inputOnlyTurnItems :: PreparedTurn -> [ResponseItem]
 inputOnlyTurnItems = turnInputsToItems . (.preparedTurnInputs)
+
+-- | Items an interrupted turn keeps after 'preparedBeforeItems'.
+--
+-- Every model step the loop committed is retained exactly as a successful
+-- turn would retain it: assistant text, tool calls, the tool results that
+-- were fed back, and the results still queued for the next step. Only the
+-- sample that never committed is dropped. This mirrors Codex and Grok Build,
+-- which record history per completed step rather than per turn, so a cancel
+-- or failure no longer erases work that was already visible on screen.
+--
+-- Tool calls left without a result are closed with a synthetic output that
+-- states the abort reason, and a user-initiated cancel appends
+-- 'turnAbortedNote' so the next request explains the gap to the model.
+--
+-- While nothing committed — or when the committed state no longer extends
+-- the prepared history, as after a mid-turn automatic compaction — only the
+-- prepared inputs are retained, so a retry resubmits exactly them.
+interruptedTurnItems
+    :: PreparedTurn
+    -> LoopExecution
+    -> TurnAbort
+    -> [ResponseItem]
+interruptedTurnItems prepared execution abort =
+    case execution.executionProgress of
+        ResponseCommitted
+            | prepared.preparedBeforeItems
+                `isPrefixOf` execution.executionState ->
+                let committed =
+                        dropTruncatedCalls
+                            execution.executionResult
+                            (drop
+                                (length prepared.preparedBeforeItems)
+                                execution.executionState)
+                    pendingResults =
+                        [ toolResultToItem result
+                        | CompletedTool result <- execution.executionPendingInputs
+                        ]
+                    retained = committed <> pendingResults
+                    closed =
+                        retained
+                            <> map (abortedToolOutput abort)
+                                (danglingToolCalls retained)
+                in closed <> abortNote abort retained
+        _ -> inputOnlyTurnItems prepared
+
+-- | An incomplete final response can end inside a tool call. Grok Build's
+-- length policy keeps only calls whose arguments are complete; a call cut off
+-- mid-arguments is dropped here because replaying truncated arguments cannot
+-- help the model, and a runaway sample may carry hundreds of kilobytes of
+-- them. Partial assistant text is kept.
+dropTruncatedCalls
+    :: Either LoopError a
+    -> [ResponseItem]
+    -> [ResponseItem]
+dropTruncatedCalls result items = case result of
+    Left (LoopIncomplete turn) ->
+        let incompleteCalls =
+                Set.fromList (map (.callId) turn.toolCalls)
+        in filter (not . isTruncatedCall incompleteCalls) items
+    _ -> items
+  where
+    isTruncatedCall incompleteCalls = \case
+        FunctionCallItem call ->
+            Set.member call.callId incompleteCalls
+                && ( call.status == Just ItemIncomplete
+                    || not (hasCompleteArguments call)
+                   )
+        CustomToolCallItem call ->
+            Set.member call.callId incompleteCalls
+                && call.status == Just ItemIncomplete
+        _ -> False
+    hasCompleteArguments call =
+        isJust call.encryptedFunctionArgs
+            || isJust
+                (Aeson.decodeStrict (Text.encodeUtf8 call.arguments)
+                    :: Maybe Aeson.Value)
+
+-- | Tool calls among the retained items that have no matching output.
+danglingToolCalls :: [ResponseItem] -> [ToolCall]
+danglingToolCalls items =
+    [ call
+    | item <- items
+    , Just call <- [responseItemToToolCall item]
+    , Set.notMember call.callId answered
+    ]
+  where
+    answered = Set.fromList (concatMap outputCallId items)
+    outputCallId = \case
+        FunctionCallOutputItem output -> [output.callId]
+        CustomToolCallOutputItem output -> [output.callId]
+        ComputerCallOutputItem output -> [output.computerOutputCallId]
+        _ -> []
+
+abortedToolOutput :: TurnAbort -> ToolCall -> ResponseItem
+abortedToolOutput abort call =
+    toolResultToItem ToolCallResult
+        { callId = call.callId
+        , output =
+            "Tool `" <> call.name <> "` was not executed: "
+                <> abortReason abort <> "."
+        , callKind = call.callKind
+        }
+
+abortReason :: TurnAbort -> Text
+abortReason = \case
+    TurnAbortedByUser -> "the user cancelled the turn"
+    TurnAbortedByFailure reason -> reason
+
+abortNote :: TurnAbort -> [ResponseItem] -> [ResponseItem]
+abortNote abort retained = case abort of
+    TurnAbortedByUser
+        | any isModelOutputItem retained ->
+            turnInputsToItems [UserMessage turnAbortedNote]
+    _ -> []
+
+-- | Recorded after a user-initiated cancel, adapted from the @<turn_aborted>@
+-- marker Codex adds to its history. It is a user-role transcript item so any
+-- Responses-compatible provider replays it; history projection hides it.
+turnAbortedNote :: Text
+turnAbortedNote =
+    "<turn_aborted>\n\
+    \The user interrupted the previous turn on purpose. Tool calls without a \
+    \result were not executed; tools that did run may have completed only \
+    \part of their work. Do not resume the interrupted work unless the user \
+    \asks for it.\n\
+    \</turn_aborted>"
+
+isTurnAbortedNote :: Text -> Bool
+isTurnAbortedNote = Text.isPrefixOf "<turn_aborted>" . Text.stripStart
+
+isModelOutputItem :: ResponseItem -> Bool
+isModelOutputItem = \case
+    MessageItem message -> message.role == RoleAssistant
+    FunctionCallItem{} -> True
+    CustomToolCallItem{} -> True
+    ComputerCallItem{} -> True
+    ReasoningItemValue{} -> True
+    _ -> False
 
 -- | Once automatic compaction has committed, the enclosing turn no longer
 -- owns the superseded prefix. Rebase both its history and the exact inputs
@@ -119,8 +295,8 @@ finishConversation prepared = \case
                 maybe KeepStartup RestoreStartup
                     prepared.preparedConsumedStartup
             }
-    ConversationCancelled -> retainInputs
-    ConversationFailed -> retainInputs
+    ConversationCancelled retained -> retainItems retained
+    ConversationFailed retained -> retainItems retained
     ConversationInterrupted -> restoreStartup
     ConversationProviderUnavailable ->
         restoreStartup
@@ -138,12 +314,13 @@ finishConversation prepared = \case
         , patchUsageDelta = emptyTokenUsage
         , patchLastAssistant = KeepField
         }
-    retainInputs =
+    -- The response chain is invalidated: the next request replays the
+    -- retained transcript in full.
+    retainItems retained =
         basePatch
             { patchPreviousResponseId = SetField Nothing
             , patchTranscript =
-                SetField
-                    (prepared.preparedBeforeItems <> inputOnlyTurnItems prepared)
+                SetField (prepared.preparedBeforeItems <> retained)
             }
     restoreStartup =
         basePatch

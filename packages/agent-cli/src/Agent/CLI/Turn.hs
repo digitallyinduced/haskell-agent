@@ -1,8 +1,6 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( IncompleteTurnCheckpoint(..)
-    , applyPendingSessionTitles
-    , checkpointIncompleteTurn
+    ( applyPendingSessionTitles
     , grokFirstTurnPrefix
     , grokFrameLastUserInput
     , grokUserQuery
@@ -101,8 +99,9 @@ import Agent.CLI.TurnState
     , FieldUpdate(..)
     , PreparedTurn(..)
     , StartupUpdate(..)
+    , TurnAbort(..)
     , finishConversation
-    , inputOnlyTurnItems
+    , interruptedTurnItems
     , rebasePreparedTurn
     , restoreStartupContext
     , turnInputsWithContext
@@ -116,13 +115,13 @@ import Agent.Loop
     , LoopError(..)
     , LoopProgress(..)
     , LoopResult(..)
+    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
     , runLoopInputsDetailed
     )
 import Agent.Provider (Provider(..))
-import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -405,8 +404,14 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             -- turnInputs already contains any startup context consumed above.
             -- Checkpoint it instead of restoring it separately, which would
             -- duplicate the instructions on the next full-history request.
+            -- Completed model steps stay with it; only the sample that never
+            -- committed is dropped.
+            let retained =
+                    interruptedTurnItems
+                        committedPrepared execution TurnAbortedByUser
             commitConversationPatch
-                (finishConversation committedPrepared ConversationCancelled)
+                (finishConversation committedPrepared
+                    (ConversationCancelled retained))
             model <- readIORef render.renderModelRef
             case fullscreen of
                 Just runtime -> do
@@ -421,10 +426,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         (formatLoopErrorColored color cancelled)
                     putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete
-                (inputOnlyTurnItems committedPrepared)
-                "cancelled"
-                Nothing
+            persistIncomplete retained "cancelled" Nothing
             pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -457,8 +459,15 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     finishTerminal (isNothing fullscreen)
                         stdoutHandle terminal wallStarted finishedAt 1
                         (Just "Agent turn failed")
+                    let retained =
+                            interruptedTurnItems
+                                committedPrepared
+                                execution
+                                (TurnAbortedByFailure
+                                    (loopErrorAbortReason err))
                     commitConversationPatch
-                        (finishConversation committedPrepared ConversationFailed)
+                        (finishConversation committedPrepared
+                            (ConversationFailed retained))
                     model <- readIORef render.renderModelRef
                     case fullscreen of
                         Just runtime ->
@@ -483,10 +492,11 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         atomicModifyIORef' usageRef \current ->
                             (addTokenUsage current turn.tokenUsage, ())
                     -- Keep the live and resumed model transcript aligned:
-                    -- terminal failures checkpoint only the prepared input.
-                    -- Partial assistant text, response id, usage, and the
-                    -- incomplete reason remain available in turn metadata.
-                    persistIncomplete (inputOnlyTurnItems committedPrepared)
+                    -- the same retained items become the durable turn, so
+                    -- the fullscreen history shows what the live turn showed.
+                    -- Response id, usage, and the incomplete reason remain
+                    -- available in turn metadata.
+                    persistIncomplete retained
                         (formatLoopErrorPersistedAt finishedAt err)
                         maybeIncompleteTurn
                     planState <- readIORef planMode.planStateRef
@@ -749,24 +759,20 @@ isPendingPersistence = \case
     PersistencePending _ _ _ -> True
     PersistenceActive _ -> False
 
--- | Pure input-only checkpoint used to persist incomplete turns.
-data IncompleteTurnCheckpoint = IncompleteTurnCheckpoint
-    { checkpointTranscript :: ![ResponseItem]
-    , checkpointTurnItems :: ![ResponseItem]
-    , checkpointPreviousResponseId :: !(Maybe Text)
-    } deriving (Eq, Show)
-
-checkpointIncompleteTurn
-    :: [ResponseItem]
-    -> [TurnInput]
-    -> IncompleteTurnCheckpoint
-checkpointIncompleteTurn beforeItems turnInputs =
-    let retainedItems = turnInputsToItems turnInputs
-    in IncompleteTurnCheckpoint
-        { checkpointTranscript = beforeItems <> retainedItems
-        , checkpointTurnItems = retainedItems
-        , checkpointPreviousResponseId = Nothing
-        }
+-- | Short reason recorded on the synthetic outputs of tool calls a failed
+-- turn never executed.
+loopErrorAbortReason :: LoopError -> Text
+loopErrorAbortReason = \case
+    LoopIncomplete turn -> case turn.completion of
+        TurnIncomplete reason _ ->
+            "the response was cut off (" <> reason <> ")"
+        TurnCompleted -> "the response was cut off"
+    LoopMaxTurns _ -> "the turn reached its maximum number of model steps"
+    LoopTransport _ -> "the provider request failed"
+    LoopTransportAfterOutput _ -> "the provider connection was interrupted"
+    LoopNoResponseId -> "the provider returned no response id"
+    LoopUnexpected _ -> "the agent hit an unexpected error"
+    LoopCancelled _ -> "the turn was cancelled"
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =

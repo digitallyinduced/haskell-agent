@@ -519,7 +519,7 @@ spec = do
         readIORef invalidations `shouldReturn`
             ["WebSocket response incomplete"]
 
-    it "recovers assembled tool calls when the socket dies after output_item.done" do
+    it "reports the transport failure when the socket dies after output_item.done" do
         remaining <- newIORef
             [ Right $ lifecycleFrame "response.created"
                 (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
@@ -548,13 +548,15 @@ spec = do
         result <- receiveWsResponseWithActions
             (Just "gpt-test") actions (const (pure ()))
 
+        -- Nothing committed: the connection-recovery wrappers resubmit the
+        -- request instead of treating the partial assembly as a response.
         case result of
-            Right response -> do
-                response.responseId `shouldBe` "resp-test"
-                [name | FunctionCallItem FunctionCall { name } <- response.output]
-                    `shouldBe` ["shell_command"]
-            other -> expectationFailure ("expected recovered response, got " <> show other)
-        readIORef completeCount `shouldReturn` 1
+            Left err ->
+                err `shouldBe` ConnectionError "WebSocket receive idle timeout"
+            Right response ->
+                expectationFailure
+                    ("expected a transport failure, got " <> show response)
+        readIORef completeCount `shouldReturn` 0
         readIORef invalidations `shouldReturn` []
 
 testPartialTerminalResponse

@@ -219,6 +219,13 @@ data LoopProgress
 
 data LoopExecution = LoopExecution
     { executionState :: ![ResponseItem]
+    -- | Inputs the loop accepted after the last committed response but never
+    -- submitted successfully: the tool results (and any steering) queued for
+    -- the next model step, or the initial inputs while nothing has committed.
+    -- Callers that checkpoint an interrupted turn retain the tool results here
+    -- next to 'executionState'. Steering stays unacknowledged until a later
+    -- commit and must not be duplicated from this field.
+    , executionPendingInputs :: ![TurnInput]
     , executionProgress :: !LoopProgress
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
@@ -394,14 +401,17 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
     initialSteering <- config0.loopReadSteering
+    pendingRef <- newIORef (firstInputs <> initialSteering)
     withAsync (runLoopEventPump eventPump) \eventWorker -> do
         let config = config0
                 { loopOnEvent = emitLoopEvent eventPump
                 }
             finish state progress result = do
                 writeIORef progressRef (state, progress)
+                pending <- readIORef pendingRef
                 pure LoopExecution
                     { executionState = state
+                    , executionPendingInputs = pending
                     , executionProgress = progress
                     , executionResult = result
                     }
@@ -413,6 +423,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             go state progress prev turnsUsed inputs steeringCount lastOutput
                     usageAcc emptyContinuations = do
                 writeIORef progressRef (state, progress)
+                writeIORef pendingRef inputs
                 if turnsUsed >= config.loopMaxTurns
                     then finish state progress $ case lastOutput of
                         Just turn -> Left (LoopMaxTurns turn)
@@ -467,6 +478,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             continueCommitted state turn turnsUsed steeringCount usageAcc
                     emptyContinuations = do
                 writeIORef progressRef (state, ResponseCommitted)
+                -- The committed response absorbed every input submitted with it.
+                writeIORef pendingRef []
                 protect state ResponseCommitted do
                     -- A cancel that landed during submitTurn after the race chose
                     -- Right still counts, but its returned state is committed.
@@ -488,6 +501,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         if null turn.toolCalls
                                             then pure []
                                             else runToolCalls config turn.toolCalls
+                                    writeIORef pendingRef (map CompletedTool results)
                                     cancelledAfter <-
                                         isCancelled config.loopCancel
                                     if cancelledAfter

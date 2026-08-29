@@ -47,7 +47,6 @@ import Agent.Responses.StreamAssembly
     , applyStreamEvent
     , emptyStreamAssemblyState
     , failedStreamResponseMessage
-    , finishAssembledIncomplete
     , finishStreamResponse
     , responseFailureFromState
     )
@@ -646,15 +645,14 @@ receiveWsResponseWithActions modelHint actions onEvent =
     loop decodeEvent assembly frames bytes = do
         msgResult <- actions.receiveFrame
         case msgResult of
-            Left e ->
-                case recoverAssembledResponse modelHint assembly of
-                    Just response -> do
-                        logStreamStats "recovered_incomplete" frames bytes
-                        actions.completeRequest
-                        pure (Right response)
-                    Nothing -> do
-                        logStreamStats "connection_error" frames bytes
-                        pure (Left e)
+            -- A socket that dies before the terminal event commits nothing on
+            -- either side. Report the transport failure so the connection
+            -- recovery wrappers resubmit the request, as Codex does, instead
+            -- of passing the partial assembly off as an "incomplete" response
+            -- that carries neither a provider reason nor usage.
+            Left e -> do
+                logStreamStats "connection_error" frames bytes
+                pure (Left e)
             Right (msgBytes :: LBS.ByteString) -> do
                 let frames' = frames + 1
                     bytes' = bytes + LBS.length msgBytes
@@ -726,14 +724,6 @@ receiveWsResponseWithActions modelHint actions onEvent =
                 logStreamStats "incomplete" frames bytes
                 actions.invalidateRequest "WebSocket response incomplete"
                 pure (Left err)
-
-    recoverAssembledResponse modelHint assembly =
-        case finishAssembledIncomplete modelHint assembly of
-            Right response ->
-                case rejectFailedCodexResponse response of
-                    Right accepted -> Just accepted
-                    Left _ -> Nothing
-            Left _ -> Nothing
 
     logStreamStats :: Text -> Int -> Int64 -> IO ()
     logStreamStats _label _frames _bytes = pure ()
