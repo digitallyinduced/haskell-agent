@@ -4,6 +4,7 @@ module Agent.CLI.Prompt
     , codexEnvironmentContext
     , mcpInstructionsGuidance
     , secretInputGuidance
+    , imageDisplayGuidance
     , subscriptionSubagentModelGuidance
     , sessionTempGuidance
     , systemPrompt
@@ -96,6 +97,7 @@ systemPromptForTools
             [ base
             , sessionTempGuidance sessionTmp
             , secretInputGuidance available
+            , imageDisplayGuidance available
             , learnedSkillGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
@@ -141,6 +143,7 @@ systemPromptForCatalogModel dialect info toolNames sessionTmp =
                 (renderModelInstructions ModelPersonalityDefault info)
             , sessionTempGuidance sessionTmp
             , secretInputGuidance available
+            , imageDisplayGuidance available
             , learnedSkillGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
@@ -204,6 +207,18 @@ secretInputGuidance available
             , "- Use ask_secret to request sensitive values. It returns a private temporary file path, never the secret value."
             , "- Pass that path to a consumer that supports file input and delete the file promptly after use."
             , "- Never read, print, summarize, or otherwise expose the secret file contents."
+            ]
+
+-- | Point the model at inline image display when the host can present one.
+imageDisplayGuidance :: Set Text -> Text
+imageDisplayGuidance available
+    | "show_image" `Set.notMember` available = ""
+    | otherwise =
+        Text.unlines
+            [ "Image display:"
+            , "- Use show_image to present an image file (PNG, JPEG, GIF, BMP, TIFF) inline to the user, for example screenshots, rendered previews, charts, or icons."
+            , "- Convert other formats such as SVG or PDF to PNG first."
+            , "- The user sees the image; it is not added to your own context."
             ]
 
 -- | Natural-language guidance advertised by MCP servers, appended verbatim

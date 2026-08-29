@@ -163,6 +163,29 @@ spec = describe "systemPrompt" do
             "Never read, print, summarize"
         withoutSecret `shouldNotSatisfy` Text.isInfixOf "Use ask_secret"
 
+    it "adds image display guidance only when show_image is registered" do
+        let withImages =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file", "show_image"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+            withoutImages =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        withImages `shouldSatisfy` Text.isInfixOf
+            "Use show_image to present an image file"
+        withImages `shouldSatisfy` Text.isInfixOf
+            "not added to your own context"
+        withoutImages `shouldNotSatisfy` Text.isInfixOf "show_image"
+
     it "adds reusable-memory guidance only when learned-skill tools are registered" do
         let withSkills =
                 systemPromptForTools

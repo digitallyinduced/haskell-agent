@@ -533,7 +533,7 @@ renderCodeModeResult budget wallTime = \case
         , Just (String text) <- KeyMap.lookup "text" content =
             text
         | Just (String "image") <- KeyMap.lookup "type" content =
-            "[image output item]"
+            "[image output item; call tools.show_image to display an image to the user]"
         | Just (String "audio") <- KeyMap.lookup "type" content =
             "[audio output item]"
         | otherwise = renderValue value

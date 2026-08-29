@@ -141,6 +141,9 @@ data AppEvent
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppCommitImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppToolImage !Text !TuiImagePreview
+      -- ^ An image the agent displayed through @show_image@, keyed by the
+      -- originating tool call id.
     | AppDictationPartial !Text
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
@@ -303,6 +306,10 @@ data AppState = AppState
     , appDictation :: !(Maybe DictationSession)
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
+      -- | Previews attached to conversation blocks: images the user
+      -- submitted with a prompt and images the agent displayed from a tool
+      -- call. Native placements are synchronized from this map after each
+      -- reflow.
     , appSubmittedImagePreviews :: !(Map.Map BlockId [TuiImagePreview])
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]

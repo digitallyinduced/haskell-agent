@@ -1,6 +1,8 @@
--- | Adapt plan-mode and secret prompts to the currently active fullscreen UI.
+-- | Adapt plan-mode, secret, and image-display hooks to the currently active
+-- fullscreen UI.
 module Agent.CLI.PromptHooks
-    ( fullscreenAwarePlanHooks
+    ( fullscreenAwareImageHooks
+    , fullscreenAwarePlanHooks
     , fullscreenAwareSecretHooks
     ) where
 
@@ -10,6 +12,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenSecret
     , requestFullscreenText
+    , showFullscreenToolImage
     )
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -18,6 +21,10 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Secret
     ( SecretPrompt(..)
     , SecretPromptHooks(..)
+    )
+import Agent.Tools.ShowImage
+    ( ImageDisplayHooks(..)
+    , ImageDisplayRequest(..)
     )
 import Data.IORef (IORef, readIORef)
 import Data.Maybe (fromMaybe)
@@ -101,6 +108,22 @@ fullscreenAwareSecretHooks runtimeRef hooks =
                     runtime
                     "Secret requested by agent"
                     (secretRequestBody request)
+
+-- | Attach agent-displayed images to the fullscreen transcript while it is
+-- active; otherwise fall back to the plain-terminal presentation.
+fullscreenAwareImageHooks
+    :: IORef (Maybe FullscreenRuntime)
+    -> ImageDisplayHooks
+    -> ImageDisplayHooks
+fullscreenAwareImageHooks runtimeRef hooks =
+    ImageDisplayHooks \request ->
+        withCurrentFullscreen runtimeRef
+            (hooks.showImage request)
+            \runtime ->
+                showFullscreenToolImage
+                    runtime
+                    request.displayCallId
+                    request.displayImage
 
 secretRequestBody :: SecretPrompt -> Text
 secretRequestBody request =
