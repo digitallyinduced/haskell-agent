@@ -44,6 +44,10 @@ advanceUiTime rawElapsedMillis state =
             if state.uiGenerating
                 then state.uiGenerationMillis + elapsedMillis
                 else state.uiGenerationMillis
+        , uiResponseMillis =
+            if state.uiRunning
+                then state.uiResponseMillis + elapsedMillis
+                else state.uiResponseMillis
         , uiActivity =
             if state.uiCompletionRemainingMillis > 0
                 && completionRemainingMillis == 0

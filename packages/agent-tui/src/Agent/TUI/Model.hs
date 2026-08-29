@@ -265,6 +265,7 @@ reduceUi event state = case event of
             , uiGenerationChars = 0
             , uiGenerationMillis = 0
             , uiGenerationLastDeltaMillis = 0
+            , uiResponseMillis = 0
             , uiLastTokensPerSecond = Nothing
             }
     UiSetFollow follow ->
@@ -311,13 +312,15 @@ reduceUi event state = case event of
 
 resetGeneration :: UiState -> UiState
 resetGeneration state =
-    -- Throughput measures decoding, so the clock starts with the first delta
-    -- rather than including request latency and prompt ingestion.
+    -- The live character estimate starts with the first visible delta. The
+    -- provider response clock starts here because provider output-token usage
+    -- can also include hidden reasoning generated before that first delta.
     state
         { uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0
         , uiGenerationLastDeltaMillis = 0
+        , uiResponseMillis = 0
         }
 
 appendGenerationChars :: Text -> UiState -> UiState
@@ -331,14 +334,16 @@ appendGenerationChars delta state =
 
 snapshotGenerationRate :: TokenUsage -> UiState -> UiState
 snapshotGenerationRate usage state =
-    let generationMillis = state.uiGenerationLastDeltaMillis
+    let
+        generationMillis = state.uiGenerationLastDeltaMillis
+        responseMillis = state.uiResponseMillis
     in state
         { uiGenerating = False
         , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
             generationTokensPerSecond
                 usage.outputTokens
-                generationMillis
+                responseMillis
         }
 
 reduceLoop :: LoopEvent -> UiState -> UiState

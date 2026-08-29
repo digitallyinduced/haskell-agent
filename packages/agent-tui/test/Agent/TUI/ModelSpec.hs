@@ -745,7 +745,7 @@ spec = describe "fullscreen UI reducer" do
                         ]
             lastDelta =
                 reduceUi (UiLoop (TextDelta "qrst")) streaming
-            awaitingCompletion = advanceUiTime 1000 lastDelta
+            awaitingCompletion = advanceUiTime 1600 lastDelta
             reported usage tools =
                 (emptyTurnOutput "r1" tools (Just "abcdefghijklmnop"))
                     { tokenUsage = usage }
@@ -767,17 +767,19 @@ spec = describe "fullscreen UI reducer" do
             afterNext = reduceUi (UiLoop TurnStarted) finished
         uiTokensPerSecond streaming `shouldBe` Just 10
         uiTokensPerSecondEstimated streaming `shouldBe` True
-        uiTokensPerSecond finished `shouldBe` Just 200
+        uiTokensPerSecond finished `shouldBe` Just 40
         uiTokensPerSecondEstimated finished `shouldBe` False
         finished.uiGenerating `shouldBe` False
         finished.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
-        uiTokensPerSecond duringTools `shouldBe` Just 200
+        finished.uiResponseMillis `shouldBe` 2000
+        uiTokensPerSecond duringTools `shouldBe` Just 40
         duringTools.uiGenerating `shouldBe` False
         duringTools.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
         (advanceUiTime 5000 duringTools).uiGenerationMillis
             `shouldBe` liveTokenRateMinMillis
-        uiTokensPerSecond afterNext `shouldBe` Just 200
+        uiTokensPerSecond afterNext `shouldBe` Just 40
         afterNext.uiGenerationMillis `shouldBe` 0
+        afterNext.uiResponseMillis `shouldBe` 0
 
     it "drops the live estimate when completed token metadata is missing" do
         let streaming =
@@ -800,7 +802,7 @@ spec = describe "fullscreen UI reducer" do
         uiTokensPerSecond finished `shouldBe` Nothing
         uiTokensPerSecondEstimated finished `shouldBe` False
 
-    it "excludes time to first token from generation speed" do
+    it "excludes time to first token only from the live estimate" do
         let waiting =
                 advanceUiTime 5000 $
                     reduceUi (UiLoop TurnStarted) initialUiState
@@ -809,11 +811,24 @@ spec = describe "fullscreen UI reducer" do
                     reduceUi
                         (UiLoop (TextDelta "abcdefghijklmnop"))
                         waiting
+            turn =
+                (emptyTurnOutput "r1" [] (Just "abcdefghijklmnop"))
+                    { tokenUsage =
+                        TokenUsage
+                            { inputTokens = 20
+                            , outputTokens = 108
+                            , cachedTokens = 0
+                            }
+                    }
+            finished = reduceUi (UiLoop (TurnFinished turn)) streaming
         waiting.uiGenerating `shouldBe` False
         waiting.uiGenerationMillis `shouldBe` 0
         uiTokensPerSecond waiting `shouldBe` Nothing
         streaming.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
         uiTokensPerSecond streaming `shouldBe` Just 10
+        streaming.uiResponseMillis `shouldBe` 5400
+        uiTokensPerSecond finished `shouldBe` Just 20
+        uiTokensPerSecondEstimated finished `shouldBe` False
 
     it "keeps turn elapsed time but resets generation timing when a response restarts" do
         let streaming =
@@ -829,10 +844,12 @@ spec = describe "fullscreen UI reducer" do
         restarted.uiElapsedMillis `shouldBe` 800
         restarted.uiGenerationMillis `shouldBe` 0
         restarted.uiGenerationChars `shouldBe` 0
+        restarted.uiResponseMillis `shouldBe` 0
         restarted.uiGenerating `shouldBe` False
         restarted.uiActivity `shouldBe` "Retrying response…"
         waiting.uiElapsedMillis `shouldBe` 2000
         waiting.uiGenerationMillis `shouldBe` 0
+        waiting.uiResponseMillis `shouldBe` 1200
 
     it "drops last tok/s when the conversation is cleared" do
         let streaming =
