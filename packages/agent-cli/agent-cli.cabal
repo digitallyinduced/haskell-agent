@@ -141,6 +141,7 @@ library
                     , Agent.CLI.AccountSelection
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
+                    , Agent.CLI.AgentViewport.Runtime
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
@@ -395,6 +396,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
+                    , Agent.CLI.AgentViewportRuntimeSpec
                     , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec
