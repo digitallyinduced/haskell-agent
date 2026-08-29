@@ -16,7 +16,10 @@ import Agent.ToolDispatch
     , ToolInput(..)
     , ToolResult
     )
-import Agent.Tools.FileSystem (resolveForRead)
+import Agent.Tools.FileSystem
+    ( resolveForRead
+    , resolveForReadWithoutAccessRequest
+    )
 import Agent.Tools.FileSystem.PathPrefix
     ( PathProgress(..)
     , jsonStringFieldProgress
@@ -570,26 +573,27 @@ prefetchRead :: ToolEnv -> ReadFileArgs -> IO (Maybe PrefetchedRead)
 prefetchRead environment arguments
     | ".pdf" `Text.isSuffixOf` Text.toLower arguments.targetFile =
         pure Nothing
-    | otherwise = resolveForRead environment (fromText target) >>= \case
-        Left _ -> pure Nothing
-        Right path -> do
-            before <- fileFingerprint path
-            case before of
-                Just fingerprint
-                    | fingerprint.fingerprintSize <= maxSpeculativeReadBytes ->
-                        readFileWindowForArgs path arguments >>= \case
-                            Left _ -> pure Nothing
-                            Right window -> do
-                                forceText window.fileWindowText
-                                after <- fileFingerprint path
-                                pure do
-                                    guard (after == Just fingerprint)
-                                    pure PrefetchedRead
-                                        { prefetchedResolvedPath = path
-                                        , prefetchedFingerprint = fingerprint
-                                        , prefetchedWindow = window
-                                        }
-                _ -> pure Nothing
+    | otherwise =
+        resolveForReadWithoutAccessRequest environment (fromText target) >>= \case
+            Left _ -> pure Nothing
+            Right path -> do
+                before <- fileFingerprint path
+                case before of
+                    Just fingerprint
+                        | fingerprint.fingerprintSize <= maxSpeculativeReadBytes ->
+                            readFileWindowForArgs path arguments >>= \case
+                                Left _ -> pure Nothing
+                                Right window -> do
+                                    forceText window.fileWindowText
+                                    after <- fileFingerprint path
+                                    pure do
+                                        guard (after == Just fingerprint)
+                                        pure PrefetchedRead
+                                            { prefetchedResolvedPath = path
+                                            , prefetchedFingerprint = fingerprint
+                                            , prefetchedWindow = window
+                                            }
+                    _ -> pure Nothing
   where
     target = arguments.targetFile
 

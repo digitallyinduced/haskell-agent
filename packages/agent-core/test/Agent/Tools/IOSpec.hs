@@ -14,6 +14,7 @@ import Agent.Tools.IO
     , commandResultOutput
     , formatCommandResult
     , readTextFile
+    , resolveForReadWithoutAccessRequest
     , resolveUnderCwd
     , runShellCommand
     , runShellCommandStreaming
@@ -244,11 +245,26 @@ spec = describe "Agent.Tools.IO" do
             resolveUnderCwd env (fromFilePath target)
                 `shouldReturn` Right (fromFilePath target)
             readIORef requests `shouldReturn` [fromFilePath outside]
-            roots <- readIORef env.toolAllowedRoots
-            roots `shouldSatisfy` any (equalFilePath (fromFilePath outside))
+
+    it "does not request access while resolving a speculative escaped path" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                outside = dir </> "outside"
+                target = outside </> "file.txt"
+            createDirectory workspace
+            createDirectory outside
+            writeFile target "speculative"
+            env <- defaultToolEnv (fromFilePath workspace)
+            requests <- newIORef (0 :: Int)
+            setToolRootAccessRequest env $ Just \_ -> do
+                modifyIORef' requests (+ 1)
+                pure True
+            result <- resolveForReadWithoutAccessRequest env (fromFilePath target)
+            result `shouldSatisfy` isLeft
+            readIORef requests `shouldReturn` 0
             resolveUnderCwd env (fromFilePath target)
                 `shouldReturn` Right (fromFilePath target)
-            readIORef requests `shouldReturn` [fromFilePath outside]
+            readIORef requests `shouldReturn` 1
 
     it "keeps rejecting an escaped root when access is denied" do
         withTempDir \dir -> do

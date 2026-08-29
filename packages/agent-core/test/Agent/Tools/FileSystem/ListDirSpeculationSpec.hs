@@ -21,11 +21,15 @@ import Agent.Tools.Speculation
     , takeToolSpeculation
     , waitForToolSpeculation
     )
-import Agent.Tools.Types (defaultToolEnv)
+import Agent.Tools.Types
+    ( defaultToolEnv
+    , setToolRootAccessRequest
+    )
 import Control.Exception.Safe (bracket, finally)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.Directory
     ( createDirectoryIfMissing
     , getTemporaryDirectory
@@ -101,6 +105,47 @@ spec = describe "list_dir speculation" do
             result <- takeList runtime callId arguments
             result `shouldSatisfy` \case
                 Just (Right output) -> "new.txt" `Text.isInfixOf` output
+                _ -> False
+
+    it "does not request external-root access during speculation" do
+        withTempDir \workspace ->
+            withTempDir \external -> do
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                requests <- newIORef 0
+                setToolRootAccessRequest env $ Just \_ -> do
+                    modifyIORef' requests (+ 1)
+                    pure False
+                cache <- newListDirSpeculation env
+                let tool = listDirToolWithSpeculation env (Just cache)
+                bracket
+                    (newToolSpeculationRuntime [tool])
+                    closeToolSpeculationRuntime
+                    \runtime -> do
+                        createDirectoryIfMissing True (external </> "nested")
+                        let callId = "call-external"
+                            arguments =
+                                listArguments (Text.pack external)
+                        streamList runtime callId arguments
+                        waitForToolSpeculation runtime
+                        waitForListDirSpeculation cache
+                        readIORef requests `shouldReturn` 0
+                        closeListDirSpeculation cache
+
+    it "falls back when a nested directory changes after prefetch" do
+        withListSpeculation \dir cache runtime -> do
+            createDirectoryIfMissing True (dir </> "root" </> "nested")
+            Text.writeFile (dir </> "root" </> "nested" </> "old.txt") "old"
+            let callId = "call-nested-stale"
+                arguments = listArguments "root"
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation cache
+            Text.writeFile (dir </> "root" </> "nested" </> "new.txt") "new"
+            retainList runtime callId arguments
+            result <- takeList runtime callId arguments
+            result `shouldSatisfy` \case
+                Just (Right output) ->
+                    "new.txt" `Text.isInfixOf` output
                 _ -> False
 
 withListSpeculation

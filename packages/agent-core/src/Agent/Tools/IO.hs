@@ -8,7 +8,9 @@ module Agent.Tools.IO
     , formatCommandResult
     , displayPathInWorkspace
     , resolveForRead
+    , resolveForReadWithoutAccessRequest
     , resolveUnderCwd
+    , resolveUnderCwdWithoutAccessRequest
     , readTextFile
     , writeTextFile
     , deleteTextFile
@@ -38,7 +40,9 @@ import Agent.Tools.FileSystem
     , readTextFile
     , renameTextFile
     , resolveForRead
+    , resolveForReadWithoutAccessRequest
     , resolveUnderCwd
+    , resolveUnderCwdWithoutAccessRequest
     , writeTextFile
     )
 import Agent.Tools.OutputArtifact

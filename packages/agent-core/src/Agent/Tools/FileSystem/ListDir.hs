@@ -31,6 +31,7 @@ import Agent.Tools.FileSystem.PathPrefix
     , PathProgress(..)
     , cancelAndJoin
     , directoryFingerprint
+    , fileFingerprint
     , fingerprintsMatch
     , jsonStringFieldProgress
     , maximumConcurrentSpeculativeTasks
@@ -42,6 +43,7 @@ import Agent.Tools.IO
     ( displayPathInWorkspace
     , listDirectoryEntries
     , resolveForRead
+    , resolveForReadWithoutAccessRequest
     )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
@@ -79,7 +81,12 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesDirectoryExist, pathIsSymbolicLink)
-import System.OsPath (OsPath, equalFilePath, takeExtension, (</>))
+import System.OsPath
+    ( OsPath
+    , equalFilePath
+    , takeExtension
+    , (</>)
+    )
 
 newtype ListDirArgs = ListDirArgs { targetDirectory :: Text }
 
@@ -174,6 +181,80 @@ collectDir cwd path = do
                     , not ("." `Text.isPrefixOf` toText name)
                     ]
             Right <$> (fmap concat $ mapM (toNode cwd path) visible)
+
+-- | Collect a listing and fingerprints for every directory visited. A root
+-- fingerprint alone is insufficient for recursive listings: changing an
+-- entry in a nested directory does not necessarily change the root's
+-- metadata. The snapshot is built during traversal so the output and all
+-- validation fingerprints describe the same observation.
+collectDirSnapshot
+    :: OsPath
+    -> OsPath
+    -> IO (Either Text ([DirNode], Map.Map OsPath FileFingerprint))
+collectDirSnapshot cwd path = do
+    before <- directoryFingerprint path
+    case before of
+        Nothing -> pure (Left "directory disappeared during speculation")
+        Just fingerprint -> do
+            listed <- listDirectoryEntries path
+            case listed of
+                Left err -> pure (Left err)
+                Right raw -> do
+                    let visible = sortOn fst
+                            [ (name, isDir)
+                            | (name, isDir) <- raw
+                            , not ("." `Text.isPrefixOf` toText name)
+                            ]
+                    children <- mapM (toNodeSnapshot cwd path) visible
+                    after <- directoryFingerprint path
+                    case sequence children of
+                        Left err -> pure (Left err)
+                        Right collected
+                            | fingerprintsMatch after (Just fingerprint) ->
+                                do
+                                    ignoreFingerprint <-
+                                        fileFingerprint
+                                            (path </> fromText ".gitignore")
+                                    let childrenFingerprints =
+                                            Map.unions (map snd collected)
+                                        ownFingerprints =
+                                            Map.insert path fingerprint
+                                                childrenFingerprints
+                                        allFingerprints =
+                                            maybe ownFingerprints
+                                                (\ignore ->
+                                                    Map.insert
+                                                        (path </> fromText ".gitignore")
+                                                        ignore
+                                                        ownFingerprints)
+                                                ignoreFingerprint
+                                    pure $ Right
+                                        (concatMap fst collected, allFingerprints)
+                            | otherwise ->
+                                pure (Left "directory changed during speculation")
+
+toNodeSnapshot
+    :: OsPath
+    -> OsPath
+    -> (OsPath, Bool)
+    -> IO (Either Text ([DirNode], Map.Map OsPath FileFingerprint))
+toNodeSnapshot cwd parent (name, isDir) = do
+    let full = parent </> name
+    ignored <- isGitIgnored cwd full
+    if ignored
+        then pure (Right ([], Map.empty))
+        else if not isDir
+            then pure (Right ([FileNode name], Map.empty))
+            else do
+                isLink <- pathIsSymbolicLink full
+                if isLink
+                    then pure (Right ([FileNode name], Map.empty))
+                    else do
+                        collectDirSnapshot cwd full >>= \case
+                            Left err -> pure (Left err)
+                            Right (children, fingerprints) ->
+                                pure $ Right
+                                    ([summarizeDir name children], fingerprints)
 
 toNode :: OsPath -> OsPath -> (OsPath, Bool) -> IO [DirNode]
 toNode cwd parent (name, isDir) = do
@@ -312,7 +393,7 @@ data ListDirState = ListDirState
 
 data PrefetchedListing = PrefetchedListing
     { listingPath :: !OsPath
-    , listingFingerprint :: !FileFingerprint
+    , listingFingerprints :: !(Map.Map OsPath FileFingerprint)
     , listingOutput :: !ToolResult
     }
 
@@ -533,25 +614,37 @@ startListCandidate speculation target = mask \_ -> do
 
 prefetchListing :: ToolEnv -> Text -> IO (Maybe PrefetchedListing)
 prefetchListing env target =
-    resolveForRead env (fromText target) >>= \case
+    resolveForReadWithoutAccessRequest env (fromText target) >>= \case
         Left _ -> pure Nothing
         Right path -> do
-            before <- directoryFingerprint path
-            case before of
-                Nothing -> pure Nothing
-                Just fingerprint ->
-                    listDirResolved env path target >>= \case
-                        Left _ -> pure Nothing
-                        Right output -> do
-                            void (evaluate (Text.length output))
-                            after <- directoryFingerprint path
-                            if fingerprintsMatch after (Just fingerprint)
-                                then pure $ Just PrefetchedListing
-                                    { listingPath = path
-                                    , listingFingerprint = fingerprint
-                                    , listingOutput = Right output
-                                    }
-                                else pure Nothing
+            collectDirSnapshot env.toolCwd path >>= \case
+                Left _ -> pure Nothing
+                Right (entries, fingerprints) -> do
+                    cwdIgnore <- fileFingerprint
+                        (env.toolCwd </> fromText ".gitignore")
+                    let fingerprints' = maybe fingerprints
+                            (\ignore ->
+                                Map.insert
+                                    (env.toolCwd </> fromText ".gitignore")
+                                    ignore
+                                    fingerprints)
+                            cwdIgnore
+                    display <- displayPathInWorkspace env path
+                    let (shown, truncated) = capNodes maxListItems entries
+                        tree = renderTree 0 shown
+                        notice
+                            | truncated =
+                                "\nLarge directory summarized; some nested entries were omitted."
+                            | otherwise = ""
+                        output =
+                            "Directory listing for " <> display <> ":\n"
+                                <> tree <> notice
+                    void (evaluate (Text.length output))
+                    pure $ Just PrefetchedListing
+                        { listingPath = path
+                        , listingFingerprints = fingerprints'
+                        , listingOutput = Right output
+                        }
 
 cancelListCandidate :: ListDirSpeculation -> ListCandidate -> IO ()
 cancelListCandidate speculation candidate = do
@@ -586,13 +679,26 @@ consumeListDir speculation args partial =
                                 | not (equalFilePath finalPath prefetched.listingPath) ->
                                     miss selected
                                 | otherwise ->
-                                    directoryFingerprint finalPath >>= \case
-                                        Just current
-                                            | current == prefetched.listingFingerprint -> do
-                                                releaseListCandidate speculation selected
-                                                pure prefetched.listingOutput
-                                        _ -> miss selected
+                                    mapM
+                                        (\(directory, expected) -> do
+                                            actual <- snapshotFingerprint directory
+                                            pure (actual, expected))
+                                        (Map.toList prefetched.listingFingerprints)
+                                        >>= \current ->
+                                            if all
+                                                (\(actual, expected) ->
+                                                    fingerprintsMatch actual (Just expected))
+                                                current
+                                                then do
+                                                    releaseListCandidate speculation selected
+                                                    pure prefetched.listingOutput
+                                                else miss selected
   where
+    snapshotFingerprint path =
+        directoryFingerprint path >>= \case
+            Just fingerprint -> pure (Just fingerprint)
+            Nothing -> fileFingerprint path
+
     miss selected = do
         cancelListCandidate speculation selected
         runListDir speculation.listEnv args

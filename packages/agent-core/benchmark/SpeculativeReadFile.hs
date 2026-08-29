@@ -253,7 +253,7 @@ runWorkload workload tailMillis _env registry speculation callId = do
                     Just result -> pure (formatToolResult result)
                     Nothing -> dispatchNormally call
             Nothing -> dispatchNormally call
-    unless ("1→" `Text.isPrefixOf` output) $
+    unless ("→" `Text.isInfixOf` output) $
         die ("unexpected read_file result: " <> Text.unpack output)
     evaluate (checksumText output)
   where
@@ -346,7 +346,14 @@ readArguments target =
     Text.decodeUtf8 $
         LazyByteString.toStrict $
             Aeson.encode $
-                Aeson.object ["target_file" Aeson..= target]
+                -- A negative offset makes read_file scan the complete file
+                -- while returning only the final line.  Without this field
+                -- the default 1000-line window makes the nominal FILE_MIB
+                -- workload irrelevant and measures only interpreter overhead.
+                Aeson.object
+                    [ "target_file" Aeson..= target
+                    , "offset" Aeson..= (-1 :: Int)
+                    ]
 
 outputItemAdded
     :: Maybe Text

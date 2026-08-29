@@ -28,7 +28,11 @@ import Agent.Tools.FileSystem.PathPrefix
     , workspaceFileIndex
     , jsonStringFieldProgress
     )
-import Agent.Tools.IO (readTextFile, resolveUnderCwd)
+import Agent.Tools.IO
+    ( readTextFile
+    , resolveUnderCwd
+    , resolveUnderCwdWithoutAccessRequest
+    )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent.Async
     ( Async
@@ -289,7 +293,7 @@ startFileCandidate prefetch target = mask \_ -> do
 
 prefetchFile :: ToolEnv -> Text -> IO (Maybe PrefetchedFile)
 prefetchFile env target =
-    resolveUnderCwd env (fromText target) >>= \case
+    resolveUnderCwdWithoutAccessRequest env (fromText target) >>= \case
         Left _ -> pure Nothing
         Right path -> do
             before <- fileFingerprint path
