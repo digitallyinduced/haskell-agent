@@ -26,6 +26,37 @@ typedef void (*ha_event_callback)(
 );
 
 /*
+ * A conversation-search callback. status is 0 for a result, 1 for terminal
+ * success, and -1 for terminal failure (with error populated). All UTF-8
+ * buffers are valid only during the callback and must be copied before it
+ * returns. A result has error == NULL. Completion has no result fields.
+ *
+ * turn_index is -1 for a metadata hit. occurred_at_ms is 0 when absent. role
+ * is 0 for metadata, 1 for user, and 2 for assistant. Timestamps are
+ * milliseconds since the Unix epoch. Callbacks run serially on the engine
+ * worker thread, not the caller or main thread. An accepted request receives
+ * exactly one terminal callback unless engine destruction has begun.
+ */
+typedef void (*ha_conversation_search_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *session_id, size_t session_id_length,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *cwd, size_t cwd_length,
+    const uint8_t *provider, size_t provider_length,
+    const uint8_t *model, size_t model_length,
+    int64_t updated_at_ms,
+    int32_t archived,
+    int64_t turn_index,
+    int64_t occurred_at_ms,
+    int32_t role,
+    const uint8_t *user_text, size_t user_text_length,
+    const uint8_t *assistant_text, size_t assistant_text_length,
+    double rank,
+    const uint8_t *error, size_t error_length
+);
+
+/*
  * Account list callbacks use status 0 for an item, 1 for end-of-list, and
  * -1 for an error. Item strings include disabled managed credentials and
  * externally discovered accounts.
@@ -92,6 +123,20 @@ int32_t ha_engine_send_json(
     void *engine,
     const uint8_t *bytes,
     size_t length
+);
+/*
+ * Search active and archived (but not deleted) conversations. The query is
+ * copied before return and limit is clamped to 1...100. Returns 0 when
+ * accepted, 1 for a null engine, 2 for invalid query/callback, and 3 for an
+ * internal failure. Calls must be serialized with ha_engine_destroy.
+ */
+int32_t ha_engine_search_conversations(
+    void *engine,
+    const uint8_t *query,
+    size_t query_length,
+    size_t limit,
+    ha_conversation_search_callback callback,
+    void *context
 );
 void ha_engine_destroy(void *engine);
 
