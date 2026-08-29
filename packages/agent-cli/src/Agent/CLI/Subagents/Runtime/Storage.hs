@@ -23,12 +23,14 @@ import Agent.GrokBuild.Dialect.Task
     , lookupAgentType
     )
 import Agent.Subagents
-    ( SubagentId
+    ( SubagentAccessProfile(..)
+    , SubagentId
     , SubagentRegistry
     , SubagentStatus(..)
     , getPreviousResponseId
     , getStatus
     , getSubagentCwd
+    , getSubagentAccessProfile
     , getSubagentIdentity
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..))
@@ -37,6 +39,7 @@ import Control.Monad (void, when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import System.OsPath (OsPath)
 
@@ -125,6 +128,9 @@ saveSubagentSnapshotWithStatus
     reasoningEffort <- lookupAgentReasoningEffort typesRef agentId
     agentCwd <- getSubagentCwd registry agentId
     identity <- getSubagentIdentity registry agentId
+    accessProfile <-
+        fromMaybe SubagentFullAccess
+            <$> getSubagentAccessProfile registry agentId
     saveSubagentState sessionDir agentId SubagentStateSnapshot
         { snapshotItems = items
         , snapshotPreviousResponseId = previous
@@ -140,6 +146,7 @@ saveSubagentSnapshotWithStatus
         , snapshotReasoningEffort = reasoningEffort
         , snapshotCwd = agentCwd
         , snapshotIdentity = identity
+        , snapshotAccessProfile = accessProfile
         }
 
 flushAllSubagentSnapshots

@@ -291,6 +291,7 @@ spec = describe "schemasFromAppTools" do
                         , multiSendToRoot = Nothing
                         , multiSpawnModelGuidance = Nothing
                         , multiAllowedChildModels = Nothing
+                        , multiPlanModeActive = pure False
                         }
                     schemas =
                         schemasFromAppTools

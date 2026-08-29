@@ -21,11 +21,13 @@ import Agent.CLI.Request (requestParams)
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents
-    ( SubagentId(..)
+    ( SubagentAccessProfile(..)
+    , SubagentId(..)
     , SubagentIdentity(..)
     , SubagentStatus(..)
     , closeSubagentRegistry
     , defaultSubagentConfig
+    , getSubagentAccessProfile
     , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (parseTaskPath)
@@ -78,6 +80,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     { collaborationModel = Nothing
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Nothing
+                    , collaborationAccessProfile = SubagentFullAccess
                     }
             Just session <- Map.lookup agentId <$> readIORef sessionsRef
             let rootParams =
@@ -202,13 +205,14 @@ spec = describe "Agent.CLI.SubagentStore" do
                 saveSubagentState
                     dir
                     agentId
-                    (testSnapshot
+                    ((testSnapshot
                         [messageItem RoleUser "inherited"]
                         (Completed (Just "OK"))
                         OpenAIProvider
                         "openai"
                         "gpt-5.6-luna"
                         CodexDialect)
+                        { snapshotAccessProfile = SubagentReadOnly })
                     `shouldReturn` Right ()
                 sessionsRef <- newIORef Map.empty
                 storeRootRef <- newIORef (Just dir)
@@ -239,6 +243,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                         session.subSessionEffectiveModel
                             `shouldBe` "gpt-5.6-luna"
                         session.subSessionDialect `shouldBe` CodexDialect
+                        getSubagentAccessProfile registry agentId
+                            `shouldReturn` Just SubagentReadOnly
 
     it "round-trips transcript items and meta" do
         withTempDir \dir -> do
@@ -268,6 +274,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                         , snapshotReasoningEffort = Just "high"
                         , snapshotCwd = Just (fromFilePath "/tmp/work")
                         , snapshotIdentity = Just identity
+                        , snapshotAccessProfile = SubagentReadOnly
                         }
             saveSubagentState dir agentId snapshot
                 `shouldReturn` Right ()
@@ -290,6 +297,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                         Just "/root/research/worker"
                     fields.diskParentId `shouldBe` Just parentId
                     fields.diskDepth `shouldBe` Just 2
+                    fields.diskAccessProfile
+                        `shouldBe` Just SubagentReadOnly
                 other -> expectationFailure ("unexpected load: " <> show other)
             case subagentStoreDir dir agentId of
                 Right path ->
@@ -329,11 +338,52 @@ spec = describe "Agent.CLI.SubagentStore" do
                     fields.diskParentId `shouldBe` Nothing
                     fields.diskDepth `shouldBe` Nothing
                     fields.diskStatus `shouldBe` Nothing
+                    fields.diskAccessProfile `shouldBe` Nothing
                     target.legacyDiskProvider `shouldBe` Nothing
                     target.legacyDiskConnection `shouldBe` Nothing
                     target.legacyDiskEffectiveModel `shouldBe` Nothing
                     target.legacyDiskDialect `shouldBe` Nothing
                 other -> expectationFailure ("unexpected load: " <> show other)
+
+    it "restores legacy explore agents as read-only" do
+        withTempDir \dir -> do
+            let agentId = SubagentId "agent-legacy-explore"
+            saveSubagentState
+                dir
+                agentId
+                ((testSnapshot
+                    []
+                    (Completed Nothing)
+                    OpenAIProvider
+                    "openai"
+                    "gpt-5.6-luna"
+                    CodexDialect)
+                    { snapshotAgentType = Just "explore" })
+                `shouldReturn` Right ()
+            Right path <- pure (subagentStoreDir dir agentId)
+            LBS.writeFile
+                (toFilePath (path </> fromFilePath "meta.json"))
+                "{\"provider\":\"openai\",\"connection\":\"openai\",\
+                \\"effectiveModel\":\"gpt-5.6-luna\",\"dialect\":\"codex\",\
+                \\"agentType\":\"explore\"}"
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef (Just dir)
+            typesRef <- newIORef Map.empty
+            bracket
+                (newSubagentRegistry defaultSubagentConfig dir
+                    (\_ _ _ _ -> fail "unexpected subagent runner invocation")
+                    (\_ _ -> pure ()))
+                closeSubagentRegistry
+                \registry -> do
+                    restoreTestAgent
+                        storeRootRef
+                        registry
+                        sessionsRef
+                        typesRef
+                        agentId
+                        `shouldReturn` Right ()
+                    getSubagentAccessProfile registry agentId
+                        `shouldReturn` Just SubagentReadOnly
 
     it "normalizes a derivable connection into current target metadata" do
         withTempDir \dir -> do
@@ -740,6 +790,7 @@ emptyDiskFields = SubagentDiskFields
     , diskTaskPath = Nothing
     , diskParentId = Nothing
     , diskDepth = Nothing
+    , diskAccessProfile = Nothing
     }
 
 testSnapshot
@@ -766,6 +817,7 @@ testSnapshot items status provider connection effectiveModel dialect =
         , snapshotReasoningEffort = Nothing
         , snapshotCwd = Nothing
         , snapshotIdentity = Nothing
+        , snapshotAccessProfile = SubagentFullAccess
         }
 
 isLeft :: Either a b -> Bool

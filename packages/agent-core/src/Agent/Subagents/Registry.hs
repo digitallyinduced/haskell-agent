@@ -46,6 +46,8 @@ module Agent.Subagents.Registry
     , getPreviousResponseId
     , getSubagentCwd
     , getSubagentIdentity
+    , getSubagentAccessProfile
+    , restrictSubagentAccess
     , setPreviousResponseId
     , getTaskPath
     , resolveAgentTarget

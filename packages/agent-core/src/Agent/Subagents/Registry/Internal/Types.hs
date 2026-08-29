@@ -7,6 +7,7 @@ import Agent.Subagents.TaskPath (TaskPath)
 import Agent.Subagents.Types
     ( RootTurnId
     , RunSubagent
+    , SubagentAccessProfile
     , SubagentConfig
     , SubagentId
     , SubagentStatus(..)
@@ -36,6 +37,7 @@ data SubagentRecord = SubagentRecord
     , recordLastUpdate :: !(TVar (Maybe (Int, SubagentStatus)))
     , recordTaskPath :: !TaskPath
     , recordCwd :: !OsPath
+    , recordAccessProfile :: !(TVar SubagentAccessProfile)
     }
 
 data SubagentWork = SubagentWork

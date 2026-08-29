@@ -101,4 +101,5 @@ main =
         , multiSendToRoot = Nothing
         , multiSpawnModelGuidance = Nothing
         , multiAllowedChildModels = Nothing
+        , multiPlanModeActive = pure False
         }

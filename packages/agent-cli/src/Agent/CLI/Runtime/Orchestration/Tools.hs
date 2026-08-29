@@ -204,6 +204,7 @@ import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planSessionDir),
+      isPlanModeActive,
       PlanModeHooks(planAskQuestion, PlanModeHooks, planConfirmEnter,
                     planDecideExit),
       PlanDecision(PlanCancel) )
@@ -498,6 +499,7 @@ runAgentTools
         (\_ _ -> pure ())
     rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
     agentTypesRef <- newIORef Map.empty
+    planModeRef <- newIORef (Nothing :: Maybe PlanModeEnv)
     openaiChild <- case provider of
         XAIProvider -> do
             available <- hasOpenAiAuth
@@ -563,6 +565,9 @@ runAgentTools
                     provider
                     (tokenProviderBillingMode tokenProvider)
             , multiAllowedChildModels = grokAllowedChildModels
+            , multiPlanModeActive = do
+                current <- readIORef planModeRef
+                maybe (pure False) isPlanModeActive current
             }
     promptRequest <- loadPrompt options
     let promptText = fmap (\request -> request.managedTurnText) promptRequest
@@ -702,6 +707,7 @@ runAgentTools
             agentTypesRef
             `onException`
                 (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
+    writeIORef planModeRef (Just coding.codingPlanMode)
     let closeBeforeSession =
             coding.codingClose
                 `finally`

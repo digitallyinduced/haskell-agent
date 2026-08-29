@@ -34,7 +34,12 @@ import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Agent.Responses.Types
 import Agent.Responses.Types.Items (responseItemDecoder)
-import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
+import Agent.Subagents
+    ( SubagentAccessProfile(..)
+    , SubagentId(..)
+    , SubagentIdentity(..)
+    , SubagentStatus(..)
+    )
 import Agent.Subagents.TaskPath (taskPathText)
 import Agent.ToolArgs (readExactInt)
 import Control.Applicative ((<|>))
@@ -67,6 +72,7 @@ data SubagentDiskFields = SubagentDiskFields
     , diskTaskPath :: !(Maybe Text)
     , diskParentId :: !(Maybe SubagentId)
     , diskDepth :: !(Maybe Int)
+    , diskAccessProfile :: !(Maybe SubagentAccessProfile)
     } deriving (Eq, Show)
 
 -- | Complete target metadata written by current versions.
@@ -104,6 +110,7 @@ data SubagentStateSnapshot = SubagentStateSnapshot
     , snapshotReasoningEffort :: !(Maybe Text)
     , snapshotCwd :: !(Maybe OsPath)
     , snapshotIdentity :: !(Maybe SubagentIdentity)
+    , snapshotAccessProfile :: !SubagentAccessProfile
     }
 
 subagentDiskFields :: SubagentDiskMeta -> SubagentDiskFields
@@ -126,6 +133,7 @@ instance ToJSON SubagentDiskMeta where
         , "taskPath" .= fields.diskTaskPath
         , "parentId" .= fields.diskParentId
         , "depth" .= fields.diskDepth
+        , "accessProfile" .= fmap accessProfileText fields.diskAccessProfile
         ]
       where
         fields = subagentDiskFields meta
@@ -162,6 +170,7 @@ subagentDiskMetaDecoder = Hermes.object do
             <*> optionalKey "taskPath" Hermes.text
             <*> (fmap SubagentId <$> optionalKey "parentId" Hermes.text)
             <*> optionalKey "depth" Hermes.int
+            <*> optionalKey "accessProfile" diskAccessProfileDecoder
         pure $ case
                 (diskProvider, diskConnection, diskEffectiveModel, diskDialect)
                 of
@@ -191,6 +200,18 @@ diskProviderDecoder = Hermes.withText \text ->
     case parseProvider text of
         Just provider -> pure provider
         Nothing -> fail ("unknown persisted subagent provider: " <> Text.unpack text)
+
+accessProfileText :: SubagentAccessProfile -> Text
+accessProfileText = \case
+    SubagentFullAccess -> "full"
+    SubagentReadOnly -> "read_only"
+
+diskAccessProfileDecoder :: Hermes.Decoder SubagentAccessProfile
+diskAccessProfileDecoder = Hermes.withText \case
+    "full" -> pure SubagentFullAccess
+    "read_only" -> pure SubagentReadOnly
+    value ->
+        fail ("invalid persisted subagent access profile: " <> Text.unpack value)
 
 encodeDiskStatus :: SubagentStatus -> Aeson.Value
 encodeDiskStatus = \case
@@ -297,6 +318,8 @@ saveSubagentState sessionDir agentId snapshot =
                         snapshot.snapshotIdentity >>= (.identityParent)
                     , diskDepth =
                         (.identityDepth) <$> snapshot.snapshotIdentity
+                    , diskAccessProfile =
+                        Just snapshot.snapshotAccessProfile
                     }
                 meta =
                     CurrentSubagentDiskMeta fields snapshot.snapshotTarget
@@ -327,7 +350,7 @@ loadSubagentState sessionDir agentId =
                         else pure (Right (LegacySubagentDiskMeta
                             (SubagentDiskFields
                                 Nothing Nothing Nothing Nothing Nothing
-                                Nothing Nothing Nothing Nothing)
+                                Nothing Nothing Nothing Nothing Nothing)
                             (LegacySubagentTargetFields
                                 Nothing Nothing Nothing Nothing)))
                     itemsResult <- if hasTranscript

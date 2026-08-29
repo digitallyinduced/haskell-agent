@@ -28,6 +28,7 @@ import Agent.Subagents.Types
     , SubagentConfig(..)
     , SubagentId(..)
     , SubagentIdentity(..)
+    , SubagentAccessProfile(..)
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , maxWaitTimeoutMs
@@ -526,6 +527,7 @@ restoreSubagentResolvedWithCwd
         asyncVar <- newTVarIO Nothing
         previousVar <- newTVarIO previous
         lastUpdateVar <- newTVarIO Nothing
+        accessProfileVar <- newTVarIO SubagentFullAccess
         restored <- atomically do
             closed <- readTVar registry.registryClosed
             if closed
@@ -556,6 +558,8 @@ restoreSubagentResolvedWithCwd
                                             , recordLastUpdate = lastUpdateVar
                                             , recordTaskPath = resolvedPath
                                             , recordCwd = childCwd
+                                            , recordAccessProfile =
+                                                accessProfileVar
                                             }
                                     writeTVar registry.registryAgents
                                         (Map.insert agentId record agents)
@@ -603,6 +607,38 @@ getSubagentIdentity registry agentId = atomically do
                     record.recordParent
                     record.recordDepth
                     record.recordTaskPath
+
+-- | Return the host-enforced profile for a resident subagent.
+getSubagentAccessProfile
+    :: SubagentRegistry
+    -> SubagentId
+    -> IO (Maybe SubagentAccessProfile)
+getSubagentAccessProfile registry agentId = atomically do
+    agents <- readTVar registry.registryAgents
+    traverse (readTVar . (.recordAccessProfile)) (Map.lookup agentId agents)
+
+-- | Monotonically restrict an admitted/restored child.
+--
+-- The operation intentionally cannot upgrade a read-only record back to full
+-- access.  Spawn preparation calls this before the supervisor starts; restore
+-- paths call it before accepting any follow-up.
+restrictSubagentAccess
+    :: SubagentRegistry
+    -> SubagentId
+    -> SubagentAccessProfile
+    -> IO (Either Text ())
+restrictSubagentAccess registry agentId requested = atomically do
+    agents <- readTVar registry.registryAgents
+    case Map.lookup agentId agents of
+        Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
+        Just record -> do
+            current <- readTVar record.recordAccessProfile
+            let restricted
+                    | current == SubagentReadOnly = SubagentReadOnly
+                    | requested == SubagentReadOnly = SubagentReadOnly
+                    | otherwise = SubagentFullAccess
+            writeTVar record.recordAccessProfile restricted
+            pure (Right ())
 
 setPreviousResponseId :: SubagentRegistry -> SubagentId -> Text -> IO ()
 setPreviousResponseId registry agentId responseId = atomically do

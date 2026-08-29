@@ -13,7 +13,7 @@ import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
     ( autoCompactOpenAiBackendWithSender )
 import Agent.CLI.Connectivity (withConnectionRecovery)
-import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
+import Agent.CLI.Options (ApprovalPolicy(..), CliOptions(..), defaultEffortFor)
 import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session (LegacySubagentTarget(..))
@@ -74,9 +74,11 @@ import Agent.Responses.LoopBackend
 import Agent.Responses.Types
     (ReasoningConfig(..), ResponseCreateParams(..), ResponseItem)
 import Agent.Subagents
-    (RunSubagent, SubagentId(..), SubagentIdentity(..), SubagentRegistry,
+    (RunSubagent, SubagentAccessProfile(..), SubagentId(..),
+     SubagentIdentity(..), SubagentRegistry,
      SubagentSpawnEnv(..), SubagentStatus(..), getStatus, getSubagentCwd,
-     getSubagentIdentity, getTaskPath, restoreSubagent, restoreSubagentAtStatus,
+     getSubagentAccessProfile, getSubagentIdentity, getTaskPath,
+     restrictSubagentAccess, restoreSubagent, restoreSubagentAtStatus,
      restoreSubagentAtWithCwdStatus, restoreSubagentWithCwd,
      setPreviousResponseId)
 import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot)
@@ -95,8 +97,9 @@ import Agent.GrokBuild.Dialect.Task
     , recordAgentSpec
     )
 import Agent.Tools.MultiAgents
-    (CollaborationSpawnOptions(..), MultiAgentContext(..), SubagentWorktree)
-import Agent.Tools.PlanMode (PlanModeEnv(..))
+    (CollaborationSpawnOptions(..), MultiAgentContext(..), SubagentWorktree,
+     filterToolsForSubagentAccess)
+import Agent.Tools.PlanMode (PlanModeEnv(..), isPlanModeActive)
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
@@ -140,7 +143,10 @@ prepareCollaborationSpawn
         legacyTarget
         sessionsRef storeRootRef typesRef sourceRef agentId spawnOptions = do
     recordAgentSpec typesRef agentId GrokSubagentSpec
-        { agentType = defaultSubagentType
+        { agentType =
+            case spawnOptions.collaborationAccessProfile of
+                SubagentReadOnly -> "explore"
+                SubagentFullAccess -> defaultSubagentType
         , modelOverride = spawnOptions.collaborationModel
         , reasoningEffortOverride =
             spawnOptions.collaborationReasoningEffort
@@ -328,7 +334,13 @@ restoreAgentFromDisk
                 agentId fields.diskParentId taskPath
                 (fromMaybe 1 fields.diskDepth)
                 Nothing fields.diskPreviousResponseId restoredStatus
-                >>= pure . fmap (const ())
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right _ ->
+                        restrictSubagentAccess
+                            registry
+                            agentId
+                            (persistedAccessProfile fields)
     reopenInMemory previous requestedCwd = do
         restored <- case requestedCwd of
             Just childCwd ->
@@ -444,6 +456,9 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         Nothing
                         Nothing
                         (Just prepared.preparedMultiContext)
+                writeIORef
+                    prepared.preparedPlanModeRef
+                    (Just coding.codingPlanMode)
                 syncStoreRootFromPlan
                     runtime.subagentStoreRoot
                     coding.codingPlanMode
@@ -451,13 +466,19 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     today <- utctDay <$> getCurrentTime
                     ghciEnabled <- readIORef runtime.subagentGhciEnabled
                     bashEnabled <- readIORef runtime.subagentBashEnabled
-                    let codingTools =
+                    let unrestrictedTools =
                             filterGhciTools ghciEnabled $
                                 filterBashTools bashEnabled $
                                     filterChildGrokTools
                                         agentType coding.codingAppTools
                         tools =
-                            codingTools <> runtime.subagentMcpTools
+                            filterToolsForSubagentAccess
+                                env.subAccessProfile
+                                ( unrestrictedTools
+                                    <> childMcpTools
+                                        env.subAccessProfile
+                                        runtime.subagentMcpTools
+                                )
                         generatedInstructions =
                             systemPromptForTools
                                 codexDialect
@@ -612,6 +633,9 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         Nothing
                         Nothing
                         (Just prepared.preparedMultiContext)
+                writeIORef
+                    prepared.preparedPlanModeRef
+                    (Just coding.codingPlanMode)
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
                     shellPath <-
@@ -628,11 +652,17 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                 []
                     ghciEnabled <- readIORef runtime.subagentGhciEnabled
                     bashEnabled <- readIORef runtime.subagentBashEnabled
-                    let codingTools =
+                    let unrestrictedTools =
                             filterGhciTools ghciEnabled $
                                 filterBashTools bashEnabled childTools
                         tools =
-                            codingTools <> runtime.subagentMcpTools
+                            filterToolsForSubagentAccess
+                                env.subAccessProfile
+                                ( unrestrictedTools
+                                    <> childMcpTools
+                                        env.subAccessProfile
+                                        runtime.subagentMcpTools
+                                )
                         baseInstructions =
                             case dialectChildAgentProtocol childDialect of
                                 CodexCollaborationProtocol ->
@@ -702,6 +732,13 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                 previous
                                 (interAgentMessagePayload prompt))
 
+-- MCP registrations are host-extensible and have no trusted capability
+-- metadata. Never admit one into a read-only child, even if it reuses the
+-- name of an allowlisted built-in.
+childMcpTools :: SubagentAccessProfile -> [AppTool] -> [AppTool]
+childMcpTools SubagentReadOnly _ = []
+childMcpTools SubagentFullAccess tools = tools
+
 defaultShell :: String
 defaultShell
     | SystemInfo.os == "mingw32" = "cmd.exe"
@@ -742,6 +779,7 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
             currentDialect
             env.subId
     nestedForkSource <- newIORef (Just (readIORef session.subSessionTranscript))
+    childPlanModeRef <- newIORef Nothing
     let sessionDialect = dialectForId session.subSessionDialect
         childToolEnv = childEnv { toolCancel = env.subCancel }
         childCtx = MultiAgentContext
@@ -782,12 +820,25 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
                     NoHostChildAgentProtocol -> Nothing
             , multiSpawnModelGuidance = runtime.subagentSpawnModelGuidance
             , multiAllowedChildModels = runtime.subagentAllowedChildModels
+            , multiPlanModeActive = do
+                current <- readIORef childPlanModeRef
+                active <- maybe (pure False) isPlanModeActive current
+                registeredProfile <-
+                    getSubagentAccessProfile
+                        runtime.subagentRegistry
+                        env.subId
+                pure
+                    ( env.subAccessProfile == SubagentReadOnly
+                        || registeredProfile == Just SubagentReadOnly
+                        || active
+                    )
             }
     pure PreparedChild
         { preparedParentParams = parentParams
         , preparedSession = session
         , preparedToolEnv = childToolEnv
         , preparedMultiContext = childCtx
+        , preparedPlanModeRef = childPlanModeRef
         }
 
 resolveChildModelAndEffort
@@ -843,7 +894,12 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
             , loopOnEvent = onEvent
             , loopApprove =
                 \call ->
-                    childApprove runtime.subagentPolicy toolRegistry call
+                    childApprove
+                        (case env.subAccessProfile of
+                            SubagentReadOnly -> DenyMutating
+                            SubagentFullAccess -> runtime.subagentPolicy)
+                        toolRegistry
+                        call
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
             , loopCancel = env.subCancel
@@ -1003,3 +1059,11 @@ recordPersistedAgentSpec typesRef agentId fields =
                 , reasoningEffortOverride = fields.diskReasoningEffort
                 }
         Nothing -> pure ()
+
+persistedAccessProfile :: SubagentDiskFields -> SubagentAccessProfile
+persistedAccessProfile fields =
+    fromMaybe inferred fields.diskAccessProfile
+  where
+    inferred = case fields.diskAgentType of
+        Just "explore" -> SubagentReadOnly
+        _ -> SubagentFullAccess

@@ -9,6 +9,7 @@ module Agent.Tools.MultiAgents
     , multiAgentTools
     , multiAgentNamespace
     , multiAgentToolNames
+    , filterToolsForSubagentAccess
     , spawnSharedSubagent
     ) where
 
@@ -16,6 +17,7 @@ import Agent.Json.Decode (Decoder)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentRegistry
+    , SubagentAccessProfile(..)
     , RootTurnId
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
@@ -24,6 +26,8 @@ import Agent.Subagents
     , listAgents
     , queueMessageFromForTurn
     , resolveAgentTarget
+    , getSubagentAccessProfile
+    , restrictSubagentAccess
     , sendInputMessageForTurn
     , spawnSubagentAtWithCwdPreparedForTurn
     , subagentLease
@@ -61,7 +65,7 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolCall(..), typedTool, typedToolWithCall)
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , PlanModeCapability(..)
     , ToolExecutionPolicy(..)
     , jsonTool
@@ -69,7 +73,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
-import Control.Monad (void)
+import Control.Monad (filterM, void)
 import Data.Aeson (Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -91,6 +95,7 @@ data CollaborationSpawnOptions = CollaborationSpawnOptions
     { collaborationModel :: !(Maybe Text)
     , collaborationReasoningEffort :: !(Maybe Text)
     , collaborationForkTurns :: !(Maybe Text)
+    , collaborationAccessProfile :: !SubagentAccessProfile
     } deriving (Eq, Show)
 
 -- | Per-agent identity for nesting depth / parent linkage / task path.
@@ -116,6 +121,9 @@ data MultiAgentContext = MultiAgentContext
     , multiSpawnModelGuidance :: !(Maybe Text)
       -- | When set, spawn_subagent may only use these model slugs (or inherit).
     , multiAllowedChildModels :: !(Maybe [Text])
+      -- | Whether this caller is currently under plan-mode restrictions.
+      -- Hosts install a live query; tests and non-plan hosts use @pure False@.
+    , multiPlanModeActive :: !(IO Bool)
     }
 
 multiAgentNamespace :: Text
@@ -131,17 +139,45 @@ multiAgentToolNames =
     , "interrupt_agent"
     ]
 
+-- | Defense-in-depth tool projection for host-enforced read-only children.
+--
+-- Approval annotations are not trusted for this boundary. Unknown tool names
+-- are removed. Hosts must also keep untrusted extension registrations (such
+-- as MCP tools) out of the candidate list because names are not capabilities.
+filterToolsForSubagentAccess
+    :: SubagentAccessProfile
+    -> [AppTool]
+    -> [AppTool]
+filterToolsForSubagentAccess SubagentFullAccess = id
+filterToolsForSubagentAccess SubagentReadOnly =
+    filter ((`elem` readOnlyExploreToolNames) . (.appToolName))
+
+readOnlyExploreToolNames :: [Text]
+readOnlyExploreToolNames = ["read_file", "list_dir", "grep"]
+
 multiAgentTools :: MultiAgentContext -> [AppTool]
 multiAgentTools ctx =
-    map (withPlanModeCapability PlanModeSafeSubagent) $
-        [spawnAgentTool ctx]
-        <> maybe [] (const [spawnAgentInWorktreeTool ctx]) ctx.multiCreateWorktree
-        <> [ waitAgentTool ctx
-           , sendMessageTool ctx
-           , followupTaskTool ctx
-           , listAgentsTool ctx
-           , interruptAgentTool ctx
-           ]
+    [planSafe (spawnAgentTool ctx)]
+        <> maybe
+            []
+            (const
+                [ withPlanModeCapability
+                    PlanModeBlocked
+                    (spawnAgentInWorktreeTool ctx)
+                ])
+            ctx.multiCreateWorktree
+        <> map planSafe
+            [ waitAgentTool ctx
+            , sendMessageTool ctx
+            , followupTaskTool ctx
+            , listAgentsTool ctx
+            , interruptAgentTool ctx
+            ]
+  where
+    -- Handlers re-check the live access profile and target, so this authority
+    -- admits only the constrained collaboration protocol, never arbitrary
+    -- child mutation.
+    planSafe = withPlanModeCapability PlanModeSafeSubagent
 
 --------------------------------------------------------------------------------
 -- spawn_agent
@@ -222,6 +258,7 @@ spawnAgentInWorktreeDescription =
 data SpawnWorkspace
     = SharedWorkspace
     | IsolatedWorktree
+    deriving (Eq)
 
 runSpawn
     :: MultiAgentContext
@@ -234,11 +271,26 @@ runSpawn ctx workspace call args
         pure (Left (spawnToolName workspace <> " requires a non-empty message"))
     | not (validForkTurns args.forkTurns) =
         pure (Left "fork_turns must be none, all, or a positive integer string")
-    | otherwise = mask \restore ->
-        resolveSpawnWorkspace ctx workspace >>= \case
-            Left err -> pure (Left err)
-            Right (childCwd, worktree) ->
-                restore (spawnInWorkspace ctx call args childCwd worktree)
+    | otherwise = do
+        planActive <- ctx.multiPlanModeActive
+        if planActive && workspace == IsolatedWorktree
+            then pure $ Left
+                "spawn_agent_in_worktree is unavailable in plan mode; \
+                \use spawn_agent for a forced read-only exploration child."
+            else mask \restore ->
+                resolveSpawnWorkspace ctx workspace >>= \case
+                    Left err -> pure (Left err)
+                    Right (childCwd, worktree) ->
+                        restore
+                            (spawnInWorkspace
+                                ctx
+                                call
+                                args
+                                childCwd
+                                worktree
+                                (if planActive
+                                    then SubagentReadOnly
+                                    else SubagentFullAccess))
 
 -- | Spawn a tracked child in the caller's shared workspace.
 --
@@ -280,8 +332,9 @@ spawnInWorkspace
     -> SpawnAgentArgs
     -> OsPath
     -> Maybe SubagentWorktree
+    -> SubagentAccessProfile
     -> IO (Either Text Text)
-spawnInWorkspace ctx call args childCwd worktree = mask \restore -> do
+spawnInWorkspace ctx call args childCwd worktree accessProfile = mask \restore -> do
     ownedWorktree <- traverse makeIdempotentWorktree worktree
     rootTurnId <- ctx.multiRootTurnId
     let spawnOptions = CollaborationSpawnOptions
@@ -289,8 +342,11 @@ spawnInWorkspace ctx call args childCwd worktree = mask \restore -> do
             , collaborationReasoningEffort =
                 sanitizeOverride args.reasoningEffort
             , collaborationForkTurns = normalizeForkTurns args.forkTurns
+            , collaborationAccessProfile = accessProfile
             }
         prepare agentId = do
+            restrictSubagentAccess ctx.multiRegistry agentId accessProfile
+                >>= either (ioError . userError . Text.unpack) pure
             maybe (pure ()) (\hook -> hook agentId spawnOptions)
                 ctx.multiPrepareSpawn
             pure $ case ownedWorktree of
@@ -419,28 +475,52 @@ waitAgentDescription =
 runWait :: MultiAgentContext -> WaitAgentArgs -> IO (Either Text Text)
 runWait ctx args = do
     let timeoutMs = fromMaybe defaultWaitTimeoutMs args.timeoutMs
+    planActive <- ctx.multiPlanModeActive
     case args.targets of
-        Nothing -> do
-            (statuses, timedOut) <-
-                waitAnyLive ctx.multiRegistry ctx.multiSelfId timeoutMs
-            pure $ Right $ encodeJson $ object
-                [ "message" .= waitSummary timedOut statuses
-                , "timed_out" .= timedOut
-                ]
+        Nothing
+            | not planActive -> do
+                (statuses, timedOut) <-
+                    waitAnyLive ctx.multiRegistry ctx.multiSelfId timeoutMs
+                pure $ Right $ encodeJson $ object
+                    [ "message" .= waitSummary timedOut statuses
+                    , "timed_out" .= timedOut
+                    ]
+            | otherwise -> do
+                ids <- planSafeAgentIds ctx
+                if null ids
+                    then pure $ Right $ encodeJson $ object
+                        [ "message" .=
+                            ("no known read-only agents to wait for" :: Text)
+                        , "timed_out" .= False
+                        ]
+                    else do
+                        (statuses, timedOut) <-
+                            waitSubagentsFrom
+                                ctx.multiRegistry
+                                ctx.multiSelfId
+                                ids
+                                timeoutMs
+                        pure $ Right $ encodeJson $ object
+                            [ "message" .= waitSummary timedOut statuses
+                            , "timed_out" .= timedOut
+                            ]
         Just [] -> pure (Left "targets must be non-empty when provided")
         Just targets -> do
             resolved <- mapM (resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath) targets
             case sequence resolved of
                 Left err -> pure (Left err)
                 Right ids -> do
-                    (statuses, timedOut) <-
-                        waitSubagentsFrom
-                            ctx.multiRegistry ctx.multiSelfId ids timeoutMs
-                    pure $ Right $ encodeJson $ object
-                        [ "message" .= waitSummary timedOut statuses
-                        , "timed_out" .= timedOut
-                        , "status" .= statusObject statuses
-                        ]
+                    planSafeTargets ctx ids >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> do
+                            (statuses, timedOut) <-
+                                waitSubagentsFrom
+                                    ctx.multiRegistry ctx.multiSelfId ids timeoutMs
+                            pure $ Right $ encodeJson $ object
+                                [ "message" .= waitSummary timedOut statuses
+                                , "timed_out" .= timedOut
+                                , "status" .= statusObject statuses
+                                ]
 
 waitSummary :: Bool -> Map SubagentId SubagentStatus -> Text
 waitSummary timedOut statuses
@@ -561,10 +641,14 @@ withMessageTarget
     -> Text
     -> (MessageTarget -> IO (Either Text Text))
     -> IO (Either Text Text)
-withMessageTarget ctx target action =
+withMessageTarget ctx target action = do
+    planActive <- ctx.multiPlanModeActive
     case resolveTaskPath ctx.multiTaskPath target of
         Right targetPath | targetPath == taskPathRoot ->
-            action RootMessageTarget
+            if planActive
+                then pure (Left
+                    "Plan-mode agents cannot message the root agent.")
+                else action RootMessageTarget
         _ -> do
             restored <- maybeRestore ctx target
             case restored of
@@ -576,8 +660,22 @@ withMessageTarget ctx target action =
                     case resolved of
                         Left err -> pure (Left err)
                         Right agentId -> do
-                            rootTurnId <- ctx.multiRootTurnId
-                            action (AgentMessageTarget agentId rootTurnId)
+                            allowed <-
+                                if not planActive
+                                    then pure True
+                                    else
+                                        (== Just SubagentReadOnly)
+                                            <$> getSubagentAccessProfile
+                                                ctx.multiRegistry
+                                                agentId
+                            if not allowed
+                                then pure $ Left
+                                    "Plan mode only permits messages and \
+                                    \follow-ups to known read-only agents."
+                                else do
+                                    rootTurnId <- ctx.multiRootTurnId
+                                    action
+                                        (AgentMessageTarget agentId rootTurnId)
 
 sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
 sendToRoot ctx content =
@@ -641,13 +739,22 @@ listAgentsDescription =
 runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
 runListAgents ctx args = do
     agents <- listAgents ctx.multiRegistry args.pathPrefix
+    planActive <- ctx.multiPlanModeActive
+    visible <-
+        if not planActive
+            then pure agents
+            else filterM
+                (\(_, agentId, _) ->
+                    (== Just SubagentReadOnly)
+                        <$> getSubagentAccessProfile ctx.multiRegistry agentId)
+                agents
     let payload =
             [ object
                 [ "agent_name" .= taskPathText path
                 , "agent_id" .= agentId.unSubagentId
                 , "agent_status" .= encodeStatus status
                 ]
-            | (path, agentId, status) <- agents
+            | (path, agentId, status) <- visible
             ]
     pure $ Right $ encodeJson $ object [ "agents" .= payload ]
 
@@ -687,13 +794,49 @@ runInterrupt ctx args = do
     case resolved of
         Left err -> pure (Left err)
         Right agentId -> do
-            result <- interruptSubagent ctx.multiRegistry agentId
-            pure $ case result of
-                Left err -> Left err
-                Right previous ->
-                    Right $ encodeJson $ object
-                        [ "previous_status" .= encodeStatus previous
-                        ]
+            planSafeTargets ctx [agentId] >>= \case
+                Left err -> pure (Left err)
+                Right () -> do
+                    result <- interruptSubagent ctx.multiRegistry agentId
+                    pure $ case result of
+                        Left err -> Left err
+                        Right previous ->
+                            Right $ encodeJson $ object
+                                [ "previous_status" .= encodeStatus previous
+                                ]
+
+planSafeAgentIds :: MultiAgentContext -> IO [SubagentId]
+planSafeAgentIds ctx = do
+    agents <- listAgents ctx.multiRegistry Nothing
+    fmap (map (\(_, agentId, _) -> agentId)) $
+        filterM
+            (\(_, agentId, _) ->
+                if Just agentId == ctx.multiSelfId
+                    then pure False
+                    else
+                        (== Just SubagentReadOnly)
+                            <$> getSubagentAccessProfile
+                                ctx.multiRegistry
+                                agentId)
+            agents
+
+planSafeTargets
+    :: MultiAgentContext
+    -> [SubagentId]
+    -> IO (Either Text ())
+planSafeTargets ctx agentIds = do
+    planActive <- ctx.multiPlanModeActive
+    if not planActive
+        then pure (Right ())
+        else do
+            profiles <- mapM
+                (getSubagentAccessProfile ctx.multiRegistry)
+                agentIds
+            pure $
+                if all (== Just SubagentReadOnly) profiles
+                    then Right ()
+                    else Left
+                        "Plan mode only permits controlling known read-only agents."
 
 encodeJson :: Value -> Text
 encodeJson = Text.decodeUtf8 . LBS.toStrict . Aeson.encode

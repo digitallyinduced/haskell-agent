@@ -2,7 +2,10 @@ module Agent.GrokBuild.TaskSpec (spec) where
 
 import Agent.GrokBuild.Dialect.Task
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
-import Agent.InterAgentMessage (interAgentMessagePayload)
+import Agent.InterAgentMessage
+    ( interAgentMessagePayload
+    , plainInterAgentContent
+    )
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Subagents
 import Agent.ToolDispatch
@@ -22,6 +25,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , jsonToolParameters
+    , toolAllowsWithoutPrompt
     )
 import Control.Concurrent.MVar
 import Data.Either (isLeft)
@@ -43,6 +47,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
             parameters = fromMaybe [] (jsonToolParameters tool)
         let isolationTypes =
@@ -61,7 +66,19 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             Text.isInfixOf "limited to 4 levels"
         tool.appToolDescription `shouldNotSatisfy`
             Text.isInfixOf "must specify a subagent_type"
-        expectAlwaysPrompt tool.appToolApproval
+        expectClassifiedReadOnly tool.appToolApproval
+        toolAllowsWithoutPrompt tool
+            (functionToolCall "approval-explore" "task"
+                "{\"subagent_type\":\"explore\"}")
+            `shouldReturn` True
+        toolAllowsWithoutPrompt tool
+            (functionToolCall "approval-general" "task"
+                "{\"subagent_type\":\"general-purpose\"}")
+            `shouldReturn` False
+        toolAllowsWithoutPrompt tool
+            (functionToolCall "approval-isolated" "task"
+                "{\"subagent_type\":\"explore\",\"isolation\":\"worktree\"}")
+            `shouldReturn` False
         closeSubagentRegistry registry
 
     it "canonicalizes Grok-root child model aliases" do
@@ -106,7 +123,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
-                (Just (grokRootChildModels True))
+                (Just (grokRootChildModels True)) (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         tool.appToolDescription `shouldSatisfy`
             Text.isInfixOf "gpt-5.6-luna"
@@ -130,7 +147,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
-                (Just (grokRootChildModels True))
+                (Just (grokRootChildModels True)) (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -152,6 +169,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -170,6 +188,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ -> pure ())
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" raceArgs)
@@ -200,6 +219,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                 pure (Left "persisted subagent dialect is incompatible")
             ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) (Just restore) Nothing Nothing Nothing Nothing Nothing
+                (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -222,6 +242,136 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         names `shouldNotContain` ["search_replace"]
         names `shouldNotContain` ["task"]
 
+    it "permits only shared explore agents while plan mode is active" do
+        observed <- newEmptyMVar
+        worktreeRequested <- newIORef False
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> do
+                putMVar observed env.subAccessProfile
+                pure $ Right LoopResult
+                    { finalResponseId = "done"
+                    , finalText = Just "done"
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        typesRef <- newIORef Map.empty
+        let createWorktree _ = do
+                writeIORef worktreeRequested True
+                pure (Left "must not run")
+            ctx = MultiAgentContext
+                registry
+                (fromFilePath "/tmp")
+                Nothing
+                0
+                taskPathRoot
+                (pure Nothing)
+                Nothing
+                (Just createWorktree)
+                Nothing
+                Nothing
+                Nothing
+                Nothing
+                (pure True)
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+            invoke args =
+                dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                    (functionToolCall "plan-task" "task" args)
+        rejected <- invoke
+            "{\"prompt\":\"edit\",\"description\":\"unsafe\",\
+            \\"subagent_type\":\"general-purpose\"}"
+        rejected.output `shouldSatisfy`
+            Text.isInfixOf "only permits subagent_type=\"explore\""
+        isolated <- invoke
+            "{\"prompt\":\"read\",\"description\":\"isolated\",\
+            \\"subagent_type\":\"explore\",\"isolation\":\"worktree\"}"
+        isolated.output `shouldSatisfy`
+            Text.isInfixOf "unavailable in plan mode"
+        readIORef worktreeRequested `shouldReturn` False
+        started <- invoke
+            "{\"prompt\":\"read\",\"description\":\"safe\",\
+            \\"subagent_type\":\"explore\"}"
+        started.output `shouldSatisfy`
+            Text.isInfixOf "Subagent started in background"
+        takeMVar observed `shouldReturn` SubagentReadOnly
+        agents <- listAgents registry Nothing
+        case agents of
+            [(_, agentId, _)] ->
+                getSubagentAccessProfile registry agentId
+                    `shouldReturn` Just SubagentReadOnly
+            _ -> expectationFailure "expected exactly one explore child"
+        closeSubagentRegistry registry
+
+    it "resumes only known explore agents and restricts them before the turn" do
+        profiles <- newIORef []
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> do
+                atomicModifyIORef' profiles (\seen ->
+                    (seen <> [env.subAccessProfile], ()))
+                pure $ Right LoopResult
+                    { finalResponseId = "done"
+                    , finalText = Just "done"
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        typesRef <- newIORef Map.empty
+        Right (agentId, _) <-
+            spawnSubagentAt
+                registry
+                Nothing
+                taskPathRoot
+                0
+                "existing"
+                (plainInterAgentContent "initial")
+                Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        recordAgentType typesRef agentId "general-purpose"
+        let ctx = MultiAgentContext
+                registry
+                (fromFilePath "/tmp")
+                Nothing
+                0
+                taskPathRoot
+                (pure Nothing)
+                Nothing
+                Nothing
+                Nothing
+                Nothing
+                Nothing
+                Nothing
+                (pure True)
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+            resumeArgs =
+                "{\"prompt\":\"continue\",\"description\":\"resume\",\
+                \\"subagent_type\":\"explore\",\"resume_from\":\""
+                    <> agentId.unSubagentId
+                    <> "\"}"
+            invoke =
+                dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                    (functionToolCall "resume-plan-task" "task" resumeArgs)
+
+        mismatched <- invoke
+        mismatched.output `shouldSatisfy`
+            Text.isInfixOf "subagent_type mismatch"
+        getSubagentAccessProfile registry agentId
+            `shouldReturn` Just SubagentFullAccess
+
+        recordAgentType typesRef agentId "explore"
+        resumed <- invoke
+        resumed.output `shouldSatisfy`
+            Text.isInfixOf "Subagent started in background"
+        _ <- waitSubagents registry [agentId] 15000
+        readIORef profiles
+            `shouldReturn` [SubagentFullAccess, SubagentReadOnly]
+        getSubagentAccessProfile registry agentId
+            `shouldReturn` Just SubagentReadOnly
+        restrictSubagentAccess registry agentId SubagentFullAccess
+            `shouldReturn` Right ()
+        getSubagentAccessProfile registry agentId
+            `shouldReturn` Just SubagentReadOnly
+        closeSubagentRegistry registry
+
     it "keeps task available to general-purpose children" do
         let tools = [fake "read_file", fake "task"]
             names = map (.appToolName) (filterGrokToolsForType "general-purpose" tools)
@@ -235,6 +385,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         let childId = SubagentId "agent-child"
             ctx = MultiAgentContext registry (fromFilePath "/tmp") (Just childId) 1 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         expectAlwaysReadOnly tool.appToolApproval
         closeSubagentRegistry registry
@@ -248,6 +399,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         let createIsolated = cleanupLease cleaned
             ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot (pure Nothing)
                 Nothing (Just createIsolated) Nothing Nothing Nothing Nothing
+                (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -269,15 +421,17 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing Nothing Nothing
+                (pure False)
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" worktreeArgs)
         result.output `shouldSatisfy` Text.isInfixOf "registry is closed"
         readIORef cleaned `shouldReturn` True
 
-expectAlwaysPrompt :: ApprovalRule -> Expectation
-expectAlwaysPrompt AlwaysPrompt = pure ()
-expectAlwaysPrompt _ = expectationFailure "expected AlwaysPrompt"
+expectClassifiedReadOnly :: ApprovalRule -> Expectation
+expectClassifiedReadOnly ClassifyReadOnly{} = pure ()
+expectClassifiedReadOnly _ =
+    expectationFailure "expected dynamic read-only classification"
 
 expectAlwaysReadOnly :: ApprovalRule -> Expectation
 expectAlwaysReadOnly AlwaysReadOnly = pure ()

@@ -31,10 +31,12 @@ import Agent.InterAgentMessage (plainInterAgentContent)
 import Agent.OsPath (fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
+    , SubagentAccessProfile(..)
     , SubagentStatus(..)
     , defaultMaxDepth
     , defaultWaitTimeoutMs
     , getStatus
+    , restrictSubagentAccess
     , sendInputMessageForTurn
     , spawnSubagentWithCwdPreparedForTurn
     , subagentLease
@@ -46,13 +48,20 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (typedTool)
-import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
+import Agent.ToolDispatch (ToolCall(..), typedTool)
+import Agent.JsonText (jsonTextFieldDefault)
+import Agent.Tools.MultiAgents
+    ( MultiAgentContext(..)
+    , SubagentWorktree(..)
+    , filterToolsForSubagentAccess
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , PlanModeCapability(..)
     , ToolExecutionPolicy(..)
     , jsonAppToolWithExecution
+    , withPlanModeCapability
     )
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
@@ -221,6 +230,7 @@ sanitizeOptional value = value >>= \raw ->
 
 taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
 taskTool baseCwd ctx specsRef =
+    withPlanModeCapability PlanModeSafeSubagent $
     jsonAppToolWithExecution "task" (taskDescription ctx.multiAllowedChildModels)
         [ PropertySchema "prompt" PropertyString True $ Just
             "The full task prompt for the subagent to execute."
@@ -245,8 +255,19 @@ taskTool baseCwd ctx specsRef =
 
 taskApproval :: MultiAgentContext -> ApprovalRule
 taskApproval ctx = case ctx.multiSelfId of
-    Nothing -> AlwaysPrompt
+    Nothing -> ClassifyReadOnly (pure . taskCallIsReadOnlyExplore)
     Just _ -> AlwaysReadOnly
+
+taskCallIsReadOnlyExplore :: ToolCall -> Bool
+taskCallIsReadOnlyExplore call =
+    let requestedType =
+            Text.toLower . Text.strip $
+                jsonTextFieldDefault "subagent_type" call.arguments
+        isolation =
+            Text.toLower . Text.strip $
+                jsonTextFieldDefault "isolation" call.arguments
+    in requestedType == "explore"
+        && not (isWorktreeIsolation isolation)
 
 taskDescription :: Maybe [Text] -> Text
 taskDescription allowedModels =
@@ -288,25 +309,54 @@ runTask baseCwd ctx typesRef args
                 <> args.subagentType
                 <> ". Known types: "
                 <> Text.intercalate ", " knownSubagentTypes
-    | Just resumeId <- args.resumeFrom = resumeTask ctx typesRef args resumeId
-    | Just _ <- args.cwd
-    , Just iso <- args.isolation
-    , isWorktreeIsolation iso =
-        pure (Left "cwd and isolation are mutually exclusive.")
-    | otherwise =
-        case resolveRequestedGrokChildModel ctx.multiAllowedChildModels args.model of
-            Left err -> pure (Left err)
-            Right model -> mask \restore ->
-                resolveTaskWorkspace baseCwd ctx args >>= \case
-                    Left err -> pure (Left err)
-                    Right (childCwd, worktree) ->
-                        restore
-                            (spawnFresh
-                                childCwd
-                                worktree
-                                ctx
-                                typesRef
-                                args { model })
+    | otherwise = do
+        planActive <- ctx.multiPlanModeActive
+        case planModeTaskError planActive args of
+            Just err -> pure (Left err)
+            Nothing
+                | Just resumeId <- args.resumeFrom ->
+                    resumeTask planActive ctx typesRef args resumeId
+                | Just _ <- args.cwd
+                , Just iso <- args.isolation
+                , isWorktreeIsolation iso ->
+                    pure (Left "cwd and isolation are mutually exclusive.")
+                | otherwise ->
+                    case resolveRequestedGrokChildModel
+                            ctx.multiAllowedChildModels
+                            args.model of
+                        Left err -> pure (Left err)
+                        Right model -> mask \restore ->
+                            resolveTaskWorkspace baseCwd ctx args >>= \case
+                                Left err -> pure (Left err)
+                                Right (childCwd, worktree) ->
+                                    restore
+                                        (spawnFresh
+                                            childCwd
+                                            worktree
+                                            ctx
+                                            typesRef
+                                            args { model }
+                                            (if planActive
+                                                then SubagentReadOnly
+                                                else accessProfileForType
+                                                    args.subagentType))
+
+planModeTaskError :: Bool -> TaskArgs -> Maybe Text
+planModeTaskError False _ = Nothing
+planModeTaskError True args
+    | args.subagentType /= "explore" =
+        Just
+            "Plan mode only permits subagent_type=\"explore\". \
+            \General-purpose and plan agents remain blocked."
+    | maybe False isWorktreeIsolation args.isolation =
+        Just
+            "Worktree-isolated subagents are unavailable in plan mode; \
+            \use a shared-workspace explore agent."
+    | otherwise = Nothing
+
+accessProfileForType :: Text -> SubagentAccessProfile
+accessProfileForType "explore" = SubagentReadOnly
+accessProfileForType _ = SubagentFullAccess
 
 spawnFresh
     :: OsPath
@@ -314,8 +364,9 @@ spawnFresh
     -> MultiAgentContext
     -> GrokSubagentSpecs
     -> TaskArgs
+    -> SubagentAccessProfile
     -> IO (Either Text Text)
-spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
+spawnFresh childCwd worktree ctx typesRef args accessProfile = mask \restore -> do
     ownedWorktree <- traverse makeIdempotentWorktree worktree
     rootTurnId <- ctx.multiRootTurnId
     let spec = GrokSubagentSpec
@@ -328,6 +379,8 @@ spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
             }
         worktreePath = (.subagentWorktreePath) <$> ownedWorktree
         prepare agentId = do
+            restrictSubagentAccess ctx.multiRegistry agentId accessProfile
+                >>= either (ioError . userError . Text.unpack) pure
             recordAgentSpec typesRef agentId spec
             pure $ case ownedWorktree of
                 Nothing -> mempty
@@ -423,12 +476,13 @@ resolveTaskCwd baseCwd requested = do
         else Left ("task cwd is not an existing directory: " <> toText path)
 
 resumeTask
-    :: MultiAgentContext
+    :: Bool
+    -> MultiAgentContext
     -> GrokSubagentSpecs
     -> TaskArgs
     -> Text
     -> IO (Either Text Text)
-resumeTask ctx typesRef args resumeId = do
+resumeTask planActive ctx typesRef args resumeId = do
     let agentId = SubagentId resumeId
     restored <- case ctx.multiResumeFromDisk of
         Just restore -> restore agentId
@@ -445,6 +499,10 @@ resumeTask ctx typesRef args resumeId = do
                 _ -> do
                     mtype <- lookupAgentType typesRef agentId
                     case mtype of
+                        Nothing | planActive ->
+                            pure $ Left
+                                "Cannot safely resume this agent in plan mode: \
+                                \its persisted read-only type is unknown."
                         Just prior
                             | prior /= args.subagentType ->
                                 pure $ Left $
@@ -453,29 +511,44 @@ resumeTask ctx typesRef args resumeId = do
                                         <> ", requested "
                                         <> args.subagentType
                         _ -> do
-                            recordAgentType typesRef agentId args.subagentType
-                            rootTurnId <- ctx.multiRootTurnId
-                            sent <- sendInputMessageForTurn ctx.multiRegistry rootTurnId
-                                ctx.multiTaskPath agentId
-                                (plainInterAgentContent args.prompt) False
-                            case sent of
+                            let requiredProfile
+                                    | planActive = SubagentReadOnly
+                                    | otherwise =
+                                        accessProfileForType args.subagentType
+                            restricted <- restrictSubagentAccess
+                                ctx.multiRegistry agentId requiredProfile
+                            case restricted of
                                 Left err -> pure (Left err)
-                                Right _ ->
-                                    if args.runInBackground
-                                        then pure $ Right $ formatTaskStarted agentId args Nothing
-                                        else do
-                                            (statuses, timedOut) <-
-                                                waitSubagents
-                                                    ctx.multiRegistry
-                                                    [agentId]
-                                                    defaultWaitTimeoutMs
-                                            pure $ Right $
-                                                formatTaskCompleted
-                                                    agentId
-                                                    args
-                                                    Nothing
-                                                    timedOut
-                                                    (Map.lookup agentId statuses)
+                                Right () -> resumeKnown agentId
+  where
+    resumeKnown agentId = do
+        recordAgentType typesRef agentId args.subagentType
+        rootTurnId <- ctx.multiRootTurnId
+        sent <- sendInputMessageForTurn
+            ctx.multiRegistry
+            rootTurnId
+            ctx.multiTaskPath
+            agentId
+            (plainInterAgentContent args.prompt)
+            False
+        case sent of
+            Left err -> pure (Left err)
+            Right _
+                | args.runInBackground ->
+                    pure $ Right $ formatTaskStarted agentId args Nothing
+                | otherwise -> do
+                    (statuses, timedOut) <-
+                        waitSubagents
+                            ctx.multiRegistry
+                            [agentId]
+                            defaultWaitTimeoutMs
+                    pure $ Right $
+                        formatTaskCompleted
+                            agentId
+                            args
+                            Nothing
+                            timedOut
+                            (Map.lookup agentId statuses)
 
 -- | Spawn a detached Grok-managed child without going through the public
 -- @task@ argument parser. Session-owned runtimes such as the scheduler and
@@ -493,16 +566,22 @@ spawnManagedGrokSubagent
 spawnManagedGrokSubagent childCwd ctx typesRef spec prompt nickname
     | Text.null (Text.strip prompt) =
         pure (Left "subagent prompt must be non-empty")
-    | otherwise =
-        spawnSubagentWithCwdPreparedForTurn
-            ctx.multiRegistry
-            Nothing
-            childCwd
-            (\agentId -> recordAgentSpec typesRef agentId spec >> pure mempty)
-            ctx.multiSelfId
-            ctx.multiDepth
-            prompt
-            nickname
+    | otherwise = do
+        planActive <- ctx.multiPlanModeActive
+        if planActive
+            then pure $ Left
+                "Managed scheduler/workflow subagents are unavailable in plan mode."
+            else
+                spawnSubagentWithCwdPreparedForTurn
+                    ctx.multiRegistry
+                    Nothing
+                    childCwd
+                    (\agentId ->
+                        recordAgentSpec typesRef agentId spec >> pure mempty)
+                    ctx.multiSelfId
+                    ctx.multiDepth
+                    prompt
+                    nickname
 
 formatTaskStarted :: SubagentId -> TaskArgs -> Maybe OsPath -> Text
 formatTaskStarted agentId args worktreePath =
@@ -590,7 +669,7 @@ lookupAgentSpec specsRef agentId =
 -- | Restrict the child tool surface by subagent type.
 filterGrokToolsForType :: Text -> [AppTool] -> [AppTool]
 filterGrokToolsForType agentType tools = case agentType of
-    "explore" -> filter ((`elem` exploreNames) . (.appToolName)) tools
+    "explore" -> filterToolsForSubagentAccess SubagentReadOnly tools
     "plan" -> filter ((`elem` planNames) . (.appToolName)) tools
     "runtime-bounded" ->
         filter ((`notElem` runtimeHiddenNames) . (.appToolName)) tools
@@ -606,12 +685,6 @@ filterGrokToolsForType agentType tools = case agentType of
         ]
     runtimeHiddenNames :: [Text]
     runtimeHiddenNames = "task" : rootOnlyNames
-    exploreNames :: [Text]
-    exploreNames =
-        [ "read_file"
-        , "list_dir"
-        , "grep"
-        ]
     planNames :: [Text]
     planNames =
         [ "read_file"

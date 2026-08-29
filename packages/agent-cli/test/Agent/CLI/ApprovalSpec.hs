@@ -189,6 +189,98 @@ spec = do
                 (Text.isInfixOf "only editable file")
                 (const False)
 
+        it "allows only dynamically read-only shared subagent spawns" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ =
+                    modifyIORef' permissionRequests (+ 1)
+                        >> pure (Just PermissionAllowOnce)
+                sharedCall =
+                    functionToolCall "call-spawn" "spawn_agent" "{}"
+                worktreeCall =
+                    functionToolCall
+                        "call-spawn-worktree"
+                        "spawn_agent_in_worktree"
+                        "{}"
+                tools = registry
+                    [ tool "spawn_agent" AlwaysReadOnly
+                    , tool "spawn_agent_in_worktree" AlwaysReadOnly
+                    ]
+
+            approveToolDecisionWithReporter
+                request (\_ -> pure ()) policy allowed tools plan sharedCall
+                `shouldReturn` Right True
+            worktreeResult <- approveToolDecisionWithReporter
+                request (\_ -> pure ()) policy allowed tools plan worktreeCall
+            worktreeResult `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+            readIORef permissionRequests `shouldReturn` 0
+
+        it "allows only explore-classified Grok tasks in plan mode" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            let exploreCall = functionToolCall
+                    "call-task-explore"
+                    "task"
+                    "{\"subagent_type\":\"explore\"}"
+                generalCall = functionToolCall
+                    "call-task-general"
+                    "task"
+                    "{\"subagent_type\":\"general-purpose\"}"
+                dynamicTask = tool "task" $
+                    ClassifyReadOnly (\call -> pure (call == exploreCall))
+                tools = registry [dynamicTask]
+
+            approveToolDecisionWithReporter
+                (\_ -> pure Nothing)
+                (\_ -> pure ())
+                policy
+                allowed
+                tools
+                plan
+                exploreCall
+                `shouldReturn` Right True
+            generalResult <- approveToolDecisionWithReporter
+                (\_ -> pure Nothing)
+                (\_ -> pure ())
+                policy
+                allowed
+                tools
+                plan
+                generalCall
+            generalResult `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+
+        it "hard-denies top-level agent-session mutations in plan mode" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            let call =
+                    functionToolCall
+                        "call-create-session"
+                        "create_agent_session"
+                        "{}"
+                tools = registry [tool "create_agent_session" AlwaysReadOnly]
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy
+                allowed
+                tools
+                plan
+                call
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+
         it "reports remembered tool approval through the callback" do
             policy <- newIORef PromptMutating
             allowed <- newIORef Set.empty

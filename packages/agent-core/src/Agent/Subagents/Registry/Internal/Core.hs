@@ -28,6 +28,7 @@ import Agent.Subagents.Types
     , SubagentConfig(..)
     , SubagentId(..)
     , SubagentIdentity(..)
+    , SubagentAccessProfile(..)
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , maxWaitTimeoutMs
@@ -354,6 +355,7 @@ spawnSubagentAtWithIdPreparedForTurn
     asyncVar <- newTVarIO Nothing
     previousVar <- newTVarIO Nothing
     lastUpdateVar <- newTVarIO Nothing
+    accessProfileVar <- newTVarIO SubagentFullAccess
     admitted <- withMVar registry.registryLifecycle \_ -> atomically do
         closed <- readTVar registry.registryClosed
         aborted <- isRootTurnAborted registry rootTurnId
@@ -418,6 +420,8 @@ spawnSubagentAtWithIdPreparedForTurn
                                                                 , recordLastUpdate = lastUpdateVar
                                                                 , recordTaskPath = childPath
                                                                 , recordCwd = childCwd
+                                                                , recordAccessProfile =
+                                                                    accessProfileVar
                                                                 }
                                                         modifyTVar'
                                                             registry.registryLiveCount (+ 1)
@@ -505,6 +509,8 @@ runSupervisor registry record = awaitWork
 
     runWork work = do
         let onEvent = registry.registryOnEvent record.recordId
+        accessProfile <- atomically $ readTVar record.recordAccessProfile
+        let
             env = SubagentSpawnEnv
                 { subId = record.recordId
                 , subDepth = record.recordDepth
@@ -512,6 +518,7 @@ runSupervisor registry record = awaitWork
                 , subCwd = record.recordCwd
                 , subCancel = record.recordCancel
                 , subRootTurnId = work.workRootTurnId
+                , subAccessProfile = accessProfile
                 }
         previous <- atomically $ readTVar record.recordPreviousResponseId
         run <- readIORef registry.registryRunRef

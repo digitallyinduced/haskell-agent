@@ -570,6 +570,7 @@ rootContext registry = MultiAgentContext
     Nothing
     Nothing
     Nothing
+    (pure False)
 
 childContext registry = MultiAgentContext
     registry
@@ -584,6 +585,7 @@ childContext registry = MultiAgentContext
     Nothing
     Nothing
     Nothing
+    (pure False)
 
 withRegistry action =
     bracket

@@ -3,6 +3,7 @@ module Agent.Subagents.Types
     ( SubagentId(..)
     , subagentIdDecoder
     , SubagentIdentity(..)
+    , SubagentAccessProfile(..)
     , RootTurnId(..)
     , SubagentStatus(..)
     , SubagentConfig(..)
@@ -44,6 +45,17 @@ data SubagentIdentity = SubagentIdentity
     , identityTaskPath :: TaskPath
     }
     deriving (Eq, Show)
+
+-- | Host-enforced access carried with an agent for its whole lifetime.
+--
+-- This is deliberately independent from provider-facing agent types.  A
+-- Codex @spawn_agent@ call has no read-only argument, while plan mode still
+-- needs to force the resulting child (and its descendants) into a safe
+-- exploration profile.
+data SubagentAccessProfile
+    = SubagentFullAccess
+    | SubagentReadOnly
+    deriving (Eq, Ord, Show)
 
 data SubagentStatus
     = Pending
@@ -89,6 +101,7 @@ data SubagentSpawnEnv = SubagentSpawnEnv
     , subCwd :: !OsPath
     , subCancel :: !CancelFlag
     , subRootTurnId :: !(Maybe RootTurnId)
+    , subAccessProfile :: !SubagentAccessProfile
     }
 
 -- | CLI/provider callback that runs one child agent loop for a prompt.

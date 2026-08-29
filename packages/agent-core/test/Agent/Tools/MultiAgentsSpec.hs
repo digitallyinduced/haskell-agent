@@ -15,12 +15,15 @@ import Agent.ToolDispatch
     , ToolCallKind(..)
     , ToolCallResult(..)
     , dispatchToolCall
+    , noArgsTool
     )
 import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools.MultiAgents
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
+    , ToolSchema(..)
     , appToolHandlers
     , jsonToolParameters
     )
@@ -110,6 +113,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             { collaborationModel = Just "gpt-5.6-luna"
             , collaborationReasoningEffort = Just "high"
             , collaborationForkTurns = Just "none"
+            , collaborationAccessProfile = SubagentFullAccess
             }
         closeSubagentRegistry registry
 
@@ -225,6 +229,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             { collaborationModel = Just "gpt-test"
             , collaborationReasoningEffort = Just "high"
             , collaborationForkTurns = Just "3"
+            , collaborationAccessProfile = SubagentFullAccess
             }
         closeSubagentRegistry registry
 
@@ -263,6 +268,157 @@ spec = describe "Agent.Tools.MultiAgents" do
         readIORef cleaned `shouldReturn` False
         closeSubagentRegistry registry
         readIORef cleaned `shouldReturn` True
+
+    it "forces shared Codex spawns read-only while plan mode is active" do
+        observed <- newEmptyTMVarIO
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> do
+                atomically (putTMVar observed env.subAccessProfile)
+                pure (resultWithText "done"))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiPlanModeActive = pure True
+                , multiPrepareSpawn =
+                    Just (\_ options -> atomically (putTMVar prepared options))
+                }
+        agentId <- spawnFrom context "reader"
+        atomically (takeTMVar observed) `shouldReturn` SubagentReadOnly
+        options <- atomically (takeTMVar prepared)
+        options.collaborationAccessProfile `shouldBe` SubagentReadOnly
+        getSubagentAccessProfile registry agentId
+            `shouldReturn` Just SubagentReadOnly
+        closeSubagentRegistry registry
+
+    it "rejects worktree spawns before creating a worktree in plan mode" do
+        created <- newIORef False
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiPlanModeActive = pure True
+                , multiCreateWorktree = Just \_ -> do
+                    writeIORef created True
+                    pure (Left "must not run")
+                }
+            handlers = appToolHandlers (multiAgentTools context)
+            call = ToolCall
+                { callId = "plan-worktree"
+                , name = "collaboration.spawn_agent_in_worktree"
+                , arguments =
+                    "{\"task_name\":\"reader\",\"message\":\"inspect\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch handlers call
+        result.output `shouldSatisfy`
+            Text.isInfixOf "unavailable in plan mode"
+        readIORef created `shouldReturn` False
+        closeSubagentRegistry registry
+
+    it "drops unknown and mutating tools from read-only child surfaces" do
+        let tools =
+                [ fakeTool "read_file"
+                , fakeTool "grep"
+                , fakeTool "apply_patch"
+                , fakeTool "mcp_unknown"
+                ]
+        map (.appToolName)
+            (filterToolsForSubagentAccess SubagentReadOnly tools)
+            `shouldBe` ["read_file", "grep"]
+
+    it "only coordinates with known read-only targets in plan mode" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText "done"))
+            (\_ _ -> pure ())
+        agentId <- spawnFrom (rootContext registry Nothing) "worker"
+        let context = (rootContext registry Nothing)
+                { multiPlanModeActive = pure True }
+            handlers = appToolHandlers (multiAgentTools context)
+            sendCall = ToolCall
+                { callId = "send-plan"
+                , name = "collaboration.send_message"
+                , arguments =
+                    "{\"target\":\""
+                        <> agentId.unSubagentId
+                        <> "\",\"message\":\"inspect more\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+            listCall = ToolCall
+                { callId = "list-plan"
+                , name = "collaboration.list_agents"
+                , arguments = "{}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+            followupCall = ToolCall
+                { callId = "followup-plan"
+                , name = "collaboration.followup_task"
+                , arguments =
+                    "{\"target\":\""
+                        <> agentId.unSubagentId
+                        <> "\",\"message\":\"inspect more\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+            waitTargetCall = ToolCall
+                { callId = "wait-plan"
+                , name = "collaboration.wait_agent"
+                , arguments =
+                    "{\"targets\":[\""
+                        <> agentId.unSubagentId
+                        <> "\"],\"timeout_ms\":1}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+            interruptCall = ToolCall
+                { callId = "interrupt-plan"
+                , name = "collaboration.interrupt_agent"
+                , arguments =
+                    "{\"target\":\""
+                        <> agentId.unSubagentId
+                        <> "\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+            rootCall = ToolCall
+                { callId = "root-plan"
+                , name = "collaboration.send_message"
+                , arguments =
+                    "{\"target\":\"/root\",\"message\":\"unsafe\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        blocked <- dispatchToolCall defaultLoopDispatch handlers sendCall
+        blocked.output `shouldSatisfy`
+            Text.isInfixOf "known read-only agents"
+        blockedFollowup <-
+            dispatchToolCall defaultLoopDispatch handlers followupCall
+        blockedFollowup.output `shouldSatisfy`
+            Text.isInfixOf "known read-only agents"
+        blockedWait <-
+            dispatchToolCall defaultLoopDispatch handlers waitTargetCall
+        blockedWait.output `shouldSatisfy`
+            Text.isInfixOf "controlling known read-only agents"
+        blockedInterrupt <-
+            dispatchToolCall defaultLoopDispatch handlers interruptCall
+        blockedInterrupt.output `shouldSatisfy`
+            Text.isInfixOf "controlling known read-only agents"
+        blockedRoot <- dispatchToolCall defaultLoopDispatch handlers rootCall
+        blockedRoot.output `shouldSatisfy`
+            Text.isInfixOf "cannot message the root agent"
+        hidden <- dispatchToolCall defaultLoopDispatch handlers listCall
+        hidden.output `shouldNotSatisfy`
+            Text.isInfixOf agentId.unSubagentId
+        restrictSubagentAccess registry agentId SubagentReadOnly
+            `shouldReturn` Right ()
+        allowed <- dispatchToolCall defaultLoopDispatch handlers sendCall
+        allowed.output `shouldBe` "queued"
+        visible <- dispatchToolCall defaultLoopDispatch handlers listCall
+        visible.output `shouldSatisfy`
+            Text.isInfixOf agentId.unSubagentId
+        closeSubagentRegistry registry
 
     it "omits spawn_agent_in_worktree when the host does not provide it" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -434,6 +590,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiSendToRoot = Just deliverRoot
                 , multiSpawnModelGuidance = Nothing
                 , multiAllowedChildModels = Nothing
+                , multiPlanModeActive = pure False
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools context))
@@ -455,6 +612,17 @@ isRightResult :: Either a b -> Bool
 isRightResult (Right _) = True
 isRightResult _ = False
 
+fakeTool :: Text -> AppTool
+fakeTool name = AppTool
+    { appToolName = name
+    , appToolDescription = name
+    , appToolSchema = JsonFunctionSchema []
+    , appToolHandler = noArgsTool name (pure (Right "unused"))
+    , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
+    }
+
 rootContext
     :: SubagentRegistry
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
@@ -472,6 +640,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiSendToRoot = sendToRoot
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
+    , multiPlanModeActive = pure False
     }
 
 childContext :: SubagentRegistry -> SubagentId -> Int -> IO MultiAgentContext

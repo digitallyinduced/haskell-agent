@@ -14,7 +14,7 @@ import Agent.Provider (Provider, TokenProvider)
 import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
 import Agent.Subagents (SubagentId, SubagentRegistry)
 import Agent.Tools.MultiAgents (MultiAgentContext, SubagentWorktree)
-import Agent.Tools.PlanMode (PlanModeHooks)
+import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
 import Agent.Tools.Types (AppTool, ToolEnv)
 import Agent.Dialect (DialectId)
 import Control.Concurrent.MVar (MVar)
@@ -69,4 +69,5 @@ data PreparedChild = PreparedChild
     , preparedSession :: !SubagentSession
     , preparedToolEnv :: !ToolEnv
     , preparedMultiContext :: !MultiAgentContext
+    , preparedPlanModeRef :: !(IORef (Maybe PlanModeEnv))
     }
