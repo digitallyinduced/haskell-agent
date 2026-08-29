@@ -161,9 +161,16 @@ coreMigrations =
         , migrationStatements =
             [ "ALTER TABLE IF EXISTS harness.sessions\
               \ ADD COLUMN IF NOT EXISTS archived_at timestamptz"
-            , "CREATE INDEX IF NOT EXISTS sessions_archived_at_idx\
-              \ ON harness.sessions (archived_at DESC)\
-              \ WHERE deleted_at IS NULL AND archived_at IS NOT NULL"
+            , "DO $ha$\
+              \ BEGIN\
+              \   IF to_regclass('harness.sessions') IS NOT NULL THEN\
+              \     CREATE INDEX IF NOT EXISTS sessions_archived_at_idx\
+              \       ON harness.sessions (archived_at DESC)\
+              \       WHERE deleted_at IS NULL\
+              \         AND archived_at IS NOT NULL;\
+              \   END IF;\
+              \ END\
+              \ $ha$"
             ]
         }
     , Migration
@@ -171,8 +178,17 @@ coreMigrations =
         , migrationName = "account usage cache"
         , migrationStatements =
             accountUsageCacheSchemaStatements
-            <> [ "GRANT SELECT, INSERT, UPDATE\
-                \ ON harness.account_usage_cache TO ha_runtime"
+            <> [ "DO $ha$\
+                \ BEGIN\
+                \   IF EXISTS (\
+                \     SELECT 1 FROM pg_catalog.pg_roles\
+                \     WHERE rolname = 'ha_runtime'\
+                \   ) THEN\
+                \     GRANT SELECT, INSERT, UPDATE\
+                \       ON harness.account_usage_cache TO ha_runtime;\
+                \   END IF;\
+                \ END\
+                \ $ha$"
                ]
         }
     ]
