@@ -10,6 +10,13 @@ import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
     )
+import Agent.Codex.Dialect.Shell
+    ( CodexShellResult(..)
+    , continueCodexShellCommand
+    , newCodexShellSession
+    , startCodexShellCommand
+    , stopCodexShellCommands
+    )
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.ToolDispatch
@@ -98,6 +105,44 @@ spec = describe "Codex dialect" do
                             "{\"command\":\"test -f cwd-marker && printf cwd-defaulted\"}")
                     result.output
                         `shouldSatisfy` Text.isInfixOf "cwd-defaulted"
+
+    it "quiesces retained shell commands without closing the session" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            session <- newCodexShellSession env
+            started <-
+                startCodexShellCommand
+                    session
+                    (unsafeEncodeUtf dir)
+                    "sleep 30"
+                    1
+                    (\_ _ -> pure ())
+            commandId <- case started of
+                Right CodexShellRunning{codexShellSessionId} ->
+                    pure codexShellSessionId
+                _ ->
+                    expectationFailure
+                        "expected retained shell command"
+                        >> pure 0
+            stopCodexShellCommands session
+            continueCodexShellCommand session commandId "" 1 >>= \case
+                Left message ->
+                    message `shouldBe`
+                        "Unknown session_id: "
+                            <> Text.pack (show commandId)
+                Right _ ->
+                    expectationFailure
+                        "quiesced command remained addressable"
+            restarted <-
+                startCodexShellCommand
+                    session
+                    (unsafeEncodeUtf dir)
+                    "printf resumed"
+                    1000
+                    (\_ _ -> pure ())
+            restarted `shouldSatisfy` \case
+                Right CodexShellFinished{} -> True
+                _ -> False
 
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd

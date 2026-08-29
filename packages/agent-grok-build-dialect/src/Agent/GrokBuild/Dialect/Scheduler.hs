@@ -11,6 +11,7 @@ module Agent.GrokBuild.Dialect.Scheduler
     , newSchedulerRuntimeWithFire
     , newSchedulerRuntimeWithFireStatus
     , closeSchedulerRuntime
+    , setSchedulerPaused
     , schedulerTools
     , schedulerCreateTool
     , schedulerDeleteTool
@@ -64,6 +65,7 @@ import Control.Concurrent.MVar
     , modifyMVar_
     , newMVar
     , readMVar
+    , withMVar
     )
 import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
@@ -134,6 +136,8 @@ data SchedulerRuntime = SchedulerRuntime
     , schedulerSignal :: !(Chan SchedulerSignal)
     , schedulerWorker :: !(Async ())
     , schedulerNow :: !(IO UTCTime)
+    , schedulerPaused :: !(MVar Bool)
+    , schedulerCycle :: !(MVar ())
     }
 
 newSchedulerRuntime
@@ -200,13 +204,19 @@ newSchedulerRuntimeWithFireStatus now fire isActive = do
         , schedulerTasks = Map.empty
         }
     signal <- newChan
+    paused <- newMVar False
+    cycleGate <- newMVar ()
     worker <- asyncWithUnmask \restore ->
-        restore (schedulerActor now fire isActive state signal)
+        restore
+            (schedulerActor
+                now fire isActive state paused cycleGate signal)
     pure SchedulerRuntime
         { schedulerState = state
         , schedulerSignal = signal
         , schedulerWorker = worker
         , schedulerNow = now
+        , schedulerPaused = paused
+        , schedulerCycle = cycleGate
         }
 
 closeSchedulerRuntime :: SchedulerRuntime -> IO ()
@@ -220,6 +230,20 @@ closeSchedulerRuntime runtime = do
             Left () -> do
                 cancel runtime.schedulerWorker
                 void (waitCatch runtime.schedulerWorker)
+
+-- | Pause or resume scheduled fires.
+--
+-- Pausing waits for an in-flight scheduler cycle to finish. Callers can then
+-- interrupt any child that cycle launched and know no later fire can race
+-- behind the interruption. Existing schedule definitions remain intact and
+-- resume when plan mode exits.
+setSchedulerPaused :: SchedulerRuntime -> Bool -> IO ()
+setSchedulerPaused runtime paused = do
+    modifyMVar_ runtime.schedulerPaused (const (pure paused))
+    writeChan runtime.schedulerSignal SchedulerWake
+    if paused
+        then withMVar runtime.schedulerCycle (const (pure ()))
+        else pure ()
 
 schedulerTools :: SchedulerRuntime -> [AppTool]
 schedulerTools runtime =
@@ -575,11 +599,29 @@ schedulerActor
     -> (ScheduledFire -> IO (Either Text SubagentId))
     -> (SubagentId -> IO Bool)
     -> MVar SchedulerState
+    -> MVar Bool
+    -> MVar ()
     -> Chan SchedulerSignal
     -> IO ()
-schedulerActor now fire isActive state signal = loop
+schedulerActor now fire isActive state paused cycleGate signal = loop
   where
     loop = do
+        isPaused <- readMVar paused
+        delayMicros <-
+            if isPaused
+                then pure maximumActorSleepMicros
+                else withMVar cycleGate \_ -> do
+                    -- Recheck after taking the gate: plan-mode activation may
+                    -- have published the pause while an earlier cycle held it.
+                    pausedAtGate <- readMVar paused
+                    if pausedAtGate
+                        then pure maximumActorSleepMicros
+                        else runCycle
+        race (threadDelay delayMicros) (readChan signal) >>= \case
+            Right SchedulerStop -> pure ()
+            _ -> loop
+
+    runCycle = do
         refreshActiveAgents
         current <- now
         fires <- modifyMVar state \snapshot ->
@@ -596,10 +638,7 @@ schedulerActor now fire isActive state signal = loop
                 }
         currentAfterFire <- now
         snapshot <- readMVar state
-        let delayMicros = nextDelayMicros currentAfterFire snapshot
-        race (threadDelay delayMicros) (readChan signal) >>= \case
-            Right SchedulerStop -> pure ()
-            _ -> loop
+        pure (nextDelayMicros currentAfterFire snapshot)
 
     runFire scheduled =
         tryAny (fire scheduled) >>= \case

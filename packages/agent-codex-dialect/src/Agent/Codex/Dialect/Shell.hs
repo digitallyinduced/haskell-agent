@@ -7,6 +7,7 @@ module Agent.Codex.Dialect.Shell
     ( CodexShellSession
     , CodexShellResult(..)
     , newCodexShellSession
+    , stopCodexShellCommands
     , closeCodexShellSession
     , startCodexShellCommand
     , continueCodexShellCommand
@@ -88,6 +89,27 @@ closeCodexShellSession session = do
     commands <- modifyMVar session.sessionCommands \case
         Nothing -> pure (Nothing, [])
         Just current -> pure (Nothing, Map.elems current.storeCommands)
+    stopCommands commands
+
+-- | Stop and join every retained command without closing the session.
+--
+-- Plan-mode activation uses this as a quiescence barrier. Keeping the store
+-- open lets normal shell use resume after plan mode exits, while removing the
+-- commands under the store lock prevents a concurrent @write_stdin@ from
+-- retaining a handle after the barrier completes.
+stopCodexShellCommands :: CodexShellSession -> IO ()
+stopCodexShellCommands session = do
+    commands <- modifyMVar session.sessionCommands \case
+        Nothing -> pure (Nothing, [])
+        Just current ->
+            pure
+                ( Just current { storeCommands = Map.empty }
+                , Map.elems current.storeCommands
+                )
+    stopCommands commands
+
+stopCommands :: [ManagedCommand] -> IO ()
+stopCommands commands =
     mapConcurrently_
         (\task ->
             void $ try @_ @SomeException $

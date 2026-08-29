@@ -7,6 +7,7 @@ module Agent.GrokBuild.Dialect.Shell
     ( GrokSession(..)
     , PersistentShell(..)
     , newGrokSession
+    , stopGrokBackgroundTasks
     , closeGrokSession
     , runForegroundStreaming
     , startBackground
@@ -38,7 +39,7 @@ import Agent.Tools.IO
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (race)
+import Control.Concurrent.Async (mapConcurrently_, race)
 import Control.Concurrent.MVar
 import Control.Exception.Safe (mask, onException, throwIO, tryAny)
 import Control.Monad (void)
@@ -127,9 +128,25 @@ newGrokSession env = do
 -- Call this when the CLI/session ends, including after exceptions.
 closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
-    modifyMVar_ session.grokTasks \store ->
-        pure store { backgroundTasks = Map.empty }
+    stopGrokBackgroundTasks session
     closeResourceScope session.grokResources
+
+-- | Stop and join every retained background command without closing the
+-- persistent Grok shell session.
+--
+-- Removing the tasks while holding the store lock makes this a quiescence
+-- barrier for plan-mode entry. Releasing each resource runs the registered
+-- 'stopShellCommand' cleanup and joins the command.
+stopGrokBackgroundTasks :: GrokSession -> IO ()
+stopGrokBackgroundTasks session = do
+    tasks <- modifyMVar session.grokTasks \store ->
+        pure
+            ( store { backgroundTasks = Map.empty }
+            , Map.elems store.backgroundTasks
+            )
+    mapConcurrently_
+        (releaseResource . (.backgroundResource))
+        tasks
 
 runForegroundStreaming
     :: GrokSession

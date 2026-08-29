@@ -6,6 +6,13 @@ import Agent.GrokBuild.Dialect.Runtime
     , newGrokCodingTools
     )
 import Agent.GrokBuild.Dialect.Scheduler
+import Agent.GrokBuild.Dialect.Shell
+    ( closeGrokSession
+    , newGrokSession
+    , readTaskOutput
+    , startBackground
+    , stopGrokBackgroundTasks
+    )
 import Agent.GrokBuild.Dialect.Task
     ( filterGrokToolsForType
     , runtimeSubagentType
@@ -77,6 +84,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "plan-mode quiescence" do
+        it "stops retained Grok commands without closing the shell session" do
+            withSystemTempDirectory "grok-quiesce" \dir -> do
+                env <- defaultToolEnv (unsafeEncodeUtf dir)
+                session <- newGrokSession env
+                startBackground session "sleep 30"
+                    `shouldReturn` Right
+                        "Command moved to background.\n\
+                        \task_id: t1\n\
+                        \Use get_command_or_subagent_output to read output. Do not poll in a loop."
+                stopGrokBackgroundTasks session
+                readTaskOutput session "t1" Nothing
+                    `shouldReturn` "Unknown task_id: t1"
+                startBackground session "printf resumed"
+                    `shouldReturn` Right
+                        "Command moved to background.\n\
+                        \task_id: t2\n\
+                        \Use get_command_or_subagent_output to read output. Do not poll in a loop."
+                closeGrokSession session
+
     describe "scheduler tools" do
         it "advertises the upstream public schema without recurring" do
             runtime <- testScheduler (pure fixedTime) (\_ -> pure (Right testAgent))
@@ -197,6 +224,33 @@ spec = do
                     readIORef fireCount `shouldReturn` 1
                     writeIORef active False
                     waitForCount fireCount 2
+
+        it "parks due scheduler fires while plan mode is active" do
+            fired <- newEmptyMVar
+            bracket
+                (testScheduler
+                    (pure fixedTime)
+                    (\fire -> do
+                        _ <- tryPutMVar fired fire
+                        pure (Right testAgent)))
+                closeSchedulerRuntime
+                \runtime -> do
+                    setSchedulerPaused runtime True
+                    _ <- call
+                        [schedulerCreateTool runtime]
+                        "scheduler_create"
+                        "{\"interval\":\"60s\",\"prompt\":\"mutate later\",\
+                        \\"fire_immediately\":true}"
+                    timeout 100000 (takeMVar fired)
+                        `shouldReturn` Nothing
+                    setSchedulerPaused runtime False
+                    timeout 1000000 (takeMVar fired)
+                        `shouldReturn` Just
+                            ScheduledFire
+                                { scheduledFireTaskId = "sched-1"
+                                , scheduledFirePrompt = "mutate later"
+                                , scheduledFireIntervalSeconds = 60
+                                }
 
         it "launches distinct due tasks concurrently with a bound of eight" do
             clock <- newIORef fixedTime
