@@ -1,9 +1,8 @@
 module Agent.GrokBuild.Dialect.SearchReplace (searchReplaceTool) where
 
-import Agent.OsPath (fromText)
+import Agent.OsPath (fromText, toText)
 import System.OsPath
     ( OsPath
-    , equalFilePath
     , takeDirectory
     , takeFileName
     )
@@ -15,6 +14,7 @@ import Agent.ToolDispatch
     , typedTool
     )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
+import Agent.Tools.PlanMode.File (renderPlanFileError)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.GrokBuild.Dialect.Json (optionalBool)
 import Agent.Tools.IO
@@ -32,14 +32,17 @@ import Agent.Tools.PlanMode
     ( PlanModeEnv
     , isPlanFileEditTarget
     , isPlanModeActive
-    , planFileName
     , planFilePath
     , planModeBlockedEditMessage
+    , writePlanSnapshot
     )
 import Agent.Tools.Types
     ( AppTool
+    , PlanModeCapability(..)
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
+    , withPlanModeCapability
+    , withToolCallNormalizer
     , withToolResourceClaims
     )
 import Control.Monad (unless, when)
@@ -53,6 +56,9 @@ import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Lazy as LazyText
+import Data.Aeson (object, (.=))
+import qualified Data.Aeson.Text as Aeson
 import System.Directory.OsPath (doesFileExist)
 
 data SearchReplaceArgs = SearchReplaceArgs
@@ -72,7 +78,10 @@ searchReplaceArgsDecoder = Json.object $
 
 searchReplaceTool :: ToolEnv -> PlanModeEnv -> AppTool
 searchReplaceTool env planMode =
-    withToolResourceClaims (searchReplaceResourceClaims env) $
+    withPlanModeCapability
+        (PlanModePlanFileWrite (searchReplacePlanTarget planMode)) $
+    withToolCallNormalizer (normalizePlanAlias planMode) $
+    withToolResourceClaims (searchReplaceResourceClaims env planMode) $
     jsonTool "search_replace" searchReplaceDescription
     [ PropertySchema "file_path" PropertyString True $ Just
         "The path to the file to modify. Relative paths are resolved within the workspace. Absolute paths are accepted only when they resolve within the workspace."
@@ -89,14 +98,59 @@ searchReplaceTool env planMode =
 
 searchReplaceResourceClaims
     :: ToolEnv
+    -> PlanModeEnv
     -> ToolCall
     -> IO (Either Text [ToolResourceClaim])
-searchReplaceResourceClaims env call =
+searchReplaceResourceClaims env planMode call =
     case decodeToolArguments searchReplaceArgsDecoder call.arguments of
         Left err -> pure (Left err)
-        Right args ->
-            resolveUnderCwd env (fromText args.filePath)
-                >>= pure . fmap claimsForResolved
+        Right args -> do
+            planPath <- planFilePath planMode
+            active <- isPlanModeActive planMode
+            if active && isPlanFileEditTarget planPath (fromText args.filePath)
+                then pure (Right (claimsForResolved planPath))
+                else
+                    resolveUnderCwd env (fromText args.filePath)
+                        >>= pure . fmap claimsForResolved
+
+searchReplacePlanTarget
+    :: PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text OsPath)
+searchReplacePlanTarget _ call =
+    pure $
+        fromText . (.filePath)
+            <$> decodeToolArguments searchReplaceArgsDecoder call.arguments
+
+-- | Grok Build models conventionally emit @plan.md@. Rewrite only that exact
+-- provider alias while plan mode is active; every later stage sees the same
+-- canonical call. Other relative paths are deliberately not aliases.
+normalizePlanAlias
+    :: PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text ToolCall)
+normalizePlanAlias planMode call = do
+    active <- isPlanModeActive planMode
+    if not active
+        then pure (Right call)
+        else case decodeToolArguments searchReplaceArgsDecoder call.arguments of
+            Left err -> pure (Left err)
+            Right args
+                | args.filePath `elem` ["plan.md", "./plan.md"] -> do
+                    path <- planFilePath planMode
+                    pure . Right $
+                        call
+                            { arguments =
+                                LazyText.toStrict
+                                    . Aeson.encodeToLazyText
+                                    $ object
+                                        [ "file_path" .= toText path
+                                        , "old_string" .= args.oldString
+                                        , "new_string" .= args.newString
+                                        , "replace_all" .= args.replaceAll
+                                        ]
+                            }
+                | otherwise -> pure (Right call)
 
 claimsForResolved :: OsPath -> [ToolResourceClaim]
 claimsForResolved resolved
@@ -126,7 +180,7 @@ searchReplaceDescription =
 runSearchReplace :: ToolEnv -> PlanModeEnv -> SearchReplaceArgs -> IO (Either Text Text)
 runSearchReplace env planMode args = runExceptT do
     guardPlanMode env planMode args.filePath
-    runSearchReplaceBody env args
+    runSearchReplaceBody env planMode args
 
 guardPlanMode :: ToolEnv -> PlanModeEnv -> Text -> ExceptT Text IO ()
 guardPlanMode env planMode filePath = do
@@ -136,36 +190,45 @@ guardPlanMode env planMode filePath = do
 checkPlanPath :: ToolEnv -> PlanModeEnv -> Text -> ExceptT Text IO ()
 checkPlanPath env planMode filePath = do
     planPath <- lift (planFilePath planMode)
-    if equalFilePath planFileName (fromText filePath)
-        then pure ()
-        else do
-            path <- resolvePath env filePath
-            unless (isPlanFileEditTarget planPath path)
-                (throwE (planModeBlockedEditMessage planPath))
+    path <- resolvePath env planMode filePath
+    unless (isPlanFileEditTarget planPath path)
+        (throwE (planModeBlockedEditMessage planPath))
 
-runSearchReplaceBody :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
-runSearchReplaceBody env args
+runSearchReplaceBody
+    :: ToolEnv
+    -> PlanModeEnv
+    -> SearchReplaceArgs
+    -> ExceptT Text IO Text
+runSearchReplaceBody env planMode args
     | args.oldString == args.newString =
         throwE "Old string and new string are the same"
-    | Text.null args.oldString = createNewFile env args
-    | otherwise = replaceInFile env args
+    | Text.null args.oldString = createNewFile env planMode args
+    | otherwise = replaceInFile env planMode args
 
-createNewFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
-createNewFile env args = do
-    (path, display) <- resolveDisplayPath env args.filePath
-    gitignoreGuard env path display
+createNewFile
+    :: ToolEnv
+    -> PlanModeEnv
+    -> SearchReplaceArgs
+    -> ExceptT Text IO Text
+createNewFile env planMode args = do
+    (path, display) <- resolveDisplayPath env planMode args.filePath
+    gitignoreGuard env planMode path display
     exists <- lift (doesFileExist path)
     when exists do
         existing <- ExceptT (readTextFile path)
         unless (Text.null existing) $
             throwE "An empty old_string cannot overwrite an existing non-empty file."
-    ExceptT (writeTextFile path args.newString)
+    writeResolved planMode path args.newString
     pure ("The file " <> display <> " has been created successfully.")
 
-replaceInFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
-replaceInFile env args = do
-    (path, display) <- resolveDisplayPath env args.filePath
-    gitignoreGuard env path display
+replaceInFile
+    :: ToolEnv
+    -> PlanModeEnv
+    -> SearchReplaceArgs
+    -> ExceptT Text IO Text
+replaceInFile env planMode args = do
+    (path, display) <- resolveDisplayPath env planMode args.filePath
+    gitignoreGuard env planMode path display
     exists <- lift (doesFileExist path)
     unless exists $
         throwE ("File not found: " <> display)
@@ -179,7 +242,7 @@ replaceInFile env args = do
         throwE
             "The string to replace was found multiple times in the file. Use replace_all to replace all occurrences, or include more context to only edit one occurrence."
     let updated = replaceOccurrences args.oldString args.newString args.replaceAll content
-    ExceptT (writeTextFile path updated)
+    writeResolved planMode path updated
     pure $
         if args.replaceAll && count > 1
             then "The file " <> display
@@ -187,21 +250,59 @@ replaceInFile env args = do
             else "The file " <> display
                 <> " has been updated successfully."
 
-resolvePath :: ToolEnv -> Text -> ExceptT Text IO OsPath
-resolvePath env path =
-    ExceptT (resolveUnderCwd env (fromText path))
+resolvePath :: ToolEnv -> PlanModeEnv -> Text -> ExceptT Text IO OsPath
+resolvePath env planMode path = do
+    active <- lift (isPlanModeActive planMode)
+    expected <- lift (planFilePath planMode)
+    if active && isPlanFileEditTarget expected (fromText path)
+        then pure expected
+        else ExceptT (resolveUnderCwd env (fromText path))
 
-resolveDisplayPath :: ToolEnv -> Text -> ExceptT Text IO (OsPath, Text)
-resolveDisplayPath env requested = do
-    path <- resolvePath env requested
-    display <- lift (displayPathInWorkspace env path)
+resolveDisplayPath
+    :: ToolEnv
+    -> PlanModeEnv
+    -> Text
+    -> ExceptT Text IO (OsPath, Text)
+resolveDisplayPath env planMode requested = do
+    path <- resolvePath env planMode requested
+    expected <- lift (planFilePath planMode)
+    display <-
+        if isPlanFileEditTarget expected path
+            then pure (toText path)
+            else lift (displayPathInWorkspace env path)
     pure (path, display)
 
-gitignoreGuard :: ToolEnv -> OsPath -> Text -> ExceptT Text IO ()
-gitignoreGuard env path display = do
-    ignored <- lift (isGitIgnored env.toolCwd path)
-    when ignored $
-        throwE ("Error: " <> display <> " is ignored by .gitignore and cannot be edited.")
+gitignoreGuard
+    :: ToolEnv
+    -> PlanModeEnv
+    -> OsPath
+    -> Text
+    -> ExceptT Text IO ()
+gitignoreGuard env planMode path display = do
+    expected <- lift (planFilePath planMode)
+    unless (isPlanFileEditTarget expected path) do
+        ignored <- lift (isGitIgnored env.toolCwd path)
+        when ignored $
+            throwE
+                ("Error: " <> display
+                    <> " is ignored by .gitignore and cannot be edited.")
+
+writeResolved
+    :: PlanModeEnv
+    -> OsPath
+    -> Text
+    -> ExceptT Text IO ()
+writeResolved planMode path content = do
+    expected <- lift (planFilePath planMode)
+    if isPlanFileEditTarget expected path
+        then
+            ExceptT $
+                writePlanSnapshot planMode content
+                    >>= pure
+                        . either
+                            (Left . renderPlanFileError)
+                            (const (Right ()))
+        else ExceptT (writeTextFile path content)
 
 nearestMatchHint :: Text -> Text -> Text
 nearestMatchHint file oldString =

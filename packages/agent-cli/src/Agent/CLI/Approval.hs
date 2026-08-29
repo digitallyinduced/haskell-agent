@@ -24,8 +24,7 @@ import Agent.CLI.Style
     , roleWarn
     )
 import Agent.CLI.Terminal (resolveColor)
-import Agent.JsonText (jsonTextFieldDefault)
-import Agent.OsPath (fromText, toText)
+import Agent.OsPath (toText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
@@ -39,7 +38,9 @@ import Agent.Tools.PlanMode
     , planModeBlockedEditMessage
     )
 import Agent.Tools.Types
-    ( ToolRegistry
+    ( AppTool(..)
+    , PlanModeCapability(..)
+    , ToolRegistry
     , lookupRegisteredTool
     , toolAllowsWithoutPrompt
     )
@@ -140,21 +141,34 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
             report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)
         Nothing -> do
-            readOnly <- case lookupRegisteredTool call.name tools of
+            let registered = lookupRegisteredTool call.name tools
+            readOnly <- case registered of
                 Nothing -> pure False
                 Just tool -> toolAllowsWithoutPrompt tool call
-            -- Plan mode hard-denies writes even under yolo. The dedicated
-            -- write_plan tool and Grok's path-locked plan.md edit are the only
-            -- mutations allowed. Shell tools are blocked entirely because an
-            -- arbitrary shell script cannot be proven read-only.
-            if planModeBlocksCall planActive planPath readOnly call
-                then do
-                    let msg = planModeBlockedEditMessage planPath
+            -- Plan-mode authority is independent from generic approval. In
+            -- particular, ApproveAll/yolo cannot make an unknown or mutating
+            -- tool plan-safe. Plan-file writers must prove their normalized
+            -- target is the exact canonical session plan.
+            blocked <-
+                planModeBlockReason
+                    planActive
+                    planPath
+                    registered
+                    call
+            case blocked of
+                Just msg -> do
                     report (ApprovalWarning msg)
                     pure (Left msg)
-                else do
-                    -- plan.md edits are auto-approved while plan mode is active.
-                    if isPlanFileWrite planActive planPath call
+                Nothing -> do
+                    fileWrite <-
+                        isAuthorizedPlanFileWrite
+                            planActive
+                            planPath
+                            registered
+                            call
+                    -- The only mutation admitted by plan-mode capability is
+                    -- the exact plan-file write; it is auto-approved.
+                    if fileWrite
                         then pure (Right True)
                         else do
                             allowed <- readIORef allowedToolsRef
@@ -193,38 +207,53 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
                                                 Just PermissionDeny ->
                                                     pure (Right False)
 
-planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool
-planModeBlocksCall active planPath readOnly call
-    | not active = False
-    | name == "apply_patch" = True
-    | name == "write_plan" = False
-    | name == "exit_plan_mode" = False
-    | name == "search_replace" =
-        let target = jsonTextFieldDefault "file_path" call.arguments
-        in Text.null target
-            || not (isPlanFileEditTarget planPath (fromText target))
-    | name `elem` ["shell_command", "run_terminal_cmd"] =
-        True
-    | name == "write_stdin" = True
-    | name `elem`
-        [ "spawn_agent", "followup_task", "create_agent_session"
-        , "send_agent_session_message"
-        ] = True
-    | otherwise = not readOnly
+planModeBlockReason
+    :: Bool
+    -> OsPath
+    -> Maybe AppTool
+    -> ToolCall
+    -> IO (Maybe Text)
+planModeBlockReason active planPath registered call
+    | not active = pure Nothing
+    | otherwise = case (.appToolPlanModeCapability) <$> registered of
+        Nothing -> pure (Just unknownMessage)
+        Just PlanModeUnknown -> pure (Just unknownMessage)
+        Just PlanModeBlocked -> pure (Just blockedMessage)
+        Just PlanModeReadOnly -> pure Nothing
+        Just PlanModeInteraction -> pure Nothing
+        Just PlanModeSafeSubagent -> pure Nothing
+        Just PlanModeScopedState -> pure Nothing
+        Just (PlanModePlanFileWrite resolveTarget) ->
+            resolveTarget call >>= \case
+                Left err ->
+                    pure . Just $
+                        planModeBlockedEditMessage planPath
+                            <> " The plan-file target could not be validated: "
+                            <> err
+                Right target
+                    | isPlanFileEditTarget planPath target -> pure Nothing
+                    | otherwise -> pure (Just blockedMessage)
   where
-    name = canonicalToolName call.name
+    unknownMessage =
+        "Rejected: unknown tool `" <> call.name
+            <> "` has no plan-mode capability."
+    blockedMessage = planModeBlockedEditMessage planPath
 
-isPlanFileWrite :: Bool -> OsPath -> ToolCall -> Bool
-isPlanFileWrite active planPath call
-    | not active = False
-    | name == "write_plan" = True
-    | name == "search_replace" =
-        let target = jsonTextFieldDefault "file_path" call.arguments
-        in not (Text.null target)
-            && isPlanFileEditTarget planPath (fromText target)
-    | otherwise = False
-  where
-    name = canonicalToolName call.name
+isAuthorizedPlanFileWrite
+    :: Bool
+    -> OsPath
+    -> Maybe AppTool
+    -> ToolCall
+    -> IO Bool
+isAuthorizedPlanFileWrite active planPath registered call
+    | not active = pure False
+    | otherwise = case (.appToolPlanModeCapability) <$> registered of
+        Just (PlanModePlanFileWrite resolveTarget) ->
+            resolveTarget call >>= \case
+                Right target ->
+                    pure (isPlanFileEditTarget planPath target)
+                Left _ -> pure False
+        _ -> pure False
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO Text
 toggleAlwaysApprove policyRef projectRoot = do

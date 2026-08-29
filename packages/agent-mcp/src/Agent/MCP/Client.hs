@@ -17,6 +17,7 @@ import Agent.Tools.IO (terminateProcessGroup)
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , PlanModeCapability(..)
     , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
@@ -840,6 +841,9 @@ appToolFor client tool = AppTool
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    -- MCP read-only annotations are advisory and cannot grant plan-mode
+    -- authority to an otherwise unknown remote tool.
+    , appToolPlanModeCapability = PlanModeBlocked
     }
   where
     qualifiedName = qualifiedMcpToolName

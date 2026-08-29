@@ -4,6 +4,7 @@ module Agent.Tools.Types
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolBatchPhase(..)
+    , PlanModeCapability(..)
     , ToolCallNormalizer
     , ToolRegistry
     , ToolEnv(..)
@@ -23,6 +24,7 @@ module Agent.Tools.Types
     , withToolResourceClaims
     , withToolBatchPhase
     , withToolCallNormalizer
+    , withPlanModeCapability
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -81,6 +83,22 @@ data ToolSchema
     | FreeformGrammarSchema !Text !Text
     deriving (Eq, Show)
 
+-- | Host-enforced plan-mode access. This is intentionally separate from
+-- generic approval: yolo/auto-approval must never expand plan-mode authority.
+--
+-- A plan-file writer carries a resolver for the effective target used by the
+-- normalized call. Approval compares that target to the canonical session
+-- plan path before any resource claim or handler is run.
+data PlanModeCapability
+    = PlanModeUnknown
+    | PlanModeBlocked
+    | PlanModeReadOnly
+    | PlanModeInteraction
+    | PlanModeSafeSubagent
+    | PlanModeScopedState
+    | PlanModePlanFileWrite
+        !(ToolCall -> IO (Either Text OsPath))
+
 -- | Whether a call may run without generic user approval.
 data ApprovalRule
     = AlwaysReadOnly
@@ -128,6 +146,7 @@ data AppTool = AppTool
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
     , appToolBatchPhase :: !ToolBatchPhase
     , appToolCallNormalizer :: !(Maybe ToolCallNormalizer)
+    , appToolPlanModeCapability :: !PlanModeCapability
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -213,9 +232,11 @@ jsonTool
     -> ToolHandler
     -> AppTool
 jsonTool name description parameters readOnly execution =
-    jsonAppToolWithExecution name description parameters
-        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
-        execution
+    withPlanModeCapability
+        (if readOnly then PlanModeReadOnly else PlanModeBlocked)
+        . jsonAppToolWithExecution name description parameters
+            (if readOnly then AlwaysReadOnly else AlwaysPrompt)
+            execution
 
 -- | Construct a JSON tool with the conservative turn-sequential default.
 jsonAppTool
@@ -248,6 +269,7 @@ jsonAppToolWithExecution
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeUnknown
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -282,6 +304,7 @@ rawJsonAppToolWithExecution
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeUnknown
     }
 
 withToolResourceClaims
@@ -301,6 +324,10 @@ withToolCallNormalizer
     -> AppTool
 withToolCallNormalizer normalizer tool =
     tool { appToolCallNormalizer = Just normalizer }
+
+withPlanModeCapability :: PlanModeCapability -> AppTool -> AppTool
+withPlanModeCapability capability tool =
+    tool { appToolPlanModeCapability = capability }
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -331,6 +358,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeUnknown
     }
 
 -- | Construct a freeform tool that advertises an explicit grammar.
@@ -354,6 +382,7 @@ freeformGrammarAppToolWithExecution
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeUnknown
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry

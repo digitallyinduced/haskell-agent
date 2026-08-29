@@ -52,9 +52,11 @@ import Agent.ToolDSL
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
     ( AppTool
+    , PlanModeCapability(..)
     , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withPlanModeCapability
     , withToolBatchPhase
     )
 import Agent.Tools.PlanMode.File
@@ -259,6 +261,7 @@ enterCodexPlanModeTool env =
 
 enterPlanModeToolWith :: PlanCompletion -> PlanModeEnv -> AppTool
 enterPlanModeToolWith completion env =
+    withPlanModeCapability PlanModeInteraction $
     withToolBatchPhase ToolBatchModeBarrier $
         jsonTool "enter_plan_mode"
             (enterPlanDescription completion)
@@ -318,7 +321,10 @@ writePlanArgsDecoder = objectArgs \object ->
         WritePlanArgs <$> reqText object "content"
 
 writePlanTool :: PlanModeEnv -> AppTool
-writePlanTool env = jsonTool "write_plan" writePlanDescription
+writePlanTool env =
+    withPlanModeCapability
+        (PlanModePlanFileWrite (\_ -> Right <$> planFilePath env)) $
+    jsonTool "write_plan" writePlanDescription
     [ PropertySchema "content" PropertyString True $ Just
         "Complete Markdown content to store in the session plan.md file."
     ]
@@ -354,6 +360,7 @@ exitPlanArgsDecoder = objectArgs \object -> ExitPlanArgs
 
 exitPlanModeTool :: PlanModeEnv -> AppTool
 exitPlanModeTool env =
+    withPlanModeCapability PlanModeInteraction $
     withToolBatchPhase ToolBatchTerminal $
         jsonTool "exit_plan_mode" exitPlanDescription
             [ PropertySchema "summary" PropertyString False $ Just
@@ -469,7 +476,9 @@ askUserQuestionArgsDecoder = objectArgs \object -> do
                     }
 
 askUserQuestionTool :: PlanModeEnv -> AppTool
-askUserQuestionTool env = jsonTool "ask_user_question" askUserDescription
+askUserQuestionTool env =
+    withPlanModeCapability PlanModeInteraction $
+    jsonTool "ask_user_question" askUserDescription
     [ PropertySchema "questions"
         (PropertyArray (PropertyObject
             [ PropertySchema "question" PropertyString True $ Just

@@ -14,6 +14,7 @@ import Agent.MCP.Types
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , PlanModeCapability(..)
     , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
@@ -658,6 +659,7 @@ mcpSearchTool fleet = AppTool
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeReadOnly
     }
 
 grokSearchTool :: McpFleet -> AppTool
@@ -781,6 +783,7 @@ grokSearchTool fleet = AppTool
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeReadOnly
     }
 
 callCatalogEntryWithReconnect
@@ -928,6 +931,7 @@ mcpCallTool fleet = AppTool
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeBlocked
     }
 
 grokUseTool :: McpFleet -> AppTool
@@ -959,6 +963,7 @@ grokUseTool fleet = AppTool
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeBlocked
     }
 
 mcpListResourcesTool :: McpFleet -> AppTool
@@ -1000,6 +1005,7 @@ mcpListResourcesTool fleet = AppTool
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeReadOnly
     }
   where
     resourceJson :: McpResource -> Value
@@ -1047,6 +1053,7 @@ mcpReadResourceTool fleet = AppTool
     , appToolResourceClaims = Nothing
     , appToolBatchPhase = ToolBatchNormal
     , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeReadOnly
     }
   where
     readArgumentsDecoder = Json.object do

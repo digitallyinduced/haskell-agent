@@ -62,8 +62,10 @@ import Agent.ToolDSL
 import Agent.ToolDispatch (ToolCall(..), typedTool, typedToolWithCall)
 import Agent.Tools.Types
     ( AppTool
+    , PlanModeCapability(..)
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withPlanModeCapability
     )
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
@@ -131,14 +133,15 @@ multiAgentToolNames =
 
 multiAgentTools :: MultiAgentContext -> [AppTool]
 multiAgentTools ctx =
-    [spawnAgentTool ctx]
-    <> maybe [] (const [spawnAgentInWorktreeTool ctx]) ctx.multiCreateWorktree
-    <> [ waitAgentTool ctx
-    , sendMessageTool ctx
-    , followupTaskTool ctx
-    , listAgentsTool ctx
-    , interruptAgentTool ctx
-    ]
+    map (withPlanModeCapability PlanModeSafeSubagent) $
+        [spawnAgentTool ctx]
+        <> maybe [] (const [spawnAgentInWorktreeTool ctx]) ctx.multiCreateWorktree
+        <> [ waitAgentTool ctx
+           , sendMessageTool ctx
+           , followupTaskTool ctx
+           , listAgentsTool ctx
+           , interruptAgentTool ctx
+           ]
 
 --------------------------------------------------------------------------------
 -- spawn_agent
