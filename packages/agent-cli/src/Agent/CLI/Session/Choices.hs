@@ -36,6 +36,7 @@ import Agent.CLI.Usage
     )
 import Agent.Claude
     ( ClaudeCodeAuth(..)
+    , ClaudeCodeTransport(..)
     , loadClaudeCodeAuth
     )
 import Agent.Dialect
@@ -182,12 +183,16 @@ accountUsageText color provider tokenProvider openAiPool = do
                     pure (roleError color ("usage: " <> err))
                 Right auth ->
                     pure $
-                        roleMuted color $
-                            "usage: Claude Code "
-                                <> fromMaybe "subscription" auth.subscriptionType
-                                <> " · "
-                                <> auth.accountLabel
-                                <> " (run `claude /status` for live limits)"
+                        roleMuted color $ case auth.transport of
+                            ClaudeCodeGateway{} ->
+                                "usage: Claude gateway-managed · "
+                                    <> auth.accountLabel
+                            ClaudeCodeLocalSubscription ->
+                                "usage: Claude Code "
+                                    <> fromMaybe "subscription" auth.subscriptionType
+                                    <> " · "
+                                    <> auth.accountLabel
+                                    <> " (run `claude /status` for live limits)"
         _ ->
             pure $
                 roleMuted color

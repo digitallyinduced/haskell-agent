@@ -5,6 +5,7 @@ import Agent.Claude.LoopBackend
     , claudeCodeOneShotBackend
     , withClaudeCodeBackend
     )
+import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Agent.Claude.Options
     ( ClaudeCodeOptions(..)
     , ClaudeCodePermission(..)
@@ -756,6 +757,38 @@ spec = do
                             _ -> False
                         readIORef events `shouldReturn` []
 
+        it "accepts the gateway token credential source in gateway mode" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [ ("FAKE_CLAUDE_API_KEY_SOURCE", Just "ANTHROPIC_AUTH_TOKEN")
+                    , ("FAKE_CLAUDE_ALLOW_GATEWAY", Just "1")
+                    ]
+                    do
+                        transcript <- newIORef []
+                        let options =
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                    { transport =
+                                        ClaudeCodeGateway
+                                            { gatewayBaseUrl = "https://gateway.example"
+                                            , gatewayToken = "gateway-token"
+                                            }
+                                    }
+                            backend =
+                                claudeCodeOneShotBackend
+                                    options
+                                    (pure defaultResponseCreateParams)
+                                    transcript
+                        result <- timeout 5_000_000 $
+                            submitBackend backend
+                                Nothing
+                                [UserMessage "gateway managed"]
+                                (\_ -> pure ())
+                        result `shouldSatisfy` \case
+                            Just (Right _) -> True
+                            _ -> False
+
         it "ignores subscription metadata from nested subagent records" $
             withFakeClaude \fake ->
                 withEnvironmentVariables
@@ -1364,7 +1397,11 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "test \"$ENABLE_CLAUDEAI_MCP_SERVERS\" = 0 || exit 46"
         , "test \"$CLAUDE_CODE_ENTRYPOINT\" = sdk-cli || exit 47"
         , "test \"$CLAUDE_AGENT_SDK_CLIENT_APP\" = haskell-agent || exit 49"
-        , "if env | grep -E '^(ANTHROPIC_|_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=|AGENT_PROXY_URL=|AWS_BEARER_TOKEN_BEDROCK=)' >/dev/null; then"
+        , "if [ \"$FAKE_CLAUDE_ALLOW_GATEWAY\" = 1 ]; then"
+        , "  test \"$ANTHROPIC_BASE_URL\" = https://gateway.example/anthropic || exit 50"
+        , "  test \"$ANTHROPIC_AUTH_TOKEN\" = gateway-token || exit 51"
+        , "  test -z \"$ANTHROPIC_API_KEY\" || exit 52"
+        , "elif env | grep -E '^(ANTHROPIC_|_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=|AGENT_PROXY_URL=|AWS_BEARER_TOKEN_BEDROCK=)' >/dev/null; then"
         , "  exit 45"
         , "fi"
         , "if env | grep '^CLAUDE_CODE_' | grep -v '^CLAUDE_CODE_ENTRYPOINT=sdk-cli$' >/dev/null; then"
