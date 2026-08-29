@@ -31,7 +31,7 @@ spec = do
                             , "  \"summary\": \"Connect Grok and add docs\","
                             , "  \"actions\": ["
                             , "    {\"type\":\"connect_account\",\"provider\":\"GROK\"},"
-                            , "    {\"type\":\"mcp_upsert\",\"name\":\"docs\",\"url\":\"https://mcp.example.test\",\"protocol\":\"modern\"}"
+                            , "    {\"type\":\"mcp_upsert\",\"name\":\"docs\",\"url\":\"https://mcp.example.test\",\"protocol\":\"modern\",\"oauthScopes\":[\"docs.read\"]}"
                             , "  ]"
                             , "}"
                             , "```"
@@ -51,6 +51,7 @@ spec = do
                             , metaMcpStartupTimeoutSeconds = 30
                             , metaMcpRequestTimeoutSeconds = 60
                             , metaMcpProtocol = McpProtocolModern
+                            , metaMcpOAuthScopes = Just ["docs.read"]
                             }
                         ]
                     }
@@ -60,6 +61,25 @@ spec = do
                 "{\"summary\":\"change\",\"actions\":[{\"type\":\"connect_account\",\"provider\":\"grok\",\"token\":\"do-not-accept\"}]}"
                 `shouldSatisfy` \case
                     Left err -> "unknown field" `Text.isInfixOf` err
+                    Right _ -> False
+
+        it "prohibits model-generated MCP and LSP environment values" do
+            decodeMetaPlan
+                "{\"summary\":\"mcp env\",\"actions\":[{\"type\":\"mcp_upsert\",\"name\":\"docs\",\"command\":\"docs-mcp\",\"env\":{\"TOKEN\":\"secret\"}}]}"
+                `shouldSatisfy` \case
+                    Left err -> "unknown field" `Text.isInfixOf` err
+                    Right _ -> False
+            decodeMetaPlan
+                "{\"summary\":\"lsp env\",\"actions\":[{\"type\":\"lsp_upsert\",\"name\":\"haskell\",\"command\":\"hls\",\"extensionToLanguage\":{\"hs\":\"haskell\"},\"env\":{\"TOKEN\":\"secret\"}}]}"
+                `shouldSatisfy` \case
+                    Left err -> "unknown field" `Text.isInfixOf` err
+                    Right _ -> False
+
+        it "allows OAuth scopes only on remote MCP servers" do
+            decodeMetaPlan
+                "{\"summary\":\"invalid oauth\",\"actions\":[{\"type\":\"mcp_upsert\",\"name\":\"local\",\"command\":\"mcp\",\"oauthScopes\":[\"read\"]}]}"
+                `shouldSatisfy` \case
+                    Left err -> "require a remote URL" `Text.isInfixOf` err
                     Right _ -> False
 
         it "rejects arbitrary or destructive session commands" do
@@ -177,6 +197,7 @@ spec = do
                     , metaMcpStartupTimeoutSeconds = 30
                     , metaMcpRequestTimeoutSeconds = 60
                     , metaMcpProtocol = McpProtocolAuto
+                    , metaMcpOAuthScopes = Nothing
                     }
                 preview = metaActionPreview (MetaUpsertMcp server)
             preview `shouldSatisfy` Text.isInfixOf "'docs'"

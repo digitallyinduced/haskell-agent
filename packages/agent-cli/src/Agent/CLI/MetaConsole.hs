@@ -99,6 +99,7 @@ data MetaMcpServer = MetaMcpServer
     , metaMcpStartupTimeoutSeconds :: !Int
     , metaMcpRequestTimeoutSeconds :: !Int
     , metaMcpProtocol :: !McpProtocolPreference
+    , metaMcpOAuthScopes :: !(Maybe [Text])
     }
     deriving (Eq, Show)
 
@@ -112,7 +113,10 @@ data MetaWebFetchUpdate = MetaWebFetchUpdate
     }
     deriving (Eq, Show)
 
--- | Public, non-secret settings for one stdio language server.
+-- | Public, non-secret settings for one stdio language server.  The host must
+-- preserve any existing environment, initialization options, and settings
+-- when applying this action; none of those potentially secret-bearing values
+-- cross the model boundary.
 data MetaLspServer = MetaLspServer
     { metaLspName :: !Text
     , metaLspCommand :: !Text
@@ -161,7 +165,7 @@ instance Aeson.FromJSON MetaAction where
                 rejectUnknownKeys "mcp_upsert"
                     [ "type", "name", "enabled", "url", "command", "args"
                     , "cwd", "startupTimeoutSeconds", "requestTimeoutSeconds"
-                    , "protocol"
+                    , "protocol", "oauthScopes"
                     ]
                     object
                 MetaUpsertMcp <$> parseMcpServer object
@@ -234,6 +238,7 @@ parseMcpServer object =
         <*> object .:? "requestTimeoutSeconds" .!= 60
         <*> (object .:? "protocol" .!= ("auto" :: Text)
             >>= parseMcpProtocol)
+        <*> object .:? "oauthScopes"
 
 parseWebFetchUpdate :: Object -> Parser MetaWebFetchUpdate
 parseWebFetchUpdate object =
@@ -406,11 +411,20 @@ validateMcpServer server = do
         Left "MCP URL must begin with http:// or https://"
     when (hasUrl && (not (null server.metaMcpArgs) || isJust server.metaMcpCwd)) $
         Left "remote MCP servers cannot configure command args or cwd"
+    when (isJust server.metaMcpOAuthScopes && not hasUrl) $
+        Left "MCP OAuth scopes require a remote URL"
     when (server.metaMcpStartupTimeoutSeconds < 1) $
         Left "MCP startup timeout must be positive"
     when (server.metaMcpRequestTimeoutSeconds < 1) $
         Left "MCP request timeout must be positive"
     mapM_ (requireNonBlank "MCP argument") server.metaMcpArgs
+    mapM_ (mapM_ (requireNonBlank "MCP OAuth scope"))
+        server.metaMcpOAuthScopes
+    case server.metaMcpOAuthScopes of
+        Just scopes
+            | length scopes /= length (nub scopes) ->
+                Left "MCP OAuth scopes must not contain duplicates"
+        _ -> pure ()
     case server.metaMcpCwd of
         Nothing -> pure ()
         Just cwd -> requireNonBlank "MCP cwd" cwd
@@ -691,7 +705,7 @@ metaConsolePrompt context request =
         , "  \"actions\": ["
         , "    {\"type\":\"session_command\",\"command\":\"/model MODEL\"},"
         , "    {\"type\":\"connect_account\",\"provider\":\"openai|grok|xai|openrouter|claude\"},"
-        , "    {\"type\":\"mcp_upsert\",\"name\":\"NAME\",\"enabled\":true,\"url\":\"https://...\"|null,\"command\":\"PROGRAM\"|null,\"args\":[],\"cwd\":null,\"startupTimeoutSeconds\":30,\"requestTimeoutSeconds\":60,\"protocol\":\"auto|modern|legacy\"},"
+        , "    {\"type\":\"mcp_upsert\",\"name\":\"NAME\",\"enabled\":true,\"url\":\"https://...\"|null,\"command\":\"PROGRAM\"|null,\"args\":[],\"cwd\":null,\"startupTimeoutSeconds\":30,\"requestTimeoutSeconds\":60,\"protocol\":\"auto|modern|legacy\",\"oauthScopes\":[\"scope\"]},"
         , "    {\"type\":\"mcp_remove\",\"name\":\"NAME\"},"
         , "    {\"type\":\"mcp_set_enabled\",\"name\":\"NAME\",\"enabled\":true},"
         , "    {\"type\":\"mcp_oauth_login\",\"name\":\"NAME\"},"
