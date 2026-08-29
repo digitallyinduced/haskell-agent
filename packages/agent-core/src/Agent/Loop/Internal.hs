@@ -361,6 +361,65 @@ emptyContinuationWarning :: Text
 emptyContinuationWarning =
     "The model produced no assistant text or tool calls after reasoning; stopping."
 
+data LoopCursor = LoopCursor
+    { cursorState :: ![ResponseItem]
+    , cursorProgress :: !LoopProgress
+    , cursorPreviousResponseId :: !(Maybe Text)
+    , cursorTurnsUsed :: !Int
+    , cursorInputs :: ![TurnInput]
+    , cursorSteeringCount :: !Int
+    , cursorLastOutput :: !(Maybe TurnOutput)
+    , cursorTokenUsage :: !TokenUsage
+    , cursorEmptyContinuations :: !Int
+    }
+
+data CompletedTurnDecision
+    = ContinueLoop !LoopCursor
+    | FinishLoop !LoopResult
+    | WarnAndFinishLoop !LoopResult
+
+decideCompletedTurn
+    :: LoopCursor
+    -> TurnOutput
+    -> [TurnInput]
+    -> Int
+    -> CompletedTurnDecision
+decideCompletedTurn cursor turn continuation steeringCount
+    | not (null continuation) =
+        ContinueLoop cursor
+            { cursorPreviousResponseId = Just turn.responseId
+            , cursorTurnsUsed = nextTurnsUsed
+            , cursorInputs = continuation
+            , cursorSteeringCount = steeringCount
+            , cursorLastOutput = Just turn
+            , cursorTokenUsage = usage
+            , cursorEmptyContinuations = 0
+            }
+    | hasVisibleAssistantText turn.assistantText =
+        FinishLoop result
+    | cursor.cursorEmptyContinuations >= maxEmptyContinuations =
+        WarnAndFinishLoop result
+    | otherwise =
+        ContinueLoop cursor
+            { cursorPreviousResponseId = Just turn.responseId
+            , cursorTurnsUsed = nextTurnsUsed
+            , cursorInputs = []
+            , cursorSteeringCount = 0
+            , cursorLastOutput = Just turn
+            , cursorTokenUsage = usage
+            , cursorEmptyContinuations =
+                cursor.cursorEmptyContinuations + 1
+            }
+  where
+    nextTurnsUsed = cursor.cursorTurnsUsed + 1
+    usage = addTokenUsage cursor.cursorTokenUsage turn.tokenUsage
+    result = LoopResult
+        { finalResponseId = turn.responseId
+        , finalText = turn.assistantText
+        , turnsUsed = nextTurnsUsed
+        , tokenUsage = usage
+        }
+
 runLoop
     :: LoopConfig
     -> Maybe Text
@@ -427,6 +486,11 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     recordVisible event
                     emitLoopEvent eventPump event
                 }
+            finish
+                :: [ResponseItem]
+                -> LoopProgress
+                -> Either LoopError LoopResult
+                -> IO LoopExecution
             finish state progress result = do
                 writeIORef progressRef (state, progress)
                 pending <- readIORef pendingRef
@@ -445,23 +509,42 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                             else Just uncommittedText
                     , executionResult = result
                     }
+            finishCursor
+                :: LoopCursor
+                -> Either LoopError LoopResult
+                -> IO LoopExecution
+            finishCursor cursor =
+                finish cursor.cursorState cursor.cursorProgress
+            unexpected
+                :: [ResponseItem]
+                -> LoopProgress
+                -> SomeException
+                -> IO LoopExecution
             unexpected state progress exception =
                 finish state progress
                     (Left (LoopUnexpected (exceptionSummary exception)))
-            protect state progress action =
-                tryAny action >>= either (unexpected state progress) pure
-            go state progress prev turnsUsed inputs steeringCount lastOutput
-                    usageAcc emptyContinuations = do
-                writeIORef progressRef (state, progress)
-                writeIORef pendingRef inputs
-                if turnsUsed >= config.loopMaxTurns
-                    then finish state progress $ case lastOutput of
+            unexpectedCursor
+                :: LoopCursor
+                -> SomeException
+                -> IO LoopExecution
+            unexpectedCursor cursor =
+                unexpected cursor.cursorState cursor.cursorProgress
+            protect :: LoopCursor -> IO LoopExecution -> IO LoopExecution
+            protect cursor action =
+                tryAny action >>= either (unexpectedCursor cursor) pure
+            go :: LoopCursor -> IO LoopExecution
+            go cursor = do
+                writeIORef progressRef
+                    (cursor.cursorState, cursor.cursorProgress)
+                writeIORef pendingRef cursor.cursorInputs
+                if cursor.cursorTurnsUsed >= config.loopMaxTurns
+                    then finishCursor cursor $ case cursor.cursorLastOutput of
                         Just turn -> Left (LoopMaxTurns turn)
                         Nothing -> Left LoopNoResponseId
-                    else protect state progress do
+                    else protect cursor do
                         cancelled <- isCancelled config.loopCancel
                         if cancelled
-                            then finish state progress (Left (LoopCancelled []))
+                            then finishCursor cursor (Left (LoopCancelled []))
                             else do
                                 config.loopOnEvent TurnStarted
                                 outputSeen <- newIORef False
@@ -477,7 +560,10 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                     result <- restore $ race
                                         (waitCancel config.loopCancel)
                                         (config.loopBackend.submitTurn
-                                            state prev inputs onBackendEvent)
+                                            cursor.cursorState
+                                            cursor.cursorPreviousResponseId
+                                            cursor.cursorInputs
+                                            onBackendEvent)
                                     case result of
                                         Right (Right BackendResult{..})
                                             | not
@@ -491,44 +577,53 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                     pure result
                                 case raced of
                                     Left () ->
-                                        finish state progress (Left (LoopCancelled []))
+                                        finishCursor cursor
+                                            (Left (LoopCancelled []))
                                     Right (Left err) -> do
                                         emitted <- readIORef outputSeen
-                                        finish state progress $ Left $
+                                        finishCursor cursor $ Left $
                                             if emitted
                                                 then LoopTransportAfterOutput err
                                                 else LoopTransport err
                                     Right (Right BackendResult{backendOutput = turn})
                                         | Text.null turn.responseId ->
-                                            finish state progress (Left LoopNoResponseId)
+                                            finishCursor cursor
+                                                (Left LoopNoResponseId)
                                     Right (Right BackendResult{..}) -> do
                                         continueCommitted
-                                            backendState backendOutput turnsUsed
-                                            steeringCount usageAcc emptyContinuations
-            continueCommitted state turn turnsUsed steeringCount usageAcc
-                    emptyContinuations = do
-                writeIORef progressRef (state, ResponseCommitted)
+                                            cursor
+                                                { cursorState = backendState
+                                                , cursorProgress =
+                                                    ResponseCommitted
+                                                }
+                                            backendOutput
+            continueCommitted
+                :: LoopCursor
+                -> TurnOutput
+                -> IO LoopExecution
+            continueCommitted cursor turn = do
+                writeIORef progressRef
+                    (cursor.cursorState, ResponseCommitted)
                 -- The committed response absorbed every input submitted with
                 -- it, and its assistant text now lives in the committed state.
                 writeIORef pendingRef []
                 writeIORef uncommittedTextRef ([], [])
-                protect state ResponseCommitted do
+                protect cursor do
                     -- A cancel that landed during submitTurn after the race chose
                     -- Right still counts, but its returned state is committed.
                     cancelledMid <- isCancelled config.loopCancel
-                    let usageAcc' = addTokenUsage usageAcc turn.tokenUsage
                     if cancelledMid
-                        then finish state ResponseCommitted
+                        then finishCursor cursor
                             (Left (LoopCancelled []))
                         else do
                             config.loopOnEvent (TurnFinished turn)
-                            let nextTurnsUsed = turnsUsed + 1
                             case turn.completion of
                                 TurnIncomplete{} ->
-                                    finish state ResponseCommitted
+                                    finishCursor cursor
                                         (Left (LoopIncomplete turn))
                                 TurnCompleted -> do
-                                    config.loopCommitSteering steeringCount
+                                    config.loopCommitSteering
+                                        cursor.cursorSteeringCount
                                     results <-
                                         if null turn.toolCalls
                                             then pure []
@@ -537,70 +632,42 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                     cancelledAfter <-
                                         isCancelled config.loopCancel
                                     if cancelledAfter
-                                        then finish state ResponseCommitted
+                                        then finishCursor cursor
                                             (Left (LoopCancelled results))
                                         else do
                                             steering <- config.loopReadSteering
                                             let continuation =
                                                     map CompletedTool results
                                                         <> steering
-                                            if not (null continuation)
-                                                then go
-                                                    state
-                                                    ResponseCommitted
-                                                    (Just turn.responseId)
-                                                    nextTurnsUsed
-                                                    continuation
-                                                    (length steering)
-                                                    (Just turn)
-                                                    usageAcc'
-                                                    0
-                                                else if hasVisibleAssistantText
-                                                    turn.assistantText
-                                                    then finish state ResponseCommitted $
-                                                        Right LoopResult
-                                                            { finalResponseId =
-                                                                turn.responseId
-                                                            , finalText =
-                                                                turn.assistantText
-                                                            , turnsUsed =
-                                                                nextTurnsUsed
-                                                            , tokenUsage = usageAcc'
-                                                            }
-                                                    else if emptyContinuations
-                                                            >= maxEmptyContinuations
-                                                        then do
-                                                            config.loopOnEvent
-                                                                (WarningRaised
-                                                                    emptyContinuationWarning)
-                                                            finish state ResponseCommitted $
-                                                                Right LoopResult
-                                                                    { finalResponseId =
-                                                                        turn.responseId
-                                                                    , finalText =
-                                                                        turn.assistantText
-                                                                    , turnsUsed =
-                                                                        nextTurnsUsed
-                                                                    , tokenUsage = usageAcc'
-                                                                    }
-                                                        else
-                                                            go
-                                                                state
-                                                                ResponseCommitted
-                                                                (Just turn.responseId)
-                                                                nextTurnsUsed
-                                                                []
-                                                                0
-                                                                (Just turn)
-                                                                usageAcc'
-                                                                (emptyContinuations + 1)
+                                            case decideCompletedTurn
+                                                cursor
+                                                turn
+                                                continuation
+                                                (length steering) of
+                                                ContinueLoop nextCursor ->
+                                                    go nextCursor
+                                                FinishLoop result ->
+                                                    finishCursor cursor
+                                                        (Right result)
+                                                WarnAndFinishLoop result -> do
+                                                    config.loopOnEvent
+                                                        (WarningRaised
+                                                            emptyContinuationWarning)
+                                                    finishCursor cursor
+                                                        (Right result)
+            run :: IO LoopExecution
             run =
-                go initialState NoResponseCommitted previousResponseId 0
-                    (firstInputs <> initialSteering)
-                    (length initialSteering)
-                    Nothing
-                    emptyTokenUsage
-                    0
+                go LoopCursor
+                    { cursorState = initialState
+                    , cursorProgress = NoResponseCommitted
+                    , cursorPreviousResponseId = previousResponseId
+                    , cursorTurnsUsed = 0
+                    , cursorInputs = firstInputs <> initialSteering
+                    , cursorSteeringCount = length initialSteering
+                    , cursorLastOutput = Nothing
+                    , cursorTokenUsage = emptyTokenUsage
+                    , cursorEmptyContinuations = 0
+                    }
         raced <- race (waitLoopEventFailure eventWorker eventPump) run
         execution <- case raced of
             Left failure -> do

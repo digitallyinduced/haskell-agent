@@ -42,7 +42,7 @@ import Agent.CLI.Options
     ( isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
-                 optPromptFile, optResume, optCwd),
+                 optPromptFile, optResume, optCwd, optCodeMode),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -286,6 +286,11 @@ runAgentWithRuntime processRuntime runMode options = do
                 go fullscreenInputs sessionState
                     (restartSessionOptions current sessionId)
                     Nothing
+            RunEnableCodeMode sessionId ->
+                let nextOptions =
+                        (restartSessionOptions current sessionId)
+                            { optCodeMode = True }
+                in go fullscreenInputs sessionState nextOptions Nothing
             RunProviderStartFailed apiError ->
                 case transition of
                     Just failed

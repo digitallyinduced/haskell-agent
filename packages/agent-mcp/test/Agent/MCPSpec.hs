@@ -5,18 +5,29 @@ import Agent.MCP
 import Agent.MCP.Client
     ( ProbeOutcome(..)
     , annotateHeaderParams
+    , closeMcpClient
     , classifyProbe
     , encodeHeaderValue
     , headerParamValues
+    , spawnClientWorker
     , splitLines
+    , startMcpClient
     )
 import Agent.MCP.Types
-    ( McpHeaderParam(..)
+    ( McpClient(..)
+    , McpHeaderParam(..)
     , McpTool(..)
     )
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder, rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
-import Control.Concurrent.STM (readTVarIO)
+import Control.Concurrent.STM
+    ( TMVar
+    , atomically
+    , newEmptyTMVarIO
+    , readTMVar
+    , readTVarIO
+    , tryPutTMVar
+    )
 import qualified Data.Aeson.Types
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
@@ -54,6 +65,17 @@ import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Timeout (timeout)
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(arbitrary, shrink)
+    , counterexample
+    , elements
+    , ioProperty
+    , listOf
+    , resize
+    , shrinkList
+    , (===)
+    )
 
 spec :: Spec
 spec = describe "Agent.MCP" do
@@ -72,6 +94,33 @@ spec = describe "Agent.MCP" do
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "super-secret"
+
+    describe "client worker lifecycle" do
+        it "does not start owned workers after the client is closed" $
+            bracket (startMcpClient workerClientConfig) closeMcpClient \client -> do
+                closeMcpClient client
+                spawnClientWorker client (pure ())
+                (length <$> readTVarIO client.clientWorkers) `shouldReturn` 0
+
+        modifyMaxSuccess (const 200) $
+            prop "preserves worker ownership for arbitrary lifecycle traces" $
+                \(WorkerLifecycle operations) -> ioProperty $
+                    bracket (startMcpClient workerClientConfig) closeMcpClient \client -> do
+                        gate <- newEmptyTMVarIO
+                        mapM_ (applyWorkerOperation client gate) operations
+                        workers <- readTVarIO client.clientWorkers
+                        _ <- atomically (tryPutTMVar gate ())
+                        let expected
+                                | CloseWorkerClient `elem` operations = 0
+                                | otherwise =
+                                    length
+                                        [ ()
+                                        | SpawnWorker <- operations
+                                        ]
+                        pure $
+                            counterexample
+                                ("operations: " <> show operations)
+                                (length workers === expected)
 
     describe "decodeHttpMcpResponse" do
         it "unwraps the JSON-RPC result before MCP payload decoding" do
@@ -817,6 +866,36 @@ concurrentConfig script barrier name = McpServerConfig
     , mcpServerRequestTimeoutSeconds = 2
     , mcpServerProtocol = McpProtocolAuto
     }
+
+data WorkerLifecycleOperation
+    = SpawnWorker
+    | CloseWorkerClient
+    deriving (Eq, Show)
+
+newtype WorkerLifecycle = WorkerLifecycle [WorkerLifecycleOperation]
+    deriving (Show)
+
+instance Arbitrary WorkerLifecycle where
+    arbitrary =
+        WorkerLifecycle
+            <$> resize 20 (listOf (elements [SpawnWorker, CloseWorkerClient]))
+    shrink (WorkerLifecycle operations) =
+        WorkerLifecycle <$> shrinkList (const []) operations
+
+applyWorkerOperation
+    :: McpClient
+    -> TMVar ()
+    -> WorkerLifecycleOperation
+    -> IO ()
+applyWorkerOperation client gate = \case
+    SpawnWorker -> spawnClientWorker client (atomically (readTMVar gate))
+    CloseWorkerClient -> closeMcpClient client
+
+workerClientConfig :: McpServerConfig
+workerClientConfig =
+    (baseConfig "worker-lifecycle" "/unused")
+        { mcpServerUrl = Just "http://127.0.0.1:1/mcp"
+        }
 
 progressiveConfig :: FilePath -> String -> Text.Text -> McpServerConfig
 progressiveConfig script delay name =
