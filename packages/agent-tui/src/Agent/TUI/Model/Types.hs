@@ -146,6 +146,7 @@ data UiState = UiState
     , uiGenerating :: !Bool
     , uiGenerationChars :: !Int
     , uiGenerationMillis :: !Int
+    , uiGenerationLastDeltaMillis :: !Int
     , uiLastTokensPerSecond :: !(Maybe Double)
     }
     deriving (Eq, Show)

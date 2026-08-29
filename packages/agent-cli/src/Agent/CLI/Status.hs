@@ -4,6 +4,7 @@ module Agent.CLI.Status
     , cycleReplInteraction
     , formatReplStatusLine
     , formatTokenUsage
+    , formatEstimatedTokensPerSecond
     , formatTokensPerSecond
     , formatUsageWithRate
     ) where
@@ -121,6 +122,11 @@ formatUsageWithRate usage rate =
             [ formatTokenUsage usage
             , maybe "" formatTokensPerSecond rate
             ]
+
+-- | Prefix a character-derived generation rate with an approximation marker.
+formatEstimatedTokensPerSecond :: Bool -> Double -> Text
+formatEstimatedTokensPerSecond estimated rate =
+    (if estimated then "~" else "") <> formatTokensPerSecond rate
 
 -- | Compact generation speed: @4.2 tok/s@, @42 tok/s@, @1.2k tok/s@.
 formatTokensPerSecond :: Double -> Text

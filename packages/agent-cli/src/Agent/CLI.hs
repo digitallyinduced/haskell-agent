@@ -16,6 +16,7 @@ module Agent.CLI
     , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
+    , formatEstimatedTokensPerSecond
     , formatTokensPerSecond
     , formatUsageWithRate
     , learnAboutUserOnboardingPrompt
@@ -45,7 +46,8 @@ import Agent.CLI.McpStatus
     )
 import Agent.CLI.Runtime.Types (DevResult(..))
 import Agent.CLI.Status
-    ( formatReplStatusLine
+    ( formatEstimatedTokensPerSecond
+    , formatReplStatusLine
     , formatTokenUsage
     , formatTokensPerSecond
     , formatUsageWithRate

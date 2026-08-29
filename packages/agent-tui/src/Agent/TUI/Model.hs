@@ -35,6 +35,7 @@ module Agent.TUI.Model
     , uiNextDeadlineMillis
     , uiNeedsTick
     , uiTokensPerSecond
+    , uiTokensPerSecondEstimated
     , warningNotice
     , advanceUiTime
     , blockCodeLanguage
@@ -263,6 +264,7 @@ reduceUi event state = case event of
             , uiGenerating = False
             , uiGenerationChars = 0
             , uiGenerationMillis = 0
+            , uiGenerationLastDeltaMillis = 0
             , uiLastTokensPerSecond = Nothing
             }
     UiSetFollow follow ->
@@ -315,6 +317,7 @@ resetGeneration state =
         { uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0
+        , uiGenerationLastDeltaMillis = 0
         }
 
 appendGenerationChars :: Text -> UiState -> UiState
@@ -323,17 +326,20 @@ appendGenerationChars delta state =
         { uiGenerating = True
         , uiGenerationChars =
             state.uiGenerationChars + Text.length delta
+        , uiGenerationLastDeltaMillis = state.uiGenerationMillis
         }
 
 snapshotGenerationRate :: TokenUsage -> UiState -> UiState
 snapshotGenerationRate usage state =
-    state
+    let generationMillis = state.uiGenerationLastDeltaMillis
+    in state
         { uiGenerating = False
+        , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
             generationTokensPerSecond
                 usage.outputTokens
                 state.uiGenerationChars
-                state.uiGenerationMillis
+                generationMillis
                 <|> state.uiLastTokensPerSecond
         }
 
@@ -759,7 +765,8 @@ updateToolOutput callId output state =
 
 finalizeTurn :: BlockState -> UiState -> UiState
 finalizeTurn terminalState state =
-    state
+    let generationMillis = state.uiGenerationLastDeltaMillis
+    in state
         { uiBlocks =
             Seq.mapWithIndex
                 (\index block ->
@@ -771,12 +778,13 @@ finalizeTurn terminalState state =
                 state.uiBlocks
         , uiRunning = False
         , uiGenerating = False
+        , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
             state.uiLastTokensPerSecond
                 <|> generationTokensPerSecond
                     0
                     state.uiGenerationChars
-                    state.uiGenerationMillis
+                    generationMillis
         , uiActivity =
             if terminalState == BlockComplete
                 then "Finished"

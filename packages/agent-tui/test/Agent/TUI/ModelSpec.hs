@@ -743,6 +743,9 @@ spec = describe "fullscreen UI reducer" do
                         [ UiLoop TurnStarted
                         , UiLoop (TextDelta "abcdefghijklmnop")
                         ]
+            lastDelta =
+                reduceUi (UiLoop (TextDelta "qrst")) streaming
+            awaitingCompletion = advanceUiTime 1000 lastDelta
             reported usage tools =
                 (emptyTurnOutput "r1" tools (Just "abcdefghijklmnop"))
                     { tokenUsage = usage }
@@ -755,16 +758,19 @@ spec = describe "fullscreen UI reducer" do
             finished =
                 reduceUi
                     (UiLoop (TurnFinished (reported usage [])))
-                    streaming
+                    awaitingCompletion
             duringTools =
                 reduceUi (UiLoop (ToolStarted call)) $
                     reduceUi
                         (UiLoop (TurnFinished (reported usage [call])))
-                        streaming
+                        awaitingCompletion
             afterNext = reduceUi (UiLoop TurnStarted) finished
         uiTokensPerSecond streaming `shouldBe` Just 10
+        uiTokensPerSecondEstimated streaming `shouldBe` True
         uiTokensPerSecond finished `shouldBe` Just 200
+        uiTokensPerSecondEstimated finished `shouldBe` False
         finished.uiGenerating `shouldBe` False
+        finished.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
         uiTokensPerSecond duringTools `shouldBe` Just 200
         duringTools.uiGenerating `shouldBe` False
         duringTools.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
@@ -808,7 +814,13 @@ spec = describe "fullscreen UI reducer" do
         waiting.uiGenerationMillis `shouldBe` 0
 
     it "drops last tok/s when the conversation is cleared" do
-        let finished =
+        let streaming =
+                advanceUiTime liveTokenRateMinMillis $
+                    apply
+                        [ UiLoop TurnStarted
+                        , UiLoop (TextDelta "abcdefghijklmnop")
+                        ]
+            finished =
                 reduceUi
                     (UiLoop
                         (TurnFinished
@@ -820,11 +832,7 @@ spec = describe "fullscreen UI reducer" do
                                         , cachedTokens = 0
                                         }
                                 })))
-                    (advanceUiTime liveTokenRateMinMillis $
-                        apply
-                            [ UiLoop TurnStarted
-                            , UiLoop (TextDelta "abcdefghijklmnop")
-                            ])
+                    (reduceUi (UiLoop (TextDelta "qrst")) streaming)
             cleared = reduceUi UiConversationCleared finished
         uiTokensPerSecond finished `shouldBe` Just 200
         uiTokensPerSecond cleared `shouldBe` Nothing
