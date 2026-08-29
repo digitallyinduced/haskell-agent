@@ -192,7 +192,7 @@ spec = do
             afterCode `shouldSatisfy` Text.isInfixOf "\ESC["
             stripAnsi out `shouldBe` "before code after"
 
-        it "keeps box borders aligned when cells have inline markers" do
+        it "keeps table columns aligned when cells have inline markers" do
             let mdTable = Text.unlines
                     [ "| a | b |"
                     , "| --- | --- |"
@@ -205,7 +205,6 @@ spec = do
                 body =
                     [ l
                     | l <- cleaned
-                    , "│" `Text.isInfixOf` l
                     , not ("─" `Text.isInfixOf` l)
                     ]
             case body of
@@ -255,6 +254,32 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "file"
             out `shouldSatisfy` Text.isInfixOf "a.hs"
             out `shouldSatisfy` (not . Text.isInfixOf "|")
+
+        it "renders borderless tables with GFM column alignment" do
+            let sample =
+                    "| Name | Footprint |\n\
+                    \| --- | ---: |\n\
+                    \| WebKit | 27.7 GiB |\n\
+                    \| Control Center | 4.6 GiB |"
+                rows =
+                    map stripAnsi
+                        (filter (not . Text.null . Text.strip)
+                            (Text.lines (renderMarkdown True sample)))
+                bodyRows =
+                    filter
+                        (\row -> not (Text.isInfixOf "─" row))
+                        (drop 2 rows)
+                valueEnd needle row =
+                    let offset = Text.length (fst (Text.breakOn needle row))
+                    in offset + Text.length needle
+            rows `shouldSatisfy` all
+                (\row -> not (Text.any (`elem` ("┌┐└┘├┤┬┴┼│" :: String)) row))
+            rows `shouldSatisfy` any (Text.isInfixOf "─")
+            case bodyRows of
+                webkit : control : _ ->
+                    valueEnd "27.7 GiB" webkit
+                        `shouldBe` valueEnd "4.6 GiB" control
+                _ -> expectationFailure "expected two table body rows"
 
         it "strips raw ESC from model output" do
             let out = renderMarkdown True ("hi" <> "\ESC[31m" <> "x")

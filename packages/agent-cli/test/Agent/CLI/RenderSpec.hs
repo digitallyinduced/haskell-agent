@@ -148,6 +148,19 @@ spec = do
             first <> second `shouldSatisfy` Text.isInfixOf "hello"
             first <> second `shouldSatisfy` Text.isInfixOf "world"
 
+        it "streams tables without optional outer pipes" do
+            let input =
+                    "Name | Footprint\n\
+                    \--- | ---:\n\
+                    \WebKit | 27.7 GiB\n\
+                    \Control Center | 4.6 GiB\n\
+                    \after\n"
+                (_state, output) = streamMarkdown input emptyRenderState
+            output `shouldSatisfy` Text.isInfixOf "Name"
+            output `shouldSatisfy` Text.isInfixOf "Control Center"
+            output `shouldSatisfy` Text.isInfixOf "─"
+            output `shouldSatisfy` (not . Text.isInfixOf "|")
+
     describe "summarizeToolCall" do
         it "uses English verbs and argument highlights" do
             summarizeToolCall (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")

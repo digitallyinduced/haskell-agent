@@ -17,8 +17,10 @@ import Agent.TUI.FencedCode
     , fenceOpener
     , isFenceCloser
     )
+import qualified Agent.TUI.Markdown.Block as Block
 import Agent.TUI.TextWidth (splitTerminalGraphemeSuffix)
 import Data.Char (isDigit, isSpace)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -212,7 +214,7 @@ feedTableCandidate state input =
         (lines_, partial) = completeLines buffered
     in case lines_ of
         header : separator : after
-            | isTableSeparator separator ->
+            | isTableStart header separator ->
                 feedMarkdownStream
                     state
                         { streamMode = StreamTable
@@ -328,7 +330,7 @@ lineNeedsLookahead line =
                         || after == "."
                         || Text.isPrefixOf ". " after
                        )
-        _ -> False
+        _ -> isPossibleTableHeader line
 
 lineIsBlock :: Text -> Bool
 lineIsBlock line =
@@ -356,19 +358,10 @@ lineIsBlock line =
         || thematic '_'
 
 isPossibleTableHeader :: Text -> Bool
-isPossibleTableHeader =
-    Text.isPrefixOf "|" . Text.dropWhile isSpace . dropLineEnding
+isPossibleTableHeader = isJust . Block.splitTableRow . dropLineEnding
 
-isTableSeparator :: Text -> Bool
-isTableSeparator line =
-    let stripped =
-            Text.dropWhile (== '|')
-                (Text.dropWhileEnd (== '|')
-                    (Text.strip (dropLineEnding line)))
-        cells = map Text.strip (Text.splitOn "|" stripped)
-        valid cell =
-            Text.any (== '-') cell
-                && Text.null
-                    (Text.filter (\character ->
-                        character `notElem` ['-', ':', ' ']) cell)
-    in not (null cells) && all valid cells
+isTableStart :: Text -> Text -> Bool
+isTableStart header separator =
+    isJust $
+        Block.takeTableRows
+            [dropLineEnding header, dropLineEnding separator]

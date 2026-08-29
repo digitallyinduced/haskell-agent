@@ -36,7 +36,10 @@ spec = describe "Markdown block parsing" do
             ]
             `shouldBe`
                 Just
-                    ( [["name", "value"], ["a", "b"]]
+                    ( MarkdownTable
+                        { tableAlignments = [AlignLeft, AlignRight]
+                        , tableRows = [["name", "value"], ["a", "b"]]
+                        }
                     , ["after"]
                     )
 
