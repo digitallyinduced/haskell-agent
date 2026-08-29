@@ -8,6 +8,7 @@ module Agent.CLI.Approval
     , approveToolDecisionWith
     , approveToolDecisionWithReporter
     , approveToolDecisionWithReporterAndPersistence
+    , approveFilesystemRootAccess
     , childApprove
     , planApproval
     , resolveApprovalPrompt
@@ -60,6 +61,15 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import System.IO (stderr)
 import System.OsPath (OsPath)
+
+-- | Auto-approve access to additional filesystem roots while yolo mode is
+-- active. Read the live policy so toggling yolo during a session takes effect
+-- for subsequent root requests.
+approveFilesystemRootAccess :: IORef ApprovalPolicy -> IO Bool -> IO Bool
+approveFilesystemRootAccess policyRef requestAccess =
+    readIORef policyRef >>= \case
+        ApproveAll -> pure True
+        _ -> requestAccess
 
 approveToolDecision
     :: IORef ApprovalPolicy

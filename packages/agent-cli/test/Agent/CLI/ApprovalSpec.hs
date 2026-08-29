@@ -5,6 +5,7 @@ import Agent.CLI.Approval
     , ApprovalFacts(..)
     , ApprovalNotice(..)
     , ApprovalPlan(..)
+    , approveFilesystemRootAccess
     , approveToolDecisionWithReporter
     , approveToolDecisionWithReporterAndPersistence
     , childApprove
@@ -33,6 +34,7 @@ import Data.IORef
     ( modifyIORef'
     , newIORef
     , readIORef
+    , writeIORef
     )
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -195,6 +197,21 @@ spec = do
                         (ApprovalSuccess
                             "✓ always allow run_terminal_command this session")
                     ]
+
+    describe "approveFilesystemRootAccess" do
+        it "bypasses the prompt whenever the live policy is yolo" do
+            policy <- newIORef PromptMutating
+            requests <- newIORef (0 :: Int)
+            let request = modifyIORef' requests (+ 1) >> pure False
+
+            approveFilesystemRootAccess policy request
+                `shouldReturn` False
+            readIORef requests `shouldReturn` 1
+
+            writeIORef policy ApproveAll
+            approveFilesystemRootAccess policy request
+                `shouldReturn` True
+            readIORef requests `shouldReturn` 1
 
     describe "approveToolDecisionWith" do
         it "does not classify, prompt, or persist a catastrophic shell call" do
