@@ -1074,6 +1074,15 @@ spec = describe "runLoop" do
         result `shouldBe`
             Left (LoopTransportAfterOutput (ConnectionError "down"))
 
+    it "treats a transport failure after a discarded attempt as pre-output" do
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (TextDelta "partial")
+                onEvent ResponseAttemptDiscarded
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Left (LoopTransport (ConnectionError "down"))
+
     it "turns synchronous backend exceptions into a failed turn" do
         config <- testConfig $ Backend \_state _prev _inputs _onEvent ->
             Exception.throwIO (userError "backend exploded")
