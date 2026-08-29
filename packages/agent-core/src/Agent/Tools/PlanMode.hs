@@ -372,6 +372,14 @@ newtype AskUserQuestionArgs = AskUserQuestionArgs
     { questions :: [AskUserQuestion]
     }
 
+data AskQuestionResult
+    = AskQuestionAnswered (Text, Text)
+    | AskQuestionBack
+
+data AskReviewDecision
+    = AskReviewSubmit
+    | AskReviewBack
+
 askUserQuestionArgsDecoder :: Decoder AskUserQuestionArgs
 askUserQuestionArgsDecoder = objectArgs \object -> do
         modern <- optList askUserQuestionDecoder object "questions" "Expected array for key: questions"
@@ -436,52 +444,106 @@ runAskUserQuestion env args
     | null args.questions =
         pure (Right "No questions provided. Continue with the task.")
     | otherwise = do
-        answers <- collectAnswers args.questions
+        answers <- collectAnswers
         pure (formatAnswers <$> answers)
   where
     collectAnswers
-        :: [AskUserQuestion]
-        -> IO (Either Text [(Text, Text)])
-    collectAnswers [] = pure (Right [])
-    collectAnswers (question : rest) =
-        ask question >>= \case
-            Left err -> pure (Left err)
-            Right answer ->
-                collectAnswers rest >>= \case
-                    Left err -> pure (Left err)
-                    Right answers -> pure (Right (answer : answers))
+        :: IO (Either Text [(Text, Text)])
+    collectAnswers = go 0 []
+      where
+        questionCount = length args.questions
 
-    ask :: AskUserQuestion -> IO (Either Text (Text, Text))
-    ask question
+        go index answers
+            | index >= questionCount =
+                reviewAnswers answers >>= \case
+                    Left err -> pure (Left err)
+                    Right AskReviewSubmit -> pure (Right answers)
+                    Right AskReviewBack ->
+                        let previousIndex = questionCount - 1
+                        in go previousIndex (take previousIndex answers)
+            | otherwise =
+                case drop index args.questions of
+                    [] -> pure (Right answers)
+                    question : _ ->
+                        ask (index > 0) question >>= \case
+                            Left err -> pure (Left err)
+                            Right AskQuestionBack ->
+                                let previousIndex = index - 1
+                                in go previousIndex (take previousIndex answers)
+                            Right (AskQuestionAnswered answer) ->
+                                go
+                                    (index + 1)
+                                    (take index answers <> [answer])
+
+    reviewAnswers
+        :: [(Text, Text)]
+        -> IO (Either Text AskReviewDecision)
+    reviewAnswers answers = do
+        answer <- env.planHooks.planAskQuestion
+            (formatAnswerReview answers)
+            [submitAnswersChoice, backToLastQuestionChoice]
+        pure $ case answer of
+            Nothing -> Left "No answer from user."
+            Just text
+                | Text.null (Text.strip text) ->
+                    Left "No answer from user."
+                | text == submitAnswersChoice ->
+                    Right AskReviewSubmit
+                | text == backToLastQuestionChoice ->
+                    Right AskReviewBack
+                | otherwise ->
+                    Left "No answer from user."
+
+    ask
+        :: Bool
+        -> AskUserQuestion
+        -> IO (Either Text AskQuestionResult)
+    ask allowBack question
         | question.multiSelect == Just True =
-            askMultiple question >>= \case
-                Left err -> pure (Left err)
-                Right answer -> pure (Right (question.question, answer))
+            askMultiple allowBack question
         | otherwise = do
-            let choices = map formatOption question.options
+            let displayed = map formatOption question.options
+                backChoice = optionalBackChoice allowBack displayed
+                choices =
+                    displayed
+                        <> [choice | Just choice <- [backChoice]]
                 labelsByChoice =
-                    Map.fromList (zip choices (map (.label) question.options))
+                    Map.fromList
+                        (zip displayed (map (.label) question.options))
             answer <- env.planHooks.planAskQuestion question.question choices
             pure $ case answer of
                 Nothing -> Left "No answer from user."
                 Just text | Text.null (Text.strip text) ->
                     Left "No answer from user."
+                Just text | Just text == backChoice ->
+                    Right AskQuestionBack
                 Just text ->
-                    Right
+                    Right $ AskQuestionAnswered
                         ( question.question
                         , fromMaybe text (Map.lookup text labelsByChoice)
                         )
 
-    askMultiple :: AskUserQuestion -> IO (Either Text Text)
-    askMultiple question =
+    askMultiple
+        :: Bool
+        -> AskUserQuestion
+        -> IO (Either Text AskQuestionResult)
+    askMultiple allowBack question =
         choose [] question.options
       where
         doneChoice = "Done selecting"
+        backChoice =
+            optionalBackChoice
+                allowBack
+                (doneChoice : map formatOption question.options)
+
         choose selected remaining = do
             let displayed = map formatOption remaining
                 labelsByDisplayed =
                     Map.fromList (zip displayed (map (.label) remaining))
-                choices = displayed <> [doneChoice]
+                choices =
+                    displayed
+                        <> [doneChoice]
+                        <> [choice | Just choice <- [backChoice]]
                 prompt
                     | null selected = question.question
                     | otherwise =
@@ -493,11 +555,14 @@ runAskUserQuestion env args
                 Nothing -> noAnswer selected
                 Just raw
                     | Text.null (Text.strip raw) -> noAnswer selected
+                    | Just raw == backChoice ->
+                        pure (Right AskQuestionBack)
                     | raw == doneChoice ->
                         if null selected
                             then pure (Left "No answer from user.")
                             else pure
-                                (Right (Text.intercalate ", " (reverse selected)))
+                                (answered
+                                    (Text.intercalate ", " (reverse selected)))
                     | Just label <-
                         Map.lookup raw labelsByDisplayed ->
                             choose
@@ -509,12 +574,45 @@ runAskUserQuestion env args
                     | otherwise ->
                         -- Non-TUI hooks may return a comma-separated answer
                         -- directly rather than one displayed choice at a time.
-                        pure (Right (Text.strip raw))
+                        pure (answered (Text.strip raw))
 
         noAnswer selected
             | null selected = pure (Left "No answer from user.")
             | otherwise =
-                pure (Right (Text.intercalate ", " (reverse selected)))
+                pure
+                    (answered
+                        (Text.intercalate ", " (reverse selected)))
+
+        answered text =
+            Right (AskQuestionAnswered (question.question, text))
+
+optionalBackChoice :: Bool -> [Text] -> Maybe Text
+optionalBackChoice allowBack unavailable
+    | allowBack =
+        Just (freshControlChoice backToPreviousQuestionChoice unavailable)
+    | otherwise = Nothing
+
+freshControlChoice :: Text -> [Text] -> Text
+freshControlChoice base unavailable = go 1
+  where
+    go :: Int -> Text
+    go suffix =
+        let candidate
+                | suffix == 1 = base
+                | otherwise =
+                    base <> " (" <> Text.pack (show suffix) <> ")"
+        in if candidate `elem` unavailable
+            then go (suffix + 1)
+            else candidate
+
+submitAnswersChoice :: Text
+submitAnswersChoice = "Submit answers"
+
+backToPreviousQuestionChoice :: Text
+backToPreviousQuestionChoice = "← Back to previous question"
+
+backToLastQuestionChoice :: Text
+backToLastQuestionChoice = "← Back to last question"
 
 formatOption :: AskUserQuestionOption -> Text
 formatOption option =
@@ -527,6 +625,20 @@ formatOption option =
                ]
   where
     nonBlank = not . Text.null . Text.strip
+
+formatAnswerReview :: [(Text, Text)] -> Text
+formatAnswerReview answers =
+    Text.intercalate "\n\n" $
+        "Review your answers before sending them:"
+            : [ Text.pack (show index)
+                    <> ". "
+                    <> indent question
+                    <> "\n   "
+                    <> indent answer
+              | (index, (question, answer)) <- zip [(1 :: Int)..] answers
+              ]
+  where
+    indent = Text.replace "\n" "\n   "
 
 formatAnswers :: [(Text, Text)] -> Text
 formatAnswers answers =
