@@ -1,6 +1,7 @@
 module Agent.OpenAI.AuthSpec (spec) where
 
 import Agent.OpenAI.Auth
+import Agent.OpenAI.Auth.Refresh (RefreshResponse(RefreshResponse), decodeRefreshResponse)
 import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
@@ -30,6 +31,23 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "decodeRefreshResponse" do
+        it "keeps optional tokens when they are absent or null" do
+            decodeRefreshResponse "{\"access_token\":\"a\"}"
+                `shouldBe` Right (RefreshResponse "a" Nothing Nothing)
+            decodeRefreshResponse
+                "{\"access_token\":\"a\",\"refresh_token\":null,\"id_token\":null}"
+                `shouldBe` Right (RefreshResponse "a" Nothing Nothing)
+            decodeRefreshResponse
+                "{\"access_token\":\"a\",\"refresh_token\":\"r\",\"id_token\":\"i\"}"
+                `shouldBe` Right (RefreshResponse "a" (Just "r") (Just "i"))
+
+        it "reports an authentication error for unreadable bodies" do
+            decodeRefreshResponse "{\"refresh_token\":\"r\"}"
+                `shouldSatisfy` \case
+                    Left (ProviderError AuthenticationError _ Nothing) -> True
+                    _ -> False
+
     describe "Show" do
         it "redacts every token while retaining account metadata" do
             let auth = AuthState

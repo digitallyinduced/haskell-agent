@@ -207,11 +207,11 @@ accessTokenFromAuthJson raw =
 
     maybeTextValue = Json.withType \case
         Json.VString -> Just <$> Json.text
-        _ -> Json.withRawJsonByteString (const (pure Nothing))
+        _ -> Json.withOwnedRawJson (const (pure Nothing))
 
     nestedTokenValue = Json.withType \case
         Json.VObject -> authObjectTokenDecoder
-        _ -> Json.withRawJsonByteString (const (pure Nothing))
+        _ -> Json.withOwnedRawJson (const (pure Nothing))
 
     chooseToken (direct, nested) = direct `orElse` nested
     nonEmpty (Just value) | not (Text.null value) = Just value

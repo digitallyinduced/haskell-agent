@@ -15,7 +15,6 @@ import Claude.Agent.SDK.Types
 import Control.Monad (join)
 import qualified Data.Aeson.Encoding as Aeson
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as ByteString
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -322,24 +321,18 @@ renderedToolResultDecoder =
         Json.VArray ->
             Text.intercalate "\n" <$> Json.list renderedToolResultDecoder
         Json.VObject ->
-            Json.withRawJsonByteString (strictly . renderToolResultBlock)
+            Json.withOwnedRawJson (pure . renderToolResultBlock)
         Json.VNull -> pure ""
-        _ -> Json.withRawJsonByteString (strictly . displayBytes)
-  where
-    -- The raw bytes alias the parser's input buffer; force the projection
-    -- before the decoder returns.
-    strictly rendered = rendered `seq` pure rendered
+        _ -> Json.withOwnedRawJson (pure . displayBytes)
 
 -- | Render one structured tool-result block. Text blocks contribute their
 -- text, tool references and images get compact labels, and anything else
 -- falls back to its raw JSON.
 renderToolResultBlock :: ByteString -> Text
 renderToolResultBlock raw =
-    case Json.decodeEither toolResultBlockDecoder owned of
+    case Json.decodeEither toolResultBlockDecoder raw of
         Right (Just rendered) -> rendered
-        _ -> displayBytes owned
-  where
-    owned = ByteString.copy raw
+        _ -> displayBytes raw
 
 toolResultBlockDecoder :: Json.Decoder (Maybe Text)
 toolResultBlockDecoder = Json.object do
