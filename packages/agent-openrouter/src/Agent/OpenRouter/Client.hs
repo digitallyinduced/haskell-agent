@@ -13,10 +13,10 @@ import Agent.Error
     , ErrorType(..)
     , isInlineRetryableProviderError
     )
-import Agent.Responses.Client
-    ( ResponsesClientConfig(..)
-    , performResponsesRequest
-    , retryStreamingResultWithPolicy
+import Agent.Responses.GenericClient
+    ( ProviderClientConfig(..)
+    , createResponseWithProviderPolicy
+    , retryTransientResultWithPolicy
     )
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Types
@@ -79,26 +79,11 @@ createResponseWithEventsPolicy policy options credential request onEvent
         "agent-openrouter requires an OpenRouter credential"
         Nothing
     | otherwise =
-        retryTransientOpenRouterResultWithPolicy policy performOnce onEvent
-  where
-    performOnce =
-        performResponsesRequest
-            ResponsesClientConfig
-                { clientExceptionPrefix = "OpenRouter request failed"
-                , clientBaseUrl = options.baseUrl
-                , clientTimeoutSeconds = options.requestTimeoutSeconds
-                , clientClassifyFailure = classifyFailure
-                , clientBuildResponse = buildResponse
-                }
-            (buildRequest options request)
-            configureRequest
-
-    configureRequest =
-        setRequestHeader "Authorization"
-            ["Bearer " <> Text.encodeUtf8 credential.accessToken]
-            . setRequestHeader "User-Agent" ["haskell-agent"]
-            . optionalHeader "HTTP-Referer" options.httpReferer
-            . optionalHeader "X-Title" options.appTitle
+        createResponseWithProviderPolicy
+            policy
+            (openRouterProviderConfig options credential)
+            request
+            (Just onEvent)
 
 -- | Retry transient failures while replay is safe. The callback marker is
 -- written before user code runs, so callback exceptions are never retried.
@@ -107,15 +92,30 @@ retryTransientOpenRouterResultWithPolicy
     -> ((event -> IO ()) -> IO (Either ApiError value))
     -> (event -> IO ())
     -> IO (Either ApiError value)
-retryTransientOpenRouterResultWithPolicy policy request onEvent =
-    retryStreamingResultWithPolicy
-        policy
-        isInlineRetryableProviderError
-        request
-        (Just onEvent)
+retryTransientOpenRouterResultWithPolicy = retryTransientResultWithPolicy
 
 transientResultPolicy :: RetryPolicyM IO
 transientResultPolicy = exponentialBackoff 1_000_000 <> limitRetries 3
+
+openRouterProviderConfig
+    :: ClientOptions
+    -> Credential
+    -> ProviderClientConfig
+openRouterProviderConfig options credential = ProviderClientConfig
+    { providerExceptionPrefix = "OpenRouter request failed"
+    , providerBaseUrl = options.baseUrl
+    , providerRequestTimeoutSeconds = options.requestTimeoutSeconds
+    , providerBuildRequest = buildRequest options
+    , providerConfigureRequest =
+        setRequestHeader "Authorization"
+            ["Bearer " <> Text.encodeUtf8 credential.accessToken]
+            . setRequestHeader "User-Agent" ["haskell-agent"]
+            . optionalHeader "HTTP-Referer" options.httpReferer
+            . optionalHeader "X-Title" options.appTitle
+    , providerClassifyFailure = classifyFailure
+    , providerBuildResponse = buildResponse
+    , providerRetryableFailure = isInlineRetryableProviderError
+    }
 
 optionalHeader :: HeaderName -> Maybe Text -> Request -> Request
 optionalHeader name value request = case nonEmptyText value of
