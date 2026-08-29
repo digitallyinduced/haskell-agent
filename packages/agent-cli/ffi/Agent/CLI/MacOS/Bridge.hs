@@ -160,7 +160,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (addUTCTime, getCurrentTime)
-import Data.Word (Word8)
+import Data.Word (Word8, Word64)
 import Foreign
     ( FunPtr
     , Ptr
@@ -187,8 +187,8 @@ import System.OsPath
     , unsafeEncodeUtf
     )
 
-decodeInput :: Ptr Word8 -> CSize -> IO Text
-decodeInput pointer (CSize length)
+decodeInput :: Ptr Word8 -> Word64 -> IO Text
+decodeInput pointer length
     | pointer == nullPtr || length == 0 = pure ""
     | otherwise = TextEncoding.decodeUtf8 <$> BS.packCStringLen
         (castPtr pointer, fromIntegral length)
@@ -515,7 +515,7 @@ ha_account_oauth_start providerBytes (CSize providerLength) callback context
     | callback == nullFunPtr = pure 1
     | providerBytes == nullPtr && providerLength > 0 = pure 2
     | otherwise = do
-        provider <- decodeInput providerBytes (CSize providerLength)
+        provider <- decodeInput providerBytes providerLength
         _ <- forkIO do
             startAccountOAuth AccountProviderRequest
                 { accountProvider = provider } >>= \case
@@ -543,11 +543,11 @@ ha_account_oauth_poll providerBytes (CSize providerLength) urlBytes (CSize urlLe
     deviceBytes (CSize deviceLength) pollInterval expires callback context
     | callback == nullFunPtr = pure 1
     | otherwise = do
-        provider <- decodeInput providerBytes (CSize providerLength)
-        url <- decodeInput urlBytes (CSize urlLength)
-        user <- decodeInput userBytes (CSize userLength)
-        authId <- decodeInput authIdBytes (CSize authIdLength)
-        device <- decodeInput deviceBytes (CSize deviceLength)
+        provider <- decodeInput providerBytes providerLength
+        url <- decodeInput urlBytes urlLength
+        user <- decodeInput userBytes userLength
+        authId <- decodeInput authIdBytes authIdLength
+        device <- decodeInput deviceBytes deviceLength
         _ <- forkIO do
             pollAccountOAuth AccountOAuthPollRequest
                 { oauthPollProvider = provider
@@ -566,8 +566,8 @@ ha_account_api_key_connect
 ha_account_api_key_connect providerBytes (CSize providerLength) keyBytes (CSize keyLength) callback context
     | callback == nullFunPtr = pure 1
     | otherwise = do
-        provider <- decodeInput providerBytes (CSize providerLength)
-        key <- decodeInput keyBytes (CSize keyLength)
+        provider <- decodeInput providerBytes providerLength
+        key <- decodeInput keyBytes keyLength
         _ <- forkIO do
             connectAccountAPIKey AccountAPIKeyRequest
                 { accountAPIKeyProvider = provider, accountAPIKey = key }
