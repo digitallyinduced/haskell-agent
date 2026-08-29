@@ -479,6 +479,7 @@
                 haskellPackages = mkHaskellPackages true;
                 productionHaskellPackages = mkHaskellPackages false;
                 agentCorePackage = productionHaskellPackages.agent-core;
+                agentMcpPackage = productionHaskellPackages.agent-mcp;
                 agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
@@ -661,6 +662,7 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-mcp = agentMcpPackage;
                 packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
@@ -696,6 +698,7 @@
                         packages.agent-cli
                         packages.agent-telegram
                         packages.agent-core
+                        packages.agent-mcp
                         packages.agent-json
                         packages.agent-process
                         packages.agent-codex-dialect
@@ -746,6 +749,7 @@
                     agent-cli = haskellPackages.agent-cli;
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;
+                    agent-mcp = haskellPackages.agent-mcp;
                     agent-json = haskellPackages.agent-json;
                     agent-process = haskellPackages.agent-process;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;
