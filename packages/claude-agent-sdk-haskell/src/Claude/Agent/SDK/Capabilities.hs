@@ -68,13 +68,22 @@ claudeAgentSDKVersion = Text.pack (showVersion Paths.version)
 
 parseClaudeVersion :: Text -> Maybe Text
 parseClaudeVersion input =
-    case Text.words input of
-        first : _ ->
-            let candidate = Text.takeWhile (\c -> c == '.' || c >= '0' && c <= '9') first
-            in if Text.any (\c -> c >= '0' && c <= '9') candidate
-                then Just candidate
-                else Nothing
-        [] -> Nothing
+    firstVersion (Text.words input)
+  where
+    firstVersion [] = Nothing
+    firstVersion (word : rest) =
+        let unprefixed =
+                if Text.isPrefixOf "v" word || Text.isPrefixOf "V" word
+                    then Text.drop 1 word
+                    else word
+            candidate = Text.takeWhile
+                (\c -> c == '.' || c >= '0' && c <= '9')
+                unprefixed
+        in if not (Text.null candidate)
+                && Text.head candidate >= '0'
+                && Text.head candidate <= '9'
+            then Just candidate
+            else firstVersion rest
 
 parseClaudeHelp :: Text -> ClaudeAgentCapabilities
 parseClaudeHelp help =

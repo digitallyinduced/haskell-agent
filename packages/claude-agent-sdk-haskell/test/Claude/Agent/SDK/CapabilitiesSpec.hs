@@ -11,6 +11,7 @@ spec :: Spec
 spec = describe "Claude Code capabilities" do
     it "parses the installed version format" do
         parseClaudeVersion "2.1.209 (Claude Code)" `shouldBe` Just "2.1.209"
+        parseClaudeVersion "Claude Code version v2.1.209" `shouldBe` Just "2.1.209"
 
     it "discovers stream and security flags from help" do
         let capabilities = parseClaudeHelp fixtureHelp
