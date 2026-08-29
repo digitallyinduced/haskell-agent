@@ -803,6 +803,12 @@ finishTurnEvent callback context turnId = \case
 
 nativeLoopEvent :: Text -> LoopEvent -> Maybe Aeson.Value
 nativeLoopEvent turnId = \case
+    ReasoningDelta text ->
+        Just $ Aeson.object
+            [ "event" Aeson..= ("turn.reasoning_delta" :: Text)
+            , "turnId" Aeson..= turnId
+            , "text" Aeson..= text
+            ]
     TextDelta text ->
         Just $ Aeson.object
             [ "event" Aeson..= ("turn.text_delta" :: Text)
