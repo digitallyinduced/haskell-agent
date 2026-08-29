@@ -30,6 +30,7 @@ import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.LearnedSkillsSpec as LearnedSkillsSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
+import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
@@ -106,6 +107,7 @@ main = hspec do
     LearnedSkillsSpec.spec
     MarkdownSpec.spec
     McpManagerSpec.spec
+    MetaConsoleSpec.spec
     ModelConfigSpec.spec
     ModelPickerSpec.spec
     NativeAgentsSpec.spec

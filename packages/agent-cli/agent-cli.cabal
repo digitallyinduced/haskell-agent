@@ -181,6 +181,7 @@ library
                     , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
+                    , Agent.CLI.MetaConsole
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
                     , Agent.CLI.McpManager
@@ -416,6 +417,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.McpManagerSpec
+                    , Agent.CLI.MetaConsoleSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
