@@ -17,7 +17,7 @@ codexSystemPrompt cwd today =
         , "Today's date is " <> formattedToday <> "."
         , ""
         , "Use these tools:"
-        , "- Inspect files with read_file, grep, and list_dir. Outside Plan Mode, shell_command is also available; always set workdir."
+        , "- Inspect files with read_file, grep, and list_dir. Outside Plan Mode, shell_command is also available; omit workdir to use the turn cwd."
         , "- Edit files with apply_patch. Never call applypatch or apply-patch."
         , "- For every multi-step task, call update_plan before starting (unavailable in Plan Mode)."
         , "- Keep the checklist current: mark steps completed immediately after verification, keep exactly one step in_progress, and leave unfinished work pending or remove it rather than claiming completion."
@@ -54,7 +54,7 @@ codexSystemPromptForTools available cwd today =
         , "Use the registered tools:"
         ]
             <> toolLine "shell_command"
-                "- Inspect the repo and run system commands with shell_command. Always set workdir."
+                "- Inspect the repo and run system commands with shell_command. Omit workdir to use the turn cwd."
             <> toolLine "apply_patch"
                 "- Edit files with apply_patch. Never call applypatch or apply-patch."
             <> toolLine "update_plan"

@@ -2,17 +2,27 @@ module Agent.Codex.DialectSpec (spec) where
 
 import Agent.Codex.Dialect.ApplyPatch (applyPatch)
 import Agent.Codex.Dialect.ProjectInstructions (formatCodexAgentsMd)
-import Agent.Codex.Dialect.Prompt (codexSystemPrompt)
+import Agent.Codex.Dialect.Prompt
+    ( codexSystemPrompt
+    , codexSystemPromptForTools
+    )
 import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
     )
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
-import Agent.ToolDispatch (customToolCall, functionToolCall)
+import Agent.ToolDispatch
+    ( ToolCallResult(..)
+    , ToolDispatchConfig(..)
+    , customToolCall
+    , dispatchToolCall
+    , functionToolCall
+    )
 import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Types
     ( AppTool(..)
+    , appToolHandlers
     , defaultToolEnv
     , mkToolRegistry
     , toolSchedulingPlanFor
@@ -41,6 +51,20 @@ spec = describe "Codex dialect" do
         prompt `shouldSatisfy` Text.isInfixOf "shell_command"
         prompt `shouldSatisfy` Text.isInfixOf "apply_patch"
         prompt `shouldSatisfy` Text.isInfixOf "<proposed_plan>"
+        Text.toLower prompt
+            `shouldSatisfy` Text.isInfixOf "omit workdir"
+        Text.toLower prompt
+            `shouldNotSatisfy` Text.isInfixOf "always set workdir"
+
+        let dynamicPrompt =
+                codexSystemPromptForTools
+                    ["shell_command"]
+                    (unsafeEncodeUtf "/repo")
+                    (fromGregorian 2026 8 23)
+        Text.toLower dynamicPrompt
+            `shouldSatisfy` Text.isInfixOf "omit workdir"
+        Text.toLower dynamicPrompt
+            `shouldNotSatisfy` Text.isInfixOf "always set workdir"
 
     it "constructs only the Codex tool surface" do
         withTempDir \dir -> do
@@ -56,6 +80,24 @@ spec = describe "Codex dialect" do
                 `shouldBe` replicate 4 True
             names `shouldNotContain` ["run_terminal_cmd", "search_replace"]
             coding.codexClose
+
+    it "defaults shell_command to the turn cwd when workdir is omitted" do
+        withTempDir \dir -> do
+            Text.writeFile (dir </> "cwd-marker") "present"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-default-cwd"
+                            "shell_command"
+                            "{\"command\":\"test -f cwd-marker && printf cwd-defaulted\"}")
+                    result.output
+                        `shouldSatisfy` Text.isInfixOf "cwd-defaulted"
 
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd
@@ -243,3 +285,13 @@ withTempDir action = do
         (mkdtemp (tmp </> "agent-codex-dialect-XXXXXX"))
         removeDirectoryRecursive
         action
+
+testDispatchConfig :: ToolDispatchConfig
+testDispatchConfig = ToolDispatchConfig
+    { toolDispatchUnknownTool = \name -> "unknown:" <> name
+    , toolDispatchFormatResult = either ("ERR " <>) id
+    , toolDispatchFormatException = \name _ -> "EX " <> name
+    , toolDispatchOnException = \_ _ -> pure ()
+    , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
+    }
