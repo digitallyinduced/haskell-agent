@@ -32,6 +32,7 @@ let
         workingDirectory = "/srv/primary";
         tokenFile = "/run/keys/primary-token";
         allowedUsers = [ 123456789 ];
+        contextBotUsers = [ 222333444 ];
         model = null;
         effort = null;
         respondToAllGroupMessages = true;
@@ -146,6 +147,39 @@ let
         codexHome = "relative";
       };
     };
+    duplicateContextBotUsers = failedAssertions {
+      services.haskell-agent.telegram.instances.invalid = {
+        enable = true;
+        package = testPackage;
+        workingDirectory = "/srv/invalid";
+        tokenFile = "/run/keys/invalid-token";
+        allowedUsers = [ 1 ];
+        contextBotUsers = [
+          2
+          2
+        ];
+      };
+    };
+    overlappingContextBotUsers = failedAssertions {
+      services.haskell-agent.telegram.instances.invalid = {
+        enable = true;
+        package = testPackage;
+        workingDirectory = "/srv/invalid";
+        tokenFile = "/run/keys/invalid-token";
+        allowedUsers = [ 2 ];
+        contextBotUsers = [ 2 ];
+      };
+    };
+    nonPositiveContextBotUsers = failedAssertions {
+      services.haskell-agent.telegram.instances.invalid = {
+        enable = true;
+        package = testPackage;
+        workingDirectory = "/srv/invalid";
+        tokenFile = "/run/keys/invalid-token";
+        allowedUsers = [ 1 ];
+        contextBotUsers = [ 0 ];
+      };
+    };
     duplicateAllowedUsers = failedAssertions {
       services.haskell-agent.telegram.instances.invalid = {
         enable = true;
@@ -207,6 +241,7 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
     jq -e '
       . == {
         allowedUsers: [123456789],
+        contextBotUsers: [222333444],
         cwd: "/srv/primary",
         effort: null,
         model: null,
@@ -245,6 +280,7 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
     jq -e '
       . == {
         allowedUsers: [987654321],
+        contextBotUsers: [],
         cwd: "/srv/secondary",
         effort: null,
         model: "openai/gpt-5.1",
@@ -308,6 +344,9 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
     printf '%s\n' "$validationFailures" | jq -e '
       (.relativeCodexHome | any(contains(".codexHome must be absolute")))
       and (.duplicateAllowedUsers | any(contains(".allowedUsers must not contain duplicates")))
+      and (.duplicateContextBotUsers | any(contains(".contextBotUsers must not contain duplicates")))
+      and (.overlappingContextBotUsers | any(contains(".contextBotUsers must not overlap allowedUsers")))
+      and (.nonPositiveContextBotUsers | any(contains(".contextBotUsers must contain only positive IDs")))
       and (.relativeEnvironmentFile | any(contains(".environmentFiles must contain only absolute paths")))
     ' >/dev/null
 

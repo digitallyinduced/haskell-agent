@@ -172,6 +172,16 @@ let
           description = "Telegram user IDs allowed to interact with the bot.";
         };
 
+        contextBotUsers = mkOption {
+          type = types.listOf types.ints.unsigned;
+          default = [ ];
+          example = [ 987654321 ];
+          description = ''
+            Telegram bot user IDs whose group messages are supplied as quoted
+            context only. These bots never gain command or tool authority.
+          '';
+        };
+
         respondToAllGroupMessages = mkOption {
           type = types.bool;
           default = false;
@@ -269,6 +279,7 @@ let
         effort = instance.effort;
         yolo = instance.yolo;
         allowedUsers = instance.allowedUsers;
+        contextBotUsers = instance.contextBotUsers;
         inherit (instance) respondToAllGroupMessages;
       }
     );
@@ -349,6 +360,20 @@ in
           assertion =
             builtins.length instance.allowedUsers == builtins.length (lib.unique instance.allowedUsers);
           message = "services.haskell-agent.telegram.instances.${name}.allowedUsers must not contain duplicates";
+        }
+        {
+          assertion = builtins.all (userId: userId > 0) instance.contextBotUsers;
+          message = "services.haskell-agent.telegram.instances.${name}.contextBotUsers must contain only positive IDs";
+        }
+        {
+          assertion =
+            builtins.length instance.contextBotUsers == builtins.length (lib.unique instance.contextBotUsers);
+          message = "services.haskell-agent.telegram.instances.${name}.contextBotUsers must not contain duplicates";
+        }
+        {
+          assertion =
+            lib.filter (userId: builtins.elem userId instance.allowedUsers) instance.contextBotUsers == [ ];
+          message = "services.haskell-agent.telegram.instances.${name}.contextBotUsers must not overlap allowedUsers";
         }
         {
           assertion = hasPrefix "/" instance.tokenFile;
