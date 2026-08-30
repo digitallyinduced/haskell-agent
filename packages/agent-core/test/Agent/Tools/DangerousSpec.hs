@@ -2,7 +2,9 @@ module Agent.Tools.DangerousSpec (spec) where
 
 import Agent.Tools.Dangerous
     ( commandLooksLikeRmRf
+    , commandUsesHardcodedSystemTmp
     , forbiddenRmRfReason
+    , hardcodedSystemTmpReason
     , shellCommandBlocked
     )
 import qualified Data.Aeson as Aeson
@@ -155,6 +157,34 @@ spec = do
                 \(BenignCommand command) ->
                     commandLooksLikeRmRf command === False
 
+    describe "commandUsesHardcodedSystemTmp" do
+        it "recognizes system temp paths in common shell positions" do
+            commandUsesHardcodedSystemTmp "touch /tmp/result.png"
+                `shouldBe` True
+            commandUsesHardcodedSystemTmp "OUT=/tmp/result.png make"
+                `shouldBe` True
+            commandUsesHardcodedSystemTmp "cat '/private/tmp/input.txt'"
+                `shouldBe` True
+            commandUsesHardcodedSystemTmp "cd /tmp"
+                `shouldBe` True
+            commandUsesHardcodedSystemTmp "touch ///tmp/result.png"
+                `shouldBe` True
+            commandUsesHardcodedSystemTmp "cat /private//tmp/input.txt"
+                `shouldBe` True
+
+        it "allows session temp variables and unrelated tmp path components" do
+            commandUsesHardcodedSystemTmp "touch \"$TMPDIR/result.png\""
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp
+                "touch \"$HASKELL_AGENT_TMPDIR/result.png\""
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp "echo /tmpfile"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp "cat build/tmp/result.png"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp "curl https://example.test/tmp/file"
+                `shouldBe` False
+
     describe "shellCommandBlocked" do
         it "blocks shell tools with a clear reason" do
             shouldBlock "run_terminal_cmd" "{\"command\":\"rm -rf /tmp/x\"}"
@@ -167,6 +197,24 @@ spec = do
             msg `shouldSatisfy` Text.isInfixOf "Blocked dangerous shell command"
             msg `shouldSatisfy` Text.isInfixOf "rm -rf /tmp/very-important"
 
+        it "rejects hardcoded system temp paths before approval" do
+            let args = "{\"command\":\"convert in.svg /tmp/out.png\"}"
+            case shellCommandBlocked "shell_command" args of
+                Just msg -> do
+                    msg `shouldSatisfy`
+                        Text.isInfixOf "Blocked hardcoded system temp path"
+                    msg `shouldSatisfy` Text.isInfixOf "$TMPDIR"
+                Nothing -> expectationFailure "expected hardcoded temp block"
+            shellCommandBlocked "monitor"
+                "{\"command\":\"tail -f /private/tmp/events\"}"
+                `shouldSatisfy`
+                    maybe False
+                        (Text.isInfixOf "Blocked hardcoded system temp path")
+
+        it "includes a truncated command snippet in the temp-path reason" do
+            let msg = hardcodedSystemTmpReason "cat /tmp/session.log"
+            msg `shouldSatisfy` Text.isInfixOf "cat /tmp/session.log"
+
         it "parses JSON with whitespace around the command value" do
             shouldBlock "run_terminal_cmd" "{\"command\" : \"rm -rf x\"}"
 
@@ -178,7 +226,8 @@ spec = do
                         [ isBlocked (shellCommandBlocked tool arguments)
                             === True
                         | tool <-
-                            [ "run_terminal_cmd"
+                            [ "monitor"
+                            , "run_terminal_cmd"
                             , "run_terminal_command"
                             , "shell_command"
                             ]

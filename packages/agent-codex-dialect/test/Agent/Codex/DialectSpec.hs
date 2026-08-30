@@ -25,6 +25,7 @@ import Agent.Tools.Types
     , appToolHandlers
     , defaultToolEnv
     , mkToolRegistry
+    , setToolSessionTmp
     , toolSchedulingPlanFor
     )
 import Control.Exception.Safe (bracket)
@@ -32,7 +33,9 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
 import System.Directory
-    ( doesFileExist
+    ( canonicalizePath
+    , createDirectory
+    , doesFileExist
     , getTemporaryDirectory
     , removeDirectoryRecursive
     )
@@ -98,6 +101,45 @@ spec = describe "Codex dialect" do
                             "{\"command\":\"test -f cwd-marker && printf cwd-defaulted\"}")
                     result.output
                         `shouldSatisfy` Text.isInfixOf "cwd-defaulted"
+
+    it "rejects literal system temp paths in shell commands" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-system-tmp"
+                            "shell_command"
+                            "{\"command\":\"touch /tmp/agent-output\"}")
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf "Blocked hardcoded system temp path"
+                    result.output `shouldSatisfy` Text.isInfixOf "$TMPDIR"
+
+    it "maps a /tmp shell workdir to the private session directory" do
+        withTempDir \dir -> do
+            let scratch = dir </> "session-scratch"
+            createDirectory scratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            canonicalScratch <- canonicalizePath scratch
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-system-tmp-workdir"
+                            "shell_command"
+                            "{\"command\":\"pwd\",\"workdir\":\"/tmp\"}")
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf (Text.pack canonicalScratch)
 
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd

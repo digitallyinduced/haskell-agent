@@ -327,8 +327,12 @@ spec = describe "systemPrompt" do
             "clones, downloads, extracted files, generated assets"
         childPrompt `shouldSatisfy` Text.isInfixOf
             "relative paths still resolve against the workspace"
+        rootPrompt `shouldSatisfy` Text.isInfixOf
+            "paths under /tmp or /private/tmp are redirected"
         rootPrompt `shouldSatisfy` Text.isInfixOf "HASKELL_AGENT_TMPDIR"
         childPrompt `shouldSatisfy` Text.isInfixOf "TMPDIR"
+        childPrompt `shouldSatisfy` Text.isInfixOf
+            "use $TMPDIR instead of a literal /tmp"
     it "gives subscription-backed OpenAI subagents task-based model guidance" do
         let subscriptionGuidance =
                 subscriptionSubagentModelGuidance

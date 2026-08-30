@@ -24,6 +24,7 @@ import Agent.Tools.Types
     ( ToolEnv(..)
     , defaultToolEnv
     , mkToolRegistry
+    , setToolSessionTmp
     , toolSchedulingPlanFor
     )
 import Control.Concurrent (threadDelay)
@@ -32,7 +33,8 @@ import Control.Exception.Safe (SomeException, bracket, try)
 import Data.Either (isRight)
 import qualified Data.Text as Text
 import System.Directory
-    ( getTemporaryDirectory
+    ( createDirectory
+    , getTemporaryDirectory
     , removeDirectoryRecursive
     )
 import System.FilePath ((</>))
@@ -185,6 +187,20 @@ spec = describe "Agent.Tools.Ghci" do
                 result.ghciOk `shouldBe` True
                 result.ghciOutput `shouldSatisfy`
                     Text.isInfixOf (Text.pack (toFilePath env.toolCwd))
+
+    it "inherits the private session temp environment" do
+        withTempEnv \env -> do
+            let scratch = toFilePath env.toolCwd </> "session-scratch"
+            createDirectory scratch
+            setToolSessionTmp env (Just (fromFilePath scratch))
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                result <- evalGhci ghci
+                    "cmd \"sh\" [\"-c\", \"printf '%s|%s|%s' \\\"$TMPDIR\\\" \\\"$HASKELL_AGENT_TMPDIR\\\" \\\"${HASKELL_AGENT_HOST_TMPDIR-unset}\\\"\"]"
+                    10000
+                result.ghciOk `shouldBe` True
+                result.ghciOutput `shouldSatisfy`
+                    Text.isInfixOf
+                        (Text.pack (scratch <> "|" <> scratch <> "|unset"))
 
     it "restores helpers after loading a module clears interactive bindings" do
         withTempEnv \env -> do

@@ -18,6 +18,7 @@ import Agent.Tools.IO
     , runShellCommand
     , runShellCommandStreaming
     , runningLiveOutput
+    , sessionTempProcessEnv
     , startShellCommand
     , startShellCommandWithInput
     , stopShellCommand
@@ -51,7 +52,7 @@ import System.Directory
     , listDirectory
     , removeDirectoryRecursive
     )
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeFileName)
 import System.IO (IOMode(..), hClose, openFile)
 import System.IO.Error (alreadyInUseErrorType, mkIOError)
 import System.Posix.Temp (mkdtemp)
@@ -225,8 +226,109 @@ spec = describe "Agent.Tools.IO" do
             resolveUnderCwd env (fromFilePath scratchFile)
                 >>= (`shouldSatisfy` isRight)
             resolveUnderCwd env
-                (fromFilePath (dir </> "unrelated" </> "file.txt"))
+                (fromFilePath "/haskell-agent-unrelated-root/file.txt")
                 >>= (`shouldSatisfy` isLeft)
+
+    it "maps system temp paths into the private session temp root" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                scratch = dir </> "scratch"
+                relative = "literal-tmp" </> "artifact.txt"
+            mapM_ createDirectory [workspace, scratch]
+            env <- defaultToolEnv (fromFilePath workspace)
+            setToolSessionTmp env (Just (fromFilePath scratch))
+            requests <- newIORef []
+            setToolRootAccessRequest env $ Just \root -> do
+                modifyIORef' requests (<> [root])
+                pure False
+            canonicalScratch <- canonicalizePath scratch
+            canonicalSystemTmp <- canonicalizePath "/tmp"
+            let expected = Right (fromFilePath (canonicalScratch </> relative))
+            resolveUnderCwd env (fromFilePath "/tmp")
+                `shouldReturn` Right (fromFilePath canonicalScratch)
+            resolveUnderCwd env (fromFilePath "/tmp/")
+                `shouldReturn` Right (fromFilePath canonicalScratch)
+            resolveUnderCwd env (fromFilePath ("/tmp" </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env (fromFilePath ("//tmp" </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env (fromFilePath ("///tmp" </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env (fromFilePath ("////tmp" </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env
+                (fromFilePath ("/tmp//" <> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env
+                (fromFilePath (canonicalSystemTmp </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env
+                (fromFilePath ("/private/tmp" </> relative))
+                `shouldReturn` expected
+            readIORef requests `shouldReturn` []
+
+    it "maps an existing host temp file unless its root was explicitly allowed" do
+        withTempDir \dir ->
+            withSystemTempDir \hostTemp -> do
+                let workspace = dir </> "workspace"
+                    scratch = dir </> "scratch"
+                    hostFile = hostTemp </> "existing.txt"
+                    relative = takeFileName hostTemp </> "existing.txt"
+                    requested = "/tmp" </> relative
+                mapM_ createDirectory [workspace, scratch]
+                writeFile hostFile "host"
+                canonicalScratch <- canonicalizePath scratch
+                canonicalHostFile <- canonicalizePath hostFile
+
+                mappedEnv <- defaultToolEnv (fromFilePath workspace)
+                setToolSessionTmp mappedEnv (Just (fromFilePath scratch))
+                resolveUnderCwd mappedEnv (fromFilePath requested)
+                    `shouldReturn` Right
+                        (fromFilePath (canonicalScratch </> relative))
+
+                allowedEnv <- defaultToolEnv (fromFilePath workspace)
+                setToolSessionTmp allowedEnv (Just (fromFilePath scratch))
+                writeIORef allowedEnv.toolAllowedRoots [fromFilePath hostTemp]
+                resolveUnderCwd allowedEnv (fromFilePath requested)
+                    `shouldReturn` Right (fromFilePath canonicalHostFile)
+
+    it "does not let a remapped temp path escape through a session symlink" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                scratch = dir </> "scratch"
+                outside = dir </> "outside"
+                alias = "literal-tmp-link"
+            mapM_ createDirectory [workspace, scratch, outside]
+            createDirectoryLink outside (scratch </> alias)
+            env <- defaultToolEnv (fromFilePath workspace)
+            setToolSessionTmp env (Just (fromFilePath scratch))
+            requests <- newIORef []
+            setToolRootAccessRequest env $ Just \root -> do
+                modifyIORef' requests (<> [root])
+                pure True
+            result <- resolveUnderCwd env
+                (fromFilePath ("/tmp" </> alias </> "missing.txt"))
+            result `shouldSatisfy` isLeft
+            result `shouldSatisfy`
+                either
+                    (Text.isInfixOf
+                        "escapes the private session temp directory")
+                    (const False)
+            traversal <- resolveUnderCwd env
+                (fromFilePath ("/tmp" </> ".." </> "outside.txt"))
+            traversal `shouldSatisfy`
+                either
+                    (Text.isInfixOf
+                        "escapes the private session temp directory")
+                    (const False)
+            doubleSlashTraversal <- resolveUnderCwd env
+                (fromFilePath "//tmp/../outside.txt")
+            doubleSlashTraversal `shouldSatisfy`
+                either
+                    (Text.isInfixOf
+                        "escapes the private session temp directory")
+                    (const False)
+            readIORef requests `shouldReturn` []
 
     it "requests and remembers approval for an escaped filesystem root" do
         withTempDir \dir -> do
@@ -294,10 +396,24 @@ spec = describe "Agent.Tools.IO" do
                 env = base
             setToolSessionTmp env (Just scratchPath)
             result <- runShellCommand env scratchPath
-                "printf '%s\\n%s' \"$TMPDIR\" \"$HASKELL_AGENT_TMPDIR\""
+                "printf '%s\\n%s\\n%s' \"$TMPDIR\" \"$HASKELL_AGENT_TMPDIR\" \"${HASKELL_AGENT_HOST_TMPDIR-unset}\""
                 5000
             result.commandStdout `shouldBe`
-                Text.pack scratch <> "\n" <> Text.pack scratch
+                Text.pack scratch <> "\n" <> Text.pack scratch <> "\nunset"
+
+    it "replaces inherited temp variables without exposing host temp" do
+        let scratch = fromFilePath "/session/private"
+        sessionTempProcessEnv scratch
+            [ ("TMPDIR", "/host/tmp")
+            , ("HASKELL_AGENT_TMPDIR", "/host/tmp")
+            , ("HASKELL_AGENT_HOST_TMPDIR", "/tmp")
+            , ("KEEP", "yes")
+            ]
+            `shouldBe`
+                [ ("TMPDIR", "/session/private")
+                , ("HASKELL_AGENT_TMPDIR", "/session/private")
+                , ("KEEP", "yes")
+                ]
 
     it "switches the effective session temp root without retaining the old one" do
         withTempDir \dir -> do
@@ -307,10 +423,12 @@ spec = describe "Agent.Tools.IO" do
             mapM_ createDirectory [workspace, first, second]
             env <- defaultToolEnv (fromFilePath workspace)
             setToolSessionTmp env (Just (fromFilePath first))
-            resolveUnderCwd env (fromFilePath (first </> "file.txt"))
+            resolveUnderCwd env
+                (fromFilePath (".." </> "first" </> "file.txt"))
                 >>= (`shouldSatisfy` isRight)
             setToolSessionTmp env (Just (fromFilePath second))
-            resolveUnderCwd env (fromFilePath (first </> "file.txt"))
+            resolveUnderCwd env
+                (fromFilePath (".." </> "first" </> "file.txt"))
                 >>= (`shouldSatisfy` isLeft)
             resolveUnderCwd env (fromFilePath (second </> "file.txt"))
                 >>= (`shouldSatisfy` isRight)
@@ -528,3 +646,9 @@ withTempDir action = do
         (mkdtemp (tmp </> "agent-io-XXXXXX"))
         removeDirectoryRecursive
         action
+
+withSystemTempDir :: (FilePath -> IO a) -> IO a
+withSystemTempDir =
+    bracket
+        (mkdtemp "/tmp/agent-io-host-XXXXXX")
+        removeDirectoryRecursive

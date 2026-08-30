@@ -6,7 +6,7 @@ module Agent.GrokBuild.Dialect.Monitor
 import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
+import Agent.Tools.Dangerous (blockedShellCommandReason)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.GrokBuild.Dialect.Json (optionalBool, optionalIntOrString)
 import Agent.GrokBuild.Dialect.Shell (GrokSession, startMonitor)
@@ -49,14 +49,15 @@ monitorDescription :: Text
 monitorDescription =
     "Start a background monitor that streams events from a long-running script. Each stdout line is an event; exit ends the watch.\n\n\
     \Print only meaningful status changes. Use line-buffered commands in pipes so events are not delayed.\n\n\
+    \Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\n\
     \Set persistent=true for session-length watches. Otherwise the monitor stops at timeout_ms (default 10h)."
 
 runMonitor :: GrokSession -> MonitorArgs -> IO (Either Text Text)
 runMonitor session args
     | Text.null (Text.strip args.description) =
         pure (Left "Missing parameter: description")
-    | commandLooksLikeRmRf args.command =
-        pure (Left (forbiddenRmRfReason args.command))
+    | Just reason <- blockedShellCommandReason args.command =
+        pure (Left reason)
     | not args.persistent
     , Just timeout <- args.timeoutMs
     , timeout > maxMonitorTimeoutMs =

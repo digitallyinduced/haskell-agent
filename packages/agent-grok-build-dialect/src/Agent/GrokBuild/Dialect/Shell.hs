@@ -106,7 +106,10 @@ newGrokSession env = do
   where
     acquireEnvFile =
         mask \restore -> do
-            tmp <- getCanonicalTemporaryDirectory
+            tmp <-
+                readIORef env.toolSessionTmp >>= \case
+                    Just sessionTmp -> pure (unsafeToFilePath sessionTmp)
+                    Nothing -> getCanonicalTemporaryDirectory
             (envFileRaw, handle) <- restore $
                 openTempFile tmp "agent-grok-env"
             let envFile = unsafeEncodeUtf envFileRaw

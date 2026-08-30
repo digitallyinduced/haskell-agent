@@ -25,6 +25,7 @@ import Agent.Tools.Types
     , ToolRegistry
     , defaultToolEnv
     , mkToolRegistry
+    , setToolSessionTmp
     , toolSchedulingPlanFor
     )
 import Control.Concurrent.MVar (readMVar)
@@ -35,7 +36,8 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import System.Directory (doesFileExist)
+import System.Directory (createDirectory, doesFileExist)
+import System.FilePath ((</>), takeDirectory)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
@@ -222,6 +224,17 @@ spec = describe "Grok Build dialect" do
                 pure path
         doesFileExist path `shouldReturn` False
         doesFileExist (path <> ".cwd") `shouldReturn` False
+
+    it "stores shell state in the private session temp directory" do
+        withTempDir \dir -> do
+            let scratch = dir </> "session-scratch"
+            createDirectory scratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                shell <- readMVar session.grokShell
+                takeDirectory (unsafeToFilePath shell.shellEnvFile)
+                    `shouldBe` scratch
 
     it "formats and neutralizes project instruction reminders" do
         let loaded = LoadedAgentsMd

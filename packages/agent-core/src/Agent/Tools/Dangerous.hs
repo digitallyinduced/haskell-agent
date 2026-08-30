@@ -1,11 +1,15 @@
 -- | Hard-deny patterns for shell tools, even under auto-approve / yolo.
 --
 -- Inspired by Grok Build's "always-approve + deny rules" and Codex's forbidden
--- exec-policy prefixes. First cut blocks recursive force deletes.
+-- exec-policy prefixes. Blocks recursive force deletes and shell references to
+-- the shared host temp namespace.
 module Agent.Tools.Dangerous
     ( shellCommandBlocked
+    , blockedShellCommandReason
     , commandLooksLikeRmRf
+    , commandUsesHardcodedSystemTmp
     , forbiddenRmRfReason
+    , hardcodedSystemTmpReason
     ) where
 
 import Agent.JsonText (jsonTextField)
@@ -18,13 +22,19 @@ import qualified Data.Text as Text
 shellCommandBlocked :: Text -> Text -> Maybe Text
 shellCommandBlocked toolName argumentsJson
     | toolName `elem`
-        ["run_terminal_cmd", "run_terminal_command", "shell_command"] =
+        ["monitor", "run_terminal_cmd", "run_terminal_command", "shell_command"] =
         case jsonTextField "command" argumentsJson of
             Nothing -> Nothing
-            Just command
-                | commandLooksLikeRmRf command ->
-                    Just (forbiddenRmRfReason command)
-                | otherwise -> Nothing
+            Just command -> blockedShellCommandReason command
+    | otherwise = Nothing
+
+-- | Apply every first-party shell hard-deny in stable precedence order.
+blockedShellCommandReason :: Text -> Maybe Text
+blockedShellCommandReason command
+    | commandLooksLikeRmRf command =
+        Just (forbiddenRmRfReason command)
+    | commandUsesHardcodedSystemTmp command =
+        Just (hardcodedSystemTmpReason command)
     | otherwise = Nothing
 
 forbiddenRmRfReason :: Text -> Text
@@ -32,6 +42,72 @@ forbiddenRmRfReason command =
     "Blocked dangerous shell command (rm -rf / recursive force delete). "
         <> "Remove files more narrowly, or ask the user to run the delete outside the agent. "
         <> "Command: "
+        <> Text.take 200 (Text.strip command)
+
+-- | Reject literal references to the host's shared temp namespace.
+--
+-- Shell source cannot be rewritten safely: a textual substitution could alter
+-- quoted data, heredocs, URLs, or nested programs. Instead, require the
+-- environment variable that the runtime points at the session-private temp
+-- directory. This is intentionally best-effort rather than a shell parser; it
+-- recognizes an absolute path at a token-like boundary while avoiding ordinary
+-- URL path components and names such as @/tmpfile@.
+commandUsesHardcodedSystemTmp :: Text -> Bool
+commandUsesHardcodedSystemTmp = go Nothing
+  where
+    go previous remaining
+        | Text.null remaining = False
+        | tempPathStartsHere previous remaining = True
+        | otherwise =
+            let current = Text.head remaining
+            in go (Just current) (Text.tail remaining)
+
+    tempPathStartsHere previous remaining =
+        pathBoundaryBefore previous
+            && case Text.span (== '/') remaining of
+                (slashes, afterSlashes)
+                    | not (Text.null slashes) ->
+                        tempComponentAtStart afterSlashes
+                            || privateTempAtStart afterSlashes
+                _ -> False
+
+    tempComponentAtStart remaining =
+        case Text.stripPrefix "tmp" remaining of
+            Just suffix -> pathBoundaryAfter suffix
+            Nothing -> False
+
+    privateTempAtStart remaining =
+        case Text.stripPrefix "private" remaining of
+            Just afterPrivate ->
+                case Text.span (== '/') afterPrivate of
+                    (slashes, afterSlashes)
+                        | not (Text.null slashes) ->
+                            tempComponentAtStart afterSlashes
+                    _ -> False
+            Nothing -> False
+
+    pathBoundaryBefore = \case
+        Nothing -> True
+        Just char -> not (isPathOrUrlChar char)
+
+    pathBoundaryAfter suffix =
+        Text.null suffix
+            || Text.head suffix == '/'
+            || not (isPathNameChar (Text.head suffix))
+
+    -- A preceding URL/path character means this slash is a path component,
+    -- rather than the beginning of an absolute temp path.
+    isPathOrUrlChar char =
+        isPathNameChar char || char `elem` ("/:" :: String)
+
+    isPathNameChar char =
+        isAlphaNum char || char `elem` ("._-" :: String)
+
+hardcodedSystemTmpReason :: Text -> Text
+hardcodedSystemTmpReason command =
+    "Blocked hardcoded system temp path. Use $TMPDIR (or \
+    \$HASKELL_AGENT_TMPDIR) so scratch files stay in this session's private \
+    \temp directory; do not use literal /tmp or /private/tmp paths. Command: "
         <> Text.take 200 (Text.strip command)
 
 -- | Best-effort detection for recursive force deletes.
