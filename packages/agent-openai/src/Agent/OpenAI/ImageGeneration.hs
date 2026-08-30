@@ -132,13 +132,13 @@ imageGenerationDescription =
     \- imagegen needs a few minutes to finish. In code-mode, use the first-line @exec directive to give the initial call 120 seconds and the same yield for any waits that follow. Once it finishes, return the image with generatedImage(result).\n\
     \- Omit both `referenced_image_paths` and `num_last_images_to_include` when generating a brand new image.\n\
     \- For edits, use `referenced_image_paths` when every target image has a local file path.\n\
-    \- If you have not seen a local image yet, use `show_image` to inspect it before editing.\n\
+    \- If you have not seen a local image yet, use `view_image` to inspect it before editing.\n\
     \- Use `num_last_images_to_include` only when at least one target image has no local file path.\n\
     \- Set `num_last_images_to_include` to the smallest number of recent conversation images that includes every target image, up to 5.\n\
     \- Never provide both `referenced_image_paths` and `num_last_images_to_include`.\n\
     \- If neither mechanism can include every target image, ask the user to attach the missing images again.\n\
     \- Directly generate the image without reconfirmation or clarification unless required images must be attached again.\n\
-    \- Always use this tool for image editing unless the user explicitly requests otherwise. Do not use the `python` tool for image editing unless specifically instructed."
+    \- Always use this tool for image editing unless the user explicitly requests otherwise. Do not use the `python` tool for image editing unless specifically instructed.\n"
 
 -- | Session-local chronological image history. Only the five images that can
 -- be selected by the public tool contract need to be retained.
@@ -252,7 +252,7 @@ imageGenerationSchema = Aeson.object
             , "items" Aeson..= Aeson.object
                 [ "type" Aeson..= ("string" :: Text)
                 , "description" Aeson..=
-                    ("Absolute path to a local image to edit." :: Text)
+                    ("A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute." :: Text)
                 ]
             , "maxItems" Aeson..= maxSelectableImages
             ]

@@ -17,6 +17,8 @@ module Agent.CLI.CodeModeRuntime
     , codexCatalogDefaultEffort
     , projectCodeModeTools
     , codeModeSessionRuntimeFor
+    , imageGenerationCodeModeRuntimeFor
+    , imageGenerationCodeModeProjection
     ) where
 
 import Agent.CLI.Models (modelsCacheFilePath)
@@ -241,6 +243,45 @@ codeModeSessionRuntimeFor maybeInfo tools =
                         info
                         CodeOnlyToolMode
                         (projectCodeModeTools CodeOnlyToolMode tools)
+
+-- | Catalog @code_mode_only@ models reserve @image_gen.imagegen@ but expect it
+-- behind the @exec@ surface. When the user has not enabled full code mode,
+-- project only image generation through @exec@ and leave every other tool
+-- directly provider-visible.
+imageGenerationCodeModeRuntimeFor
+    :: Maybe ModelInfo
+    -> [AppTool]
+    -> IO (Either Text (Maybe CodeModeSessionRuntime))
+imageGenerationCodeModeRuntimeFor maybeInfo tools =
+    case maybeInfo of
+        Just info
+            | Just projection <-
+                imageGenerationCodeModeProjection
+                    (toolModeForInfo ConventionalToolMode info)
+                    tools ->
+                buildRuntime
+                    info
+                    CodeOnlyToolMode
+                    projection
+        _ -> pure (Right Nothing)
+
+imageGenerationCodeModeProjection
+    :: ToolMode
+    -> [AppTool]
+    -> Maybe CodeModeToolProjection
+imageGenerationCodeModeProjection mode tools
+    | mode == CodeOnlyToolMode
+    , any isImageGenerationTool tools =
+        Just CodeModeToolProjection
+            { directCodeModeTools =
+                filter (not . isImageGenerationTool) tools
+            , nestedCodeModeTools =
+                filter isImageGenerationTool tools
+            }
+    | otherwise = Nothing
+  where
+    isImageGenerationTool tool =
+        tool.appToolName == imageGenerationToolName
 
 buildRuntime
     :: ModelInfo

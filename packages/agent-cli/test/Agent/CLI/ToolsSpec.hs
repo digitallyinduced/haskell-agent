@@ -3,6 +3,7 @@ module Agent.CLI.ToolsSpec (spec) where
 import Agent.CLI.Tools
 import Agent.CLI.CodeModeRuntime
     ( CodeModeToolProjection(..)
+    , imageGenerationCodeModeProjection
     , projectCodeModeTools
     )
 import Agent.Dialect
@@ -65,6 +66,21 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+    it "nests only imagegen for code-only models when full code mode is off" do
+        let tools = map testTool ["read_file", "imagegen", "shell_command"]
+        case imageGenerationCodeModeProjection CodeOnlyToolMode tools of
+            Just projection -> do
+                map (.appToolName) projection.directCodeModeTools
+                    `shouldBe` ["read_file", "shell_command"]
+                map (.appToolName) projection.nestedCodeModeTools
+                    `shouldBe` ["imagegen"]
+            Nothing ->
+                expectationFailure "expected an image-generation projection"
+        case imageGenerationCodeModeProjection ConventionalToolMode tools of
+            Nothing -> pure ()
+            Just _ ->
+                expectationFailure
+                    "conventional models should keep imagegen direct"
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch : _ -> pure ()
