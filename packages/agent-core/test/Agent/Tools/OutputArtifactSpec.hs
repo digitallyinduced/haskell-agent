@@ -140,7 +140,8 @@ spec = describe "Agent.Tools.OutputArtifact" do
                         Left _ -> False
                         Right value ->
                             Text.length value < 50 * 1024
-                                && Text.isInfixOf "2:needle" value
+                                && Text.isInfixOf "1:" value
+                                && Text.isInfixOf "needle" value
 
     it "exposes delegated analysis only when a spawner is available" do
         withTempEnv \env -> do

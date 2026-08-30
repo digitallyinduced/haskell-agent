@@ -4,17 +4,17 @@
 
 module Main (main) where
 
-import Agent.Tools.OutputArtifact
-    ( artifactTools
-    , outputArtifactMetadata
-    , readOutputArtifact
-    , writeOutputArtifactDetailed
-    )
 import Agent.ToolDispatch
     ( ToolCall
     , ToolDispatchConfig(..)
     , dispatchToolHandler
     , functionToolCall
+    )
+import Agent.Tools.OutputArtifact
+    ( artifactTools
+    , outputArtifactMetadata
+    , readOutputArtifact
+    , writeOutputArtifactDetailed
     )
 import Agent.Tools.Types
     ( AppTool(..)
@@ -24,13 +24,14 @@ import Agent.Tools.Types
     )
 import Control.Exception (evaluate)
 import qualified Data.ByteString as ByteString
-import Data.List (find)
+import Data.List (find, sort)
 import qualified Data.Text as Text
 import GHC.Stats
     ( RTSStats(..)
     , getRTSStats
     , getRTSStatsEnabled
     )
+import System.CPUTime (getCPUTime)
 import System.Directory
     ( createDirectory
     , doesDirectoryExist
@@ -42,10 +43,13 @@ import System.Exit (die)
 import System.FilePath ((</>))
 import System.Mem (performGC)
 import System.OsPath (unsafeEncodeUtf)
+import GHC.Clock (getMonotonicTimeNSec)
 import Text.Printf (printf)
 
 data Sample = Sample
-    { allocatedBytes :: !Integer
+    { elapsedMillis :: !Double
+    , cpuMillis :: !Double
+    , allocatedBytes :: !Integer
     , liveBytes :: !Integer
     }
 
@@ -55,7 +59,7 @@ main = do
     if not enabled
         then die "RTS statistics are disabled; run with +RTS -T"
         else pure ()
-    _ <- getArgs
+    (sizeMb, samples) <- parseArgs =<< getArgs
     tmp <- getTemporaryDirectory
     let root = tmp </> "agent-output-artifact-bench"
         session = root </> "session"
@@ -65,49 +69,105 @@ main = do
     createDirectory session
     env <- defaultToolEnv (unsafeEncodeUtf root)
     setToolSessionTmp env (Just (unsafeEncodeUtf session))
-    let payload =
-            ByteString.concat
-                [ ByteString.replicate (32 * 1024 * 1024) 97
-                , "\nneedle\n"
-                ]
+    let line = "needle: this is a representative tool output line\n"
+        payload = ByteString.concat
+            (replicate ((sizeMb * 1024 * 1024) `div` ByteString.length line) line)
     writeOutputArtifactDetailed env payload >>= \case
         Left err -> die (Text.unpack err)
         Right artifact -> do
-            run "bounded-read" $
-                runArtifactTool env $
-                    functionToolCall "read" "read_tool_output"
-                        ( "{\"handle\":\"" <> artifact.artifactHandle
-                            <> "\",\"offset\":1,\"limit\":1}" )
-            run "bounded-search" $
-                runArtifactTool env $
-                    functionToolCall "search" "search_tool_output"
-                        ( "{\"handle\":\"" <> artifact.artifactHandle
-                            <> "\",\"pattern\":\"needle\",\"head_limit\":5}" )
-            run "metadata" $
+            benchmark "legacy-read" samples $
+                legacyRead env artifact.artifactHandle
+            benchmark "streaming-read" samples $
+                streamingRead env artifact.artifactHandle
+            benchmark "legacy-search" samples $
+                legacySearch env artifact.artifactHandle
+            benchmark "streaming-search" samples $
+                streamingSearch env artifact.artifactHandle
+            benchmark "streaming-metadata" samples $
                 outputArtifactMetadata env artifact.artifactHandle
-            run "full-read-baseline" $
-                readOutputArtifact env artifact.artifactHandle
+                    >>= either (die . Text.unpack) (pure . Text.pack . show)
     removeDirectoryRecursive root
-  where
-    run label action = do
-        sample <- measure action
-        printf "%s,allocated=%d,live-after-gc=%d\n"
-            label sample.allocatedBytes sample.liveBytes
 
-measure :: IO a -> IO Sample
+parseArgs :: [String] -> IO (Int, Int)
+parseArgs args =
+    case map reads args of
+        [] -> pure (32, 3)
+        [[(size, "")], [(samples, "")]]
+            | size > 0 && samples > 0 -> pure (size, samples)
+        _ -> die "usage: output-artifact-bench [SIZE_MB SAMPLES]"
+
+benchmark :: String -> Int -> IO Text.Text -> IO ()
+benchmark label count action = do
+    samples <- mapM (const (measure action)) [1 .. count]
+    let median field = sort (map field samples) !! (length samples `div` 2)
+    printf "%s,elapsed-ms=%.3f,cpu-ms=%.3f,allocated=%d,live-after-gc=%d\n"
+        label
+        (median elapsedMillis)
+        (median cpuMillis)
+        (median allocatedBytes)
+        (median liveBytes)
+
+measure :: IO Text.Text -> IO Sample
 measure action = do
     performGC
     before <- getRTSStats
+    wallStart <- getMonotonicTimeNSec
+    cpuStart <- getCPUTime
     result <- action
-    _ <- evaluate result
+    _ <- evaluate (Text.foldl' checksum 5381 result)
+    cpuEnd <- getCPUTime
+    wallEnd <- getMonotonicTimeNSec
     after <- getRTSStats
     performGC
     settled <- getRTSStats
     pure Sample
-        { allocatedBytes =
+        { elapsedMillis = fromIntegral (wallEnd - wallStart) / 1.0e6
+        , cpuMillis = fromIntegral (cpuEnd - cpuStart) / 1.0e9
+        , allocatedBytes =
             fromIntegral (after.allocated_bytes - before.allocated_bytes)
         , liveBytes = fromIntegral settled.live_bytes
         }
+
+checksum :: Int -> Char -> Int
+checksum value character = value * 33 + fromEnum character
+
+legacyRead :: ToolEnv -> Text.Text -> IO Text.Text
+legacyRead env handle = do
+    content <- readOutputArtifact env handle >>= either (die . Text.unpack) pure
+    let selected = take 200 (drop 0 (Text.lines content))
+        end = length selected
+    pure ("artifact " <> handle <> " lines 1-" <> Text.pack (show end)
+        <> ":\n" <> Text.intercalate "\n" selected)
+
+streamingRead :: ToolEnv -> Text.Text -> IO Text.Text
+streamingRead env handle =
+    runArtifactTool env $
+        functionToolCall "read" "read_tool_output"
+            ( "{\"handle\":\"" <> handle <> "\",\"offset\":1,\"limit\":200}" )
+
+legacySearch :: ToolEnv -> Text.Text -> IO Text.Text
+legacySearch env handle = do
+    content <- readOutputArtifact env handle >>= either (die . Text.unpack) pure
+    let matches =
+        [ Text.pack (show n) <> ":" <> line
+        | (n, line) <- zip [1 :: Int ..] (Text.lines content)
+        , "needle" `Text.isInfixOf` line
+        ]
+        shown = take 200 matches
+        suffix
+            | length matches > 200 =
+                "\n[search truncated: "
+                    <> Text.pack (show (length matches - 200))
+                    <> " matches omitted]"
+            | otherwise = ""
+    pure (Text.intercalate "\n" shown <> suffix)
+
+streamingSearch :: ToolEnv -> Text.Text -> IO Text.Text
+streamingSearch env handle =
+    runArtifactTool env $
+        functionToolCall "search" "search_tool_output"
+            ( "{\"handle\":\"" <> handle
+                <> "\",\"pattern\":\"needle\",\"head_limit\":200}" )
 
 runArtifactTool :: ToolEnv -> ToolCall -> IO Text.Text
 runArtifactTool env call = do
