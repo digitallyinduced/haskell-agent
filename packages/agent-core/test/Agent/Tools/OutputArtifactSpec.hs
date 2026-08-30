@@ -2,12 +2,14 @@ module Agent.Tools.OutputArtifactSpec (spec) where
 
 import Agent.ToolDispatch
     ( ToolCall
+    , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , dispatchToolHandler
     , functionToolCall
     )
 import Agent.Tools.OutputArtifact
-    ( artifactTools
+    ( OutputArtifact(..)
+    , artifactTools
     , boundedPreview
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
