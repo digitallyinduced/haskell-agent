@@ -291,10 +291,11 @@ import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..),
       closeCodexConn,
       codexConnTurnState,
+      codexConnUsesHttpFallback,
       isGatewayWebSocketCredential,
       resetCodexTurnState,
-      withCodexWsCredential,
-      withCodexWsWithProvider )
+      withCodexWsCredentialOrHttpFallback,
+      withCodexWsWithProviderOrHttpFallback )
 import Agent.OpenRouter.LoopBackend ( openRouterBackend )
 import Agent.OsPath ( toText, unsafeToFilePath )
 import Agent.Provider
@@ -2261,15 +2262,17 @@ runAgentInitializedWithLock
                     case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
-                            (withCodexWsWithProvider tokenProvider \conn credential -> do
+                            (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential -> do
                                 wsLock <- newMVar ()
-                                initialWsHealthy <- newIORef True
+                                let startsOnHttp =
+                                        codexConnUsesHttpFallback conn
+                                initialWsHealthy <- newIORef (not startsOnHttp)
                                 activeConnectionRef <- newIORef $
                                     OpenAiPersistentConnection
                                         credential
                                         initialWsHealthy
                                         conn
-                                httpFallbackActive <- newIORef False
+                                httpFallbackActive <- newIORef startsOnHttp
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
                                 let selectAccount = case loaded.loadedOpenAiPool of
@@ -2333,8 +2336,12 @@ runAgentInitializedWithLock
                                                     installConnection
                                                         newCredential
                                                         newConn = do
+                                                            let usesHttp =
+                                                                    codexConnUsesHttpFallback
+                                                                        newConn
                                                             newHealthy <-
-                                                                newIORef True
+                                                                newIORef
+                                                                    (not usesHttp)
                                                             label <-
                                                                 resolveActiveAccountLabel
                                                                     newCredential
@@ -2353,6 +2360,9 @@ runAgentInitializedWithLock
                                                             writeIORef
                                                                 activeAccountRef
                                                                 label
+                                                            writeIORef
+                                                                httpFallbackActive
+                                                                usesHttp
                                                             pure (newHealthy, label)
                                                     awaitNext newHealthy =
                                                         readChan switchRequests
@@ -2376,7 +2386,7 @@ runAgentInitializedWithLock
                                                     (Just
                                                         selectedCredential.accountId)
                                                 let connectSelected =
-                                                        withCodexWsCredential
+                                                        withCodexWsCredentialOrHttpFallback
                                                             selectedCredential
                                                             \newConn
                                                                 newCredential -> do
@@ -2423,7 +2433,7 @@ runAgentInitializedWithLock
                                                                                         , provider =
                                                                                             OpenAIProvider
                                                                                         }
-                                                                            (withCodexWsCredential
+                                                                            (withCodexWsCredentialOrHttpFallback
                                                                                 restoredCredential
                                                                                 \newConn
                                                                                     newCredential -> do
