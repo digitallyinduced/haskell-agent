@@ -373,9 +373,8 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                     -- RepositoryCheck and cancellation is owned by that
                     -- worker's finalizer.
                     created <- trySynchronous (mask \_ -> do
-                        (maybeOutput, maybeError, process) <-
+                        (maybeOutput, maybeError, process, processGroup) <-
                             createCheckProcess root executable arguments
-                        processGroup <- getPid process
                         cancelled <- newIORef False
                         let cleanup = do
                                 closeQuietly maybeOutput
@@ -514,8 +513,8 @@ createCheckProcess
     :: FilePath
     -> FilePath
     -> [String]
-    -> IO (Handle, Handle, ProcessHandle)
-createCheckProcess root executable arguments = do
+    -> IO (Handle, Handle, ProcessHandle, Maybe ProcessID)
+createCheckProcess root executable arguments = mask \_ -> do
     (maybeInput, maybeOutput, maybeError, process) <-
         createProcess
             (proc executable arguments)
@@ -528,10 +527,26 @@ createCheckProcess root executable arguments = do
                 }
     case (maybeInput, maybeOutput, maybeError) of
         (Just input, Just output, Just errors) -> do
+            let cleanupWithoutGroup = do
+                    closeQuietly input
+                    closeQuietly output
+                    closeQuietly errors
+                    _ <- tryAny (terminateProcess process)
+                    _ <- tryAny (waitForProcess process)
+                    pure ()
+            processGroup <- getPid process
+                `onException` cleanupWithoutGroup
+            let cleanup = do
+                    closeQuietly input
+                    closeQuietly output
+                    closeQuietly errors
+                    signalCheckProcessGroup sigKILL processGroup process
+                    _ <- tryAny (waitForProcess process)
+                    pure ()
             -- Checks have no stdin API. Closing immediately prevents an
             -- inherited terminal or pipe from leaving a check blocked.
-            hClose input
-            pure (output, errors, process)
+            (hClose input >> pure (output, errors, process, processGroup))
+                `onException` cleanup
         _ -> do
             _ <- tryAny (terminateProcess process)
             _ <- tryAny (waitForProcess process)
@@ -1119,7 +1134,7 @@ runProcessBytes workingDirectory executable arguments input =
                         writeIORef completed True
                         pure (exitCode, output, errors)
   where
-    start = do
+    start = mask \_ -> do
         (maybeInput, maybeOutput, maybeError, process) <-
             createProcess
                 (proc executable arguments)
@@ -1130,10 +1145,27 @@ runProcessBytes workingDirectory executable arguments input =
                     , close_fds = True
                     , create_group = True
                     }
+        let closePipes = do
+                mapM_ closeQuietly maybeInput
+                mapM_ closeQuietly maybeOutput
+                mapM_ closeQuietly maybeError
+            cleanupWithoutGroup = do
+                closePipes
+                _ <- tryAny (terminateProcess process)
+                _ <- tryAny (waitForProcess process)
+                pure ()
         case (maybeInput, maybeOutput, maybeError) of
             (Just inputHandle, Just outputHandle, Just errorHandle) -> do
                 processGroup <- getPid process
+                    `onException` cleanupWithoutGroup
+                let cleanup = do
+                        closePipes
+                        signalCheckProcessGroup
+                            sigKILL processGroup process
+                        _ <- tryAny (waitForProcess process)
+                        pure ()
                 completed <- newIORef False
+                    `onException` cleanup
                 pure
                     ( inputHandle
                     , outputHandle
@@ -1143,8 +1175,7 @@ runProcessBytes workingDirectory executable arguments input =
                     , completed
                     )
             _ -> do
-                terminateProcess process
-                _ <- waitForProcess process
+                cleanupWithoutGroup
                 fail "could not create process pipes"
     stop
         ( inputHandle

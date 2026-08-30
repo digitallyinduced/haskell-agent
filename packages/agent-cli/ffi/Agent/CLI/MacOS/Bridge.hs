@@ -1211,46 +1211,49 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                         argumentsPointer argumentCount
                     case copiedArguments of
                         Left _ -> pure 2
-                        Right arguments -> do
+                        Right arguments -> mask \_ -> do
+                            poke outCheck nullPtr
                             checkRef <- newIORef Nothing
                             cancelRef <- newIORef False
                             gate <- newEmptyMVar
                             owner <- asyncWithUnmask \unmask ->
                                 readMVar gate >> do
-                                    -- asyncWithUnmask starts masked. Only the
-                                    -- potentially long start is unmasked;
-                                    -- publishing its handle remains atomic
-                                    -- with respect to owner cancellation.
-                                    started <- unmask
-                                        (tryRepositorySynchronous
-                                            (RepositoryReview.startRepositoryCheck
-                                                (Text.unpack path)
-                                                expected
-                                                (Text.unpack executable)
-                                                (map Text.unpack arguments)
-                                                (\stream bytes ->
-                                                    BS.useAsCStringLen bytes
-                                                        \(pointer, length) ->
-                                                            withRepositoryCallbackThread
-                                                                (invokeRepositoryCheckOutputCallback
-                                                                    outputCallback
-                                                                    context
-                                                                    (case stream of
-                                                                        RepositoryReview.RepositoryCheckStdout -> 1
-                                                                        RepositoryReview.RepositoryCheckStderr -> 2)
-                                                                    (castPtr pointer)
-                                                                    (fromIntegral length)))
-                                                (\cancelled exitCode ->
-                                                    withRepositoryCallbackThread
-                                                        (invokeRepositoryCheckExitCallback
-                                                            exitCallback
-                                                            context
-                                                            (if cancelled then 1 else 0)
-                                                            (case exitCode of
-                                                                System.Exit.ExitSuccess -> 0
-                                                                System.Exit.ExitFailure code ->
-                                                                    fromIntegral code)
-                                                            nullPtr 0))))
+                                    -- asyncWithUnmask starts masked. Keep
+                                    -- acquisition and publication in that
+                                    -- masked region so ownership transfer is
+                                    -- atomic with respect to cancellation. Its
+                                    -- blocking I/O remains interruptible under
+                                    -- masked-interruptible semantics and owns
+                                    -- cleanup brackets.
+                                    started <- tryRepositorySynchronous
+                                        (RepositoryReview.startRepositoryCheck
+                                            (Text.unpack path)
+                                            expected
+                                            (Text.unpack executable)
+                                            (map Text.unpack arguments)
+                                            (\stream bytes ->
+                                                BS.useAsCStringLen bytes
+                                                    \(pointer, length) ->
+                                                        withRepositoryCallbackThread
+                                                            (invokeRepositoryCheckOutputCallback
+                                                                outputCallback
+                                                                context
+                                                                (case stream of
+                                                                    RepositoryReview.RepositoryCheckStdout -> 1
+                                                                    RepositoryReview.RepositoryCheckStderr -> 2)
+                                                                (castPtr pointer)
+                                                                (fromIntegral length)))
+                                            (\cancelled exitCode ->
+                                                withRepositoryCallbackThread
+                                                    (invokeRepositoryCheckExitCallback
+                                                        exitCallback
+                                                        context
+                                                        (if cancelled then 1 else 0)
+                                                        (case exitCode of
+                                                            System.Exit.ExitSuccess -> 0
+                                                            System.Exit.ExitFailure code ->
+                                                                fromIntegral code)
+                                                        nullPtr 0)))
                                     case started of
                                         Left exception ->
                                             unmask
@@ -1290,11 +1293,17 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                                 , repositoryCheckCancelRequested = cancelRef
                                 , repositoryCheckOwner = owner
                                 }
-                            poke outCheck (castStablePtrToPtr stable)
-                            -- No callback can begin before the owned handle is
-                            -- visible through out_check.
-                            putMVar gate ()
-                            pure 0
+                                `onException` cancel owner
+                            (do
+                                poke outCheck (castStablePtrToPtr stable)
+                                -- No callback can begin before the owned
+                                -- handle is visible through out_check.
+                                putMVar gate ()
+                                pure 0)
+                                `onException` do
+                                    cancel owner
+                                    freeStablePtr stable
+                                    poke outCheck nullPtr
                 Right _ -> pure 3
 
 ha_repository_check_cancel :: Ptr () -> IO ()
