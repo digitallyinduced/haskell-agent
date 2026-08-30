@@ -9,8 +9,14 @@ import Data.List (dropWhileEnd, isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified System.Directory as Directory
-import System.Directory.OsPath (doesDirectoryExist, doesFileExist)
+import System.Directory.OsPath
+    ( createDirectoryIfMissing
+    , doesDirectoryExist
+    , doesFileExist
+    )
 import System.Exit (ExitCode(..))
 import qualified System.FilePath as FilePath
 import System.OsPath
@@ -215,6 +221,136 @@ spec = describe "Agent.CLI.Worktree" do
                 branches <- git repo ["branch", "--list", branch]
                 branches `shouldBe` ""
 
+    describe "cleanupStaleWorktrees" do
+        it "never collects worktrees created on the current UTC day" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                day <- formatTime defaultTimeLocale "%Y-%m-%d"
+                    <$> getCurrentTime
+                first <- addManagedWorktree repo root (day <> "-00000001")
+                second <- addManagedWorktree repo root (day <> "-00000002")
+
+                report <- cleanupStaleWorktrees root 1 []
+
+                report.cleanupRemoved `shouldBe` []
+                doesDirectoryExist first `shouldReturn` True
+                doesDirectoryExist second `shouldReturn` True
+
+        it "removes clean managed worktrees beyond the per-repository retention" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                older <- addManagedWorktree repo root "2026-08-20-00000001"
+                newer <- addManagedWorktree repo root "2026-08-21-00000002"
+
+                report <- cleanupStaleWorktrees root 1 []
+
+                report.cleanupFailures `shouldBe` []
+                report.cleanupRemoved `shouldBe` [older]
+                doesDirectoryExist older `shouldReturn` False
+                doesDirectoryExist newer `shouldReturn` True
+                git repo ["branch", "--list", "2026-08-20-00000001"]
+                    `shouldReturn` ""
+
+        it "preserves stale worktrees with uncommitted files" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                older <- addManagedWorktree repo root "2026-08-20-00000001"
+                _ <- addManagedWorktree repo root "2026-08-21-00000002"
+                writeFile
+                    (toFilePath (older </> fromFilePath "notes.txt"))
+                    "keep me\n"
+
+                report <- cleanupStaleWorktrees root 1 []
+
+                report.cleanupRemoved `shouldBe` []
+                report.cleanupFailures `shouldBe` []
+                doesDirectoryExist older `shouldReturn` True
+
+        it "preserves stale worktrees whose commit is not reachable elsewhere" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                older <- addManagedWorktree repo root "2026-08-20-00000001"
+                _ <- addManagedWorktree repo root "2026-08-21-00000002"
+                writeFile
+                    (toFilePath (older </> fromFilePath "README"))
+                    "unique\n"
+                _ <- git older ["add", "README"]
+                _ <- git older ["commit", "-m", "unique work"]
+
+                report <- cleanupStaleWorktrees root 1 []
+
+                report.cleanupRemoved `shouldBe` []
+                report.cleanupFailures `shouldBe` []
+                doesDirectoryExist older `shouldReturn` True
+
+        it "preserves stale worktrees with an active shared lease" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                older <- addManagedWorktree repo root "2026-08-20-00000001"
+                _ <- addManagedWorktree repo root "2026-08-21-00000002"
+                lease <- acquireWorktreeLease root older >>= \case
+                    Right (Just value) -> pure value
+                    _ -> expectationFailure
+                        "expected a managed worktree lease"
+                        >> fail "missing worktree lease"
+
+                fmap (.cleanupRemoved) (cleanupStaleWorktrees root 1 [])
+                    `shouldReturn` []
+                doesDirectoryExist older `shouldReturn` True
+
+                releaseWorktreeLease lease
+                fmap (.cleanupRemoved) (cleanupStaleWorktrees root 1 [])
+                    `shouldReturn` [older]
+                doesDirectoryExist older `shouldReturn` False
+
+        it "preserves explicitly protected stale worktrees" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                older <- addManagedWorktree repo root "2026-08-20-00000001"
+                _ <- addManagedWorktree repo root "2026-08-21-00000002"
+
+                report <- cleanupStaleWorktrees
+                    root
+                    1
+                    [older </> fromFilePath "nested/current-directory"]
+
+                report.cleanupRemoved `shouldBe` []
+                doesDirectoryExist older `shouldReturn` True
+
+        it "ignores symlinked managed-looking candidates" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                    parent = root </> takeFileName repo
+                    branch = "2026-08-20-00000001"
+                    candidate = parent </> fromFilePath branch
+                    actual =
+                        home
+                            </> fromFilePath "outside"
+                            </> fromFilePath branch
+                createDirectoryIfMissing True parent
+                createDirectoryIfMissing True (home </> fromFilePath "outside")
+                _ <- git repo
+                    ["worktree", "add", "-b", branch, toFilePath actual]
+                Directory.createDirectoryLink
+                    (toFilePath actual)
+                    (toFilePath candidate)
+                _ <- addManagedWorktree
+                    repo
+                    root
+                    "2026-08-21-00000002"
+
+                report <- cleanupStaleWorktrees root 1 []
+
+                report.cleanupRemoved `shouldBe` []
+                doesDirectoryExist actual `shouldReturn` True
+
 expectRight :: Either Text OsPath -> IO OsPath
 expectRight = \case
     Right path -> pure path
@@ -278,6 +414,14 @@ temporaryFetchRefs repo =
         , "--format=%(refname)"
         , "refs/haskell-agent/worktree-fetches/"
         ]
+
+addManagedWorktree :: OsPath -> OsPath -> String -> IO OsPath
+addManagedWorktree repo root name = do
+    let parent = root </> takeFileName repo
+        path = parent </> fromFilePath name
+    createDirectoryIfMissing True parent
+    _ <- git repo ["worktree", "add", "-b", name, toFilePath path]
+    pure path
 
 withTempDir :: String -> (OsPath -> IO a) -> IO a
 withTempDir prefix action = do

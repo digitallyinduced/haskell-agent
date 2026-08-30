@@ -31,6 +31,7 @@ import Agent.Loop
     , BackendResult(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , emptyBackendSnapshot
     )
 import Agent.MCP (McpProtocolPreference(..))
 import Agent.Provider (Provider(..), providerSlug)
@@ -936,7 +937,11 @@ runMetaConsoleWithCancel withCancelScope makeBackend paramsRef context request =
     let Backend submit = makeBackend params
         initialPrompt = metaConsolePrompt context request
         submitPrompt prompt =
-            submit [] Nothing [UserMessage prompt] (\_ -> pure ())
+            submit
+                emptyBackendSnapshot
+                Nothing
+                [UserMessage prompt]
+                (\_ -> pure ())
         action = do
             result <- race (waitCancel cancel) do
                 first <- submitPrompt initialPrompt

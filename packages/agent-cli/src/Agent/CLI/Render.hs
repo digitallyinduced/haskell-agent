@@ -137,11 +137,12 @@ import Agent.TextBuffer
     , emptyTextBuffer
     , textBufferToText
     )
+import Agent.Telemetry (telemetrySummary)
 import Control.Applicative ((<|>))
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
-import Control.Monad (unless, void, when)
+import Control.Monad (forM_, unless, void, when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -417,6 +418,11 @@ renderEventUnlocked config = \case
             didPrint <- finalizeAssistantBuffer config turn.assistantText
             when (didPrint && not (null turn.toolCalls)) do
                 putTextLn config.renderStdout ""
+        forM_ turn.providerTelemetry \telemetry -> do
+            let summary = telemetrySummary telemetry
+            unless (Text.null summary) $
+                putTextLn config.renderStderr
+                    (roleMuted config.renderColor summary)
     ToolStarted call -> do
         commitThinkingUnlocked config
         alreadyVisible <- modifyRenderState config \state ->

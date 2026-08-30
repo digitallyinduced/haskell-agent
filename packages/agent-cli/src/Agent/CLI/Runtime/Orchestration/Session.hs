@@ -10,6 +10,7 @@ import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(loadedOpenAiPool, loadedTokenProvider) )
 import Agent.CLI.Clipboard ()
+import Agent.CLI.Claude (newClaudeSessionRuntimeSlot)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime(..),
       CodexCatalogSession(..),
@@ -59,7 +60,10 @@ import Agent.CLI.ProviderTransition ()
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
-import Agent.CLI.Request ( requestParams )
+import Agent.CLI.Request
+    ( requestParams
+    , setRequestPromptCacheKey
+    )
 import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
@@ -98,6 +102,7 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policyRef, allTools,
+                     claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, resetToolSessionTemp, grokRuntime,
                      mcpRegistrations, mcpWarnings,
@@ -116,7 +121,7 @@ import Agent.CLI.Session.Runtime.Types
                      selectAccount, onPersisted, compactRunner, codeModeNestedSlot),
       StartupRuntime(startupBackground, startupDatabaseStore,
                      startupSessionState) )
-import Agent.CLI.Session.Selection ()
+import Agent.CLI.Session.Selection ( reservedSessionId )
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
 import Agent.CLI.SessionLock ()
@@ -180,8 +185,10 @@ import Agent.Tools.MultiAgents
     ( MultiAgentContext(multiSendToRoot, multiRegistry) )
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
+import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.Types
-    ( AppTool(appToolName)
+    ( AppTool(..)
+    , ToolSchema(..)
     , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
     )
 import Agent.XAI.LoopBackend ()
@@ -361,6 +368,7 @@ runAgentSession
                 Right runtime -> pure (runtime, False)
         writeIORef codeModeCloseRef
             (maybe (pure ()) (.codeModeClose) codeModeRuntime)
+        sessionId <- reservedSessionId persist
         let providerTools
                 | suppressDirectImageGeneration =
                     filter
@@ -405,8 +413,11 @@ runAgentSession
             registryTools =
                 allTools
                     <> maybe [] (.codeModeWireTools) codeModeRuntime
-            params = requestParams provider model instructions
+            baseParams = requestParams provider model instructions
                 wireSchemas effortText
+            params = maybe baseParams
+                (`setRequestPromptCacheKey` baseParams)
+                sessionId
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             resumeNeedsFreshContext =
@@ -419,6 +430,26 @@ runAgentSession
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
         policyRef <- newIORef policy
+        claudeRuntimeSlot <- newClaudeSessionRuntimeSlot
+        let claudeBridgeTools =
+                filter isClaudeBridgeTool $
+                    coding.codingAppTools
+                        <> mcpTools
+                        <> sessionTools
+                        <> databaseAppTools
+                        <> learnedSkillAppTools
+            isClaudeBridgeTool tool =
+                canonicalToolName tool.appToolName
+                    `notElem`
+                        [ "shell_command", "run_terminal_cmd"
+                        , "read_file", "write_file", "grep", "glob"
+                        , "search_replace", "apply_patch", "write_stdin"
+                        , "web_fetch", "web_search"
+                        ]
+                    && case tool.appToolSchema of
+                        JsonFunctionSchema{} -> True
+                        RawJsonFunctionSchema{} -> True
+                        _ -> False
         automaticCompactionRef <- newIORef Nothing
         automaticCompactionHookRef <-
             newIORef
@@ -561,6 +592,8 @@ runAgentSession
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
+                                , claudeRuntimeSlot
+                                , claudeBridgeTools
                                 , modelInfo = codexModelInfo
                                 , connectionId =
                                     inferredTarget.targetConnectionId

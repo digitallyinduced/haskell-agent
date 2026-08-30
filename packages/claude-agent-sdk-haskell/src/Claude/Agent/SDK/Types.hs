@@ -46,6 +46,8 @@ data PermissionMode
     | PermissionPlan
     | PermissionBypassPermissions
     | PermissionDontAsk
+    -- | Compatibility spelling accepted by newer Claude Code releases.
+    | PermissionManual
     | PermissionAuto
     deriving (Eq, Ord, Show)
 
@@ -56,6 +58,7 @@ permissionModeName = \case
     PermissionPlan -> "plan"
     PermissionBypassPermissions -> "bypassPermissions"
     PermissionDontAsk -> "dontAsk"
+    PermissionManual -> "manual"
     PermissionAuto -> "auto"
 
 data SystemPrompt
@@ -104,6 +107,9 @@ data ClaudeAgentOptions = ClaudeAgentOptions
     , streamStartupTimeoutMicros :: !Int
     , streamInactivityTimeoutMicros :: !Int
     , turnTimeoutMicros :: !Int
+    -- | When enabled, probe the Claude executable's version/help output before
+    -- spawning a protocol session and fail closed on missing security flags.
+    , validateCapabilities :: !Bool
     -- | Maximum size of one newline-delimited structured-output record.
     --
     -- Claude Code runs its own tools and echoes every tool result on stdout
@@ -154,6 +160,7 @@ defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions
     , streamStartupTimeoutMicros = 60 * 1_000_000
     , streamInactivityTimeoutMicros = 15 * 60 * 1_000_000
     , turnTimeoutMicros = 2 * 60 * 60 * 1_000_000
+    , validateCapabilities = False
     , maxBufferSizeBytes = 128 * 1024 * 1024
     }
 
@@ -182,7 +189,12 @@ data ModelUsage = ModelUsage
     , outputTokens :: !Int
     , cacheReadInputTokens :: !Int
     , cacheCreationInputTokens :: !Int
+    , webSearchRequests :: !Int
     , costUSD :: !(Maybe Double)
+    , contextWindow :: !(Maybe Int)
+    , maxOutputTokens :: !(Maybe Int)
+    , canonicalModel :: !(Maybe Text)
+    , provider :: !(Maybe Text)
     } deriving (Eq, Show)
 
 modelUsageToUsage :: ModelUsage -> Usage
@@ -199,6 +211,17 @@ modelUsageToUsage modelUsage =
 -- | Provenance attached to user messages and terminal results.
 data MessageOrigin = MessageOrigin
     { kind :: !Text
+    , server :: !(Maybe Text)
+    , from :: !(Maybe Text)
+    , name :: !(Maybe Text)
+    , fromSession :: !(Maybe Text)
+    , senderTaskId :: !(Maybe Text)
+    , body :: !(Maybe Text)
+    , verifiedPeerPid :: !(Maybe Int)
+    , subkind :: !(Maybe Text)
+    -- | The complete origin object for diagnostics and future protocol
+    -- extensions.
+    , raw :: !RawJson
     } deriving (Eq, Show)
 
 -- | Content accepted in one streaming-input user message.
@@ -367,6 +390,9 @@ data QueryMessageScope
 data QueryProgress
     = QueryMessageObserved !QueryMessageScope !Message
     | QueryMessagesRetracted !(Maybe QueryMessageScope) ![Text]
+    -- | Claude Code moved the active query to a new conversation. Messages
+    -- accumulated before the reset are discarded transactionally.
+    | QueryConversationReset !ConversationResetMessage
     deriving (Eq, Show)
 
 messageUuid :: Message -> Maybe Text

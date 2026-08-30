@@ -5,6 +5,7 @@ import Agent.OpenAI.Auth.Refresh (RefreshResponse(RefreshResponse), decodeRefres
 import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
+    , CredentialRefreshFailure(..)
     , ErrorType(..)
     , credentialsExhausted
     )
@@ -282,6 +283,26 @@ spec = do
                     accountIdOf result `shouldBe` second
                 _ -> expectationFailure
                     ("expected two refresh attempts, got " <> show tried)
+
+        it "retains a token-endpoint rejection without its response body" do
+            let secretBody = "TOP_SECRET_REFRESH_RESPONSE"
+                refresh _ = pure $ Left $ HttpError 403 secretBody
+            pool <- newPool [mkExpiredAuth "acc-broken"] refresh
+
+            result <- getAccessToken pool
+
+            case result of
+                Left CredentialsExhausted{exhaustionReasons} ->
+                    exhaustionReasons `shouldBe`
+                        [ ExhaustedByCredentialRefresh
+                            { refreshFailure = RefreshProviderFailed
+                            , exhaustionErrorType = Nothing
+                            , exhaustionStatusCode = Just 403
+                            }
+                        ]
+                other -> expectationFailure
+                    ("expected CredentialsExhausted, got " <> show other)
+            show result `shouldNotContain` "TOP_SECRET_REFRESH_RESPONSE"
 
     describe "reportRateLimit" $ do
         it "skips rate-limited accounts on subsequent picks" $ do
@@ -620,6 +641,28 @@ spec = do
             outcome `shouldSatisfy` isLeft
             ids <- mapM (const (accountIdOf <$> getAccessToken pool)) [1 .. 3 :: Int]
             ids `shouldSatisfy` all (== "healthy")
+
+        it "retains transport provenance when forced refresh fails" do
+            let refreshError =
+                    ConnectionError "TOP_SECRET_REFRESH_EXCEPTION"
+                refresh _ = pure (Left refreshError)
+            pool <- newPool [mkFreshAuth "broken"] refresh
+
+            refreshAfterAuthFailure pool "broken" >>= \case
+                Left err -> err `shouldBe` refreshError
+                Right _ -> expectationFailure
+                    "expected forced refresh to fail"
+            getAccessToken pool >>= \case
+                Left CredentialsExhausted{exhaustionReasons} ->
+                    exhaustionReasons `shouldBe`
+                        [ ExhaustedByCredentialRefresh
+                            { refreshFailure = RefreshTransportFailed
+                            , exhaustionErrorType = Nothing
+                            , exhaustionStatusCode = Nothing
+                            }
+                        ]
+                other -> expectationFailure
+                    ("expected CredentialsExhausted, got " <> show other)
 
     describe "allAccountIds + readAccountState" $ do
         it "lists every account currently in the pool" $ do

@@ -16,6 +16,7 @@ import Agent.Loop.EventPump
     , waitEventPumpFailure
     )
 import Agent.Responses.Types (ResponseItem)
+import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
     ( ToolArgumentStreamEvent
     , ToolCall(..)
@@ -48,6 +49,7 @@ import Agent.Tools.Speculation
 import Control.Concurrent.Async
     ( mapConcurrently
     , race
+    , waitCatch
     , withAsync
     )
 import qualified Control.Exception as Exception
@@ -69,6 +71,8 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word64)
+import System.Timeout (timeout)
 
 maxEmptyContinuations :: Int
 maxEmptyContinuations = 2
@@ -225,6 +229,7 @@ data TurnOutput = TurnOutput
     , toolCalls :: ![ToolCall]
     , assistantText :: !(Maybe Text)
     , tokenUsage :: !TokenUsage
+    , providerTelemetry :: !(Maybe TurnTelemetry)
     , completion :: !TurnCompletion
     } deriving (Eq, Show)
 
@@ -257,6 +262,8 @@ data LoopExecution = LoopExecution
     -- 'executionState'. This is display metadata only: callers must not add
     -- it to backend state.
     , executionUncommittedAssistantText :: !(Maybe Text)
+    -- | Rich provider metadata for every response committed during this loop.
+    , executionProviderTelemetry :: ![TurnTelemetry]
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
 
@@ -266,17 +273,81 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     , toolCalls
     , assistantText
     , tokenUsage = emptyTokenUsage
+    , providerTelemetry = Nothing
     , completion = TurnCompleted
     }
 
 data BackendResult = BackendResult
     { backendOutput :: !TurnOutput
-    , backendState :: ![ResponseItem]
+    -- | The provider candidate checkpoint. The state store assigns the
+    -- authoritative revision when this response is committed.
+    , backendState :: !BackendSnapshot
     } deriving (Eq, Show)
+
+newtype BackendRevision = BackendRevision Word64
+    deriving (Eq, Ord, Show)
+
+-- | An opaque provider continuation. Namespacing prevents a session token
+-- minted by one backend from accidentally being sent to another backend.
+data BackendContinuation = BackendContinuation
+    { continuationProvider :: !Text
+    , continuationToken :: !Text
+    } deriving (Eq, Show)
+
+-- | An immutable, atomically publishable backend checkpoint.
+data BackendSnapshot = BackendSnapshot
+    { backendItems :: ![ResponseItem]
+    , backendRevision :: !BackendRevision
+    , backendContinuation :: !(Maybe BackendContinuation)
+    } deriving (Eq, Show)
+
+emptyBackendSnapshot :: BackendSnapshot
+emptyBackendSnapshot = initialBackendSnapshot []
+
+initialBackendSnapshot :: [ResponseItem] -> BackendSnapshot
+initialBackendSnapshot items = BackendSnapshot
+    { backendItems = items
+    , backendRevision = BackendRevision 0
+    , backendContinuation = Nothing
+    }
+
+-- | Build a provider result from the checkpoint it consumed. State stores
+-- still normalize the revision at commit time, so concurrent writers cannot
+-- publish duplicate or stale revisions.
+advanceBackendSnapshot
+    :: BackendSnapshot
+    -> [ResponseItem]
+    -> Maybe BackendContinuation
+    -> BackendSnapshot
+advanceBackendSnapshot snapshot items continuation = BackendSnapshot
+    { backendItems = items
+    , backendRevision = nextBackendRevision snapshot.backendRevision
+    , backendContinuation = continuation
+    }
+
+clearBackendContinuation :: BackendSnapshot -> BackendSnapshot
+clearBackendContinuation snapshot =
+    snapshot { backendContinuation = Nothing }
+
+backendContinuationToken :: Text -> BackendSnapshot -> Maybe Text
+backendContinuationToken provider snapshot =
+    case snapshot.backendContinuation of
+        Just BackendContinuation
+            { continuationProvider
+            , continuationToken
+            }
+            | continuationProvider == provider -> Just continuationToken
+        _ -> Nothing
+
+nextBackendRevision :: BackendRevision -> BackendRevision
+nextBackendRevision (BackendRevision revision) =
+    BackendRevision (revision + 1)
 
 newtype Backend = Backend
     { submitTurn
-        :: [ResponseItem]
+        :: BackendSnapshot
+        -- | Legacy unnamespaced continuation for persisted sessions. New
+        -- backends should prefer the namespaced token in 'BackendSnapshot'.
         -> Maybe Text
         -> [TurnInput]
         -> (LoopEvent -> IO ())
@@ -284,11 +355,14 @@ newtype Backend = Backend
     }
 
 data BackendStateStore = BackendStateStore
-    { readBackendState :: !(IO [ResponseItem])
+    { readBackendState :: !(IO BackendSnapshot)
       -- | Publish a completed provider response for live observers and later
       -- tool continuations. Higher-level turn policy may still deliberately
       -- roll this state back after cancellation or terminal failure.
-    , commitBackendState :: !([ResponseItem] -> IO ())
+      --
+      -- The returned snapshot is the authoritative committed value, including
+      -- the store-assigned monotonic revision.
+    , commitBackendState :: !(BackendSnapshot -> IO BackendSnapshot)
     }
 
 data LoopEvent
@@ -357,9 +431,12 @@ data LoopConfig = LoopConfig
     -- failed submission can be retried without losing it.
     , loopReadSteering :: !(IO [TurnInput])
     , loopCommitSteering :: !(Int -> IO ())
-      -- | Soft-cancel latch. The caller owns resetting it before publishing
-      -- the turn to input/interrupt handlers. When set, the loop stops after
-      -- the current tool batch instead of asking the model for another step.
+    -- | Ask the active provider to interrupt its turn in-band. The loop calls
+    -- this before falling back to structured async teardown.
+    , loopInterrupt :: !(IO ())
+    -- | Soft-cancel latch. The caller owns resetting it before publishing
+    -- the turn to input/interrupt handlers. When set, the loop stops after
+    -- the current tool batch instead of asking the model for another step.
     , loopCancel :: !CancelFlag
     }
 
@@ -398,7 +475,7 @@ emptyContinuationWarning =
     "The model produced no assistant text or tool calls after reasoning; stopping."
 
 data LoopCursor = LoopCursor
-    { cursorState :: ![ResponseItem]
+    { cursorState :: !BackendSnapshot
     , cursorProgress :: !LoopProgress
     , cursorPreviousResponseId :: !(Maybe Text)
     , cursorTurnsUsed :: !Int
@@ -494,7 +571,7 @@ exceptionSummary =
 
 runLoopInputsUnsafe
     :: LoopConfig
-    -> [ResponseItem]
+    -> BackendSnapshot
     -> Maybe Text
     -> [TurnInput]
     -> IO LoopExecution
@@ -503,6 +580,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     progressRef <- newIORef (initialState, NoResponseCommitted)
     runtime <- newToolSpeculationRuntime (toolRegistryTools config0.loopTools)
     uncommittedTextRef <- newIORef ([], [])
+    providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
     flip finally (closeToolSpeculationRuntime runtime) $
@@ -525,7 +603,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     emitLoopEvent eventPump event
                 }
             finish
-                :: [ResponseItem]
+                :: BackendSnapshot
                 -> LoopProgress
                 -> Either LoopError LoopResult
                 -> IO LoopExecution
@@ -534,18 +612,21 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 writeIORef progressRef (state, progress)
                 pending <- readIORef pendingRef
                 (finishedChunks, currentChunks) <- readIORef uncommittedTextRef
+                providerTelemetry <-
+                    reverse <$> readIORef providerTelemetryRef
                 let uncommittedText = Text.intercalate "\n\n" $
                         filter (not . Text.null) $
                             map (Text.concat . reverse)
                                 (reverse finishedChunks <> [currentChunks])
                 pure LoopExecution
-                    { executionState = state
+                    { executionState = state.backendItems
                     , executionPendingInputs = pending
                     , executionProgress = progress
                     , executionUncommittedAssistantText =
                         if Text.null uncommittedText
                             then Nothing
                             else Just uncommittedText
+                    , executionProviderTelemetry = providerTelemetry
                     , executionResult = result
                     }
             finishCursor
@@ -555,7 +636,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             finishCursor cursor =
                 finish cursor.cursorState cursor.cursorProgress
             unexpected
-                :: [ResponseItem]
+                :: BackendSnapshot
                 -> LoopProgress
                 -> SomeException
                 -> IO LoopExecution
@@ -618,28 +699,67 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                 -- Race the model call against cancel so Ctrl-C / Esc
                                 -- can stop reasoning mid-stream, not only between tools.
                                 resetToolSpeculationRuntime runtime
-                                raced <- mask \restore -> do
-                                    result <- restore $ race
-                                        (waitCancel config.loopCancel)
-                                        (config.loopBackend.submitTurn
+                                raced <- mask \restore ->
+                                    withAsync
+                                        (restore $
+                                            config.loopBackend.submitTurn
                                             cursor.cursorState
                                             cursor.cursorPreviousResponseId
                                             cursor.cursorInputs
                                             onBackendEvent)
-                                    case result of
-                                        Right (Right BackendResult{..})
-                                            | not
-                                                (Text.null
-                                                    backendOutput.responseId) -> do
-                                                config.loopBackendState.commitBackendState
-                                                    backendState
-                                                writeIORef progressRef
-                                                    (backendState, ResponseCommitted)
-                                                retainToolSpeculation
-                                                    runtime
-                                                    backendOutput.toolCalls
-                                        _ -> pure ()
-                                    pure result
+                                        \submission -> do
+                                            result <- restore $ race
+                                                (waitCancel config.loopCancel)
+                                                (waitCatch submission)
+                                            normalized <- case result of
+                                                Left () -> do
+                                                    -- Give structured providers a
+                                                    -- chance to preserve their
+                                                    -- subprocess/session invariants
+                                                    -- before withAsync force-cancels
+                                                    -- an unresponsive submission.
+                                                    _ <- restore $
+                                                        timeout 2000000
+                                                            (tryAny
+                                                                config.loopInterrupt)
+                                                    _ <- restore $
+                                                        timeout 2000000
+                                                            (waitCatch submission)
+                                                    pure (Left ())
+                                                Right (Left exception) ->
+                                                    -- Preserve the provider thread's
+                                                    -- asynchronous-exception identity.
+                                                    -- Safe.throwIO deliberately marks
+                                                    -- manually thrown exceptions as
+                                                    -- synchronous, which would turn a
+                                                    -- ThreadKilled into LoopUnexpected.
+                                                    Exception.throwIO exception
+                                                Right (Right completed) ->
+                                                    pure (Right completed)
+                                            case normalized of
+                                                Right
+                                                    (Right
+                                                        backendResult@BackendResult{..})
+                                                    | not
+                                                        (Text.null
+                                                            backendOutput.responseId) -> do
+                                                        committed <-
+                                                            config.loopBackendState.commitBackendState
+                                                                backendState
+                                                        writeIORef progressRef
+                                                            ( committed
+                                                            , ResponseCommitted
+                                                            )
+                                                        retainToolSpeculation
+                                                            runtime
+                                                            backendOutput.toolCalls
+                                                        pure
+                                                            (Right
+                                                                (Right backendResult
+                                                                    { backendState =
+                                                                        committed
+                                                                    }))
+                                                _ -> pure normalized
                                 case raced of
                                     Left () ->
                                         finishCursor cursor
@@ -673,6 +793,12 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 -- it, and its assistant text now lives in the committed state.
                 writeIORef pendingRef []
                 writeIORef uncommittedTextRef ([], [])
+                -- Result metadata belongs to the response commit even when a
+                -- cancellation lands before the completion event is painted.
+                case turn.providerTelemetry of
+                    Nothing -> pure ()
+                    Just telemetry ->
+                        modifyIORef' providerTelemetryRef (telemetry :)
                 protect cursor do
                     -- A cancel that landed during submitTurn after the race chose
                     -- Right still counts, but its returned state is committed.
@@ -741,11 +867,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             Right completed -> pure completed
         flushEventPump eventPump >>= \case
             Left failure ->
-                handleLoopEventFailure
-                    unexpected
-                    execution.executionState
-                    execution.executionProgress
-                    failure
+                readIORef progressRef >>= \(state, progress) ->
+                    handleLoopEventFailure unexpected state progress failure
             Right () -> pure execution
 
 data LoopEventCoalescingKey
@@ -804,8 +927,8 @@ loopEventTailPayloadBudgetCodeUnits =
     (8 * 1024 * 1024 - 64) `div` 4
 
 handleLoopEventFailure
-    :: ([ResponseItem] -> LoopProgress -> SomeException -> IO LoopExecution)
-    -> [ResponseItem]
+    :: (BackendSnapshot -> LoopProgress -> SomeException -> IO LoopExecution)
+    -> BackendSnapshot
     -> LoopProgress
     -> EventPumpFailure
     -> IO LoopExecution

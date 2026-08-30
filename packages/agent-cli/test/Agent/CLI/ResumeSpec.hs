@@ -306,6 +306,7 @@ sampleTurn =
         , turnItems = []
         , turnUsage = Nothing
         , turnEffect = TranscriptAppend
+        , turnProviderTelemetry = []
         }
 
 sampleMeta :: Text.Text -> Text.Text -> SessionMeta

@@ -17,6 +17,7 @@ import Agent.CLI.Duration (formatDuration)
 import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
+    , CredentialRefreshFailure(..)
     , ErrorType(..)
     , errorTypeText
     )
@@ -145,11 +146,30 @@ formatExhaustionReason = \case
         { exhaustionErrorType
         , exhaustionStatusCode
         } ->
-            "authentication rejected or credential refresh failed"
+            "authentication rejected"
                 <> formatReasonMetadata
                     exhaustionErrorType
                     exhaustionStatusCode
                     Nothing
+    ExhaustedByCredentialRefresh
+        { refreshFailure
+        , exhaustionErrorType
+        , exhaustionStatusCode
+        } ->
+            formatCredentialRefreshFailure refreshFailure
+                <> formatReasonMetadata
+                    exhaustionErrorType
+                    exhaustionStatusCode
+                    Nothing
+
+formatCredentialRefreshFailure :: CredentialRefreshFailure -> Text
+formatCredentialRefreshFailure = \case
+    RefreshCredentialSourceFailed ->
+        "credential source or persistence failed"
+    RefreshTransportFailed ->
+        "credential refresh transport failed"
+    RefreshProviderFailed ->
+        "credential refresh failed"
 
 formatReasonMetadata
     :: Maybe ErrorType

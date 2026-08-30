@@ -28,6 +28,7 @@ import Agent.CLI.Session.History
 import Agent.CLI.Auth
     ( LoadedAuth(..)
     , loadAuth
+    , loadDirectOpenAiAuth
     , loadAuthForAccount
     , preferredOpenAiTokenProvider
     )
@@ -162,7 +163,7 @@ loadSelectedAccountAuth
 loadSelectedAccountAuth provider selectionId accountId =
     case provider of
         OpenAIProvider ->
-            loadAuth (Just OpenAIProvider) >>= \case
+            loadDirectOpenAiAuth >>= \case
                 Left err -> pure (Left err)
                 Right loaded -> case loaded.loadedOpenAiPool of
                     Nothing ->

@@ -5,6 +5,7 @@ import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
+import Agent.Telemetry (TurnTelemetry(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import Agent.Tools.Scheduling
@@ -43,6 +44,17 @@ import qualified Data.Text as Text
 import System.Timeout (timeout)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
+
+emptyTestTelemetry :: TurnTelemetry
+emptyTestTelemetry = TurnTelemetry
+    { telemetryDurationMs = Nothing
+    , telemetryApiDurationMs = Nothing
+    , telemetryCostUsd = Nothing
+    , telemetryStopReason = Nothing
+    , telemetryProviderTurns = Nothing
+    , telemetryModels = mempty
+    , telemetryStructuredOutput = Nothing
+    }
 
 spec :: Spec
 spec = describe "runLoop" do
@@ -204,7 +216,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 TurnStarted -> do
@@ -239,7 +251,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 TurnStarted -> do
@@ -276,7 +288,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 TurnStarted -> do
@@ -316,7 +328,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent event = do
                 modifyIORef' events (event :)
@@ -361,7 +373,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 TurnStarted -> do
@@ -402,7 +414,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 TurnStarted -> do
@@ -444,7 +456,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent event = do
                 modifyIORef' events (event :)
@@ -482,7 +494,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 ToolOutputUpdated "large" output ->
@@ -1268,6 +1280,38 @@ spec = describe "runLoop" do
         execution.executionPendingInputs `shouldBe`
             [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
 
+    it "interrupts the provider in-band before tearing down a cancelled submission" do
+        started <- newEmptyMVar
+        interrupted <- newEmptyMVar
+        observedInterrupt <- newEmptyMVar
+        config0 <- testConfig $ Backend \state _previous _inputs _onEvent -> do
+            putMVar started ()
+            takeMVar interrupted
+            putMVar observedInterrupt ()
+            pure $ Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "must-not-commit" [] (Just "late")
+                , backendState = appendStateMarker state
+                }
+        let config = config0
+                { loopInterrupt = putMVar interrupted ()
+                }
+        _ <- forkIO do
+            takeMVar started
+            requestCancel config.loopCancel
+        execution <-
+            timeout 1000000
+                (runLoopInputsDetailed config Nothing [UserMessage "go"])
+        case execution of
+            Nothing -> expectationFailure "cancelled loop did not finish"
+            Just completed -> do
+                completed.executionResult
+                    `shouldBe` Left (LoopCancelled [])
+                completed.executionProgress `shouldBe` NoResponseCommitted
+                completed.executionState `shouldBe` []
+        timeout 100000 (takeMVar observedInterrupt)
+            `shouldReturn` Just ()
+
     it "exposes the initial inputs while nothing has committed" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions [Left (ConnectionError "down")]
@@ -1313,7 +1357,7 @@ spec = describe "runLoop" do
                     { backendOutput = emptyTurnOutput "resp-1"
                         [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                         Nothing
-                    , backendState = state <> [stateMarker]
+                    , backendState = appendStateMarker state
                     }
                 else do
                     putMVar started ()
@@ -1349,8 +1393,8 @@ spec = describe "runLoop" do
     it "retains committed state when the event pump fails during commit" do
         commitStarted <- newEmptyMVar
         sinkCanFail <- newEmptyMVar
-        state <- newIORef []
-        let committedState = [stateMarker]
+        state <- newIORef emptyBackendSnapshot
+        let committedState = appendStateMarker emptyBackendSnapshot
             backend = Backend \_state _prev _inputs _onEvent ->
                 pure $ Right BackendResult
                     { backendOutput =
@@ -1369,6 +1413,7 @@ spec = describe "runLoop" do
                             -- before the masked commit returns.
                             threadDelay 30000
                             writeIORef state newState
+                            pure newState
                     }
                 , loopOnEvent = \case
                     TurnStarted -> do
@@ -1379,7 +1424,7 @@ spec = describe "runLoop" do
                 }
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
         readIORef state `shouldReturn` committedState
-        execution.executionState `shouldBe` committedState
+        execution.executionState `shouldBe` committedState.backendItems
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionResult
             `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
@@ -1675,7 +1720,7 @@ spec = describe "runLoop" do
             pure $ Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "resp-slow" [] (Just "too late")
-                , backendState = state <> [stateMarker]
+                , backendState = appendStateMarker state
                 }
         let cancel = case config0 of
                 LoopConfig{loopCancel = c} -> c
@@ -1714,7 +1759,7 @@ spec = describe "runLoop" do
                         { backendOutput = emptyTurnOutput "resp-1"
                             [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                             (Just "committed text")
-                        , backendState = state <> [stateMarker]
+                        , backendState = appendStateMarker state
                         }
                 else do
                     onEvent (TextDelta "dropped attempt")
@@ -1746,12 +1791,21 @@ spec = describe "runLoop" do
 
     it "sums token usage across model steps in one user turn" do
         submissions <- newIORef []
+        let firstTelemetry = emptyTestTelemetry
+                { telemetryDurationMs = Just 100
+                , telemetryCostUsd = Just 0.01
+                }
+            secondTelemetry = emptyTestTelemetry
+                { telemetryDurationMs = Just 200
+                , telemetryCostUsd = Just 0.02
+                }
         backend <- scriptedBackend submissions
             [ Right TurnOutput
                 { responseId = "resp-1"
                 , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 , assistantText = Just "calling"
                 , tokenUsage = TokenUsage 10 4 2
+                , providerTelemetry = Just firstTelemetry
                 , completion = TurnCompleted
                 }
             , Right TurnOutput
@@ -1759,17 +1813,21 @@ spec = describe "runLoop" do
                 , toolCalls = []
                 , assistantText = Just "done"
                 , tokenUsage = TokenUsage 12 6 0
+                , providerTelemetry = Just secondTelemetry
                 , completion = TurnCompleted
                 }
             ]
         config <- testConfig backend
-        result <- runLoop config Nothing "hello"
-        result `shouldBe` Right LoopResult
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionResult `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "done"
             , turnsUsed = 2
             , tokenUsage = TokenUsage 22 10 2
             }
+        execution.executionProviderTelemetry
+            `shouldBe` [firstTelemetry, secondTelemetry]
 
     it "continues after a reasoning-only completion until the model answers" do
         events <- newIORef []
@@ -1947,6 +2005,7 @@ spec = describe "runLoop" do
                     [functionToolCall "c1" "echo" "{\"message\":\"unsafe\"}"]
                 , assistantText = Just "partial"
                 , tokenUsage = TokenUsage 120 32768 0
+                , providerTelemetry = Nothing
                 , completion = TurnIncomplete
                     { incompleteReason = "max_output_tokens"
                     , incompleteReasoningTokens = Just 32000
@@ -1974,6 +2033,7 @@ spec = describe "runLoop" do
                             "c1" "echo" "{\"message\":\"unsafe\"}"]
                     , assistantText = Just "partial"
                     , tokenUsage = TokenUsage 120 32768 0
+                    , providerTelemetry = Nothing
                     , completion = TurnIncomplete
                         { incompleteReason = "max_output_tokens"
                         , incompleteReasoningTokens = Just 32000
@@ -2070,12 +2130,14 @@ retryProbeTool starts firstStarted secondStarted =
 testConfig :: Backend -> IO LoopConfig
 testConfig backend = do
     cancel <- newCancelFlag
-    state <- newIORef []
+    state <- newIORef emptyBackendSnapshot
     pure LoopConfig
         { loopBackend = backend
         , loopBackendState = BackendStateStore
             { readBackendState = readIORef state
-            , commitBackendState = writeIORef state
+            , commitBackendState = \snapshot -> do
+                writeIORef state snapshot
+                pure snapshot
             }
         , loopTools = registryFromHandlers
             [ typedTool "echo" echoArgsDecoder $ \EchoArgs { message } ->
@@ -2087,6 +2149,7 @@ testConfig backend = do
         , loopApprove = \_ -> pure (Right True)
         , loopReadSteering = pure []
         , loopCommitSteering = \_ -> pure ()
+        , loopInterrupt = pure ()
         , loopCancel = cancel
         }
 
@@ -2157,7 +2220,7 @@ scriptedBackend submissions answers = do
                 , fmap
                     (\output -> BackendResult
                         { backendOutput = output
-                        , backendState = state <> [stateMarker]
+                        , backendState = appendStateMarker state
                         })
                     next
                 )
@@ -2172,10 +2235,16 @@ endlessToolsBackend = do
             { backendOutput = emptyTurnOutput responseId
                 [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
                 Nothing
-            , backendState = state <> [stateMarker]
+            , backendState = appendStateMarker state
             }
 
 stateMarker :: ResponseItem
 stateMarker = UnknownResponseItem TaggedObject
     { tag = "test_state"
     }
+
+appendStateMarker :: BackendSnapshot -> BackendSnapshot
+appendStateMarker snapshot =
+    advanceBackendSnapshot snapshot
+        (snapshot.backendItems <> [stateMarker])
+        snapshot.backendContinuation

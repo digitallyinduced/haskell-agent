@@ -5,6 +5,12 @@ module Agent.CLI.Worktree
     , createManagedWorktree
     , createManagedWorktreeWithProgress
     , removeWorktree
+    , cleanupStaleWorktrees
+    , defaultWorktreeKeepCount
+    , WorktreeCleanupReport(..)
+    , WorktreeLease
+    , acquireWorktreeLease
+    , releaseWorktreeLease
     , isUnderWorktreeRoot
     , worktreeProgressMessage
     , worktreePath
@@ -19,8 +25,15 @@ import Agent.CLI.Config
     )
 import Agent.OsPath (unsafeToFilePath)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (finally, mask, onException, tryAny)
-import Control.Monad (void)
+import Control.Exception.Safe
+    ( SomeException
+    , displayException
+    , finally
+    , mask
+    , onException
+    , tryAny
+    )
+import Control.Monad (filterM, foldM, void)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -29,25 +42,32 @@ import Control.Monad.Trans.Except
     , withExceptT
     )
 import qualified Data.ByteString as ByteString
-import Data.List (isPrefixOf)
+import Data.Char (isHexDigit)
+import Data.List (isPrefixOf, sortOn)
 import Data.Maybe (listToMaybe)
+import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Numeric (showHex)
 import System.Directory.OsPath
     ( createDirectoryIfMissing
+    , doesDirectoryExist
     , doesPathExist
+    , listDirectory
+    , pathIsSymbolicLink
     , removePathForcibly
     )
 import System.Entropy (getEntropy)
 import System.Exit (ExitCode(..))
+import qualified System.FileLock as FileLock
 import System.OsPath
     ( OsPath
     , equalFilePath
+    , normalise
     , splitDirectories
     , takeDirectory
     , takeFileName
@@ -74,6 +94,29 @@ worktreeProgressMessage = \case
   where
     branchName ref =
         maybe ref id (Text.stripPrefix "refs/heads/" ref)
+
+-- | Match Codex Desktop's default per-repository retention. Worktrees beyond
+-- this count are only removed when they are inactive, clean, and their HEAD is
+-- reachable from another branch or tag.
+defaultWorktreeKeepCount :: Int
+defaultWorktreeKeepCount = 15
+
+data WorktreeCleanupReport = WorktreeCleanupReport
+    { cleanupRemoved :: ![OsPath]
+    , cleanupFailures :: ![(OsPath, Text)]
+    }
+    deriving (Eq, Show)
+
+instance Semigroup WorktreeCleanupReport where
+    left <> right = WorktreeCleanupReport
+        { cleanupRemoved = left.cleanupRemoved <> right.cleanupRemoved
+        , cleanupFailures = left.cleanupFailures <> right.cleanupFailures
+        }
+
+instance Monoid WorktreeCleanupReport where
+    mempty = WorktreeCleanupReport [] []
+
+newtype WorktreeLease = WorktreeLease FileLock.FileLock
 
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
 worktreeRoot :: OsPath -> OsPath
@@ -156,6 +199,353 @@ removeWorktree source path = runExceptT do
         git repo ["worktree", "remove", "--force", unsafeToFilePath path]
     void $ ExceptT $
         git repo ["branch", "-D", unsafeToFilePath (takeFileName path)]
+
+-- | Take a shared lease when @path@ is inside one of our managed worktrees.
+-- Cleanup takes the corresponding exclusive lock, so multiple live sessions
+-- may share a checkout while automatic cleanup cannot remove it.
+acquireWorktreeLease
+    :: OsPath
+    -> OsPath
+    -> IO (Either Text (Maybe WorktreeLease))
+acquireWorktreeLease root path =
+    case managedWorktreePath root path of
+        Nothing -> pure (Right Nothing)
+        Just managed -> do
+            let lockPath = worktreeLeasePath root managed
+            result <- tryAny do
+                createDirectoryIfMissing True (takeDirectory lockPath)
+                FileLock.tryLockFile
+                    (unsafeToFilePath lockPath)
+                    FileLock.Shared
+            pure case result of
+                Left exception ->
+                    Left
+                        ("failed to lease managed worktree "
+                            <> pathText managed
+                            <> ": "
+                            <> Text.pack (displayException exception))
+                Right Nothing ->
+                    Left
+                        ("managed worktree is being cleaned up: "
+                            <> pathText managed)
+                Right (Just lock) -> Right (Just (WorktreeLease lock))
+
+releaseWorktreeLease :: WorktreeLease -> IO ()
+releaseWorktreeLease (WorktreeLease lock) = do
+    _ <- tryAny (FileLock.unlockFile lock)
+    pure ()
+
+-- | Remove old managed worktrees without risking unique Git work.
+--
+-- Retention is applied per repository directory. A candidate must use our
+-- generated path and branch name, be a linked worktree with no tracked or
+-- untracked changes, have no active lease, and have a HEAD reachable from
+-- another local branch, remote-tracking branch, or tag. Removal deliberately
+-- omits @--force@. The generated branch is then deleted with @-d@, leaving it
+-- intact whenever Git's own merged-branch check is stricter than ours.
+-- Worktrees created on the current UTC day are never considered stale; this
+-- also closes the interval between checkout creation and lease acquisition.
+cleanupStaleWorktrees
+    :: OsPath
+    -> Int
+    -> [OsPath]
+    -> IO WorktreeCleanupReport
+cleanupStaleWorktrees root requestedKeep protected = do
+    exists <- doesDirectoryExist root
+    if not exists
+        then pure mempty
+        else do
+            today <- utctDay <$> getCurrentTime
+            let cleanupLockPath =
+                    root </> unsafeEncodeUtf ".cleanup.lock"
+            lockResult <- tryAny $
+                FileLock.tryLockFile
+                    (unsafeToFilePath cleanupLockPath)
+                    FileLock.Exclusive
+            case lockResult of
+                Left exception ->
+                    pure $ cleanupFailure root exception
+                Right Nothing ->
+                    -- Another process is already doing the same best-effort GC.
+                    pure mempty
+                Right (Just lock) ->
+                    runCleanup today `finally` FileLock.unlockFile lock
+  where
+    keep = max 1 requestedKeep
+    protectedManaged =
+        [ normalise path
+        | path <- protected
+        ]
+
+    runCleanup today = do
+        discovered <- discoverStaleCandidates root keep today
+        case discovered of
+            Left failures ->
+                pure mempty { cleanupFailures = failures }
+            Right (candidates, discoveryFailures) -> do
+                cleaned <- foldM cleanupOne mempty candidates
+                pure $
+                    cleaned
+                        <> mempty { cleanupFailures = discoveryFailures }
+
+    cleanupOne report candidate
+        | any (isUnderWorktreeRoot candidate) protectedManaged =
+            pure report
+        | otherwise = do
+            result <- tryAny (cleanupCandidate root candidate)
+            pure $ report <> case result of
+                Left exception -> cleanupFailure candidate exception
+                Right candidateReport -> candidateReport
+
+discoverStaleCandidates
+    :: OsPath
+    -> Int
+    -> Day
+    -> IO (Either [(OsPath, Text)] ([OsPath], [(OsPath, Text)]))
+discoverStaleCandidates root keep today = do
+    listed <- tryAny (listDirectory root)
+    case listed of
+        Left exception ->
+            pure (Left [(root, exceptionText exception)])
+        Right entries ->
+            Right <$> foldM discoverRepository ([], []) entries
+  where
+    discoverRepository (candidates, failures) entry = do
+        let repository = root </> entry
+        isDirectory <- doesDirectoryExist repository
+        if not isDirectory
+            then pure (candidates, failures)
+            else do
+                listed <- tryAny (listDirectory repository)
+                case listed of
+                    Left exception ->
+                        pure
+                            ( candidates
+                            , failures <> [(repository, exceptionText exception)]
+                            )
+                    Right children -> do
+                        directories <- filterM
+                            (doesDirectoryExist . (repository </>))
+                            children
+                        let managed =
+                                sortOn
+                                    ( Down
+                                        . unsafeToFilePath
+                                        . takeFileName
+                                        . fst
+                                    )
+                                    [ (repository </> child, day)
+                                    | child <- directories
+                                    , Just day <- [managedWorktreeDay child]
+                                    ]
+                            stale =
+                                [ path
+                                | (path, day) <- drop keep managed
+                                , day < today
+                                ]
+                        pure (candidates <> stale, failures)
+
+cleanupCandidate :: OsPath -> OsPath -> IO WorktreeCleanupReport
+cleanupCandidate root candidate = do
+    leaseResult <- tryExclusiveWorktreeLease root candidate
+    case leaseResult of
+        Left err ->
+            pure mempty
+                { cleanupFailures = [(candidate, err)]
+                }
+        Right Nothing ->
+            pure mempty
+        Right (Just lease) ->
+            cleanupWithLease `finally` releaseWorktreeLease lease
+  where
+    cleanupWithLease =
+        inspectCleanupCandidate candidate >>= \case
+            Left err ->
+                pure mempty
+                    { cleanupFailures = [(candidate, err)]
+                    }
+            Right Nothing ->
+                pure mempty
+            Right (Just (commonDir, branch)) ->
+                git commonDir
+                    [ "worktree"
+                    , "remove"
+                    , unsafeToFilePath candidate
+                    ] >>= \case
+                        Left err ->
+                            pure mempty
+                                { cleanupFailures = [(candidate, err)]
+                                }
+                        Right _ -> do
+                            deleted <- git commonDir
+                                [ "branch"
+                                , "-d"
+                                , "--"
+                                , Text.unpack branch
+                                ]
+                            pure WorktreeCleanupReport
+                                { cleanupRemoved = [candidate]
+                                , cleanupFailures = case deleted of
+                                    Left err ->
+                                        [(candidate,
+                                            "worktree removed but branch retained: "
+                                                <> err)]
+                                    Right _ -> []
+                                }
+
+inspectCleanupCandidate
+    :: OsPath
+    -> IO (Either Text (Maybe (OsPath, Text)))
+inspectCleanupCandidate candidate = runExceptT do
+    candidateLink <- lift (pathIsSymbolicLink candidate)
+    repositoryLink <- lift (pathIsSymbolicLink (takeDirectory candidate))
+    if candidateLink || repositoryLink
+        then pure Nothing
+        else do
+            topLevel <- Text.strip <$> ExceptT
+                (git candidate
+                    [ "rev-parse"
+                    , "--path-format=absolute"
+                    , "--show-toplevel"
+                    ])
+            let topLevelPath = unsafeEncodeUtf (Text.unpack topLevel)
+            if not
+                (equalFilePath
+                    (normalise candidate)
+                    (normalise topLevelPath))
+                then pure Nothing
+                else do
+                    gitDir <- Text.strip <$> ExceptT
+                        (git candidate
+                            [ "rev-parse"
+                            , "--path-format=absolute"
+                            , "--git-dir"
+                            ])
+                    commonDirText <- Text.strip <$> ExceptT
+                        (git candidate
+                            [ "rev-parse"
+                            , "--path-format=absolute"
+                            , "--git-common-dir"
+                            ])
+                    if gitDir == commonDirText
+                        then pure Nothing
+                        else do
+                            branch <- Text.strip <$> ExceptT
+                                (git candidate
+                                    ["branch", "--show-current"])
+                            let expected = Text.pack
+                                    (unsafeToFilePath
+                                        (takeFileName candidate))
+                            if Text.null branch || branch /= expected
+                                then pure Nothing
+                                else do
+                                    status <- ExceptT $
+                                        git candidate
+                                            [ "status"
+                                            , "--porcelain=v1"
+                                            , "--untracked-files=all"
+                                            , "--ignore-submodules=none"
+                                            ]
+                                    if not (Text.null status)
+                                        then pure Nothing
+                                        else do
+                                            refs <- ExceptT $
+                                                git candidate
+                                                    [ "for-each-ref"
+                                                    , "--format=%(refname)"
+                                                    , "--contains=HEAD"
+                                                    , "refs/heads"
+                                                    , "refs/remotes"
+                                                    , "refs/tags"
+                                                    ]
+                                            let ownRef =
+                                                    "refs/heads/" <> branch
+                                                otherRefs =
+                                                    filter
+                                                        (\ref ->
+                                                            not (Text.null ref)
+                                                                && ref /= ownRef)
+                                                        (Text.lines refs)
+                                            pure $
+                                                if null otherRefs
+                                                    then Nothing
+                                                    else Just
+                                                        ( unsafeEncodeUtf
+                                                            (Text.unpack
+                                                                commonDirText)
+                                                        , branch
+                                                        )
+
+tryExclusiveWorktreeLease
+    :: OsPath
+    -> OsPath
+    -> IO (Either Text (Maybe WorktreeLease))
+tryExclusiveWorktreeLease root candidate = do
+    let lockPath = worktreeLeasePath root candidate
+    result <- tryAny do
+        createDirectoryIfMissing True (takeDirectory lockPath)
+        FileLock.tryLockFile
+            (unsafeToFilePath lockPath)
+            FileLock.Exclusive
+    pure case result of
+        Left exception ->
+            Left
+                ("failed to lock stale worktree: "
+                    <> exceptionText exception)
+        Right Nothing -> Right Nothing
+        Right (Just lock) -> Right (Just (WorktreeLease lock))
+
+managedWorktreePath :: OsPath -> OsPath -> Maybe OsPath
+managedWorktreePath rawRoot rawPath =
+    let root = normalise rawRoot
+        path = normalise rawPath
+        rootParts = splitDirectories root
+        pathParts = splitDirectories path
+    in case drop (length rootParts) pathParts of
+        repository : checkout : _
+            | rootParts `isPrefixOf` pathParts
+            , isManagedWorktreeName checkout ->
+                Just (root </> repository </> checkout)
+        _ -> Nothing
+
+worktreeLeasePath :: OsPath -> OsPath -> OsPath
+worktreeLeasePath root managed =
+    root
+        </> unsafeEncodeUtf ".locks"
+        </> takeFileName (takeDirectory managed)
+        </> (takeFileName managed <> unsafeEncodeUtf ".lock")
+
+isManagedWorktreeName :: OsPath -> Bool
+isManagedWorktreeName path = case managedWorktreeDay path of
+    Just _ -> True
+    Nothing -> False
+
+managedWorktreeDay :: OsPath -> Maybe Day
+managedWorktreeDay path =
+    case unsafeToFilePath path of
+        year1 : year2 : year3 : year4 : '-' :
+                month1 : month2 : '-' : day1 : day2 : '-' : suffix ->
+            let date =
+                    [ year1, year2, year3, year4, '-'
+                    , month1, month2, '-', day1, day2
+                    ]
+            in if length suffix == 8 && all isHexDigit suffix
+                then parseTimeM True defaultTimeLocale "%Y-%m-%d" date
+                else Nothing
+        _ -> Nothing
+
+cleanupFailure :: OsPath -> SomeException -> WorktreeCleanupReport
+cleanupFailure path exception =
+    mempty
+        { cleanupFailures =
+            [(path, Text.pack (displayException exception))]
+        }
+
+exceptionText :: SomeException -> Text
+exceptionText = Text.pack . displayException
+
+pathText :: OsPath -> Text
+pathText = Text.pack . unsafeToFilePath
 
 addUnique
     :: OsPath

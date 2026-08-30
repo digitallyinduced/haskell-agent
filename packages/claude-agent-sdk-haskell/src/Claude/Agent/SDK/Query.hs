@@ -22,6 +22,7 @@ module Claude.Agent.SDK.Query
 import Claude.Agent.SDK.Client
     ( ClaudeSDKClient
     , ClaudeSDKTurn
+    , acceptConversationReset
     , acceptTurnSessionId
     , receiveMessage
     , sendQueryContent
@@ -337,7 +338,10 @@ receiveResponseWithMessageValidatorAndProgress
                                     Left err -> pure (Left err)
                                     Right () -> do
                                         mapM_ onProgress progress
-                                        go nextAccumulator True
+                                        go
+                                            nextAccumulator
+                                            (sawOutput
+                                                || hasOwnOutputProgress progress)
                             Right (_, progress, Just (messages, result)) -> do
                                 accepted <-
                                     acceptTurnSessionId
@@ -357,11 +361,21 @@ validateLiveProgressSession
     -> [QueryProgress]
     -> IO (Either ClaudeSDKError ())
 validateLiveProgressSession turn message progress
+    | QueryConversationReset reset : _ <- progress = do
+        acceptConversationReset turn reset
+        pure (Right ())
     | null progress = pure (Right ())
     | otherwise =
         case messageSessionId message of
             Nothing -> pure (Right ())
             Just sessionId -> acceptTurnSessionId turn sessionId
+
+hasOwnOutputProgress :: [QueryProgress] -> Bool
+hasOwnOutputProgress =
+    any \case
+        QueryMessageObserved{} -> True
+        QueryMessagesRetracted{} -> True
+        QueryConversationReset{} -> True
 
 timeoutError :: ClaudeSDKTurn -> Text -> IO ClaudeSDKError
 timeoutError turn reason = do

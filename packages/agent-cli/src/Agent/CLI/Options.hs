@@ -386,7 +386,7 @@ optionUpdateParser = asum
         (positiveIntReader "--max-concurrent-agents")
         (\value options -> options { optMaxConcurrentAgents = Just value })
     , optionUpdate "compact-threshold" "N"
-        "OpenAI auto-compaction threshold in tokens"
+        "Automatic compaction threshold in tokens"
         (positiveIntReader "--compact-threshold")
         (\value options -> options { optCompactThreshold = Just value })
     , optionUpdate "effort" "LEVEL" "Reasoning effort"
@@ -612,8 +612,8 @@ usage = unlines
     , "                          Concurrent subagent cap (default: 32;"
     , "                          project settings, then ~/.haskell-agent/config.json)"
     , "      --compact-threshold N"
-    , "                          OpenAI auto-compaction threshold in tokens"
-    , "                          (default: model-specific, currently 244800)"
+    , "                          Automatic compaction threshold in tokens"
+    , "                          (default: provider/model-specific)"
     , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
     , "                          (default: xhigh for Claude Code, high for xai/grok,"
     , "                          medium otherwise)"
@@ -633,7 +633,7 @@ usage = unlines
     , "Ctrl+O is the fallback when the terminal cannot distinguish Ctrl+Enter."
     , "With an empty composer, send-now promotes the oldest queued prompt."
     , "/compact [FOCUS] summarizes history (OpenAI remote compact;"
-    , "xAI/OpenRouter/Gemini local summary) to free context."
+    , "Claude Code/xAI/OpenRouter/Gemini local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"
     , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
     , "/btw <QUESTION> asks a one-shot side question without changing or"

@@ -28,10 +28,12 @@ module Agent.Tools.PlanMode
     , writePlanTool
     , exitPlanModeTool
     , askUserQuestionTool
+    , answerAskUserQuestionInput
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Json.Decode (Decoder)
+import qualified Agent.Json.Decode as Json
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optList, optText, reqText)
 import Agent.ToolDSL
@@ -46,6 +48,9 @@ import Agent.Tools.Types
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -613,6 +618,112 @@ backToPreviousQuestionChoice = "← Back to previous question"
 
 backToLastQuestionChoice :: Text
 backToLastQuestionChoice = "← Back to last question"
+
+-- | Collect native-provider answers without the host tool's final review
+-- prompt. Native callbacks already have their own submit boundary.
+collectNativeAskUserQuestionAnswers
+    :: PlanModeEnv
+    -> [AskUserQuestion]
+    -> IO (Either Text [(Text, Text)])
+collectNativeAskUserQuestionAnswers _ [] = pure (Right [])
+collectNativeAskUserQuestionAnswers env (question : rest) =
+    ask question >>= \case
+        Left err -> pure (Left err)
+        Right answer ->
+            collectNativeAskUserQuestionAnswers env rest >>= \case
+                Left err -> pure (Left err)
+                Right answers -> pure (Right (answer : answers))
+  where
+    ask :: AskUserQuestion -> IO (Either Text (Text, Text))
+    ask question
+        | question.multiSelect == Just True =
+            askMultiple question >>= \case
+                Left err -> pure (Left err)
+                Right answer -> pure (Right (question.question, answer))
+        | otherwise = do
+            let choices = map formatOption question.options
+                labelsByChoice =
+                    Map.fromList (zip choices (map (.label) question.options))
+            answer <- env.planHooks.planAskQuestion question.question choices
+            pure $ case answer of
+                Nothing -> Left "No answer from user."
+                Just text | Text.null (Text.strip text) ->
+                    Left "No answer from user."
+                Just text ->
+                    Right
+                        ( question.question
+                        , fromMaybe text (Map.lookup text labelsByChoice)
+                        )
+
+    askMultiple :: AskUserQuestion -> IO (Either Text Text)
+    askMultiple question =
+        choose [] question.options
+      where
+        doneChoice = "Done selecting"
+        choose selected remaining = do
+            let displayed = map formatOption remaining
+                labelsByDisplayed =
+                    Map.fromList (zip displayed (map (.label) remaining))
+                choices = displayed <> [doneChoice]
+                prompt
+                    | null selected = question.question
+                    | otherwise =
+                        question.question
+                            <> "\nSelected: "
+                            <> Text.intercalate ", " (reverse selected)
+            answer <- env.planHooks.planAskQuestion prompt choices
+            case answer of
+                Nothing -> noAnswer selected
+                Just raw
+                    | Text.null (Text.strip raw) -> noAnswer selected
+                    | raw == doneChoice ->
+                        if null selected
+                            then pure (Left "No answer from user.")
+                            else pure
+                                (Right (Text.intercalate ", " (reverse selected)))
+                    | Just label <- Map.lookup raw labelsByDisplayed ->
+                        choose
+                            (label : selected)
+                            [ option
+                            | option <- remaining
+                            , option.label /= label
+                            ]
+                    | otherwise -> pure (Right (Text.strip raw))
+        noAnswer selected
+            | null selected = pure (Left "No answer from user.")
+            | otherwise =
+                pure (Right (Text.intercalate ", " (reverse selected)))
+
+-- | Run the same host question UI used by 'askUserQuestionTool', then add the
+-- @answers@ object expected by Claude Code's native AskUserQuestion tool.
+answerAskUserQuestionInput
+    :: PlanModeEnv
+    -> Aeson.Value
+    -> IO (Either Text Aeson.Value)
+answerAskUserQuestionInput env input =
+    case input of
+        Aeson.Object object ->
+            case
+                Json.decodeEither
+                    askUserQuestionArgsDecoder
+                    (LazyByteString.toStrict (Aeson.encode input))
+              of
+                Left err ->
+                    pure (Left err.jsonErrorMessage)
+                Right args ->
+                    collectNativeAskUserQuestionAnswers env args.questions >>= \case
+                        Left err -> pure (Left err)
+                        Right answers ->
+                            pure $
+                                Right $
+                                    Aeson.Object $
+                                        KeyMap.insert
+                                            "answers"
+                                            (Aeson.toJSON
+                                                (Map.fromList answers))
+                                            object
+        _ ->
+            pure (Left "AskUserQuestion input must be an object.")
 
 formatOption :: AskUserQuestionOption -> Text
 formatOption option =

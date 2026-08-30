@@ -29,6 +29,7 @@ module Agent.Tools.Types
     , toolExecutionPolicyFor
     , toolSchedulingPlanFor
     , dispatchRegisteredToolCall
+    , dispatchRegisteredToolCallDetailed
     , jsonToolParameters
     , appToolHandlers
     , toolAllowsWithoutPrompt
@@ -39,6 +40,7 @@ import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult
+    , ToolDispatchOutcome
     , ToolDispatchConfig
     , ToolHandler
     , StreamedToolFactory
@@ -46,6 +48,7 @@ import Agent.ToolDispatch
     , canonicalToolName
     , decodeToolArguments
     , dispatchToolHandler
+    , dispatchToolHandlerDetailed
     , handlerName
     , streamedToolFactoryForHandler
     , toolArgumentsValue
@@ -428,6 +431,16 @@ dispatchRegisteredToolCall
     -> IO ToolCallResult
 dispatchRegisteredToolCall config registry call =
     dispatchToolHandler config
+        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        call
+
+dispatchRegisteredToolCallDetailed
+    :: ToolDispatchConfig
+    -> ToolRegistry
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchRegisteredToolCallDetailed config registry call =
+    dispatchToolHandlerDetailed config
         ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
         call
 

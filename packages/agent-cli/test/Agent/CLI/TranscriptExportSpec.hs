@@ -97,4 +97,5 @@ turnWithAnswer user assistant effect = SessionTurn
     , turnEffect = effect
     , turnItems = []
     , turnUsage = Nothing
+    , turnProviderTelemetry = []
     }

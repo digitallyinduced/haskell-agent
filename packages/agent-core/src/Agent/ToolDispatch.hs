@@ -4,6 +4,7 @@ module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolDispatchOutcome(..)
     , ToolResultImage(..)
     , ToolHandlerResult(..)
     , toolCallResultImages
@@ -31,7 +32,9 @@ module Agent.ToolDispatch
     , canonicalToolName
     , canonicalToolArguments
     , dispatchToolCall
+    , dispatchToolCallDetailed
     , dispatchToolHandler
+    , dispatchToolHandlerDetailed
     , finishToolException
     , finishToolResult
     , handlerName
@@ -106,6 +109,16 @@ instance Show ToolResultImage where
 data ToolHandlerResult = ToolHandlerResult
     { resultText :: !Text
     , resultImages :: ![ToolResultImage]
+    } deriving (Eq, Show)
+
+-- | A dispatched result together with its protocol-neutral success bit.
+--
+-- Provider adapters such as an in-process MCP server must not infer failure
+-- from the rendered output: callers are free to customize that rendering, and
+-- successful tools may legitimately return text beginning with @"Error:"@.
+data ToolDispatchOutcome = ToolDispatchOutcome
+    { toolDispatchResult :: !ToolCallResult
+    , toolDispatchSucceeded :: !Bool
     } deriving (Eq, Show)
 
 -- | Provider-neutral result ready for a transport adapter to encode.
@@ -363,7 +376,16 @@ noArgsTool = NoArgsTool
 
 dispatchToolCall :: ToolDispatchConfig -> [ToolHandler] -> ToolCall -> IO ToolCallResult
 dispatchToolCall config handlers call =
-    dispatchToolHandler config (findHandler call.name handlers) call
+    (.toolDispatchResult) <$>
+        dispatchToolCallDetailed config handlers call
+
+dispatchToolCallDetailed
+    :: ToolDispatchConfig
+    -> [ToolHandler]
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchToolCallDetailed config handlers call =
+    dispatchToolHandlerDetailed config (findHandler call.name handlers) call
 
 -- | Dispatch with an already-resolved handler. Registries should prefer this
 -- entry point so canonical-name lookup and uniqueness checks happen once.
@@ -373,6 +395,18 @@ dispatchToolHandler
     -> ToolCall
     -> IO ToolCallResult
 dispatchToolHandler config maybeHandler call = do
+    (.toolDispatchResult) <$>
+        dispatchToolHandlerDetailed config maybeHandler call
+
+-- | Detailed dispatch entry point for protocol adapters which need to preserve
+-- the handler's success/failure distinction independently of output
+-- formatting.
+dispatchToolHandlerDetailed
+    :: ToolDispatchConfig
+    -> Maybe ToolHandler
+    -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchToolHandlerDetailed config maybeHandler call = do
     let callName = call.name
         input = canonicalToolArguments call.name call.arguments
         runTool = case maybeHandler of
@@ -385,9 +419,9 @@ dispatchToolHandler config maybeHandler call = do
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     tryAny runTool >>= \case
         Right result ->
-            finishToolHandlerResult config call result
+            finishToolHandlerOutcome config call result
         Left exception ->
-            finishToolException config call exception
+            finishToolExceptionOutcome config call exception
 
 -- | Apply the same formatting and output-finalization path used by ordinary
 -- dispatch to a text-only result produced by a streamed interpreter.
@@ -396,9 +430,12 @@ finishToolResult
     -> ToolCall
     -> ToolResult
     -> IO ToolCallResult
-finishToolResult config call =
-    finishToolHandlerResult config call
-        . fmap (\output -> ToolHandlerResult output [])
+finishToolResult config call result =
+    (.toolDispatchResult) <$>
+        finishToolHandlerOutcome
+            config
+            call
+            (fmap (\output -> ToolHandlerResult output []) result)
 
 -- | Format and finalize a synchronous handler failure without rerunning the
 -- handler. This is used after a streamed consume phase has already begun.
@@ -407,56 +444,82 @@ finishToolException
     -> ToolCall
     -> SomeException
     -> IO ToolCallResult
-finishToolException config call exception = do
+finishToolException config call exception =
+    (.toolDispatchResult) <$>
+        finishToolExceptionOutcome config call exception
+
+finishToolExceptionOutcome
+    :: ToolDispatchConfig
+    -> ToolCall
+    -> SomeException
+    -> IO ToolDispatchOutcome
+finishToolExceptionOutcome config call exception = do
     -- Diagnostics must not replace the original tool failure with a second
     -- exception. 'tryAny' still lets asynchronous cancellation propagate.
     _ <- tryAny (config.toolDispatchOnException call.name exception)
-    finishFormattedToolResult
+    finishFormattedToolOutcome
         config
         call
+        False
         (config.toolDispatchFormatException call.name exception)
         []
 
-finishToolHandlerResult
+finishToolHandlerOutcome
     :: ToolDispatchConfig
     -> ToolCall
     -> Either Text ToolHandlerResult
-    -> IO ToolCallResult
-finishToolHandlerResult config call = \case
+    -> IO ToolDispatchOutcome
+finishToolHandlerOutcome config call = \case
     Right toolResult ->
-        finishFormattedToolResult
+        finishFormattedToolOutcome
             config
             call
+            True
             (config.toolDispatchFormatResult (Right toolResult.resultText))
             toolResult.resultImages
     Left err ->
-        finishFormattedToolResult
+        finishFormattedToolOutcome
             config
             call
+            False
             (config.toolDispatchFormatResult (Left err))
             []
 
-finishFormattedToolResult
+finishFormattedToolOutcome
     :: ToolDispatchConfig
     -> ToolCall
+    -> Bool
     -> Text
     -> [ToolResultImage]
-    -> IO ToolCallResult
-finishFormattedToolResult config call resultOutput resultImages = do
+    -> IO ToolDispatchOutcome
+finishFormattedToolOutcome
+    config
+    call
+    succeeded
+    resultOutput
+    resultImages = do
     finalizedOutput <-
         tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
             Right output -> pure output
             Left exception -> do
                 _ <- tryAny (config.toolDispatchOnException call.name exception)
                 pure resultOutput
-    pure $
-        if null resultImages
-            then ToolCallResult call.callId finalizedOutput call.callKind
-            else ToolCallResultWithImages
-                call.callId
-                finalizedOutput
-                call.callKind
-                resultImages
+    let dispatchedResult
+            | null resultImages =
+                ToolCallResult
+                    call.callId
+                    finalizedOutput
+                    call.callKind
+            | otherwise =
+                ToolCallResultWithImages
+                    call.callId
+                    finalizedOutput
+                    call.callKind
+                    resultImages
+    pure ToolDispatchOutcome
+        { toolDispatchResult = dispatchedResult
+        , toolDispatchSucceeded = succeeded
+        }
 
 toolArgumentsValue :: Text -> Text
 toolArgumentsValue = id

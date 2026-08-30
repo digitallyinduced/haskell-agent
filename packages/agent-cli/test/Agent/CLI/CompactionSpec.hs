@@ -3,6 +3,7 @@ module Agent.CLI.CompactionSpec (spec) where
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , CompactionInstall(..)
+    , autoCompactBackendWith
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactOpenAiBackendWithSender
@@ -15,6 +16,7 @@ import Agent.CLI.Compaction
     , reportedOccupancy
     , runProviderCompact
     , runProviderCompactWith
+    , runBackendCompactWithContextWindow
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
     )
@@ -575,6 +577,117 @@ spec = do
                 Right _ -> False
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
+    describe "runBackendCompactWithContextWindow" do
+        it "uses an isolated fresh backend and records summary usage" do
+            let history = [userTextItem "old context"]
+                paramsValue =
+                    (defaultResponseCreateParams :: ResponseCreateParams)
+                        { tools =
+                            Just
+                                [ FunctionToolValue FunctionTool
+                                    { name = "must_not_run"
+                                    , description = Nothing
+                                    , parameters = Nothing
+                                    , strict = Just True
+                                    }
+                                ]
+                        , previousResponseId = Just "resp-old"
+                        }
+            params <- newIORef paramsValue
+            transcript <- newIORef history
+            requests <- newIORef []
+            recordedUsage <- newIORef []
+            let makeBackend summaryParams =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        modifyIORef' requests
+                            (<> [(summaryParams, snapshot, previous, inputs)])
+                        pure $ successful snapshot TurnOutput
+                            { responseId = "claude-summary-session"
+                            , toolCalls = []
+                            , assistantText = Just "portable summary"
+                            , tokenUsage = compactionUsage
+                            , providerTelemetry = Nothing
+                            , completion = TurnCompleted
+                            }
+            result <-
+                runBackendCompactWithContextWindow
+                    200_000
+                    makeBackend
+                    (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                    params
+                    transcript
+                    (Just "focus")
+            outcome <- case result of
+                Left err -> expectationFailure (Text.unpack err) >> undefined
+                Right value -> pure value
+            outcome.compactSummary `shouldBe` "portable summary"
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+            readIORef requests >>= \case
+                [(summaryParams, snapshot, previous, inputs)] -> do
+                    summaryParams.tools `shouldBe` Nothing
+                    summaryParams.previousResponseId `shouldBe` Nothing
+                    snapshot.backendItems `shouldBe` history
+                    snapshot.backendContinuation `shouldBe` Nothing
+                    previous `shouldBe` Nothing
+                    inputs `shouldBe`
+                        [UserMessage (summarizationPrompt (Just "focus"))]
+                _ -> expectationFailure "expected one isolated backend request"
+
+        it "clears a provider continuation before automatic continuation" do
+            let oldHistory = [userTextItem "old context"]
+                compactedHistory = [assistantSummaryItem "summary"]
+                outcome = CompactOutcome
+                    { compactBeforeTokens = 100
+                    , compactAfterTokens = 4
+                    , compactHistory = compactedHistory
+                    , compactSummary = "summary"
+                    }
+                oldSnapshot =
+                    advanceBackendSnapshot
+                        emptyBackendSnapshot
+                        oldHistory
+                        (Just BackendContinuation
+                            { continuationProvider = "test"
+                            , continuationToken = "session-old"
+                            })
+            contextState <- newIORef
+                (Just (reportedOccupancy 100 (length oldHistory)))
+            submissions <- newIORef []
+            let base =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        modifyIORef' submissions
+                            (<> [(snapshot, previous, inputs)])
+                        pure $ successful snapshot TurnOutput
+                            { responseId = "session-new"
+                            , toolCalls = []
+                            , assistantText = Just "continued"
+                            , tokenUsage = TokenUsage 5 1 0
+                            , providerTelemetry = Nothing
+                            , completion = TurnCompleted
+                            }
+                backend =
+                    autoCompactBackendWith
+                        (pure 20)
+                        (\_history _inputs -> pure (Right outcome))
+                        (\_outcome _inputs -> pure CompactionNotInstalled)
+                        (pure defaultResponseCreateParams)
+                        contextState
+                        base
+            result <-
+                backend.submitTurn
+                    oldSnapshot
+                    (Just "session-old")
+                    [UserMessage "continue"]
+                    (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef submissions >>= \case
+                [(snapshot, previous, inputs)] -> do
+                    snapshot.backendItems `shouldBe` compactedHistory
+                    snapshot.backendContinuation `shouldBe` Nothing
+                    previous `shouldBe` Nothing
+                    inputs `shouldBe` [UserMessage "continue"]
+                _ -> expectationFailure "expected one compacted continuation"
+
     describe "installCompactOutcome" do
         it "clears the previous response id with transcript and token state" do
             previous <- newIORef (Just "resp-old")
@@ -667,6 +780,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -677,7 +791,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -723,6 +837,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -733,7 +848,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old") pending
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old") pending
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -751,12 +866,13 @@ spec = do
             let sender _request =
                     pure (Right remoteCompactionResponse)
                 base = Backend \state _ _ _ -> do
-                    writeIORef seenHistory state
+                    writeIORef seenHistory state.backendItems
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -767,7 +883,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             compacted <- readIORef seenHistory
@@ -791,12 +907,13 @@ spec = do
                     writeIORef continuationTokens $
                         estimateRequestTokensWithItems
                             params
-                            (state <> [pendingItem])
+                            (state.backendItems <> [pendingItem])
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -807,7 +924,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage pendingText] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             tokens <- readIORef continuationTokens
@@ -830,6 +947,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -840,7 +958,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` \case
                 Left (ProviderError InvalidRequestError message _) ->
@@ -865,6 +983,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -878,7 +997,7 @@ spec = do
                         contextState
                         base
             result <- try $
-                backend.submitTurn history Nothing
+                backend.submitTurn (initialBackendSnapshot history) Nothing
                     [UserMessage "new"] (const (pure ()))
                 :: IO
                     (Either ErrorCall (Either ApiError BackendResult))
@@ -903,6 +1022,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -918,7 +1038,7 @@ spec = do
                             pure CompactionInstalled)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef hookCalls `shouldReturn` 1
@@ -1099,7 +1219,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            backend.submitTurn history Nothing
+            backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
                 `shouldReturn`
                     Left (ConnectionError
@@ -1134,6 +1254,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1144,12 +1265,13 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage pendingText] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef seenHistory >>= \case
-                [compacted] -> hasCompactionCheckpoint compacted
+                [compacted] ->
+                    hasCompactionCheckpoint compacted.backendItems
                     `shouldBe` True
                 seen ->
                     expectationFailure
@@ -1180,6 +1302,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1190,7 +1313,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn [] Nothing
+            result <- backend.submitTurn emptyBackendSnapshot Nothing
                 [UserMessage prompt] (const (pure ()))
             result `shouldSatisfy` \case
                 Left (ProviderError InvalidRequestError message _) ->
@@ -1237,6 +1360,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1247,7 +1371,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn [] Nothing inputs (const (pure ()))
+            result <- backend.submitTurn emptyBackendSnapshot Nothing inputs (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
             readIORef submitCalls `shouldReturn` 1
@@ -1276,16 +1400,18 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith
                         compactAction contextState base
-            result <- backend.submitTurn oldHistory (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-old")
                 [UserMessage "new"]
                 (\event -> modifyIORef' events (<> [event]))
             result `shouldSatisfy` either (const False) (const True)
-            fmap (.backendState) result `shouldBe` Right compactedHistory
+            fmap (.backendState.backendItems) result
+                `shouldBe` Right compactedHistory
             readIORef compactCalls `shouldReturn` 1
             readIORef seenPrevious `shouldReturn` [Nothing]
             readIORef contextState `shouldReturn`
@@ -1319,7 +1445,7 @@ spec = do
                             pure CompactionInstalled)
                         contextState
                         base
-            backend.submitTurn history Nothing
+            backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
                 `shouldReturn` Left (ConnectionError "continuation failed")
             map requestItems <$> readIORef requests
@@ -1350,7 +1476,7 @@ spec = do
                         contextState
                         base
                 submit =
-                    backend.submitTurn history Nothing
+                    backend.submitTurn (initialBackendSnapshot history) Nothing
                         [UserMessage "new"]
                         (const (pure ()))
             result <- try submit
@@ -1387,6 +1513,7 @@ spec = do
                                     , toolCalls = []
                                     , assistantText = Just "ok"
                                     , tokenUsage = TokenUsage 20 5 0
+                                    , providerTelemetry = Nothing
                                     , completion = TurnCompleted
                                     }
                 reconnectingContinuation =
@@ -1401,7 +1528,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         contextState
                         reconnectingContinuation
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -1449,6 +1576,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1466,7 +1594,7 @@ spec = do
                         base
                 inputs = [CompletedTool toolResult, UserMessage "steer"]
                 completedInputs = [CompletedTool toolResult]
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -1480,7 +1608,7 @@ spec = do
             readIORef seenInputs `shouldReturn` [[]]
             compacted <- readIORef installedHistory
             compacted `shouldSatisfy` hasCompactionCheckpoint
-            fmap (.backendState) result `shouldBe` Right compacted
+            fmap (.backendState.backendItems) result `shouldBe` Right compacted
             readIORef contextState `shouldReturn`
                 Just (reportedOccupancy 25 (length compacted))
             readIORef recordedUsage `shouldReturn` [compactionUsage]
@@ -1527,6 +1655,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1537,7 +1666,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
@@ -1573,6 +1702,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = usage
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1583,7 +1713,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef contextState `shouldReturn`
@@ -1615,6 +1745,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1625,7 +1756,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old") pending
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old") pending
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
@@ -1667,11 +1798,12 @@ spec = do
             seenInputs <- newIORef []
             let base = Backend \_state _previous submitted _ -> do
                     modifyIORef' seenInputs (<> [submitted])
-                    pure $ successful oldHistory TurnOutput
+                    pure $ successful (initialBackendSnapshot oldHistory) TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1682,7 +1814,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef seenInputs `shouldReturn` [inputs]
@@ -1723,11 +1855,12 @@ spec = do
                     pure (Right remoteCompactionResponse)
                 base = Backend \_state _previous submitted _ -> do
                     modifyIORef' seenInputs (<> [submitted])
-                    pure $ successful oldHistory TurnOutput
+                    pure $ successful (initialBackendSnapshot oldHistory) TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1738,7 +1871,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef seenInputs `shouldReturn` [[]]
@@ -1769,6 +1902,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = emptyTokenUsage
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1779,7 +1913,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef contextState `shouldReturn` Nothing
@@ -1828,6 +1962,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1838,7 +1973,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -1887,6 +2022,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1897,13 +2033,14 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory Nothing inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) Nothing inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef seenHistory >>= \case
                 [fitted] ->
-                    fitted `shouldSatisfy` hasCompactionCheckpoint
+                    fitted.backendItems
+                        `shouldSatisfy` hasCompactionCheckpoint
                 seen ->
                     expectationFailure
                         ("expected one compacted continuation, got "
@@ -1923,7 +2060,7 @@ spec = do
                 backend =
                     autoCompactOpenAiBackendWithApi
                         compactAction contextState base
-            backend.submitTurn history Nothing
+            backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
                 `shouldReturn`
                     Left (ProviderError UsageLimitReached
@@ -1952,12 +2089,13 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith
                         compactAction contextState base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` \case
                 Left (ProviderError InvalidRequestError message _) ->
@@ -1989,18 +2127,19 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith
                         compactAction contextState base
-            result <- backend.submitTurn history Nothing [UserMessage "new"]
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing [UserMessage "new"]
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
 
 successful
-    :: [ResponseItem]
+    :: BackendSnapshot
     -> TurnOutput
     -> Either ApiError BackendResult
 successful state output =

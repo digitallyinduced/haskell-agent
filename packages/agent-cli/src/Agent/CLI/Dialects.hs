@@ -47,6 +47,7 @@ import Agent.Tools.OutputArtifact (artifactTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , PlanModeHooks
+    , askUserQuestionTool
     , newPlanModeEnv
     )
 import Agent.Tools.Secret
@@ -184,7 +185,7 @@ codingToolsForWithTypes
             plan <- newPlanModeEnv env.toolCwd planHooks
             pure $
                 finish
-                    []
+                    [askUserQuestionTool plan]
                     False
                     plan
                     (pure ())

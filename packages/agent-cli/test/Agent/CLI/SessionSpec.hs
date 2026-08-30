@@ -1,6 +1,7 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.SessionLock (acquireSessionLock, releaseSessionLock)
 import Agent.CLI.Session.StoreCodec
     ( fromStoredResponseItem
     , toStoredResponseItem
@@ -10,6 +11,7 @@ import Agent.Dialect (DialectId(..))
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Loop (TokenUsage(..))
+import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import Agent.Store.SessionItem
@@ -24,7 +26,7 @@ import Agent.Store.Postgres
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
-import Control.Exception (bracket)
+import Control.Exception.Safe (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -32,10 +34,12 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
+import Data.Time.Clock (UTCTime(..), getCurrentTime, secondsToDiffTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified System.Directory as Directory
 import System.Directory.OsPath
     ( createDirectory
+    , createDirectoryIfMissing
     , doesDirectoryExist
     , doesFileExist
     , listDirectory
@@ -557,6 +561,86 @@ spec = describe "Agent.CLI.Session" do
             isValidSessionId "../outside" `shouldBe` False
             isValidSessionId "nested/id" `shouldBe` False
 
+        it "removes old session scratch directories beyond retention" $
+            withTempSessionRoot \root -> do
+                older <- addSessionTemp root "2026-08-20-00000001"
+                newer <- addSessionTemp root "2026-08-21-00000002"
+
+                report <- cleanupStaleSessionTemps root 1 []
+
+                report.tempCleanupFailures `shouldBe` []
+                report.tempCleanupRemoved `shouldBe` [older]
+                doesDirectoryExist older `shouldReturn` False
+                doesDirectoryExist newer `shouldReturn` True
+
+        it "never collects scratch directories allocated today" $
+            withTempSessionRoot \root -> do
+                day <- formatTime defaultTimeLocale "%Y-%m-%d"
+                    <$> getCurrentTime
+                first <- addSessionTemp root (day <> "-00000001")
+                second <- addSessionTemp root (day <> "-00000002")
+
+                report <- cleanupStaleSessionTemps root 1 []
+
+                report.tempCleanupRemoved `shouldBe` []
+                doesDirectoryExist first `shouldReturn` True
+                doesDirectoryExist second `shouldReturn` True
+
+        it "preserves old session scratch directories with a live lease" $
+            withTempSessionRoot \root -> do
+                older <- addSessionTemp root "2026-08-20-00000001"
+                _ <- addSessionTemp root "2026-08-21-00000002"
+                lease <- acquireSessionTempLease root older >>= \case
+                    Right (Just value) -> pure value
+                    _ -> expectationFailure
+                        "expected a managed session-temp lease"
+                        >> fail "missing session-temp lease"
+
+                report <- cleanupStaleSessionTemps root 1 []
+                report.tempCleanupRemoved `shouldBe` []
+                doesDirectoryExist older `shouldReturn` True
+
+                releaseSessionTempLease lease
+                second <- cleanupStaleSessionTemps root 1 []
+                second.tempCleanupRemoved `shouldBe` [older]
+                doesDirectoryExist older `shouldReturn` False
+
+        it "preserves scratch for a running durable session" $
+            withTempSessionRoot \root -> do
+                let sessionId = "2026-08-20-00000001"
+                    durableDir = root </> fromFilePath sessionId
+                older <- addSessionTemp root sessionId
+                _ <- addSessionTemp root "2026-08-21-00000002"
+                createDirectory durableDir
+                lock <- acquireSessionLock durableDir (Text.pack sessionId)
+                    >>= \case
+                        Left err ->
+                            expectationFailure (Text.unpack err)
+                                >> fail "missing durable session lock"
+                        Right value -> pure value
+
+                report <- cleanupStaleSessionTemps root 1 []
+                report.tempCleanupRemoved `shouldBe` []
+                doesDirectoryExist older `shouldReturn` True
+
+                releaseSessionLock lock
+                second <- cleanupStaleSessionTemps root 1 []
+                second.tempCleanupRemoved `shouldBe` [older]
+                doesDirectoryExist older `shouldReturn` False
+
+        it "ignores non-session directories in the scratch root" $
+            withTempSessionRoot \root -> do
+                let custom =
+                        sessionTempsRoot root
+                            </> fromFilePath "keep-custom"
+                createDirectoryIfMissing True custom
+                _ <- addSessionTemp root "2026-08-21-00000002"
+
+                report <- cleanupStaleSessionTemps root 1 []
+
+                report.tempCleanupRemoved `shouldBe` []
+                doesDirectoryExist custom `shouldReturn` True
+
         it "derives bounded titles and shell-safe resume hints" do
             sessionTitleFromPrompt
                 "one two three four five six seven eight nine ten eleven"
@@ -705,6 +789,7 @@ spec = describe "Agent.CLI.Session" do
                             , cachedTokens = 1
                             }
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 source <- appendTurnWithMetaUpdate source0 sourceTurn
                     \meta -> meta
@@ -790,6 +875,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 source <- appendTurn source0 sourceTurn
                 let outside = source.sessionDir </> unsafeEncodeUtf "outside"
@@ -837,6 +923,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 source <- appendTurn source0 sourceTurn
                 let reset = SessionTurn
@@ -848,6 +935,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptReset
+                        , turnProviderTelemetry = []
                         }
                 resetSource <- appendTurnKeepTitle source reset
 
@@ -936,6 +1024,7 @@ spec = describe "Agent.CLI.Session" do
                             , cachedTokens = 2
                             }
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = [sampleTurnTelemetry]
                         }
                     compactTurn = SessionTurn
                         { turnAt = fixedTime
@@ -946,6 +1035,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptReplace
+                        , turnProviderTelemetry = []
                         }
                 withNormal <- appendTurn handle normalTurn
                 final <- appendTurnWithMetaUpdate withNormal compactTurn
@@ -1005,6 +1095,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 createDirectory dir
                 LBS.writeFile (toFilePath metaPath) (Aeson.encode meta)
@@ -1066,6 +1157,7 @@ spec = describe "Agent.CLI.Session" do
                     , turnItems = []
                     , turnUsage = Nothing
                     , turnEffect = TranscriptAppend
+                    , turnProviderTelemetry = [sampleTurnTelemetry]
                     }
             Hermes.decodeEither sessionTurnDecoder
                 (LBS.toStrict (Aeson.encode turn))
@@ -1149,10 +1241,44 @@ testMeta sessionId = SessionMeta
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 19) (secondsToDiffTime 0)
 
+sampleTurnTelemetry :: TurnTelemetry
+sampleTurnTelemetry = TurnTelemetry
+    { telemetryDurationMs = Just 1250
+    , telemetryApiDurationMs = Just 1100
+    , telemetryCostUsd = Just 0.0125
+    , telemetryStopReason = Just "end_turn"
+    , telemetryProviderTurns = Just 2
+    , telemetryModels = mempty
+    , telemetryStructuredOutput = Nothing
+    }
+
 modeOf :: OsPath -> IO Integer
 modeOf path = do
     status <- getFileStatus (toFilePath path)
     pure (fromIntegral (fileMode status `mod` 0o1000))
+
+withTempSessionRoot :: (OsPath -> IO a) -> IO a
+withTempSessionRoot action = do
+    tmp <- Directory.getTemporaryDirectory
+    bracket
+        (mkdtemp (tmp FilePath.</> "agent-session-temp-XXXXXX"))
+        Directory.removeDirectoryRecursive
+        \basePath -> do
+            let root =
+                    fromFilePath
+                        (basePath
+                            FilePath.</> ".haskell-agent"
+                            FilePath.</> "sessions")
+            Directory.createDirectoryIfMissing True (toFilePath root)
+            action root
+
+addSessionTemp :: OsPath -> String -> IO OsPath
+addSessionTemp root sessionId = do
+    let path =
+            sessionTempsRoot root
+                </> fromFilePath sessionId
+    Directory.createDirectoryIfMissing True (toFilePath path)
+    pure path
 
 withTempStore :: (Store -> OsPath -> IO a) -> IO a
 withTempStore action = do

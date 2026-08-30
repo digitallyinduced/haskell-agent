@@ -4,6 +4,7 @@ import Agent.CLI.MetaConsole
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , TurnInput(..)
     , emptyTurnOutput
     )
@@ -385,7 +386,7 @@ spec = do
                     Backend \state previous inputs _onEvent -> do
                         writeIORef privateParamsRef (Just privateParams)
                         modifyIORef' submissions (<> [inputs])
-                        modifyIORef' states (<> [state])
+                        modifyIORef' states (<> [state.backendItems])
                         modifyIORef' previousValues (<> [previous])
                         count <- length <$> readIORef submissions
                         let answer

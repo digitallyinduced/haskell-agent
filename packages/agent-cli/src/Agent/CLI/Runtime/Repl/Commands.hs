@@ -173,7 +173,7 @@ import Agent.CLI.Session
       SessionMeta(metaId, metaLastResponseId),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
-                  turnItems) )
+                  turnItems, turnProviderTelemetry) )
 import Agent.CLI.Session.Attachments ( queueAttachedImages )
 import Agent.CLI.Session.Choices
     ( accountUsageText, showAccountUsage )
@@ -868,6 +868,7 @@ handleReplLine
                                                 -- compactRunner, including
                                                 -- response-level failures.
                                                 , turnUsage = Nothing
+                                                , turnProviderTelemetry = []
                                                 }
                                         (handle', turnIndex) <-
                                             appendTurnWithMetaUpdateIndexed handle turn

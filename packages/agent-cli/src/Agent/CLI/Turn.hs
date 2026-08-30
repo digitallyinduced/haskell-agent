@@ -379,6 +379,8 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         , turnEffect = TranscriptAppend
                         , turnItems = retainedItems
                         , turnUsage = (.tokenUsage) <$> maybeTurn
+                        , turnProviderTelemetry =
+                            execution.executionProviderTelemetry
                         }
                 (handle', turnIndex) <-
                     appendTurnWithMetaUpdateIndexed handle turn \meta ->
@@ -597,6 +599,8 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                             , turnEffect = effect
                             , turnItems = newItems
                             , turnUsage = Just loopResult.tokenUsage
+                            , turnProviderTelemetry =
+                                execution.executionProviderTelemetry
                             }
                     titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
                     (countedHandle, turnIndex) <-

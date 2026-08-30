@@ -52,6 +52,11 @@ logicalFileBytes file =
         `saturatingAdd` logicalTextBytes file.fileMime
         `saturatingAdd` ByteString.length file.fileBytes
 
+logicalToolResultImageBytes :: ToolResultImage -> Int
+logicalToolResultImageBytes image =
+    logicalTextBytes image.imageUrl
+        `saturatingAdd` maybe 0 logicalTextBytes image.imageDetail
+
 logicalTurnInputBytes :: TurnInput -> Int
 logicalTurnInputBytes = \case
     UserMessage text -> logicalTextBytes text
@@ -69,11 +74,6 @@ logicalTurnInputBytes = \case
             `saturatingAdd` foldBytes
                 logicalToolResultImageBytes
                 (toolCallResultImages result)
-
-logicalToolResultImageBytes :: ToolResultImage -> Int
-logicalToolResultImageBytes image =
-    logicalTextBytes image.imageUrl
-        `saturatingAdd` maybe 0 logicalTextBytes image.imageDetail
 
 logicalReplLineBytes :: ReplLine -> Int
 logicalReplLineBytes = \case

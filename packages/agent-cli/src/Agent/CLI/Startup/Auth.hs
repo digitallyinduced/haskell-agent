@@ -2,6 +2,7 @@
 module Agent.CLI.Startup.Auth
     ( learnAboutUserOnboardingPrompt
     , loadStartupAuth
+    , loadStartupAuthFromResult
     , markStartupStage
     , recordStartupTiming
     , setStartupNotice
@@ -98,7 +99,16 @@ loadStartupAuth
     -> Maybe Provider
     -> IO (LoadedAuth, Bool)
 loadStartupAuth startup transition requestedProvider =
-    loadTransitionAuth transition requestedProvider >>= \case
+    loadTransitionAuth transition requestedProvider >>=
+        loadStartupAuthFromResult startup transition requestedProvider
+
+loadStartupAuthFromResult
+    :: StartupRuntime
+    -> Maybe ProviderTransition
+    -> Maybe Provider
+    -> Either Text LoadedAuth
+    -> IO (LoadedAuth, Bool)
+loadStartupAuthFromResult startup transition requestedProvider = \case
         Right loaded
             | loaded.loadedProvider == GeminiProvider
             , Just runtime <- startup.startupFullscreen ->

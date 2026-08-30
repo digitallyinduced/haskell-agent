@@ -31,6 +31,7 @@ data AccountSwitchRequest
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
     , processSessionThreads :: !SessionThreadManager
+    , processCleanupStarted :: !(IORef Bool)
     , processMcpElicitation
         :: !(IORef (Maybe (MCP.McpElicitRequest -> IO MCP.McpElicitResult)))
     -- ^ Interactive elicitation UI installed by the active session, shared by

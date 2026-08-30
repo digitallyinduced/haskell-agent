@@ -75,6 +75,11 @@ module Agent.MCP
     , decodeHttpMcpResponse
     , modernProtocolVersion
     , supportedLegacyVersions
+    , InProcessMcpServer
+    , InProcessMcpApproval
+    , createInProcessMcpServer
+    , inProcessMcpToolNames
+    , handleInProcessMcpMessage
     ) where
 
 import Agent.MCP.Client
@@ -84,6 +89,13 @@ import Agent.MCP.Client
     , normalizeMcpToolResult
     , renderMcpPromptResult
     , supportedLegacyVersions
+    )
+import Agent.MCP.InProcess
+    ( InProcessMcpApproval
+    , InProcessMcpServer
+    , createInProcessMcpServer
+    , handleInProcessMcpMessage
+    , inProcessMcpToolNames
     )
 import Agent.MCP.Fleet
     ( closeMcpFleet

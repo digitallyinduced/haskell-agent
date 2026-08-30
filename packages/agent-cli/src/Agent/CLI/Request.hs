@@ -4,6 +4,7 @@ module Agent.CLI.Request
     , setRequestInstructions
     , setRequestInstructionsAndTools
     , setRequestModel
+    , setRequestPromptCacheKey
     ) where
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
@@ -68,6 +69,16 @@ requestParams provider modelName instructionText toolSchemas effort =
                     if responsesLite then Nothing else Just toolSchemas
                 , ..
                 }
+
+setRequestPromptCacheKey
+    :: Text
+    -> ResponseCreateParams
+    -> ResponseCreateParams
+setRequestPromptCacheKey cacheKey ResponseCreateParams{..} =
+    ResponseCreateParams
+        { promptCacheKey = Just cacheKey
+        , ..
+        }
 
 -- | Change the wire model while keeping the request dialect coherent.
 --

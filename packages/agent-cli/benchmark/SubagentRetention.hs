@@ -3,9 +3,15 @@ module Main (main) where
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Compaction (OccupancySnapshot(..), estimatedOccupancy)
 import Agent.CLI.NativeAgents
-import Agent.CLI.Subagents.Runtime (SubagentSession(..))
+import Agent.CLI.Subagents.Runtime (SubagentResidency(..), SubagentSession(..))
 import Agent.Dialect (DialectId(..))
-import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
+import Agent.Loop
+    ( BackendSnapshot(..)
+    , LoopEvent(..)
+    , NativeAgentStatus(..)
+    , emptyBackendSnapshot
+    , initialBackendSnapshot
+    )
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import Control.Concurrent.MVar (modifyMVar_, newMVar)
@@ -269,10 +275,9 @@ buildSessions agentCount itemCount payloadBytes sampleIndex =
                     (itemText sampleIndex agentIndex itemIndex payloadBytes)
                 | itemIndex <- [1 .. itemCount]
                 ]
-        transcript <- newIORef items
+        transcript <- newIORef (initialBackendSnapshot items)
         contextTokens <- newIORef (Just (estimatedOccupancy itemCount payloadBytes))
-        pinned <- newIORef False
-        hydrated <- newMVar True
+        residency <- newMVar SessionResident
         pure
             ( agentIndex
             , SubagentSession
@@ -282,23 +287,22 @@ buildSessions agentCount itemCount payloadBytes sampleIndex =
                 , subSessionConnection = "openai"
                 , subSessionEffectiveModel = "gpt-5.6-luna"
                 , subSessionDialect = CodexDialect
-                , subSessionPinned = pinned
-                , subSessionHydrated = hydrated
+                , subSessionResidency = residency
                 }
             )
 
 evictSessions :: Map Int SubagentSession -> IO ()
 evictSessions sessions =
     forM_ (Map.elems sessions) \session ->
-        modifyMVar_ session.subSessionHydrated \_ -> do
-            writeIORef session.subSessionTranscript []
+        modifyMVar_ session.subSessionResidency \_ -> do
+            writeIORef session.subSessionTranscript emptyBackendSnapshot
             writeIORef session.subSessionContextTokens Nothing
-            pure False
+            pure SessionEvicted
 
 checksumSessions :: Map Int SubagentSession -> IO Int
 checksumSessions sessions =
     foldMStrict 5381 (Map.toList sessions) \checksum (agentIndex, session) -> do
-        items <- readIORef session.subSessionTranscript
+        snapshot <- readIORef session.subSessionTranscript
         context <- readIORef session.subSessionContextTokens
         pure $
             foldl'
@@ -309,7 +313,7 @@ checksumSessions sessions =
                             snapshot.occupancyTokens + snapshot.occupancyLength)
                         context
                 )
-                items
+                snapshot.backendItems
 
 checksumItem :: Int -> ResponseItem -> Int
 checksumItem checksum = \case

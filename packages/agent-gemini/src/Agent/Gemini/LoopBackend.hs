@@ -7,7 +7,13 @@ module Agent.Gemini.LoopBackend
 
 import Agent.Error (ApiError)
 import Agent.Gemini.Response (GeminiStreamEvent(..))
-import Agent.Loop (Backend(..), BackendResult(..), LoopEvent(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , BackendSnapshot(..)
+    , LoopEvent(..)
+    , advanceBackendSnapshot
+    )
 import Agent.Provider
     ( Credential
     , TokenProvider
@@ -34,10 +40,10 @@ statelessGeminiBackend
     -> IO ResponseCreateParams
     -> Backend
 statelessGeminiBackend send getParams =
-    Backend \history _previousResponseId inputs onEvent -> do
+    Backend \snapshot _previousResponseId inputs onEvent -> do
         baseParams <- getParams
         let newItems = turnInputsToItems inputs
-            requestItems = history <> newItems
+            requestItems = snapshot.backendItems <> newItems
             request = withRequestInput baseParams requestItems
         result <- send request \event ->
             maybe (pure ()) onEvent (geminiStreamEventToLoopEvent event)
@@ -46,7 +52,10 @@ statelessGeminiBackend send getParams =
             Right response ->
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
-                    , backendState = requestItems <> response.output
+                    , backendState =
+                        advanceBackendSnapshot snapshot
+                            (requestItems <> response.output)
+                            Nothing
                     }
 
 tokenProviderStatelessGeminiBackend

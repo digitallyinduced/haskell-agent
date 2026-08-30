@@ -94,6 +94,10 @@ spec = do
             renderLoginFrame False (initialLoginState [openai])
                 `shouldSatisfy` (not . Text.isInfixOf "secret-openai")
 
+        it "shows gateway routing status instead of a usage spinner" do
+            renderLoginFrame False (initialLoginState [gateway])
+                `shouldSatisfy` Text.isInfixOf "gateway connected"
+
         it "shows unchecked usage as an in-progress refresh" do
             renderLoginFrame False (initialLoginState [openai])
                 `shouldSatisfy` Text.isInfixOf "checking usage"
@@ -121,8 +125,25 @@ spec = do
                 rendered = Text.unlines
                     [label <> " " <> description | (label, description) <- rows]
             labels `shouldSatisfy` any (Text.isInfixOf "Connect account")
+            labels `shouldSatisfy` any (Text.isInfixOf "Connect gateway")
             labels `shouldSatisfy` not . any (Text.isInfixOf "Refresh")
             rendered `shouldSatisfy` Text.isInfixOf "Google Gemini"
+
+        it "shows a saved gateway with reconnect and disconnect controls" do
+            let dashboardLabels =
+                    map fst (loginDashboardRows [gateway])
+                actionLabels =
+                    map fst (loginAccountActionRows gateway)
+            dashboardLabels
+                `shouldSatisfy` any (Text.isInfixOf "Reconnect gateway")
+            dashboardLabels
+                `shouldSatisfy` not . any (Text.isInfixOf "Refresh all")
+            actionLabels
+                `shouldSatisfy` any (Text.isInfixOf "Disconnect gateway")
+            actionLabels
+                `shouldSatisfy` not . any (Text.isInfixOf "Refresh usage")
+            loginAccountDetail gateway
+                `shouldSatisfy` Text.isInfixOf "preferred"
 
         it "offers usage refresh and opens each discovered account" do
             let rows = loginDashboardRows [openai, openRouter]
@@ -259,6 +280,21 @@ openRouter = LoginAccount
     , loginAccessToken = "secret-openrouter"
     , loginAuthKind = ManagedBearerToken
     , loginSecretPayload = "secret-openrouter"
+    , loginEnabled = True
+    }
+
+gateway :: LoginAccount
+gateway = LoginAccount
+    { loginManagedId = Nothing
+    , loginProvider = OpenAIProvider
+    , loginAccountId = "https://gateway.example"
+    , loginLabel = "Gateway · https://gateway.example"
+    , loginBilling = SubscriptionBilling Nothing
+    , loginSource = "gateway"
+    , loginUsage = UsageNotChecked
+    , loginAccessToken = ""
+    , loginAuthKind = ManagedBearerToken
+    , loginSecretPayload = ""
     , loginEnabled = True
     }
 

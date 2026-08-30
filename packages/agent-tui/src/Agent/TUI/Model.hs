@@ -62,6 +62,7 @@ import Agent.Loop
     , TurnOutput(..)
     , generationTokensPerSecond
     )
+import Agent.Telemetry (telemetrySummary)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -505,6 +506,12 @@ reduceLoop event state = case event of
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)
+            finishedActivity =
+                case telemetrySummary <$> output.providerTelemetry of
+                    Just summary
+                        | not (Text.null summary) ->
+                            "Finished · " <> summary
+                    _ -> "Finished"
             withFallback = case output.assistantText of
                 Just text
                     | not (Text.null (Text.strip text))
@@ -520,7 +527,7 @@ reduceLoop event state = case event of
             , uiActivity =
                 if continuing
                     then "Running tools…"
-                    else "Finished"
+                    else finishedActivity
             , uiCompletionRemainingMillis =
                 if continuing then 0 else completionStatusDurationMillis
             }

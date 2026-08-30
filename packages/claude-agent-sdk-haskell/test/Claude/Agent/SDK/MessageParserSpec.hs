@@ -9,6 +9,32 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "decodeMessageLine" do
+    it "retains autonomous origin identifiers and the raw origin object" do
+        let originBytes =
+                "{\"kind\":\"task-notification\",\"server\":\"team\",\
+                \\"from\":\"worker\",\"name\":\"Worker\",\
+                \\"fromSession\":\"session-2\",\"senderTaskId\":\"task-7\",\
+                \\"body\":\"done\",\"verifiedPeerPid\":42,\
+                \\"subkind\":\"completion\",\"future\":3}"
+            line =
+                "{\"type\":\"user\",\"uuid\":\"notification\",\
+                \\"origin\":" <> originBytes <> ",\
+                \\"message\":{\"role\":\"user\",\"content\":\"done\"}}"
+        case decodeMessageLine line of
+            Right (MessageUser UserMessage{origin = Just origin}) -> do
+                origin.kind `shouldBe` "task-notification"
+                origin.server `shouldBe` Just "team"
+                origin.from `shouldBe` Just "worker"
+                origin.name `shouldBe` Just "Worker"
+                origin.fromSession `shouldBe` Just "session-2"
+                origin.senderTaskId `shouldBe` Just "task-7"
+                origin.body `shouldBe` Just "done"
+                origin.verifiedPeerPid `shouldBe` Just 42
+                origin.subkind `shouldBe` Just "completion"
+                rawJsonBytes origin.raw `shouldBe` originBytes
+            other ->
+                expectationFailure ("unexpected decode: " <> show other)
+
     describe "tool_result content" do
         it "keeps string content" do
             block <- decodeToolResult "\"hello\""

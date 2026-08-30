@@ -11,6 +11,7 @@ import Agent.Loop
     , LoopResult
     , defaultLoopDispatch
     , defaultLoopMaxTurns
+    , emptyBackendSnapshot
     , emptyTurnOutput
     , runLoop
     )
@@ -165,7 +166,7 @@ runWorkload :: Workload -> Int -> Int -> IO WorkloadResult
 runWorkload workload eventCount sinkDelayMicros = do
     checksumRef <- newIORef 0
     producerFinishedRef <- newIORef Nothing
-    stateRef <- newIORef []
+    stateRef <- newIORef emptyBackendSnapshot
     cancel <- newCancelFlag
     backend <- case workload of
         StreamingEvents ->
@@ -184,7 +185,9 @@ runWorkload workload eventCount sinkDelayMicros = do
             { loopBackend = backend
             , loopBackendState = BackendStateStore
                 { readBackendState = readIORef stateRef
-                , commitBackendState = writeIORef stateRef
+                , commitBackendState = \snapshot -> do
+                    writeIORef stateRef snapshot
+                    pure snapshot
                 }
             , loopTools = case workload of
                 StreamingEvents -> emptyRegistry
@@ -196,6 +199,7 @@ runWorkload workload eventCount sinkDelayMicros = do
             , loopApprove = \_ -> pure (Right True)
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
+            , loopInterrupt = pure ()
             , loopCancel = cancel
             }
     result <- runLoop config Nothing "benchmark"
@@ -220,7 +224,7 @@ streamingBackend eventCount producerFinishedRef =
         pure . Right $ BackendResult
             { backendOutput =
                 emptyTurnOutput "stream-response" [] (Just "done")
-            , backendState = []
+            , backendState = emptyBackendSnapshot
             }
 
 queuedEventsBackend
@@ -234,7 +238,7 @@ queuedEventsBackend eventCount producerFinishedRef =
         pure . Right $ BackendResult
             { backendOutput =
                 emptyTurnOutput "queued-response" [] (Just "done")
-            , backendState = []
+            , backendState = emptyBackendSnapshot
             }
 
 parallelToolBackend
@@ -260,14 +264,14 @@ parallelToolBackend eventCount producerFinishedRef = do
                 pure . Right $ BackendResult
                     { backendOutput =
                         emptyTurnOutput "tool-response" calls Nothing
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             2 -> do
                 getMonotonicTimeNSec >>= writeIORef producerFinishedRef . Just
                 pure . Right $ BackendResult
                     { backendOutput =
                         emptyTurnOutput "final-response" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             _ -> die "parallel tool benchmark submitted too many turns"
 

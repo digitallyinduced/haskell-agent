@@ -6,7 +6,9 @@ import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , TurnInput(..)
+    , emptyBackendSnapshot
     , emptyTurnOutput
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
@@ -69,7 +71,7 @@ spec = do
             seenPrevious <- newIORef (Just "not-called")
             seenInputs <- newIORef []
             seenPrivateParams <- newIORef Nothing
-            seenPrivateTranscript <- newIORef []
+            seenPrivateTranscript <- newIORef emptyBackendSnapshot
             let factory privateParams =
                     Backend \privateTranscript previous inputs _onEvent -> do
                         writeIORef seenPrevious previous
@@ -92,7 +94,8 @@ spec = do
                     "Side question boundary." `Text.isPrefixOf` text
                         && "why?" `Text.isSuffixOf` Text.strip text
                 _ -> False
-            readIORef seenPrivateTranscript `shouldReturn` originalItems
+            (.backendItems) <$> readIORef seenPrivateTranscript
+                `shouldReturn` originalItems
             readIORef mainTranscript `shouldReturn` originalItems
             readIORef mainParams `shouldReturn` originalParams
             captured <- readIORef seenPrivateParams

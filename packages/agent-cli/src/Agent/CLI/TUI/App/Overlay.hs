@@ -140,7 +140,7 @@ import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.State.Strict (modify')
+import Control.Monad.State.Strict (gets, modify')
 import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isPrint, isSpace)
@@ -164,10 +164,22 @@ import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
 import System.Environment (lookupEnv)
+import System.Exit (ExitCode(ExitSuccess))
 import System.Info (os)
 import System.IO (stdout)
 import System.Posix.Process (getProcessID)
-import System.Process (callProcess)
+import System.Process
+    ( StdStream(NoStream)
+    , close_fds
+    , createProcess
+    , create_group
+    , getProcessExitCode
+    , new_session
+    , proc
+    , std_err
+    , std_in
+    , std_out
+    )
 import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.Reduce
@@ -608,19 +620,48 @@ isQuickStartControl = \case
 openMarkdownLink :: Text -> EventM Name AppState ()
 openMarkdownLink url = do
     opened <- liftIO (openExternalUrl url)
-    unless opened $
+    unless opened $ do
+        copyAction <- gets (.appRuntime.runtimeCopy)
+        copied <- liftIO (copyAction url)
         modify' $
             applyUiEvent
                 (UiSetNotice
-                    (Just (warningNotice "Could not open that link.")))
+                    (Just (warningNotice
+                        (if copied
+                            then "Could not open that link; URL copied."
+                            else "Could not open that link."))))
 
 openExternalUrl :: Text -> IO Bool
 openExternalUrl url =
     case externalUrlCommand url of
         Nothing -> pure False
-        Just (command, arguments) ->
-            either (const False) (const True)
-                <$> tryAny (callProcess command arguments)
+        Just command ->
+            launchExternalUrlCommand command
+
+-- | Start the platform URL opener without waiting for it to exit. Browser
+-- launchers may remain attached for the lifetime of the browser, and waiting
+-- for them would block the Brick event loop.
+launchExternalUrlCommand :: (FilePath, [String]) -> IO Bool
+launchExternalUrlCommand (command, arguments) = do
+    result <- tryAny $ do
+        (_, _, _, processHandle) <-
+            createProcess
+            (proc command arguments)
+                { std_in = NoStream
+                , std_out = NoStream
+                , std_err = NoStream
+                , close_fds = True
+                , create_group = True
+                , new_session = True
+                }
+        -- Catch launchers that fail immediately while still avoiding an
+        -- unbounded wait on browser processes.
+        threadDelay 100_000
+        maybe True (== ExitSuccess)
+            <$> getProcessExitCode processHandle
+    case result of
+        Right opened -> pure opened
+        Left _ -> pure False
 
 externalUrlCommand :: Text -> Maybe (FilePath, [String])
 externalUrlCommand url

@@ -176,6 +176,14 @@ coreMigrations =
               \ ADD COLUMN IF NOT EXISTS image_bytes bytea"
             ]
         }
+    , Migration
+        { migrationVersion = 11
+        , migrationName = "provider turn telemetry"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.session_turns\
+              \ ADD COLUMN IF NOT EXISTS provider_telemetry_json text"
+            ]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty
