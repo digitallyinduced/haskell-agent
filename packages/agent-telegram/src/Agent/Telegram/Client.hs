@@ -471,7 +471,11 @@ editRichMessageText
     -> Text
     -> IO (Either Text ())
 editRichMessageText client key messageId text =
-    requestUnit client "editMessageText" $ object
+    requestUnit client "editMessageText" richBody >>= \case
+        Left _ -> editMessageText client key messageId text
+        Right () -> pure (Right ())
+  where
+    richBody = object
         [ "chat_id" .= key.chatId
         , "message_id" .= messageId
         , "text" .= markdownToTelegramHtml text
