@@ -946,6 +946,49 @@ main = hspec $ do
                 BS.readFile (directory </> "events.jsonl")
                     >>= (`shouldSatisfy` (not . BS.isInfixOf rawBytes))
 
+        it "retains failed input for one-process retry and discards it after completion" $
+            withSystemTempDirectory "daemon-task-input-lifetime" $ \directory -> do
+                received <- newTQueueIO
+                let rawPrompt = "memory-only-retry-input"
+                    runner =
+                        TaskRunner
+                            { runTask = \task _ -> do
+                                atomically (writeTQueue received (task.attempt, task.description))
+                                pure $
+                                    if task.attempt == 1
+                                        then Left "first attempt failed"
+                                        else Right ()
+                            }
+                    retryCommand =
+                        object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("retry" :: Text)
+                            , "task_id" .= ("retry-lifetime" :: Text)
+                            ]
+                journal <- openJournal (defaultJournalConfig directory)
+                withTaskAdapter journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit-retry-lifetime")
+                        (object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("submit" :: Text)
+                            , "task_id" .= ("retry-lifetime" :: Text)
+                            , "prompt" .= rawPrompt
+                            , "cwd" .= ("/tmp" :: Text)
+                            ])
+                        >>= shouldSucceed
+                    timeout 1_000_000 (atomically (readTQueue received))
+                        `shouldReturn` Just (1, rawPrompt)
+                    waitForStatus journal (TaskId "retry-lifetime") TaskFailed
+                    supervisor.handleCommand (CommandId "retry-failed") retryCommand
+                        >>= shouldSucceed
+                    timeout 1_000_000 (atomically (readTQueue received))
+                        `shouldReturn` Just (2, rawPrompt)
+                    waitForStatus journal (TaskId "retry-lifetime") TaskCompleted
+                    supervisor.handleCommand (CommandId "retry-completed") retryCommand
+                        `shouldReturn` Left
+                            "completed tasks cannot be retried; task input has been discarded"
+
         it "uses the actual agent-cli argv shape and bounds process output chunks" $
             withSystemTempDirectory "daemon-process-runner" $ \directory -> do
                 now <- getCurrentTime

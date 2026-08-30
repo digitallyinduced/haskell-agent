@@ -72,7 +72,10 @@ the original, unredacted input in memory. Raw prompts are deliberately not
 persisted separately from the redacted task description. After daemon restart,
 `retry` therefore fails with `task input is unavailable`; the client must
 submit the input again under a new task ID. A completed or active task cannot
-be retried.
+be retried. Input is discarded from memory as soon as a task completes; it is
+retained only for same-process failed or cancelled retries. Consequently the
+raw-input map is bounded by the durable task limit and the 8,192-character
+prompt limit, and all remaining input disappears when the daemon exits.
 
 The shipped daemon runner executes `agent-cli` directly without a shell
 (`HASKELL_AGENT_CLI` can override its path), using the real one-shot CLI flags

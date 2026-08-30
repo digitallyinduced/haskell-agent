@@ -269,10 +269,17 @@ schedulerLoopWithRegistry journal runner commands completions registry = go
                                                     <> either (\message -> [message]) (const []) result
                                             }
                                 persisted <- persistBounded journal updated
-                                pure withoutWorker
-                                    { adapterTasks =
-                                        Map.insert taskId persisted state.adapterTasks
-                                    }
+                                pure $
+                                    ( if persisted.status == TaskCompleted
+                                        then withoutWorker
+                                            { adapterInputs =
+                                                Map.delete taskId withoutWorker.adapterInputs
+                                            }
+                                        else withoutWorker
+                                    )
+                                        { adapterTasks =
+                                            Map.insert taskId persisted state.adapterTasks
+                                        }
                         _ -> pure withoutWorker
                 _ -> pure state
 
@@ -380,16 +387,20 @@ executeCommand journal registry state = \case
             Just task
                 | isActive task ->
                     pure (state, Left "active tasks cannot be retried")
-                | task.status == TaskCompleted ->
-                    pure (state, Left "completed tasks cannot be retried")
                 | Map.notMember taskId state.adapterInputs ->
                     pure
                         ( state
-                        , Left
-                            ( "task input is unavailable after daemon restart; "
-                                <> "submit a new task id"
-                            )
+                        , Left $
+                            if task.status == TaskCompleted
+                                then
+                                    "completed tasks cannot be retried; task input has been discarded"
+                                else
+                                    ( "task input is unavailable after daemon restart; "
+                                        <> "submit a new task id"
+                                    )
                         )
+                | task.status == TaskCompleted ->
+                    pure (state, Left "completed tasks cannot be retried")
                 | otherwise -> do
                     now <- getCurrentTime
                     let updated =
