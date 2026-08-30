@@ -525,12 +525,18 @@ void ha_runtime_exit(void);
 void *ha_engine_create(ha_event_callback callback, void *context);
 /*
  * Stage an ordered image batch for a turn before its turn.start request.
- * A later call for the same turn replaces the previous batch. Passing zero
- * images discards that turn's batch, which callers should do if they abandon
- * the request. Staging is also discarded when a request envelope or turn.start
- * parameters are rejected, and is consumed by the matching valid turn.start.
- * Returns 0 when accepted, 1 for a null engine, 2 for an invalid turn ID, 3
- * for an internal failure, and 4 for an invalid image array or UTF-8 MIME.
+ * A later call for the same turn replaces the previous batch. turn_id is
+ * required, must be non-null even when turn_id_length is zero, and must have
+ * a non-zero length; a null or empty turn ID returns 2. Invalid UTF-8 returns
+ * 4. images may be null only when image_count is zero. Passing zero images
+ * discards that turn's batch, which callers should do if they abandon the
+ * request. For every image, mime and bytes are required, non-null, and have
+ * non-zero lengths; violating those requirements returns 4. All pointers are
+ * borrowed for this call and the runtime copies accepted data before return.
+ * Staging is also discarded when a request envelope or turn.start parameters
+ * are rejected, and is consumed by the matching valid turn.start. Returns 0
+ * when accepted, 1 for a null engine, 2 for a null or empty turn ID, 3 for an
+ * internal failure, and 4 for invalid image fields or UTF-8.
  */
 int32_t ha_engine_stage_turn_images(
     void *engine,
