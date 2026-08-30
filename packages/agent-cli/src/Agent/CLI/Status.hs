@@ -23,9 +23,10 @@ import Agent.CLI.Style (roleMuted)
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
 import System.OsPath (OsPath)
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(..)
+    ( PlanModeEnv
     , PlanModeState(..)
     , deactivatePlanMode
+    , writePlanModeState
     )
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
@@ -81,7 +82,7 @@ applyReplMode
     -> IO ()
 applyReplMode planMode policyRef projectRoot = \case
     ReplModePlan ->
-        writeIORef planMode.planStateRef PlanPending
+        writePlanModeState planMode PlanPending
     ReplModeAlwaysApprove -> do
         deactivatePlanMode planMode
         writeIORef policyRef ApproveAll

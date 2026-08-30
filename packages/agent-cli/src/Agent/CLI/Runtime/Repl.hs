@@ -151,8 +151,9 @@ import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(planStateRef),
-      PlanModeState(PlanPending, PlanActive) )
+    ( PlanModeState(PlanPending, PlanActive)
+    , readPlanModeState
+    )
 import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
 import Agent.XAI.LoopBackend ()
@@ -262,7 +263,7 @@ replWithDraft env@SessionEnv
                 (dialectId dialect) activeToolNames skillCommands
                 (catalogModelIds catalog)
     stdoutColor <- resolveColor stdout
-    planState <- readIORef planMode.planStateRef
+    planState <- readPlanModeState planMode
     let planActive = planState == PlanActive
         planPending = planState == PlanPending
     policy <- readIORef policyRef

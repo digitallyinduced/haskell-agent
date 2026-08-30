@@ -59,8 +59,9 @@ import Agent.ReasoningEffort
     )
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(..)
+    ( PlanModeEnv
     , PlanModeState
+    , readPlanModeState
     )
 import Agent.TUI.Model
     ( PromptState(..)
@@ -83,7 +84,7 @@ import qualified Data.Text as Text
 syncFullscreenPrompt :: SessionEnv -> IO ()
 syncFullscreenPrompt env =
     forM_ env.sessionFullscreen \runtime -> do
-        planState <- readIORef env.sessionPlanMode.planStateRef
+        planState <- readPlanModeState env.sessionPlanMode
         params <- readIORef env.sessionParams
         policy <- readIORef env.sessionPolicy
         account <- readIORef env.sessionAccount

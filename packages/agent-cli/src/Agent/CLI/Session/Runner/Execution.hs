@@ -579,7 +579,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             newManagedLoopEventPublisher
             promptRequest
     let syncStore = do
-            sessionDir <- readIORef planMode.planSessionDir
+            sessionDir <- readPlanSessionDir planMode
             case sessionDir of
                 Just dir -> writeIORef storeRoot (Just dir)
                 Nothing -> pure ()

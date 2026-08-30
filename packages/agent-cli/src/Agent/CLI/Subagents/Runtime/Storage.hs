@@ -33,7 +33,7 @@ import Agent.Subagents
     , getSubagentAccessProfile
     , getSubagentIdentity
     )
-import Agent.Tools.PlanMode (PlanModeEnv(..))
+import Agent.Tools.PlanMode (PlanModeEnv, readPlanSessionDir)
 import Control.Concurrent.MVar (modifyMVar, withMVar)
 import Control.Monad (void, when)
 import Data.IORef (IORef, readIORef, writeIORef)
@@ -50,7 +50,7 @@ syncStoreRootFromPlan storeRootRef planMode = do
     case mroot of
         Just _ -> pure ()
         Nothing -> do
-            sessionDir <- readIORef planMode.planSessionDir
+            sessionDir <- readPlanSessionDir planMode
             case sessionDir of
                 Just dir -> writeIORef storeRootRef (Just dir)
                 Nothing -> pure ()

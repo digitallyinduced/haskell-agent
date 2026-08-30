@@ -47,7 +47,7 @@ import Agent.CLI.TUI.App
     , hasQueuedFullscreenInput
     )
 import Agent.CLI.Turn (retryCheckpointedTurn, runOneTurn)
-import Agent.Tools.PlanMode (PlanModeEnv(..))
+import Agent.Tools.PlanMode (writePlanModeState)
 import Agent.TUI.Model (UiEvent(..))
 import Control.Exception.Safe (throwIO)
 import Control.Monad (unless, when)
@@ -84,7 +84,7 @@ retryFailedTurn
     -> PendingTurn
     -> IO RunResult
 retryFailedTurn continuation env pending = do
-    writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    writePlanModeState env.sessionPlanMode pending.pendingPlanState
     syncFullscreenPrompt env
     case env.sessionFullscreen of
         Nothing -> pure ()
@@ -106,7 +106,7 @@ runPendingTurnWithCooldownRetry
     -> IO RunResult
 runPendingTurnWithCooldownRetry
     continuation allowCooldownRetry presentation env pending = do
-    writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    writePlanModeState env.sessionPlanMode pending.pendingPlanState
     syncFullscreenPrompt env
     case env.sessionFullscreen of
         Nothing -> pure ()
@@ -187,7 +187,7 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                 continueAfterTurn continuation env
     TurnRestartRequested level pending -> do
         setSessionEffortText env level
-        writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+        writePlanModeState env.sessionPlanMode pending.pendingPlanState
         case env.sessionFullscreen of
             Just runtime ->
                 emitUiEvent runtime
