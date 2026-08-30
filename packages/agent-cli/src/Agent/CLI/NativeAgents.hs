@@ -484,7 +484,10 @@ alterTouched identifier update store =
     in store
         { storeAgents = Map.insert identifier next store.storeAgents
         , storeOrder = touchOrder identifier store.storeOrder
-        , storeBytes = store.storeBytes - oldBytes + nextBytes
+        , storeBytes =
+            saturatingNativeAdd
+                (max 0 (store.storeBytes - oldBytes))
+                nextBytes
         }
 
 touchOrder :: Text -> Seq Text -> Seq Text
@@ -497,7 +500,8 @@ appendOutput budget chunk output
     | otherwise =
         trimOutputTo budget output
             { outputChunks = output.outputChunks :|> chunk
-            , outputBytes = output.outputBytes + textBytes chunk
+            , outputBytes =
+                saturatingNativeAdd output.outputBytes (textBytes chunk)
             }
 
 trimOutputTo :: Int -> NativeOutput -> NativeOutput
@@ -529,7 +533,10 @@ dropOldestTo budget = go
                         then go (bytes - chunkBytes) rest
                         else
                             let dropChars = (excess + 3) `div` 4
-                                suffix = Text.drop dropChars chunk
+                                -- A strict Text slice keeps the complete
+                                -- original backing array alive. Copy the
+                                -- retained tail so the cap is a real heap cap.
+                                suffix = Text.copy (Text.drop dropChars chunk)
                                 suffixBytes = textBytes suffix
                             in ( if Text.null suffix
                                     then rest
@@ -549,6 +556,11 @@ textBytes :: Text -> Int
 textBytes text =
     let chars = Text.length text
     in if chars > maxBound `div` 4 then maxBound else chars * 4
+
+saturatingNativeAdd :: Int -> Int -> Int
+saturatingNativeAdd left right
+    | right > maxBound - left = maxBound
+    | otherwise = left + right
 
 normalizeStore :: NativeAgentStore -> NativeAgentStore
 normalizeStore store =
@@ -639,5 +651,6 @@ compactOutputs store
 retainedBytes :: Map.Map Text NativeAgentView -> Int
 retainedBytes =
     Map.foldl'
-        (\total view -> total + view.nativeAgentOutput.outputBytes)
+        (\total view ->
+            saturatingNativeAdd total view.nativeAgentOutput.outputBytes)
         0
