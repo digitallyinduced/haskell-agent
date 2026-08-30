@@ -190,8 +190,11 @@ spec = do
                 , "curl file:///usr/../tmp/other-session"
                 , "curl file:///%74mp/other-session"
                 , "curl file:///%2fprivate%2ftmp/other-session"
+                , "curl file:%2ftmp/other-session"
+                , "curl file:%2Fprivate%2Ftmp/other-session"
+                , "curl file:%2fusr%2f..%2ftmp/other-session"
                 ]
-                `shouldBe` replicate 7 True
+                `shouldBe` replicate 10 True
 
         it "allows session temp variables and unrelated tmp path components" do
             commandUsesHardcodedSystemTmp "touch \"$TMPDIR/result.png\""

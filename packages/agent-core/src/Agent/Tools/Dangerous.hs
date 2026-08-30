@@ -142,6 +142,8 @@ commandUsesHardcodedSystemTmp command =
                 let (_, path) = Text.breakOn "/" afterAuthority
                 in if Text.null path then Nothing else Just path
             | Text.isPrefixOf "/" afterScheme = Just afterScheme
+            | Text.isPrefixOf "/" (percentDecodePath afterScheme) =
+                Just afterScheme
             | otherwise = Nothing
 
         isFileUrlPathChar char =
