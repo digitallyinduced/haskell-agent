@@ -36,6 +36,7 @@ import qualified Data.Text as Text
 import qualified Data.ByteString as BS
 import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
+import Data.Word (Word8)
 import Control.Exception.Safe (SomeException, try)
 import System.IO (Handle, IOMode(ReadMode), withBinaryFile)
 import System.OsPath (OsPath)
@@ -144,7 +145,7 @@ streamReadFile path args =
 countFileLines :: OsPath -> IO (Either Text Int)
 countFileLines path =
     withBinaryFile (unsafeToFilePath path) ReadMode $ \h ->
-        go h 0 False 0 0
+        go h 0 False (0 :: Word8) 0
   where
     go h !newlines !seen !lastByte !checked = do
         chunk <- BS.hGetSome h chunkSize
@@ -224,7 +225,7 @@ collectWindow h start takeCount rangeSpecified args =
                 chars' = outChars + extra
             in if chars' `div` 4 > maxReadTokens
                 then (selected, chars', True)
-                else (selected <> [rendered], chars', length selected + 1 >= takeCount)
+                else (rendered : selected, chars', length selected + 1 >= takeCount)
 
     finish selected outChars
         | outChars `div` 4 > maxReadTokens =
@@ -232,7 +233,7 @@ collectWindow h start takeCount rangeSpecified args =
                 rangeSpecified args
         | null selected && outChars == 0 && start == 1 =
             pure $ Right (formatNumbered 1 [""])
-        | otherwise = pure $ Right $ Text.intercalate "\n" selected
+        | otherwise = pure $ Right $ Text.intercalate "\n" (reverse selected)
 
 formatReadFile :: Text -> ReadFileArgs -> Either Text Text
 formatReadFile content args =

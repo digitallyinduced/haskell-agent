@@ -88,7 +88,8 @@ spec = describe "formatReadFile" do
         it "decodes invalid UTF-8 leniently across chunks" do
             withBytes (BS.replicate 65535 97 <> BS.pack [0xc3, 0x28] <> "\n") \path ->
                 streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
-                    `shouldSatisfy` either (const False) (Text.isInfixOf "\xfffd(")
+                    >>= (`shouldSatisfy`
+                        either (const False) (Text.isInfixOf "\xfffd("))
 
         it "rejects NUL bytes in the first 8 KiB" do
             withBytes "prefix\0suffix" \path ->
@@ -103,7 +104,7 @@ spec = describe "formatReadFile" do
         it "fails early on a giant selected line" do
             withBytes (BS.replicate 300000 120 <> "\n") \path ->
                 streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
-                    `shouldSatisfy` isLeft
+                    >>= (`shouldSatisfy` isLeft)
 
 readArgs :: Maybe Int -> Maybe Int -> ReadFileArgs
 readArgs offset limit =

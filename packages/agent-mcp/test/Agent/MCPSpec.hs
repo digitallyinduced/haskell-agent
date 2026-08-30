@@ -9,7 +9,9 @@ import Agent.MCP.Client
     , classifyProbe
     , encodeHeaderValue
     , headerParamValues
+    , readBounded
     , spawnClientWorker
+    , splitSseChunk
     , splitLines
     , startMcpClient
     )
@@ -49,9 +51,15 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, wait, waitCatch, withAsync)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef
+    ( atomicModifyIORef'
+    , modifyIORef'
+    , newIORef
+    , readIORef
+    )
 import Data.List (find)
 import qualified Data.Text as Text
 import System.Directory
@@ -522,6 +530,35 @@ spec = describe "Agent.MCP" do
         it "splits SSE buffers into complete lines" do
             splitLines "data: a\r\n\r\ndata: b"
                 `shouldBe` (["data: a", ""], "data: b")
+
+        it "accepts an HTTP body exactly at the byte limit" do
+            reader <- scriptedBodyReader
+                [BS.replicate (16 * 1024 * 1024) 97]
+            readBounded reader
+                `shouldReturn` Right (BS.replicate (16 * 1024 * 1024) 97)
+
+        it "rejects an HTTP body one byte over the limit" do
+            reader <- scriptedBodyReader
+                [BS.replicate (16 * 1024 * 1024) 97, "b"]
+            readBounded reader `shouldSatisfy` isLeft
+
+        it "accepts large reader chunks made of bounded SSE lines" do
+            let chunk = BS.concat
+                    (replicate 70000 "data: xxxxxxxx\n")
+            splitSseChunk "" chunk `shouldSatisfy` \case
+                Right (lines_, rest) ->
+                    length lines_ == 70000 && BS.null rest
+                Left _ -> False
+
+        it "rejects an oversized unterminated SSE line" do
+            splitSseChunk
+                (BS.replicate (16 * 1024 * 1024) 97)
+                "b"
+                `shouldSatisfy` isLeft
+
+        it "strips CR from complete SSE lines across chunks" do
+            splitSseChunk "data: a" "\r\n\r\ndata: b"
+                `shouldBe` Right (["data: a", ""], "data: b")
 
     it "renders resource links and binary content blocks" do
         normalizeMcpToolResult
@@ -1010,6 +1047,13 @@ fakeServer =
     \      ;;\n\
     \  esac\n\
     \done\n"
+
+scriptedBodyReader :: [BS.ByteString] -> IO (IO BS.ByteString)
+scriptedBodyReader chunks = do
+    remaining <- newIORef chunks
+    pure $ atomicModifyIORef' remaining \case
+        [] -> ([], BS.empty)
+        chunk : rest -> (rest, chunk)
 
 skillsFakeServer :: LBS.ByteString
 skillsFakeServer =

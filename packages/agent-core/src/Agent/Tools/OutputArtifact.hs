@@ -276,20 +276,14 @@ foldCaseLazy False = id
 -- searches.
 previewArtifactLine :: LazyText.Text -> Text
 previewArtifactLine line =
-    let lineLength = LazyText.length line
-        truncated = lineLength > artifactLinePreviewChars
-        prefixChars = artifactLinePreviewChars `div` 2
-        suffix =
-            LazyText.drop
-                (max 0 (lineLength - prefixChars))
-                line
-        compact =
-            LazyText.toStrict (LazyText.take prefixChars line)
-                <> "\n… [middle omitted] …\n"
-                <> LazyText.toStrict suffix
+    let previewChars = fromIntegral artifactLinePreviewChars
+        prefix = LazyText.take (previewChars + 1) line
+        truncated = LazyText.length prefix > previewChars
+        compact = LazyText.toStrict
+            (LazyText.take previewChars prefix)
     in if truncated
         then boundedPreview artifactLinePreviewBytes
-                compact
+                (compact <> "\n… [line omitted] …")
         else LazyText.toStrict line
 
 artifactLinePreviewChars :: Int
@@ -464,7 +458,7 @@ outputArtifactMetadata env handle =
                 pure OutputArtifactMetadata
                     { metadataHandle = handle
                     , metadataBytes = fromIntegral bytes
-                    , metadataCharacters = characters
+                    , metadataCharacters = fromIntegral characters
                     })
                 >>= \case
                     Left exception ->

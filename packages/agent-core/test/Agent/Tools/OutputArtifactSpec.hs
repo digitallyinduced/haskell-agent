@@ -126,8 +126,9 @@ spec = describe "Agent.Tools.OutputArtifact" do
         withTempEnv \env -> do
             let bytes =
                     ByteString.concat
-                        [ ByteString.replicate (2 * 1024 * 1024) 97
-                        , "needle\n"
+                        [ "needle"
+                        , ByteString.replicate (2 * 1024 * 1024) 97
+                        , "\n"
                         ]
             writeOutputArtifactDetailed env bytes >>= \case
                 Left err -> expectationFailure (Text.unpack err)
@@ -169,7 +170,11 @@ listArtifactHandles rendered =
     validHandleCharacter character =
         character /= ';' && character /= ']' && character /= ','
 
-runArtifactTool :: ToolEnv -> Text.Text -> ToolCall -> IO (Either Text.Text Text)
+runArtifactTool
+    :: ToolEnv
+    -> Text.Text
+    -> ToolCall
+    -> IO (Either Text.Text Text.Text)
 runArtifactTool env toolName call = do
     let tool = find ((== toolName) . (.appToolName)) (artifactTools env Nothing)
         config = ToolDispatchConfig

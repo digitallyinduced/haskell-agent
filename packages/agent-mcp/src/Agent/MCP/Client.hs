@@ -1968,11 +1968,9 @@ readBounded reader = go [] 0
         chunk <- brRead reader
         if BS.null chunk
             then pure (Right (BS.concat (reverse chunks)))
-            else
-                let next = total + BS.length chunk
-                in if next > mcpBodyLimit
-                    then pure (Left next)
-                    else go (chunk : chunks) next
+            else if BS.length chunk > mcpBodyLimit - total
+                then pure (Left mcpBodyLimit)
+                else go (chunk : chunks) (total + BS.length chunk)
 
 mcpBodyLimit :: Int
 mcpBodyLimit = 16 * 1024 * 1024
@@ -2055,7 +2053,9 @@ readSseStream client reader pending request = do
                             -- End of stream: flush a trailing event without a blank line.
                             trailing <- if BS.null buffer
                                 then pure (Right (dataLines, dataBytes))
-                                else foldLines dataLines dataBytes [buffer]
+                                else
+                                    foldLines dataLines dataBytes
+                                        [stripCarriage buffer]
                             case trailing of
                                 Left err -> pure (HttpFailed err)
                                 Right (remaining, _) -> do
@@ -2085,11 +2085,15 @@ readSseStream client reader pending request = do
         | BS8.isPrefixOf ":" line = foldLines dataLines dataBytes rest
         | Just payload <- BS.stripPrefix "data:" line =
             let value = fromMaybe payload (BS.stripPrefix " " payload)
-                nextBytes = dataBytes + BS.length value + 1
-            in if nextBytes > mcpSseEventLimit
+                valueBytes = BS.length value + 1
+            in if valueBytes > mcpSseEventLimit - dataBytes
                 then pure (Left (McpTransportError
                     "MCP SSE event exceeded the size limit"))
-                else foldLines (value : dataLines) nextBytes rest
+                else
+                    foldLines
+                        (value : dataLines)
+                        (dataBytes + valueBytes)
+                        rest
         | otherwise = foldLines dataLines dataBytes rest
     dispatchEvent [] = pure ()
     dispatchEvent dataLines =
@@ -2098,7 +2102,7 @@ readSseStream client reader pending request = do
             Right inbound -> handleInbound client inbound
 
 mcpSseLineLimit :: Int
-mcpSseLineLimit = 1024 * 1024
+mcpSseLineLimit = 16 * 1024 * 1024
 
 mcpSseEventLimit :: Int
 mcpSseEventLimit = 16 * 1024 * 1024
@@ -2115,20 +2119,27 @@ splitSseChunk initial chunk = go initial chunk []
     go partial rest reversedLines =
         case BS.elemIndex 10 rest of
             Nothing
-                | BS.length partial + BS.length rest > mcpSseLineLimit ->
+                | exceedsLineLimit partial rest ->
                     Left (McpTransportError "MCP SSE line exceeded the size limit")
                 | otherwise ->
                     Right (reverse reversedLines, partial <> rest)
             Just index ->
                 let prefix = BS.take index rest
                     remainder = BS.drop (index + 1) rest
-                    lineLength = BS.length partial + BS.length prefix
-                in if lineLength > mcpSseLineLimit
+                in if exceedsLineLimit partial prefix
                     then Left (McpTransportError "MCP SSE line exceeded the size limit")
                     else
-                        let line = fromMaybe (partial <> prefix)
-                                (BS.stripSuffix "\r" (partial <> prefix))
+                        let combined
+                                | BS.null partial = prefix
+                                | otherwise = partial <> prefix
+                            line = stripCarriage combined
                         in go BS.empty remainder (line : reversedLines)
+
+    exceedsLineLimit left right =
+        BS.length right > mcpSseLineLimit - BS.length left
+
+stripCarriage :: BS.ByteString -> BS.ByteString
+stripCarriage line = fromMaybe line (BS.stripSuffix "\r" line)
 
 -- | Split a buffer into complete lines (without terminators) and the
 -- trailing partial line.
@@ -2139,8 +2150,6 @@ splitLines buffer =
         [] -> ([], BS.empty)
         partial : completeReversed ->
             (map stripCarriage (reverse completeReversed), partial)
-  where
-    stripCarriage line = fromMaybe line (BS.stripSuffix "\r" line)
 
 configuredAccessToken :: McpClient -> IO (Either Text (Maybe Text))
 configuredAccessToken client =
