@@ -199,7 +199,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
-    nativeAgentsRef <- newIORef (Map.empty :: Map.Map Text NativeAgentView)
+    nativeAgentsRef <- newIORef emptyNativeAgentStore
     agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
     let cachedAgentSteps target variant items build = do
             transcriptName <- makeStableName items
@@ -223,9 +223,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     pure steps
         loadAgentSnapshot includeSummaries = do
             rootItems <- readLiveTranscript conversationRef
+            currentSelected <- readIORef selectedAgent
             nativeAgents <-
                 atomicModifyIORef' nativeAgentsRef \current ->
-                    let restored = restoreNativeAgents rootItems current
+                    let restored =
+                            restoreNativeAgents currentSelected rootItems current
                     in (restored, restored)
             agents <- case multiCtx of
                 Nothing -> pure []
@@ -235,8 +237,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         : [ AgentChild agentId
                           | (_, agentId, _) <- agents
                           ]
-                        <> map (\view -> AgentNative view.nativeAgentId)
-                            (Map.elems nativeAgents)
+                        <> nativeAgentTargets nativeAgents
             selected <-
                 atomicModifyIORef' selectedAgent \current ->
                     let reconciled =
@@ -244,6 +245,15 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 availableTargets
                                 current
                     in (reconciled, reconciled)
+            modifyIORef' nativeAgentsRef
+                (setNativeAgentSelection
+                    (case selected of
+                        AgentNative identifier -> Just identifier
+                        _ -> Nothing))
+            modifyIORef' agentStepCache
+                (\cache ->
+                    Map.restrictKeys cache
+                        (Set.fromList availableTargets))
             sessions <- readIORef subagentSessions
             let transcriptLines target items
                     | null agents = []
@@ -256,8 +266,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             | otherwise ->
                                 []
                         AgentNative nativeId ->
-                            maybe [] (.nativeAgentTranscript)
-                                (Map.lookup nativeId nativeAgents)
+                            maybe [] nativeAgentTranscript
+                                (nativeAgentLookup nativeId nativeAgents)
                     | includeSummaries =
                         responseItemPreviewLines 0 items
                     | otherwise = []
@@ -266,8 +276,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     | target /= selected = initialUiState
                     | target == AgentRoot = initialUiState
                     | AgentNative nativeId <- target =
-                        maybe initialUiState (.nativeAgentConversation)
-                            (Map.lookup nativeId nativeAgents)
+                        maybe initialUiState nativeAgentConversation
+                            (nativeAgentLookup nativeId nativeAgents)
                     | otherwise =
                         settleConversation items status $
                             responseItemsToUiStateRelative
@@ -335,7 +345,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     conversationFor
                     sessions)
                 agents
-            let nativeEntries = nativeAgentEntries nativeAgents
+            let nativeEntries = nativeAgentEntries selected nativeAgents
             pure (selected, rootEntry : children <> nativeEntries)
           where
             materializeChild
@@ -412,6 +422,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     ("failed to pin selected agent: "
                                         <> formatException err)
             writeIORef selectedAgent target
+            modifyIORef' nativeAgentsRef
+                (setNativeAgentSelection
+                    (case target of
+                        AgentNative identifier -> Just identifier
+                        _ -> Nothing))
         releaseSelectedAgent = \case
             AgentRoot -> pure ()
             AgentNative _ -> pure ()
@@ -499,6 +514,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             writeIORef lastAssistantRef Nothing
             writeIORef subagentSessions Map.empty
             writeIORef selectedAgent AgentRoot
+            writeIORef nativeAgentsRef emptyNativeAgentStore
             writeIORef agentStepCache Map.empty
             case multiCtx of
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry

@@ -14,7 +14,7 @@ import Agent.TUI.Model (BlockState(..), UiBlock(..), UiState(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Foldable as Foldable
 import Data.List (find)
-import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -23,7 +23,7 @@ spec = describe "provider-native agent tracking" do
         let beforeStart =
                 applyNativeAgentEvent
                     (NativeAgentOutput "child" "working")
-                    Map.empty
+                    emptyNativeAgentStore
             afterStart =
                 applyNativeAgentEvent
                     (NativeAgentStarted
@@ -32,8 +32,8 @@ spec = describe "provider-native agent tracking" do
                         "Explore"
                         (Just "claude-sonnet"))
                     beforeStart
-            view = afterStart Map.! "child"
-        view.nativeAgentTranscript `shouldBe` ["working"]
+            view = lookupView "child" afterStart
+        nativeAgentTranscript view `shouldBe` ["working"]
         view.nativeAgentLabel `shouldBe` "Explore"
         view.nativeAgentModel `shouldBe` Just "claude-sonnet"
 
@@ -41,13 +41,13 @@ spec = describe "provider-native agent tracking" do
         let tracked =
                 foldl
                     (flip applyNativeAgentEvent)
-                    Map.empty
+                    emptyNativeAgentStore
                     [ NativeAgentStarted
                         "parent" Nothing "Research / API" Nothing
                     , NativeAgentStarted
                         "child" (Just "parent") "Review" Nothing
                     ]
-            entries = nativeAgentEntries tracked
+            entries = nativeAgentEntries AgentRoot tracked
             child =
                 find ((== AgentNative "child") . (.agentTarget)) entries
         (.agentPath) <$> child
@@ -57,15 +57,16 @@ spec = describe "provider-native agent tracking" do
         let tracked =
                 foldl
                     (flip applyNativeAgentEvent)
-                    Map.empty
+                    emptyNativeAgentStore
                     [ NativeAgentStarted "child" Nothing "Explore" Nothing
                     , NativeAgentOutput "child" "partial"
                     , ResponseAttemptDiscarded
                     ]
-            view = tracked Map.! "child"
+            view = lookupView "child" tracked
             states =
                 map (.blockState)
-                    (Foldable.toList view.nativeAgentConversation.uiBlocks)
+                    (Foldable.toList
+                        (nativeAgentConversation view).uiBlocks)
         view.nativeAgentStatus `shouldBe` "cancelled"
         states `shouldSatisfy` all (/= BlockRunning)
 
@@ -73,15 +74,16 @@ spec = describe "provider-native agent tracking" do
         let tracked =
                 foldl
                     (flip applyNativeAgentEvent)
-                    Map.empty
+                    emptyNativeAgentStore
                     [ NativeAgentStarted "child" Nothing "Explore" Nothing
                     , NativeAgentOutput "child" "partial"
                     , TurnStarted
                     ]
-            view = tracked Map.! "child"
+            view = lookupView "child" tracked
             states =
                 map (.blockState)
-                    (Foldable.toList view.nativeAgentConversation.uiBlocks)
+                    (Foldable.toList
+                        (nativeAgentConversation view).uiBlocks)
         view.nativeAgentStatus `shouldBe` "cancelled"
         states `shouldSatisfy` all (/= BlockRunning)
 
@@ -89,10 +91,10 @@ spec = describe "provider-native agent tracking" do
         let tracked =
                 applyNativeAgentEvent
                     (NativeAgentFinished "late" NativeAgentFailed)
-                    Map.empty
-            view = tracked Map.! "late"
+                    emptyNativeAgentStore
+            view = lookupView "late" tracked
         view.nativeAgentStatus `shouldBe` "error"
-        view.nativeAgentTranscript `shouldBe` []
+        nativeAgentTranscript view `shouldBe` []
 
     it "restores completed Claude-native agents from canonical tool items" do
         let call = FunctionCallItem FunctionCall
@@ -116,12 +118,16 @@ spec = describe "provider-native agent tracking" do
                     rawJsonFromEncoding (Aeson.toEncoding ("review complete" :: String))
                 , status = Just ItemCompleted
                 }
-            restored = restoreNativeAgents [call, output] Map.empty
-            view = restored Map.! "agent-1"
+            restored =
+                restoreNativeAgents
+                    (AgentNative "agent-1")
+                    [call, output]
+                    emptyNativeAgentStore
+            view = lookupView "agent-1" restored
         view.nativeAgentLabel `shouldBe` "Review API"
         view.nativeAgentModel `shouldBe` Just "sonnet"
         view.nativeAgentStatus `shouldBe` "done"
-        view.nativeAgentTranscript `shouldBe` ["review complete"]
+        nativeAgentTranscript view `shouldBe` ["review complete"]
 
     it "does not restore unpaired or non-Claude canonical calls" do
         let call identifier provider = FunctionCallItem FunctionCall
@@ -146,9 +152,58 @@ spec = describe "provider-native agent tracking" do
                 }
             restored =
                 restoreNativeAgents
+                    AgentRoot
                     [ call "claude-unpaired" "claude-code"
                     , wrongOutput
                     , call "other" "openai"
                     ]
-                    Map.empty
-        restored `shouldBe` Map.empty
+                    emptyNativeAgentStore
+        nativeAgentStoreSize restored `shouldBe` 0
+
+    it "bounds terminal rows and retained output" do
+        let payload = Text.replicate (nativeAgentPreviewBytes `div` 2) "x"
+            tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    (concat
+                        [ [ NativeAgentStarted identifier Nothing identifier Nothing
+                          , NativeAgentOutput identifier payload
+                          , NativeAgentFinished identifier NativeAgentCompleted
+                          ]
+                        | index <- [1 .. nativeAgentMaxEntries + 16]
+                        , let identifier = Text.pack ("agent-" <> show index)
+                        ])
+        nativeAgentStoreSize tracked `shouldBe` nativeAgentMaxEntries
+        nativeAgentStoreBytes tracked
+            `shouldSatisfy` (<= nativeAgentAggregateBytes)
+
+    it "materializes conversation state only for the selected native row" do
+        let tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ NativeAgentOutput "one" "first"
+                    , NativeAgentOutput "two" "second"
+                    ]
+            entries = nativeAgentEntries (AgentNative "one") tracked
+            one = find ((== AgentNative "one") . (.agentTarget)) entries
+            two = find ((== AgentNative "two") . (.agentTarget)) entries
+        (Foldable.toList . (.uiBlocks) . (.agentConversation) <$> one)
+            `shouldSatisfy` maybe False (not . null)
+        (Foldable.toList . (.uiBlocks) . (.agentConversation) <$> two)
+            `shouldBe` Just []
+
+    it "drops stale live terminal rows instead of resurrecting them" do
+        let stale =
+                applyNativeAgentEvent
+                    (NativeAgentFinished "stale" NativeAgentCompleted)
+                    emptyNativeAgentStore
+            restored = restoreNativeAgents AgentRoot [] stale
+        nativeAgentLookup "stale" restored `shouldBe` Nothing
+
+lookupView :: Text.Text -> NativeAgentStore -> NativeAgentView
+lookupView identifier store =
+    case nativeAgentLookup identifier store of
+        Just view -> view
+        Nothing -> error ("missing native agent: " <> Text.unpack identifier)
