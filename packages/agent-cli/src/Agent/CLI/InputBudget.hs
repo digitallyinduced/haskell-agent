@@ -18,7 +18,11 @@ import Agent.Loop
     , TurnAttachment(..)
     , TurnInput(..)
     )
-import Agent.ToolDispatch (ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCallResult(..)
+    , ToolResultImage(..)
+    , toolCallResultImages
+    )
 import qualified Data.ByteString as ByteString
 import Data.Char (ord)
 import qualified Data.List.NonEmpty as NonEmpty
@@ -62,6 +66,14 @@ logicalTurnInputBytes = \case
     CompletedTool result ->
         logicalTextBytes result.callId
             `saturatingAdd` logicalTextBytes result.output
+            `saturatingAdd` foldBytes
+                logicalToolResultImageBytes
+                (toolCallResultImages result)
+
+logicalToolResultImageBytes :: ToolResultImage -> Int
+logicalToolResultImageBytes image =
+    logicalTextBytes image.imageUrl
+        `saturatingAdd` maybe 0 logicalTextBytes image.imageDetail
 
 logicalReplLineBytes :: ReplLine -> Int
 logicalReplLineBytes = \case
