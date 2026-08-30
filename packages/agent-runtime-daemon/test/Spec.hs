@@ -208,6 +208,40 @@ main = hspec $ do
                         JournalCorrupt _ _ -> True
                         _ -> False
 
+        it "rejects a stale prefix before an otherwise current snapshot anchor" $
+            withSystemTempDirectory "daemon-stale-prefix" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    stale = EventEnvelope {sequenceNumber = 3, eventType = "test", payload = Null}
+                    anchor = EventEnvelope {sequenceNumber = 4, eventType = "test", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    (LBS.toStrict (encode stale) <> "\n" <> LBS.toStrict (encode anchor) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalCorrupt _ _ -> True
+                        _ -> False
+
+        it "can reopen repeatedly after startup compaction" $
+            withSystemTempDirectory "daemon-reopen-compaction" $ \directory -> do
+                let originalConfig = (defaultJournalConfig directory) {maximumEvents = 10}
+                    compactedConfig = originalConfig {maximumEvents = 2}
+                original <- openJournal originalConfig
+                _ <- appendEvent original "one" Null
+                _ <- appendEvent original "two" Null
+                _ <- appendEvent original "three" Null
+                first <- openJournal compactedConfig
+                firstSnapshot <- snapshot first
+                firstSnapshot.lastSequence `shouldBe` 3
+                second <- openJournal compactedConfig
+                secondSnapshot <- snapshot second
+                secondSnapshot `shouldBe` firstSnapshot
+                fourth <- appendEvent second "four" Null
+                fourth.sequenceNumber `shouldBe` 4
+                third <- openJournal compactedConfig
+                thirdSnapshot <- snapshot third
+                thirdSnapshot.lastSequence `shouldBe` 4
+
         it "enforces contiguous startup retention and rejects an oversized newest event" $
             withSystemTempDirectory "daemon-startup-retention" $ \directory -> do
                 original <- openJournal ((defaultJournalConfig directory) {maximumEvents = 10})
