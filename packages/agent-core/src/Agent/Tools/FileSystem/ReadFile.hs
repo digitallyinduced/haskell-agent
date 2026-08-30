@@ -92,4 +92,3 @@ readFileDescription =
 
 formatReadFile :: Text -> ReadFileArgs -> Either Text Text
 formatReadFile = formatReadFileContent
-
