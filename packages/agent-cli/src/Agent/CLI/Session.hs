@@ -163,7 +163,6 @@ import System.Directory.OsPath
     , doesDirectoryExist
     , doesFileExist
     , listDirectory
-    , pathIsSymbolicLink
     , removePathForcibly
     , removeFile
     )
@@ -1394,10 +1393,15 @@ cleanupStaleSessionTemp root candidate =
             Right (Just lock) -> do
                 removed <- tryAny $
                     (do
-                        symbolic <- pathIsSymbolicLink candidate
-                        if symbolic
-                            then pure False
-                            else removePathForcibly candidate >> pure True)
+                        symbolicLinkStatusMaybe candidate >>= \case
+                            -- Another startup cleaner may have removed the
+                            -- candidate before this process acquired its
+                            -- exclusive lock.
+                            Nothing -> pure False
+                            Just status
+                                | isSymbolicLink status -> pure False
+                                | otherwise ->
+                                    removePathForcibly candidate >> pure True)
                         `finally` FileLock.unlockFile lock
                 pure case removed of
                     Left exception ->
