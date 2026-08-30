@@ -146,73 +146,50 @@ applyNativeAgentEvent event current =
             ResponseAttemptDiscarded ->
                 settleRunningNativeAgents NativeAgentCancelled current
             NativeAgentStarted rawIdentifier rawParent rawLabel rawModel ->
-                case boundedNativeAgentIdentifier rawIdentifier of
-                    Nothing -> current
-                    Just identifier ->
-                        let parent =
-                                rawParent >>= boundedNativeAgentIdentifier
-                            label =
-                                boundedNativeAgentText
-                                    nativeAgentPreviewBytes
-                                    rawLabel
-                            model =
-                                boundedNativeAgentText nativeAgentModelBytes
-                                    <$> rawModel
-                        in alterTouched identifier
-                            (\case
-                                Nothing ->
-                                    newNativeAgentView
-                                        NativeAgentLive
-                                        identifier
-                                        parent
-                                        label
-                                        model
-                                Just view ->
-                                    view
-                                        { nativeAgentParent = parent
-                                        , nativeAgentLabel = label
-                                        , nativeAgentModel = model
-                                        , nativeAgentStatus = "running"
-                                        , nativeAgentTerminal = Nothing
-                                        , nativeAgentOrigin = NativeAgentLive
-                                        })
-                            current
+                let parent =
+                        rawParent >>= boundedNativeAgentIdentifier
+                    label =
+                        boundedNativeAgentText
+                            nativeAgentPreviewBytes
+                            rawLabel
+                    model =
+                        boundedNativeAgentText nativeAgentModelBytes
+                            <$> rawModel
+                in alterTouched rawIdentifier
+                    (\identifier -> \case
+                        Nothing ->
+                            newNativeAgentView
+                                NativeAgentLive
+                                identifier
+                                parent
+                                label
+                                model
+                        Just view ->
+                            view
+                                { nativeAgentParent = parent
+                                , nativeAgentLabel = label
+                                , nativeAgentModel = model
+                                , nativeAgentStatus = "running"
+                                , nativeAgentTerminal = Nothing
+                                , nativeAgentOrigin = NativeAgentLive
+                                })
+                    current
             NativeAgentOutput rawIdentifier output ->
-                case boundedNativeAgentIdentifier rawIdentifier of
-                    Nothing -> current
-                    Just identifier ->
-                        alterTouched identifier
-                            (\maybeView ->
-                                let view = fromMaybe
-                                        (newNativeAgentView NativeAgentLive
-                                            identifier Nothing identifier Nothing)
-                                        maybeView
-                                in view
-                                    { nativeAgentOutput =
-                                        appendOutput
-                                            nativeAgentSelectedOutputBytes
-                                            output
-                                            view.nativeAgentOutput
-                                    , nativeAgentOrigin = NativeAgentLive
-                                    })
-                            current
+                alterNativeOutput rawIdentifier output current
             NativeAgentFinished rawIdentifier status ->
-                case boundedNativeAgentIdentifier rawIdentifier of
-                    Nothing -> current
-                    Just identifier ->
-                        alterTouched identifier
-                            (\maybeView ->
-                                (fromMaybe
-                                    (newNativeAgentView NativeAgentLive
-                                        identifier Nothing identifier Nothing)
-                                    maybeView)
-                                    { nativeAgentStatus =
-                                        nativeAgentStatusText status
-                                    , nativeAgentTerminal =
-                                        Just (nativeAgentBlockState status)
-                                    , nativeAgentOrigin = NativeAgentLive
-                                    })
-                            current
+                alterTouched rawIdentifier
+                    (\identifier maybeView ->
+                        (fromMaybe
+                            (newNativeAgentView NativeAgentLive
+                                identifier Nothing identifier Nothing)
+                            maybeView)
+                            { nativeAgentStatus =
+                                nativeAgentStatusText status
+                            , nativeAgentTerminal =
+                                Just (nativeAgentBlockState status)
+                            , nativeAgentOrigin = NativeAgentLive
+                            })
+                    current
             _ -> current
 
 -- | Materialize presentation state only for the selected row. Other rows get
@@ -597,26 +574,65 @@ nativeAgentPathSegment view =
 
 alterTouched
     :: Text
-    -> (Maybe NativeAgentView -> NativeAgentView)
+    -> (Text -> Maybe NativeAgentView -> NativeAgentView)
     -> NativeAgentStore
     -> NativeAgentStore
-alterTouched identifier update store =
-    let previous = Map.lookup identifier store.storeAgents
-        canonicalIdentifier =
-            maybe identifier (.nativeAgentId) previous
-        oldBytes = maybe 0 nativeAgentViewBytes previous
-        next = update previous
-        nextBytes = nativeAgentViewBytes next
-    in store
-        { storeAgents =
-            Map.insert canonicalIdentifier next store.storeAgents
-        , storeOrder =
-            touchOrder canonicalIdentifier store.storeOrder
-        , storeBytes =
-            saturatingNativeAdd
-                (max 0 (store.storeBytes - oldBytes))
-                nextBytes
-        }
+alterTouched rawIdentifier update =
+    alterTouchedAccounting rawIdentifier update updateBytes
+  where
+    updateBytes previous next bytes =
+        saturatingNativeAdd
+            (max 0 (bytes - maybe 0 nativeAgentViewBytes previous))
+            (nativeAgentViewBytes next)
+
+alterNativeOutput :: Text -> Text -> NativeAgentStore -> NativeAgentStore
+alterNativeOutput rawIdentifier chunk =
+    alterTouchedAccounting rawIdentifier update updateBytes
+  where
+    update identifier maybeView =
+        let view = fromMaybe
+                (newNativeAgentView NativeAgentLive
+                    identifier Nothing identifier Nothing)
+                maybeView
+        in view
+            { nativeAgentOutput =
+                appendOutput
+                    nativeAgentSelectedOutputBytes
+                    chunk
+                    view.nativeAgentOutput
+            , nativeAgentOrigin = NativeAgentLive
+            }
+    updateBytes Nothing next bytes =
+        saturatingNativeAdd bytes (nativeAgentViewBytes next)
+    updateBytes (Just previous) next bytes =
+        saturatingNativeAdd
+            (max 0
+                (bytes - previous.nativeAgentOutput.outputBytes))
+            next.nativeAgentOutput.outputBytes
+
+alterTouchedAccounting
+    :: Text
+    -> (Text -> Maybe NativeAgentView -> NativeAgentView)
+    -> (Maybe NativeAgentView -> NativeAgentView -> Int -> Int)
+    -> NativeAgentStore
+    -> NativeAgentStore
+alterTouchedAccounting rawIdentifier update updateBytes store =
+    case Map.lookup rawIdentifier store.storeAgents of
+        Just previous -> apply previous.nativeAgentId (Just previous)
+        Nothing
+            | nativeAgentIdentifierWithinLimit rawIdentifier ->
+                apply (Text.copy rawIdentifier) Nothing
+            | otherwise -> store
+  where
+    apply identifier previous =
+        let next = update identifier previous
+        in store
+            { storeAgents =
+                Map.insert identifier next store.storeAgents
+            , storeOrder =
+                touchOrder identifier store.storeOrder
+            , storeBytes = updateBytes previous next store.storeBytes
+            }
 
 touchOrder :: Text -> Seq Text -> Seq Text
 touchOrder identifier order =
@@ -722,8 +738,12 @@ outputChunkBytes text
 
 boundedNativeAgentIdentifier :: Text -> Maybe Text
 boundedNativeAgentIdentifier identifier
-    | Text.length bounded > codeUnitLimit = Nothing
+    | not (nativeAgentIdentifierWithinLimit identifier) = Nothing
     | otherwise = Just (Text.copy identifier)
+
+nativeAgentIdentifierWithinLimit :: Text -> Bool
+nativeAgentIdentifierWithinLimit identifier =
+    Text.length bounded <= codeUnitLimit
   where
     codeUnitLimit = nativeAgentIdentifierBytes `div` 4
     bounded = Text.take (codeUnitLimit + 1) identifier
@@ -834,21 +854,25 @@ compactOutputs store
     compact current identifier
         | nativeAgentStoreBytes current <= nativeAgentAggregateBytes = current
         | otherwise =
-            current
-                { storeAgents =
-                    nextAgents
-                , storeBytes = retainedBytes nextAgents
-                }
-      where
-        nextAgents =
-            Map.adjust
-                (\view -> view
-                    { nativeAgentOutput =
-                        trimOutputTo nativeAgentPreviewBytes
-                            view.nativeAgentOutput
-                    })
-                identifier
-                current.storeAgents
+            case Map.lookup identifier current.storeAgents of
+                Nothing -> current
+                Just previous ->
+                    let next = previous
+                            { nativeAgentOutput =
+                                trimOutputTo nativeAgentPreviewBytes
+                                    previous.nativeAgentOutput
+                            }
+                    in current
+                        { storeAgents =
+                            Map.insert identifier next current.storeAgents
+                        , storeBytes =
+                            saturatingNativeAdd
+                                (max 0
+                                    ( current.storeBytes
+                                        - nativeAgentViewBytes previous
+                                    ))
+                                (nativeAgentViewBytes next)
+                        }
 
 retainedBytes :: Map.Map Text NativeAgentView -> Int
 retainedBytes =
