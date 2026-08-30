@@ -2,7 +2,13 @@ module Agent.CLI.McpAdminSpec (spec) where
 
 import Agent.CLI.Config (HarnessConfig(..), loadHarnessConfig)
 import Agent.CLI.McpAdmin
-import Control.Concurrent.Async (concurrently)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (concurrently, poll, wait, withAsync)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    )
 import Control.Exception.Safe (bracket)
 import qualified Data.Map.Strict as Map
 import System.Directory.OsPath (getTemporaryDirectory)
@@ -61,6 +67,7 @@ spec = describe "Agent.CLI.McpAdmin" do
             Right disabled <- setMcpAdminServerEnabled home
                 edited.mcpAdminRevision "docs" False
             restartMcpAdminServer home disabled.mcpAdminRevision "docs"
+                (pure ())
                 `shouldReturn` Right disabled
             Right removed <- removeMcpAdminServer home
                 disabled.mcpAdminRevision "docs"
@@ -82,6 +89,49 @@ spec = describe "Agent.CLI.McpAdmin" do
             length final.mcpAdminValue `shouldBe` 1
             final.mcpAdminRevision `shouldSatisfy`
                 (> initial.mcpAdminRevision)
+
+    it "linearizes revision validation with the supervisor restart" $
+        withTempDir \home -> do
+            Right initial <- listMcpAdminServers home
+            Right added <- addMcpAdminServer home initial.mcpAdminRevision
+                "docs" input
+            entered <- newEmptyMVar
+            release <- newEmptyMVar
+            let restart = putMVar entered () >> takeMVar release
+            withAsync
+                (restartMcpAdminServer home added.mcpAdminRevision
+                    "docs" restart)
+                \restarting -> do
+                    takeMVar entered
+                    withAsync
+                        (setMcpAdminServerEnabled home
+                            added.mcpAdminRevision "docs" False)
+                        \writing -> do
+                            threadDelay 20000
+                            poll writing >>= \case
+                                Nothing -> pure ()
+                                Just _ ->
+                                    expectationFailure
+                                        "writer bypassed restart lock"
+                            putMVar release ()
+                            wait restarting `shouldReturn` Right added
+                            wait writing >>= \case
+                                Left err -> expectationFailure (show err)
+                                Right disabled ->
+                                    disabled.mcpAdminValue.mcpAdminEnabled
+                                        `shouldBe` False
+
+    it "does not run the supervisor restart for a stale revision" $
+        withTempDir \home -> do
+            Right initial <- listMcpAdminServers home
+            Right added <- addMcpAdminServer home initial.mcpAdminRevision
+                "docs" input
+            Right disabled <- setMcpAdminServerEnabled home
+                added.mcpAdminRevision "docs" False
+            result <- restartMcpAdminServer home added.mcpAdminRevision
+                "docs" (expectationFailure "stale restart action ran")
+            result `shouldBe`
+                Left (McpAdminConflict disabled.mcpAdminRevision)
 
 input :: McpAdminServerInput
 input = McpAdminServerInput

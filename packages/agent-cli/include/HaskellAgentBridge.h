@@ -108,10 +108,12 @@ typedef struct ha_mcp_env_entry {
 /*
  * MCP catalog reads expose redacted typed rows. Environment values are never
  * returned: field callbacks use kind 0 for an argument and kind 1 for an
- * environment key. Fields for a row are emitted before that row. status is 0
- * for a row, 1 for list completion, and -1 for failure. revision is an opaque
- * optimistic-concurrency token; a conflict reports the current revision.
- * Callback buffers are valid only until that callback returns.
+ * environment key. Fields for a row are emitted before that row. List uses
+ * status 0 for rows, 1 for terminal completion, and -1 for terminal failure.
+ * Read/status invokes exactly one callback: status 0 for its row or -1 for
+ * failure, with no trailing status 1. revision is an opaque optimistic-
+ * concurrency token; a conflict reports the current revision. Callback
+ * buffers are valid only until that callback returns.
  */
 typedef void (*ha_mcp_server_callback)(
     void *context, int32_t status, uint64_t revision,
@@ -146,7 +148,8 @@ int32_t ha_mcp_servers_list(
 /*
  * Status is a side-effect-free catalog status: enabled means configured for
  * the next turn, disabled means intentionally stopped. It does not start a
- * server or probe its process. The callback contract matches read.
+ * server or probe its process. Like read, it invokes exactly one callback and
+ * does not emit a separate completion callback.
  */
 int32_t ha_mcp_server_status(
     const uint8_t *name, size_t name_length,

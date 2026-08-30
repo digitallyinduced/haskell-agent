@@ -21,6 +21,7 @@ import Agent.CLI.Config
     , McpServerConfig(..)
     , loadHarnessConfigSnapshot
     , modifyHarnessConfig
+    , withHarnessConfigSnapshot
     )
 import Control.Monad (when)
 import Data.Bifunctor (first)
@@ -124,20 +125,32 @@ addMcpAdminServer home expected name input =
             , publicServer name server
             )
 
--- | Validate a restart request against the current catalog. The native engine
--- performs the process-cache restart after this check succeeds.
+-- | Validate a restart request and perform the process-cache restart while
+-- holding the shared config lock. A catalog mutation therefore happens wholly
+-- before or after the restart's revision check and cannot make the accepted
+-- restart stale between validation and its side effect.
 restartMcpAdminServer
     :: OsPath
     -> Word64
     -> Text
+    -> IO ()
     -> IO (Either McpAdminError (McpAdminSnapshot McpAdminServer))
-restartMcpAdminServer home expected name =
-    readMcpAdminServer home name >>= \case
-        Left err -> pure (Left err)
-        Right snapshot
-            | snapshot.mcpAdminRevision /= expected ->
-                pure (Left (McpAdminConflict snapshot.mcpAdminRevision))
-            | otherwise -> pure (Right snapshot)
+restartMcpAdminServer home expected name restart =
+    withHarnessConfigSnapshot home
+        (\current config ->
+            if current /= expected
+                then pure (Left (McpAdminConflict current))
+                else case Map.lookup name config.configMcpServers of
+                    Nothing -> pure (Left (McpAdminNotFound name))
+                    Just server -> do
+                        restart
+                        pure (Right McpAdminSnapshot
+                            { mcpAdminRevision = current
+                            , mcpAdminValue = publicServer name server
+                            }))
+        >>= \case
+            Left err -> pure (Left (McpAdminInvalid err))
+            Right result -> pure result
 
 editMcpAdminServer
     :: OsPath

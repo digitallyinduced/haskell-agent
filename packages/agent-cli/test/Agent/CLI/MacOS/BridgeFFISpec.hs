@@ -9,13 +9,14 @@ import Test.Hspec (Spec, describe, it, shouldReturn)
 
 foreign import ccall "ha_image_attachment_stage_smoke"
     imageAttachmentStageSmoke :: IO CInt
+
 #else
 import Test.Hspec (Spec, describe, it, pendingWith)
 #endif
 
 spec :: Spec
-spec = describe "native image attachment staging" do
-    it "accepts copied image buffers through the exported bridge" do
+spec = describe "native engine lifecycle smoke" do
+    it "stages copied images and completes restart before destroy returns" do
 #ifdef darwin_HOST_OS
         imageAttachmentStageSmoke `shouldReturn` 0
 #else

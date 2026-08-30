@@ -1527,11 +1527,8 @@ idleLoop callback context config store root processRuntime commands stagedImages
             restarted <- tryAny do
                 home <- getHomeDirectory
                 mcpAdminTry
-                    (restartMcpAdminServer home expected name) >>= \case
-                        Left err -> pure (Left err)
-                        Right snapshot -> do
-                            restartNativeMcpRuntime processRuntime
-                            pure (Right snapshot)
+                    (restartMcpAdminServer home expected name
+                        (restartNativeMcpRuntime processRuntime))
             case restarted of
                 Left exception ->
                     withText (Text.pack (show exception)) $
