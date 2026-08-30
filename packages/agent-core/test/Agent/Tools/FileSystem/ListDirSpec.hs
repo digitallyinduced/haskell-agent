@@ -9,12 +9,16 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.FileSystem.ListDir
     ( DirNode(..)
+    , ListDirOperations(..)
     , capNodes
+    , collectDirWith
     , listDirTool
     , renderTree
     )
 import Agent.Tools.Types (AppTool(..), defaultToolEnv)
 import Control.Exception.Safe (bracket, finally)
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
@@ -30,6 +34,7 @@ import System.Directory
     )
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
+import qualified System.OsPath as OsPath
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
@@ -85,6 +90,31 @@ spec = do
                 (shown, truncated) = capNodes 5 tree
             truncated `shouldBe` True
             map nodeName shown `shouldBe` ["1", "2", "3", "4", "5"]
+
+    describe "collectDirWith" do
+        it "stops opening descendants when the node budget is exhausted" do
+            visitedRef <- newIORef []
+            let root = fromText "/root"
+                child = fromText "child"
+                operations = ListDirOperations
+                    { readDirectoryEntries = \path -> do
+                        modifyIORef' visitedRef (path :)
+                        pure (Right [(child, True)])
+                    , findIgnoredPaths = \_ _ -> pure Set.empty
+                    , isEntrySymbolicLink = const (pure False)
+                    }
+                expectedTree =
+                    [ DirectoryNode child
+                        [ DirectoryNode child
+                            [DirectoryNode child []]
+                        ]
+                    ]
+                expectedVisited =
+                    take 4 (iterate (\path -> path OsPath.</> child) root)
+            result <- collectDirWith operations (fromText "/workspace") 3 root
+            visited <- reverse <$> readIORef visitedRef
+            result `shouldBe` Right (expectedTree, True)
+            visited `shouldBe` expectedVisited
 
     describe "renderTree" do
         it "does not insert blank lines after nested directories" do

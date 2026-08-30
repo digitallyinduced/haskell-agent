@@ -1,12 +1,14 @@
 module Agent.Tools.FileSystem.ListDir
     ( listDirTool
     , DirNode(..)
+    , ListDirOperations(..)
+    , collectDirWith
     , capNodes
     , renderTree
     ) where
 
 import Agent.Json.Decode (Decoder)
-import Agent.OsPath (fromText, toText)
+import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
@@ -15,7 +17,7 @@ import Agent.ToolDispatch
     , toolArgumentsValue
     , typedTool
     )
-import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
+import Agent.Tools.FileSystem.GitIgnore (ignoredPaths)
 import Agent.Tools.IO
     ( displayPathInWorkspace
     , listDirectoryEntries
@@ -35,6 +37,7 @@ import Agent.Tools.Types
     )
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesDirectoryExist, pathIsSymbolicLink)
@@ -93,11 +96,10 @@ runListDir env args = resolveForRead env (fromText args.targetDirectory) >>= \ca
             False -> pure $ Left $
                 "Error: " <> display <> " is not a valid directory"
             True ->
-                collectDir env.toolCwd path >>= \case
+                collectDir env.toolCwd maxListItems path >>= \case
                     Left err -> pure (Left err)
-                    Right entries -> do
-                        let (shown, truncated) = capNodes maxListItems entries
-                            tree = renderTree 0 shown
+                    Right (entries, truncated) -> do
+                        let tree = renderTree 0 entries
                             notice
                                 | truncated =
                                     "\nLarge directory summarized; some nested entries were omitted."
@@ -115,37 +117,136 @@ data DirNode
     | ErrorNode OsPath Text
     deriving (Eq, Show)
 
-collectDir :: OsPath -> OsPath -> IO (Either Text [DirNode])
-collectDir cwd path = do
-    listed <- listDirectoryEntries path
+data ListDirOperations = ListDirOperations
+    { readDirectoryEntries
+        :: OsPath -> IO (Either Text [(OsPath, Bool)])
+    , findIgnoredPaths
+        :: OsPath -> [OsPath] -> IO (Set.Set FilePath)
+    , isEntrySymbolicLink
+        :: OsPath -> IO Bool
+    }
+
+filesystemOperations :: ListDirOperations
+filesystemOperations = ListDirOperations
+    { readDirectoryEntries = listDirectoryEntries
+    , findIgnoredPaths = ignoredPaths
+    , isEntrySymbolicLink = pathIsSymbolicLink
+    }
+
+-- | Traverse only nodes that can appear in the result.  The old implementation
+-- built the complete tree and applied 'capNodes' afterwards, which meant a
+-- request for a large directory could scan millions of descendants despite the
+-- 200-node result limit.
+collectDir :: OsPath -> Int -> OsPath -> IO (Either Text ([DirNode], Bool))
+collectDir = collectDirWith filesystemOperations
+
+collectDirWith
+    :: ListDirOperations
+    -> OsPath
+    -> Int
+    -> OsPath
+    -> IO (Either Text ([DirNode], Bool))
+collectDirWith operations cwd budget path = do
+    visibleEntries operations cwd path >>= \case
+        Left err -> pure (Left err)
+        Right entries ->
+            Right <$> collectEntries operations cwd budget path entries
+
+visibleEntries
+    :: ListDirOperations
+    -> OsPath
+    -> OsPath
+    -> IO (Either Text [(OsPath, Bool)])
+visibleEntries operations cwd path = do
+    listed <- operations.readDirectoryEntries path
     case listed of
         Left err -> pure (Left err)
         Right raw -> do
-            let visible = sortOn fst
+            let candidates = sortOn fst
                     [ (name, isDir)
                     | (name, isDir) <- raw
                     , not ("." `Text.isPrefixOf` toText name)
                     ]
-            Right <$> (fmap concat $ mapM (toNode cwd path) visible)
+            ignored <-
+                operations.findIgnoredPaths cwd
+                    [path </> name | (name, _) <- candidates]
+            Right . foldr addVisible [] <$> traverse (classify ignored) candidates
+  where
+    classify ignored (name, isDir)
+        | Set.member (unsafeToFilePath (path </> name)) ignored = pure Nothing
+        | not isDir = pure (Just (name, False))
+        | otherwise = do
+            isLink <- operations.isEntrySymbolicLink (path </> name)
+            pure $ Just (name, not isLink)
 
-toNode :: OsPath -> OsPath -> (OsPath, Bool) -> IO [DirNode]
-toNode cwd parent (name, isDir) = do
+    addVisible (Just entry) entries = entry : entries
+    addVisible Nothing entries = entries
+
+collectEntries
+    :: ListDirOperations
+    -> OsPath
+    -> Int
+    -> OsPath
+    -> [(OsPath, Bool)]
+    -> IO ([DirNode], Bool)
+collectEntries operations cwd budget parent entries =
+    fillBounded operations cwd (max 0 budget) (length entries) parent entries
+
+-- | Preserve the existing sibling-reservation behavior while using the
+-- remaining result budget to decide whether to descend into a directory.
+fillBounded
+    :: ListDirOperations
+    -> OsPath
+    -> Int
+    -> Int
+    -> OsPath
+    -> [(OsPath, Bool)]
+    -> IO ([DirNode], Bool)
+fillBounded _ _ _ _ _ [] = pure ([], False)
+fillBounded _ _ remaining _ _ _ | remaining <= 0 = pure ([], True)
+fillBounded operations cwd remaining restCount parent (entry : rest) = do
+    let reserved = min (remaining - 1) (restCount - 1)
+        available = remaining - reserved
+    (node, nodeTruncated) <-
+        toNodeBounded operations cwd available parent entry
+    (more, restTruncated) <-
+        fillBounded operations cwd
+            (remaining - countNodes [node])
+            (restCount - 1)
+            parent
+            rest
+    pure (node : more, nodeTruncated || restTruncated)
+
+toNodeBounded
+    :: ListDirOperations
+    -> OsPath
+    -> Int
+    -> OsPath
+    -> (OsPath, Bool)
+    -> IO (DirNode, Bool)
+toNodeBounded _ _ _ _ (name, False) = pure (FileNode name, False)
+toNodeBounded operations cwd budget parent (name, True) = do
     let full = parent </> name
-    ignored <- isGitIgnored cwd full
-    if ignored
-        then pure []
-        else if not isDir
-            then pure [FileNode name]
-            else do
-                isLink <- pathIsSymbolicLink full
-                if isLink
-                    then pure [FileNode name]
-                    else
-                        collectDir cwd full >>= \case
-                            Left err ->
-                                pure [ErrorNode name err]
-                            Right children ->
-                                pure [summarizeDir name children]
+    visibleEntries operations cwd full >>= \case
+        Left err -> pure (ErrorNode name err, False)
+        Right entries
+            | isLargeFlatDirectory entries ->
+                pure (summarizedDirectory name entries, False)
+            | otherwise -> do
+                (children, truncated) <-
+                    collectEntries operations cwd
+                        (max 0 (budget - 1))
+                        full
+                        entries
+                pure (DirectoryNode name children, truncated)
+
+isLargeFlatDirectory :: [(OsPath, Bool)] -> Bool
+isLargeFlatDirectory entries =
+    length entries > 20 && all (not . snd) entries
+
+summarizedDirectory :: OsPath -> [(OsPath, Bool)] -> DirNode
+summarizedDirectory name entries =
+    summarizeDir name [FileNode child | (child, _) <- entries]
 
 -- | Keep as many nodes as @budget@ allows. A directory that does not fit in
 -- full is included as a stub (and maybe a truncated child list) rather than
