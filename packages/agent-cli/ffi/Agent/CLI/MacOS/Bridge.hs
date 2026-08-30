@@ -1025,25 +1025,14 @@ ha_repository_delivery_status pathBytes pathLength snapshotBytes snapshotLength
                         (emitDeliveryOnce terminal $
                             emitDeliveryStatusFailure callback context (-3)
                                 "repository delivery was cancelled") $
-                        tryRepositorySynchronous
+                        prepareDeliveryResult terminal
                             (RepositoryDelivery.repositoryDeliveryStatus
                                 (Text.unpack path)
-                                snapshot) >>= \case
-                                    Left _ ->
-                                        emitDeliveryOnce terminal $
-                                            emitDeliveryStatusFailure
-                                            callback context (-1)
-                                            "repository delivery failed"
-                                    Right (Left err) ->
-                                        emitDeliveryOnce terminal $
-                                            emitDeliveryStatusFailure
-                                            callback context
-                                            (deliveryErrorStatus err)
-                                            (RepositoryDelivery.deliveryErrorText err)
-                                    Right (Right status) ->
-                                        emitDeliveryOnce terminal $
-                                            emitDeliveryStatus
-                                                callback context status
+                                snapshot)
+                            (emitDeliveryStatusFailure callback context (-1)
+                                "repository delivery failed")
+                            (emitDeliveryStatusFailure callback context)
+                            (emitDeliveryStatus callback context)
                     pure (if started then 0 else 3)
                 _ -> pure 2
 
@@ -1065,25 +1054,14 @@ ha_repository_push_preview pathBytes pathLength snapshotBytes snapshotLength
                         (emitDeliveryOnce terminal $
                             emitPushPreviewFailure callback context (-3)
                                 "repository push preview was cancelled") $
-                        tryRepositorySynchronous
+                        prepareDeliveryResult terminal
                             (RepositoryDelivery.previewRepositoryPush
                                 (Text.unpack path)
-                                snapshot) >>= \case
-                                    Left _ ->
-                                        emitDeliveryOnce terminal $
-                                            emitPushPreviewFailure
-                                            callback context (-1)
-                                            "repository push preview failed"
-                                    Right (Left err) ->
-                                        emitDeliveryOnce terminal $
-                                            emitPushPreviewFailure
-                                            callback context
-                                            (deliveryErrorStatus err)
-                                            (RepositoryDelivery.deliveryErrorText err)
-                                    Right (Right preview) ->
-                                        emitDeliveryOnce terminal $
-                                            emitPushPreview
-                                                callback context preview
+                                snapshot)
+                            (emitPushPreviewFailure callback context (-1)
+                                "repository push preview failed")
+                            (emitPushPreviewFailure callback context)
+                            (emitPushPreview callback context)
                     pure (if started then 0 else 3)
                 _ -> pure 2
 
@@ -1105,23 +1083,14 @@ ha_repository_push_confirm pathBytes pathLength tokenBytes tokenLength
                         (emitDeliveryOnce terminal $
                             emitPushResultFailure callback context (-3)
                                 "repository push was cancelled") $
-                        tryRepositorySynchronous
+                        prepareDeliveryResult terminal
                             (RepositoryDelivery.confirmRepositoryPush
                                 (Text.unpack path)
-                                token) >>= \case
-                                    Left _ ->
-                                        emitDeliveryOnce terminal $
-                                            emitPushResultFailure
-                                            callback context (-1)
-                                            "repository push failed"
-                                    Right (Left err) ->
-                                        emitDeliveryOnce terminal $
-                                            emitPushResultFailure
-                                            callback context
-                                            (deliveryErrorStatus err)
-                                            (RepositoryDelivery.deliveryErrorText err)
-                                    Right (Right status) ->
-                                        emitDeliveryOnce terminal $
+                                token)
+                            (emitPushResultFailure callback context (-1)
+                                "repository push failed")
+                            (emitPushResultFailure callback context)
+                            (\status ->
                                         withText status.deliverySnapshotId
                                             \snapshotPtr snapshotSize ->
                                         withText status.deliveryHeadOid
@@ -1130,7 +1099,7 @@ ha_repository_push_confirm pathBytes pathLength tokenBytes tokenLength
                                                     callback context 0
                                                     snapshotPtr snapshotSize
                                                     headPtr headSize
-                                                    nullPtr 0
+                                                    nullPtr 0)
                     pure (if started then 0 else 3)
                 _ -> pure 2
 
@@ -1164,25 +1133,15 @@ ha_repository_pr_preview pathBytes pathLength snapshotBytes snapshotLength
                             emitPullRequestPreviewFailure
                                 callback context (-3)
                                 "pull-request preview was cancelled") $
-                        tryRepositorySynchronous
+                        prepareDeliveryResult terminal
                             (RepositoryDelivery.previewPullRequest
                                 (Text.unpack path)
-                                snapshot base title body) >>= \case
-                                    Left _ ->
-                                        emitDeliveryOnce terminal $
-                                            emitPullRequestPreviewFailure
-                                            callback context (-1)
-                                            "pull-request preview failed"
-                                    Right (Left err) ->
-                                        emitDeliveryOnce terminal $
-                                            emitPullRequestPreviewFailure
-                                            callback context
-                                            (deliveryErrorStatus err)
-                                            (RepositoryDelivery.deliveryErrorText err)
-                                    Right (Right preview) ->
-                                        emitDeliveryOnce terminal $
-                                            emitPullRequestPreview
-                                            callback context preview
+                                snapshot base title body)
+                            (emitPullRequestPreviewFailure
+                                callback context (-1)
+                                "pull-request preview failed")
+                            (emitPullRequestPreviewFailure callback context)
+                            (emitPullRequestPreview callback context)
                     pure (if started then 0 else 3)
                 _ -> pure 2
 
@@ -1204,27 +1163,18 @@ ha_repository_pr_confirm pathBytes pathLength tokenBytes tokenLength
                         (emitDeliveryOnce terminal $
                             emitPullRequestResultFailure callback context (-3)
                                 "pull-request creation was cancelled") $
-                        tryRepositorySynchronous
+                        prepareDeliveryResult terminal
                             (RepositoryDelivery.createPullRequest
                                 (Text.unpack path)
-                                token) >>= \case
-                                    Left _ ->
-                                        emitDeliveryOnce terminal $
-                                            emitPullRequestResultFailure
-                                            callback context (-1)
-                                            "pull-request creation failed"
-                                    Right (Left err) ->
-                                        emitDeliveryOnce terminal $
-                                            emitPullRequestResultFailure
-                                            callback context
-                                            (deliveryErrorStatus err)
-                                            (RepositoryDelivery.deliveryErrorText err)
-                                    Right (Right url) ->
-                                        emitDeliveryOnce terminal $
+                                token)
+                            (emitPullRequestResultFailure callback context (-1)
+                                "pull-request creation failed")
+                            (emitPullRequestResultFailure callback context)
+                            (\url ->
                                         withText url \urlPtr urlSize ->
                                             invokeRepositoryPullRequestResultCallback
                                                 callback context 0
-                                                urlPtr urlSize nullPtr 0
+                                                urlPtr urlSize nullPtr 0)
                     pure (if started then 0 else 3)
                 _ -> pure 2
 
@@ -1773,6 +1723,26 @@ emitDeliveryOnce terminal callback =
         shouldRun <- modifyMVar terminal \completed ->
             pure (True, not completed)
         when shouldRun callback
+
+prepareDeliveryResult
+    :: MVar Bool
+    -> IO (Either RepositoryDelivery.DeliveryError value)
+    -> IO ()
+    -> (CInt -> Text -> IO ())
+    -> (value -> IO ())
+    -> IO (IO ())
+prepareDeliveryResult terminal operation unexpectedFailure knownFailure success =
+    tryRepositorySynchronous operation >>= \case
+        Left _ ->
+            pure (emitDeliveryOnce terminal unexpectedFailure)
+        Right (Left err) ->
+            pure
+                (emitDeliveryOnce terminal $
+                    knownFailure
+                        (deliveryErrorStatus err)
+                        (RepositoryDelivery.deliveryErrorText err))
+        Right (Right value) ->
+            pure (emitDeliveryOnce terminal (success value))
 
 emitDeliveryStatus
     :: FunPtr RepositoryDeliveryStatusCallback
