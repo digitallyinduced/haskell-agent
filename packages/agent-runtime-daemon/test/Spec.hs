@@ -946,6 +946,43 @@ main = hspec $ do
                 BS.readFile (directory </> "events.jsonl")
                     >>= (`shouldSatisfy` (not . BS.isInfixOf rawBytes))
 
+        it "redacts repeated maximum prompts before bounding custom runner logs" $
+            withSystemTempDirectory "daemon-custom-runner-redaction" $ \directory -> do
+                let rawPrompt = Text.replicate 8_192 "x"
+                    runner =
+                        TaskRunner
+                            { runTask = \task logLine -> do
+                                logLine (task.description <> task.description)
+                                threadDelay 100_000
+                                pure (Right ())
+                            }
+                journal <- openJournal (defaultJournalConfig directory)
+                withTaskAdapter journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit-repeated-redaction")
+                        (object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("submit" :: Text)
+                            , "task_id" .= ("repeated-redaction" :: Text)
+                            , "prompt" .= rawPrompt
+                            , "cwd" .= ("/tmp" :: Text)
+                            ])
+                        >>= shouldSucceed
+                    waitForStatus
+                        journal
+                        (TaskId "repeated-redaction")
+                        TaskCompleted
+                saved <- snapshot journal
+                let retained =
+                        Text.concat
+                            (saved.tasks Map.! TaskId "repeated-redaction").logTail
+                retained
+                    `shouldNotSatisfy`
+                        Text.isInfixOf (Text.replicate 128 "x")
+                retained
+                    `shouldSatisfy`
+                        Text.isInfixOf "[task input redacted]"
+
         it "retains failed input for one-process retry and discards it after completion" $
             withSystemTempDirectory "daemon-task-input-lifetime" $ \directory -> do
                 received <- newTQueueIO
@@ -1042,6 +1079,23 @@ main = hspec $ do
                 captured `shouldSatisfy` (not . null)
                 map Text.length captured `shouldSatisfy` all (<= 4_096)
                 sum (map Text.length captured) `shouldBe` 20_000
+                let longPrompt =
+                        Text.replicate 500 "sensitive"
+                            <> "\n"
+                            <> Text.replicate 500 "private"
+                    longTask = task {description = longPrompt}
+                writeFile executable "#!/bin/sh\nprintf '%s\\n' \"$2\"\n"
+                redactedChunks <- newTQueueIO
+                (processTaskRunnerFor executable).runTask longTask
+                    (atomically . writeTQueue redactedChunks)
+                    `shouldReturn` Right ()
+                redacted <- Text.concat <$> atomically (flushTQueue redactedChunks)
+                redacted
+                    `shouldNotSatisfy`
+                        Text.isInfixOf (Text.replicate 500 "sensitive")
+                redacted
+                    `shouldSatisfy`
+                        Text.isInfixOf "[task input redacted]"
                 writeFile executable "#!/bin/sh\nsleep 30\n"
                 timeout
                     4_000_000
@@ -1052,6 +1106,14 @@ main = hspec $ do
                     5_000_000
                     ((processTaskRunnerForWithTimeout 10 executable).runTask task (const (pure ())))
                     `shouldReturn` Just (Right ())
+                writeFile executable $
+                    "#!/bin/sh\n"
+                        <> "dd if=/dev/zero bs=1048576 count=40 2>/dev/null\n"
+                        <> "dd if=/dev/zero bs=1048576 count=40 1>&2 2>/dev/null\n"
+                timeout
+                    20_000_000
+                    ((processTaskRunnerFor executable).runTask task (const (pure ())))
+                    `shouldThrow` anyException
 
         it "bounds task-runner output in the durable journal" $
             withSystemTempDirectory "daemon-runner-log-bound" $ \directory -> do

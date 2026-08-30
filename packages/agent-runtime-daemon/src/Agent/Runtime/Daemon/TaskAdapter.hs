@@ -477,13 +477,27 @@ startRunnable journal runner commands completions registry state = do
                                     , updatedAt = persisted.updatedAt
                                     , logTail = persisted.logTail
                                     }
-                worker <- launchWorker commands completions runner executionTask
+                worker <-
+                    launchWorker
+                        commands
+                        completions
+                        runner
+                        executionTask
+                        $ \registered ->
+                            atomically $
+                                modifyTVar'
+                                    registry
+                                    (Map.insert
+                                        taskId
+                                        RunningTask
+                                            { runningAttempt = persisted.attempt
+                                            , runningWorker = registered
+                                            })
                 let runningTask =
                         RunningTask
                             { runningAttempt = persisted.attempt
                             , runningWorker = worker
                             }
-                atomically $ modifyTVar' registry (Map.insert taskId runningTask)
                 pure
                     ( Map.insert taskId persisted tasks
                     , Map.insert taskId runningTask running
@@ -494,8 +508,9 @@ launchWorker ::
     TQueue AdapterMessage ->
     TaskRunner ->
     DurableTask ->
+    (Async () -> IO ()) ->
     IO (Async ())
-launchWorker commands completions runner task =
+launchWorker commands completions runner task register =
     mask $ \_ -> do
         gate <- newEmptyMVar
         logTruncated <- newTVarIO False
@@ -510,16 +525,37 @@ launchWorker commands completions runner task =
                         writeTQueue completions
                             (TaskFinished task.taskId task.attempt (redactFailure outcome))
                 logged line =
-                    atomically $ do
+                    let prefixLimit =
+                            4_096
+                                + max 0 (Text.length task.description - 1)
+                        (inputPrefix, inputRemainder) =
+                            Text.splitAt prefixLimit line
+                        (redactedBytes, _) =
+                            redactSensitiveBytes
+                                (Text.null inputRemainder)
+                                (TextEncoding.encodeUtf8 task.description)
+                                (TextEncoding.encodeUtf8 inputPrefix)
+                        redactedLine =
+                            TextEncoding.decodeUtf8With
+                                lenientDecode
+                                redactedBytes
+                        boundedLine = Text.take 4_096 redactedLine
+                        lineTruncated =
+                            not (Text.null inputRemainder)
+                                || not
+                                    (Text.null
+                                        (Text.drop 4_096 redactedLine))
+                    in atomically $ do
                         accepted <-
                             tryWriteTBQueueCompat
                                 commands
                                 ( TaskLogged
                                     task.taskId
                                     task.attempt
-                                    (redactTaskInput task.description line)
+                                    boundedLine
                                 )
-                        unless accepted (writeTVar logTruncated True)
+                        when (lineTruncated || not accepted)
+                            (writeTVar logTruncated True)
             result <-
                 tryAny
                     ( unmask $
@@ -531,7 +567,8 @@ launchWorker commands completions runner task =
                     | otherwise ->
                         finished (Left (Text.pack (show exception)))
                 Right value -> finished value
-        putMVar gate ()
+        (register worker >> putMVar gate ())
+            `onException` cancel worker
         pure worker
   where
     redactFailure = \case
@@ -674,8 +711,13 @@ runProcessTask runtimeSeconds executable task logLine = do
                 pure (stdoutHandle, stderrHandle, process)
             _ -> fail "failed to capture agent-cli output"
     processGroup <- getPid process
+    totalOutputBytes <- newTVarIO 0
     let terminate = terminateProcessGroup processGroup process
-        consume = consumeBoundedOutput logLine
+        consume =
+            consumeBoundedOutput
+                totalOutputBytes
+                task.description
+                logLine
         closeHandles = hClose stdoutHandle `finally` hClose stderrHandle
         runAndDrain =
             withAsync
@@ -714,18 +756,38 @@ processTaskArguments task =
         <> maybe [] (\value -> ["--effort", Text.unpack value]) task.effort
         <> ["--worktree" | task.worktree]
 
-consumeBoundedOutput :: (Text -> IO ()) -> Handle -> IO ()
-consumeBoundedOutput logChunk handle = go 0 BS.empty
+consumeBoundedOutput
+    :: TVar Int
+    -> Text
+    -> (Text -> IO ())
+    -> Handle
+    -> IO ()
+consumeBoundedOutput totalOutputBytes sensitiveText logChunk handle =
+    go BS.empty BS.empty
   where
-    go total pending = do
+    sensitiveBytes = TextEncoding.encodeUtf8 sensitiveText
+    go redactionPending outputPending = do
         bytes <- BS.hGetSome handle 4_096
-        let nextTotal = total + BS.length bytes
-        when (nextTotal > maxTaskOutputBytes) $
-            ioError (userError "daemon task output exceeded 64 MiB")
-        let buffered = pending <> bytes
+        atomically $ do
+            total <- readTVar totalOutputBytes
+            let nextTotal = total + BS.length bytes
+            when (nextTotal > maxTaskOutputBytes) $
+                throwSTM (userError "daemon task output exceeded 64 MiB")
+            writeTVar totalOutputBytes nextTotal
         if BS.null bytes
-            then unless (BS.null buffered) (emit buffered)
-            else drain buffered >>= go nextTotal
+            then do
+                let (redacted, _) =
+                        redactSensitiveBytes True sensitiveBytes redactionPending
+                    buffered = outputPending <> redacted
+                remainder <- drain buffered
+                unless (BS.null remainder) (emit remainder)
+            else do
+                let (redacted, retained) =
+                        redactSensitiveBytes
+                            False
+                            sensitiveBytes
+                            (redactionPending <> bytes)
+                drain (outputPending <> redacted) >>= go retained
     drain buffered =
         let candidate = BS.take 4_096 buffered
          in case BS.elemIndex 10 candidate of
@@ -738,6 +800,36 @@ consumeBoundedOutput logChunk handle = go 0 BS.empty
                         drain (BS.drop 4_096 buffered)
                     | otherwise -> pure buffered
     emit = logChunk . TextEncoding.decodeUtf8With lenientDecode
+
+redactSensitiveBytes
+    :: Bool
+    -> BS.ByteString
+    -> BS.ByteString
+    -> (BS.ByteString, BS.ByteString)
+redactSensitiveBytes final sensitive = go []
+  where
+    sensitiveLength = BS.length sensitive
+    redactedBytes = TextEncoding.encodeUtf8 redactedTaskDescription
+    go chunks remaining
+        | BS.null sensitive = (remaining, BS.empty)
+        | otherwise =
+            case BS.breakSubstring sensitive remaining of
+                (prefix, suffix)
+                    | not (BS.null suffix) ->
+                        go
+                            (redactedBytes : prefix : chunks)
+                            (BS.drop sensitiveLength suffix)
+                    | final ->
+                        (BS.concat (reverse (prefix : chunks)), BS.empty)
+                    | otherwise ->
+                        let retainedLength =
+                                min
+                                    (max 0 (sensitiveLength - 1))
+                                    (BS.length prefix)
+                            emittedLength = BS.length prefix - retainedLength
+                            emitted = BS.take emittedLength prefix
+                            retained = BS.drop emittedLength prefix
+                        in (BS.concat (reverse (emitted : chunks)), retained)
 
 maxTaskOutputBytes :: Int
 maxTaskOutputBytes = 64 * 1024 * 1024
