@@ -30,6 +30,7 @@ import Agent.Codex.Dialect.Runtime
     )
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.CodeMode.Tool (ToolMode(..))
+import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -92,6 +93,17 @@ spec = describe "schemasFromAppTools" do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
+
+    it "disables strict mode for grep while keeping path optional" do
+        env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
+        case schemasFromAppTools codexDialect [grepTool env] of
+            [_, FunctionToolValue tool] -> do
+                tool.name `shouldBe` "grep"
+                tool.strict `shouldBe` Just False
+                required_ tool `shouldBe` Just ["pattern"]
+                propertyNames tool `shouldContain` ["path"]
+            other -> expectationFailure
+                ("expected non-strict grep function tool, got " <> show other)
 
     it "keeps shell_command workdir optional in direct and code-only mode" do
         env <- defaultToolEnv (unsafeEncodeUtf "/tmp")

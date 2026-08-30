@@ -11,6 +11,7 @@ module Agent.Tools.Types
     , setToolSkillRoots
     , setToolSessionTmp
     , jsonTool
+    , nonStrictJsonTool
     , jsonAppTool
     , jsonAppToolWithExecution
     , rawJsonAppTool
@@ -64,6 +65,9 @@ import System.OsPath
 -- meaningless JSON parameters.
 data ToolSchema
     = JsonFunctionSchema ![PropertySchema]
+    -- | A JSON function whose provider-side strict schema validation must be
+    -- disabled. Optional properties remain genuinely optional on the wire.
+    | NonStrictJsonFunctionSchema ![PropertySchema]
     | RawJsonFunctionSchema !Value
     | FreeformApplyPatchSchema
     -- | Freeform custom tool with an explicit provider grammar
@@ -192,6 +196,19 @@ jsonTool name description parameters readOnly execution =
     jsonAppToolWithExecution name description parameters
         (if readOnly then AlwaysReadOnly else AlwaysPrompt)
         execution
+
+-- | Construct a JSON tool that explicitly opts out of provider strict mode.
+nonStrictJsonTool
+    :: Text
+    -> Text
+    -> [PropertySchema]
+    -> Bool
+    -> ToolExecutionPolicy
+    -> ToolHandler
+    -> AppTool
+nonStrictJsonTool name description parameters readOnly execution handler =
+    (jsonTool name description parameters readOnly execution handler)
+        { appToolSchema = NonStrictJsonFunctionSchema parameters }
 
 -- | Construct a JSON tool with the conservative turn-sequential default.
 jsonAppTool
@@ -384,6 +401,7 @@ dispatchRegisteredToolCall config registry call =
 jsonToolParameters :: AppTool -> Maybe [PropertySchema]
 jsonToolParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> Just parameters
+    NonStrictJsonFunctionSchema parameters -> Just parameters
     RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
     FreeformGrammarSchema _ _ -> Nothing

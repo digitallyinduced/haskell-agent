@@ -516,6 +516,7 @@
                                                 pkgs.ffmpeg
                                                 bun_1_4
                                                 pkgs.postgresql_18
+                                                pkgs.ripgrep
                                                 haskellPackages.ghc
                                             ]}"
                                 '';
