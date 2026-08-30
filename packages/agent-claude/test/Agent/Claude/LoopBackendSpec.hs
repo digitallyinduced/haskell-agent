@@ -499,7 +499,7 @@ spec = do
                                 (\_ -> pure ())
                         result `shouldSatisfy` \case
                             Just (Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 }) ->
                                     "login expired" `Text.isInfixOf` message
@@ -531,7 +531,7 @@ spec = do
                                     modifyIORef' events (<> [event]))
                         result `shouldSatisfy` \case
                             Just (Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 }) ->
                                     "non-subscription credential source"
@@ -995,7 +995,7 @@ spec = do
                                 turns
                         failed `shouldSatisfy` \case
                             Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 } ->
                                     "login expired"
