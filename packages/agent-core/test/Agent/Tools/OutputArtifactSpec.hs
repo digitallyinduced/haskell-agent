@@ -202,15 +202,24 @@ spec = describe "Agent.Tools.OutputArtifact" do
         withTempEnv \env -> do
             let names = map (.appToolName)
                 childNames = names (artifactTools env Nothing)
-                rootNames = names
-                    (artifactTools env
-                        (Just (\_ _ _ -> pure (Right "spawned"))))
+                rootTools = artifactTools env
+                    (Just (\_ _ _ -> pure (Right "spawned")))
+                rootNames = names rootTools
             childNames `shouldBe`
                 ["read_tool_output", "search_tool_output"]
             rootNames `shouldBe`
                 [ "read_tool_output"
                 , "search_tool_output"
                 , "analyze_tool_output"
+                ]
+            let analysisDescriptions =
+                    [ tool.appToolDescription
+                    | tool <- rootTools
+                    , tool.appToolName == "analyze_tool_output"
+                    ]
+            analysisDescriptions `shouldBe`
+                [ "Spawn a tracked child agent to analyze an oversized tool-output artifact. \
+                \Use wait_agent for its report."
                 ]
 
 listArtifactHandles :: Text.Text -> IO [Text.Text]
