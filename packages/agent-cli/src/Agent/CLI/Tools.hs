@@ -24,12 +24,12 @@ import Agent.Dialect
     , dialectToolLayout
     , grokBuildPublicToolName
     )
-import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.OpenAI.ImageGeneration
     ( imageGenerationNamespace
     , imageGenerationNamespaceDescription
     , imageGenerationToolName
     )
+import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)

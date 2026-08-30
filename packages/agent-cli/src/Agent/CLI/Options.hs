@@ -181,6 +181,7 @@ defaultEffortFor = \case
     XAIProvider -> EffortHigh
     OpenAIProvider -> EffortMedium
     OpenRouterProvider -> EffortMedium
+    GeminiProvider -> EffortMedium
     ClaudeCodeProvider -> EffortXHigh
 
 isOneShot :: CliOptions -> Bool
@@ -359,7 +360,7 @@ runOptionsParser =
 optionUpdateParser :: Options.Parser OptionUpdate
 optionUpdateParser = asum
     [ optionUpdate "provider" "NAME"
-        "Provider: openai, xai, openrouter, or claude-code"
+        "Provider: openai, xai, openrouter, gemini, or claude-code"
         providerReader (\value options -> options { optProvider = Just value })
     , optionUpdate "model" "NAME" "Override the saved last model"
         textReader (\value options -> options { optModel = Just value })
@@ -496,7 +497,7 @@ providerReader = Options.eitherReader \value ->
         Just provider -> Right provider
         Nothing -> Left
             ("unknown provider: " <> value
-                <> " (use openai, xai, openrouter, or claude-code)")
+                <> " (use openai, xai, openrouter, gemini, or claude-code)")
 
 positiveIntReader :: String -> Options.ReadM Int
 positiveIntReader flag =
@@ -583,7 +584,7 @@ usage = unlines
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
-    , "      --provider NAME     openai, xai, openrouter, or claude-code"
+    , "      --provider NAME     openai, xai, openrouter, gemini, or claude-code"
     , "                          (default: detect from API/OAuth auth)"
     , "      --model NAME        Override the saved last model"
     , "      --cwd DIR           Working directory for tools (default: current)"
@@ -632,7 +633,7 @@ usage = unlines
     , "Ctrl+O is the fallback when the terminal cannot distinguish Ctrl+Enter."
     , "With an empty composer, send-now promotes the oldest queued prompt."
     , "/compact [FOCUS] summarizes history (OpenAI remote compact;"
-    , "Claude Code/xAI/OpenRouter local summary) to free context."
+    , "Claude Code/xAI/OpenRouter/Gemini local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"
     , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
     , "/btw <QUESTION> asks a one-shot side question without changing or"
@@ -655,7 +656,7 @@ usage = unlines
     , "drops them. Linux uses wl-paste/xclip."
     , "with an optional caption. /session prints the current session id."
     , "/clear resets the live conversation; /new starts a fresh session id."
-    , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
+    , "/reload-auth forces a re-read of xAI/OpenRouter/Gemini credentials;"
     , "auth failures also reload once and retry automatically."
     , "Ctrl-D or :q exits. Graceful exits print a --resume command when a"
     , "session has been persisted."

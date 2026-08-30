@@ -76,6 +76,17 @@
                     ];
                 };
 
+                agentGeminiSource = nix-filter.lib {
+                    root = ./packages/agent-gemini;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-gemini.cabal"
+                        "README.md"
+                        "LICENSE"
+                    ];
+                };
+
                 agentProcessSource = nix-filter.lib {
                     root = ./packages/agent-process;
                     include = [
@@ -281,8 +292,8 @@
                 skylightingSyntaxDirectory =
                     "${skylightingSyntaxes}/share/skylighting/xml";
 
-                mkHaskellPackages = checkLocalPackages:
-                    pkgs.haskellPackages.extend (
+                mkHaskellPackages = baseHaskellPackages: checkLocalPackages:
+                    baseHaskellPackages.extend (
                     final: previous:
                     let
                         # User-facing builds only need the statically linked
@@ -433,6 +444,9 @@
                         agent-openrouter = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
                         });
+                        agent-gemini = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-gemini/package.nix { }) {
+                            src = agentGeminiSource;
+                        });
                         claude-agent-sdk-haskell = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
                             src = claudeAgentSdkHaskellSource;
                         });
@@ -476,8 +490,14 @@
                     }
                 );
 
-                haskellPackages = mkHaskellPackages true;
-                productionHaskellPackages = mkHaskellPackages false;
+                haskellPackages = mkHaskellPackages pkgs.haskellPackages true;
+                productionHaskellPackages =
+                    mkHaskellPackages pkgs.haskellPackages false;
+                staticHaskellPackages =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        mkHaskellPackages pkgs.pkgsStatic.haskellPackages false
+                    else
+                        null;
                 agentCorePackage = productionHaskellPackages.agent-core;
                 agentMcpPackage = productionHaskellPackages.agent-mcp;
                 agentJsonPackage = productionHaskellPackages.agent-json;
@@ -490,12 +510,19 @@
                 agentOpenaiPackage = productionHaskellPackages.agent-openai;
                 agentXaiPackage = productionHaskellPackages.agent-xai;
                 agentOpenrouterPackage = productionHaskellPackages.agent-openrouter;
+                agentGeminiPackage = productionHaskellPackages.agent-gemini;
                 claudeAgentSdkHaskellPackage = productionHaskellPackages.claude-agent-sdk-haskell;
                 agentClaudePackage = productionHaskellPackages.agent-claude;
                 agentTuiPackage = productionHaskellPackages.agent-tui;
                 agentStorePackage = productionHaskellPackages.agent-store;
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
+                agentCliStaticExecutable =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        pkgs.haskell.lib.justStaticExecutables
+                            staticHaskellPackages.agent-cli
+                    else
+                        agentCliExecutable;
                 agentCliExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
                         (old: {
@@ -516,6 +543,7 @@
                                                 pkgs.ffmpeg
                                                 bun_1_4
                                                 pkgs.postgresql_18
+                                                pkgs.ripgrep
                                                 haskellPackages.ghc
                                             ]}"
                                 '';
@@ -658,7 +686,11 @@
                 '';
             in
             {
-                packages.default = agentCliExecutable;
+                # Linux users get fully static musl executables rather than
+                # the tool-bundled package's multi-gigabyte runtime closure.
+                # The native wrapped build remains available as `agent-cli`.
+                packages.default = agentCliStaticExecutable;
+                packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-core = agentCorePackage;
@@ -676,6 +708,7 @@
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
                 packages.agent-openrouter = agentOpenrouterPackage;
+                packages.agent-gemini = agentGeminiPackage;
                 packages.claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
                 packages.agent-claude = agentClaudePackage;
                 packages.agent-openai-login = agentOpenaiExecutables;
@@ -711,6 +744,7 @@
                         packages.agent-openai
                         packages.agent-xai
                         packages.agent-openrouter
+                        packages.agent-gemini
                         packages.claude-agent-sdk-haskell
                         packages.agent-claude
                     ];
@@ -762,6 +796,7 @@
                     agent-openai = haskellPackages.agent-openai;
                     agent-xai = haskellPackages.agent-xai;
                     agent-openrouter = haskellPackages.agent-openrouter;
+                    agent-gemini = haskellPackages.agent-gemini;
                     claude-agent-sdk-haskell =
                         haskellPackages.claude-agent-sdk-haskell;
                     agent-claude = haskellPackages.agent-claude;

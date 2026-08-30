@@ -38,6 +38,7 @@ data Provider
     = OpenAIProvider
     | XAIProvider
     | OpenRouterProvider
+    | GeminiProvider
     | ClaudeCodeProvider
     deriving (Eq, Ord, Show)
 
@@ -46,6 +47,7 @@ providerSlug = \case
     OpenAIProvider -> "openai"
     XAIProvider -> "xai"
     OpenRouterProvider -> "openrouter"
+    GeminiProvider -> "gemini"
     ClaudeCodeProvider -> "claude-code"
 
 parseProvider :: Text -> Maybe Provider
@@ -53,6 +55,8 @@ parseProvider = \case
     "openai" -> Just OpenAIProvider
     "xai" -> Just XAIProvider
     "openrouter" -> Just OpenRouterProvider
+    "gemini" -> Just GeminiProvider
+    "google" -> Just GeminiProvider
     "claude-code" -> Just ClaudeCodeProvider
     "claude" -> Just ClaudeCodeProvider
     _ -> Nothing
@@ -190,9 +194,7 @@ accountFailureFromApiError err = case err of
     ProviderError UsageLimitReached _ _ -> rateLimited
     ProviderError UsageBalanceExhausted _ _ -> rateLimited
     HttpError 401 _ -> authenticationRejected
-    HttpError 403 _ -> authenticationRejected
     ProviderError AuthenticationError _ _ -> authenticationRejected
-    CredentialError{} -> authenticationRejected
     _ -> Nothing
   where
     rateLimited = Just $ AccountRateLimited (apiErrorRetryAfter err)

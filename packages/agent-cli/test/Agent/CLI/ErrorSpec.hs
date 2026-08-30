@@ -4,6 +4,7 @@ import Agent.CLI.Error
 import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
+    , CredentialRefreshFailure(..)
     , ErrorType(..)
     , credentialsExhausted
     )
@@ -157,6 +158,11 @@ spec = do
                                 Just AuthenticationError
                             , exhaustionStatusCode = Just 401
                             }
+                        , ExhaustedByCredentialRefresh
+                            { refreshFailure = RefreshTransportFailed
+                            , exhaustionErrorType = Nothing
+                            , exhaustionStatusCode = Nothing
+                            }
                         ]
                     }
             rendered `shouldSatisfy`
@@ -164,6 +170,10 @@ spec = do
             rendered `shouldSatisfy`
                 Text.isInfixOf "type usage_limit_reached"
             rendered `shouldSatisfy` Text.isInfixOf "HTTP 401"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "credential refresh transport failed"
+            rendered `shouldNotSatisfy`
+                Text.isInfixOf "authentication rejected or credential refresh failed"
 
         it "bounds and sanitizes provider detail text" do
             let rendered =
@@ -257,6 +267,10 @@ internalNames =
     , "CredentialError"
     , "ConnectionError"
     , "CredentialsExhausted"
+    , "ExhaustedByCredentialRefresh"
+    , "RefreshCredentialSourceFailed"
+    , "RefreshTransportFailed"
+    , "RefreshProviderFailed"
     , "InvalidRequestError"
     , "AuthenticationError"
     , "PermissionError"

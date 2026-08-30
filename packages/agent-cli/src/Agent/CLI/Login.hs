@@ -21,6 +21,7 @@ module Agent.CLI.Login
     , initialLoginState
     , loginAccountActionRows
     , loginAccountDetail
+    , launchBrowserCommand
     , loginAccountSelectionId
     , loginDashboardRows
     , refreshLoginAccount
@@ -39,6 +40,10 @@ import Agent.CLI.Auth
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , xaiOAuthClientId
+    )
+import Agent.CLI.Auth.Gemini
+    ( geminiAuthStateFromJson
+    , geminiAuthStateToJson
     )
 import Agent.CLI.Auth.Grok (refreshGrokLoginPayload)
 import Agent.CLI.Login.Types
@@ -95,6 +100,7 @@ import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (toText, unsafeToFilePath)
 import qualified Agent.OpenAI.Usage as OpenAI
 import qualified Agent.OpenRouter.Usage as OpenRouter
+import qualified Agent.Gemini.Auth as GeminiAuth
 import Agent.Provider
     ( BillingMode(..)
     , Credential(..)
@@ -115,7 +121,7 @@ import Control.Concurrent.Async
     )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Exception.Safe (bracket, bracket_, tryAny)
-import Control.Monad (join, void)
+import Control.Monad (join, unless, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isControl)
@@ -142,6 +148,12 @@ import System.IO
     , hSetEcho
     , stderr
     , stdin
+    )
+import System.Process
+    ( CreateProcess(..)
+    , StdStream(NoStream)
+    , createProcess
+    , proc
     )
 
 runLoginManager :: Bool -> IO ()
@@ -348,7 +360,9 @@ loginDashboardEntries
     -> [(LoginDashboardAction, (Text, Text))]
 loginDashboardEntries accounts =
     [ ( LoginDashboardConnect
-      , ("＋ Connect account", "OpenAI, xAI / Grok, OpenRouter, or Claude Code")
+      , ( "＋ Connect account"
+        , "OpenAI, xAI / Grok, OpenRouter, Google Gemini, or Claude Code"
+        )
       )
     ]
         <> refreshEntry
@@ -658,7 +672,12 @@ discoverLoginAccounts = do
     pure (nubOrdOn loginAccountKey accounts)
   where
     loginAccountKey account =
-        (account.loginProvider, account.loginAccountId)
+        ( account.loginProvider
+        , case (account.loginProvider, account.loginManagedId) of
+            (GeminiProvider, Just managedId) ->
+                managedAuthSelectionId managedId
+            _ -> account.loginAccountId
+        )
 
 -- | Accounts that can be selected in a live session. Unlike the login
 -- dashboard, disabled managed entries do not shadow usable external sources,
@@ -688,6 +707,7 @@ discoverLoginAccountSources = do
     grokFile <- discoverGrokFile
         (home </> unsafeEncodeUtf ".grok" </> unsafeEncodeUtf "auth.json")
     openRouter <- discoverOpenRouter
+    gemini <- discoverGemini
     managed <- loadManagedCredentials
     let managedAccounts = case managed of
             Left _ -> []
@@ -700,6 +720,7 @@ discoverLoginAccountSources = do
                 , grokEnv
                 , grokFile
                 , openRouter
+                , gemini
                 ]
 
 managedLoginAccount
@@ -731,7 +752,12 @@ managedLoginAccount now (metadata, secret) =
             ManagedBearerToken ->
                 XAIAuth.emailFromToken secret.secretPayload
             ManagedOpenAIAuthJson -> Nothing
+            ManagedGeminiAuthJson -> Nothing
         OpenRouterProvider -> Nothing
+        GeminiProvider -> case metadata.managedAuthKind of
+            ManagedGeminiAuthJson ->
+                (.email) <$> geminiAuth
+            _ -> Nothing
         ClaudeCodeProvider -> Nothing
     openAIAuth = case metadata.managedAuthKind of
         ManagedOpenAIAuthJson ->
@@ -743,6 +769,10 @@ managedLoginAccount now (metadata, secret) =
         ManagedOpenAIAuthJson -> (.accessToken) <$> openAIAuth
         ManagedGrokAuthJson ->
             grokCredentialFromAuthJson secret.secretPayload
+        ManagedGeminiAuthJson ->
+            (.accessToken) <$> geminiAuth
+    geminiAuth =
+        geminiAuthStateFromJson secret.secretPayload
 
 toggleAt :: Bool -> Int -> [LoginAccount] -> IO ()
 toggleAt color index accounts =
@@ -843,13 +873,14 @@ connectAccount color =
                 (fmap (\accountId -> (provider, accountId)))
                 (connectProviderAccount color provider)
 
--- | Connect one account for the requested provider and return its provider
--- account id after it has been stored successfully.
+-- | Connect one account for the requested provider and return an identifier
+-- that selects the newly stored credential.
 connectProviderAccount :: Bool -> Provider -> IO (Maybe Text)
 connectProviderAccount color = \case
     OpenAIProvider -> connectOpenAI color
     XAIProvider -> connectXAI color
     OpenRouterProvider -> connectOpenRouter color
+    GeminiProvider -> connectGemini color
     ClaudeCodeProvider -> do
         printLoginMessage color False
             "Claude Code subscriptions are managed by `claude auth login`"
@@ -863,6 +894,7 @@ pickConnectProvider color =
         [ OpenAIProvider
         , XAIProvider
         , OpenRouterProvider
+        , GeminiProvider
         , ClaudeCodeProvider
         ]
     render index =
@@ -911,6 +943,9 @@ connectFullscreenAccount runtime = do
         , ( OpenRouterProvider
           , ("OpenRouter", "Add a masked API key and inspect credits")
           )
+        , ( GeminiProvider
+          , ("Google Gemini", "Connect a Google account with OAuth")
+          )
         , ( ClaudeCodeProvider
           , ("Claude Code", "Managed by the Claude Code CLI")
           )
@@ -924,6 +959,7 @@ connectFullscreenProvider runtime = \case
     OpenAIProvider -> connectOpenAIFullscreen runtime
     XAIProvider -> connectXAIFullscreen runtime
     OpenRouterProvider -> connectOpenRouterFullscreen runtime
+    GeminiProvider -> connectGeminiFullscreen runtime
     ClaudeCodeProvider ->
         pure $
             Just $
@@ -1211,6 +1247,60 @@ connectOpenRouterFullscreen runtime =
               where
                 apiKey = Text.strip rawKey
 
+connectGeminiFullscreen
+    :: FullscreenRuntime
+    -> IO (Maybe (Either Text Text))
+connectGeminiFullscreen runtime = do
+    oauthOptions <- GeminiAuth.oauthOptionsFromEnv
+    codeAssistOptions <- GeminiAuth.codeAssistOptionsFromEnv
+    authenticated <-
+        withLoginProgress runtime "Waiting for Google sign-in…" $
+            GeminiAuth.authenticateGoogleAccount
+                oauthOptions
+                codeAssistOptions
+                (presentGoogleLoginFullscreen runtime)
+    case authenticated of
+        Left err ->
+            pure (Just (Left ("Google sign-in failed: " <> err)))
+        Right auth
+            | Nothing <- auth.refreshToken ->
+                pure $
+                    Just $
+                        Left
+                            "Google sign-in did not return a refresh token; disconnect access for Gemini CLI in your Google account and try again"
+            | otherwise ->
+                Just <$> storeConnectedCredentialResult
+                    GeminiProvider
+                    auth.email
+                    auth.email
+                    SubscriptionBilled
+                    ManagedGeminiAuthJson
+                    (geminiAuthStateToJson auth)
+
+presentGoogleLoginFullscreen :: FullscreenRuntime -> Text -> IO ()
+presentGoogleLoginFullscreen runtime url = do
+    opened <- openBrowser url
+    choice <-
+        requestFullscreenChoiceWithBody
+            runtime
+            "Connect Google / Gemini"
+            ( Text.intercalate "\n\n" $
+                [ "[Open the Google page](" <> url <> ")."
+                , if opened
+                    then
+                        "A browser window was opened automatically. Complete the Google step, then return here."
+                    else
+                        "The browser could not be opened automatically. Use the link above, then return here."
+                ]
+            )
+            0
+            [ ("Continue", "Finish this Google step and continue")
+            , ("Cancel", "Stop without storing a credential")
+            ]
+    case choice of
+        Just 0 -> pure ()
+        _ -> fail "Google sign-in was cancelled"
+
 deviceAuthorizationBody
     :: Text
     -> Text
@@ -1369,6 +1459,79 @@ connectOpenRouter color =
                                     then Just accountId
                                     else Nothing
 
+connectGemini :: Bool -> IO (Maybe Text)
+connectGemini color = do
+    oauthOptions <- GeminiAuth.oauthOptionsFromEnv
+    codeAssistOptions <- GeminiAuth.codeAssistOptionsFromEnv
+    printLoginMessage color True
+        "Opening Google sign-in for Gemini…"
+    GeminiAuth.authenticateGoogleAccount
+        oauthOptions
+        codeAssistOptions
+        (presentGoogleLogin color) >>= \case
+            Left err -> do
+                printLoginMessage color False
+                    ("Google sign-in failed: " <> err)
+                pure Nothing
+            Right auth
+                | Nothing <- auth.refreshToken -> do
+                    printLoginMessage color False
+                        "Google sign-in did not return a refresh token; disconnect access for Gemini CLI in your Google account and try again"
+                    pure Nothing
+                | otherwise ->
+                    storeConnectedCredential color
+                        GeminiProvider
+                        auth.email
+                        auth.email
+                        SubscriptionBilled
+                        ManagedGeminiAuthJson
+                        (geminiAuthStateToJson auth)
+                        >>= \stored -> pure (if stored then Just auth.email else Nothing)
+
+presentGoogleLogin :: Bool -> Text -> IO ()
+presentGoogleLogin color url = do
+    Text.hPutStrLn stderr $
+        roleMuted color "Open "
+            <> rolePrompt color url
+    opened <- openBrowser url
+    unless opened $
+        Text.hPutStrLn stderr $
+            roleMuted color
+                "Could not launch a browser automatically; open the URL above."
+    Text.hPutStrLn stderr $
+        roleMuted color "Waiting for Google…"
+    hFlush stderr
+
+openBrowser :: Text -> IO Bool
+openBrowser url = do
+    configured <- lookupNonEmpty "BROWSER"
+    case configured of
+        Just browser ->
+            launchBrowserCommand browser url
+        Nothing -> do
+            opened <- launchBrowserCommand "open" url
+            if opened
+                then pure True
+                else launchBrowserCommand "xdg-open" url
+
+-- | Start the browser without waiting for its process to exit. Some browsers
+-- stay in the foreground for the lifetime of the window; waiting here would
+-- prevent the OAuth listener from ever accepting their callback.
+launchBrowserCommand :: Text -> Text -> IO Bool
+launchBrowserCommand command url =
+    tryAny
+        (createProcess
+            (proc (Text.unpack command) [Text.unpack url])
+                { std_in = NoStream
+                , std_out = NoStream
+                , std_err = NoStream
+                , close_fds = True
+                , create_group = True
+                , new_session = True
+                }) >>= \case
+        Right _ -> pure True
+        Left _ -> pure False
+
 storeConnectedCredential
     :: Bool
     -> Provider
@@ -1521,6 +1684,26 @@ discoverOpenRouter = do
             , loginProvider = OpenRouterProvider
             , loginAccountId = "openrouter"
             , loginLabel = "OpenRouter"
+            , loginBilling = ApiCreditsBilling
+            , loginSource = "environment"
+            , loginUsage = UsageNotChecked
+            , loginAccessToken = accessToken
+            , loginAuthKind = ManagedBearerToken
+            , loginSecretPayload = accessToken
+            , loginEnabled = True
+            }
+
+discoverGemini :: IO (Maybe LoginAccount)
+discoverGemini = do
+    googleKey <- lookupNonEmpty "GOOGLE_API_KEY"
+    geminiKey <- lookupNonEmpty "GEMINI_API_KEY"
+    pure $ do
+        accessToken <- googleKey <|> geminiKey
+        pure LoginAccount
+            { loginManagedId = Nothing
+            , loginProvider = GeminiProvider
+            , loginAccountId = "gemini"
+            , loginLabel = "Google Gemini"
             , loginBilling = ApiCreditsBilling
             , loginSource = "environment"
             , loginUsage = UsageNotChecked
@@ -1699,6 +1882,16 @@ refreshLoginAccount account
                                             <|> snapshot.keyUsage)
                                 }
                         }
+        GeminiProvider ->
+            pure account
+                { loginUsage =
+                    UsageUnavailable
+                        (case account.loginAuthKind of
+                            ManagedGeminiAuthJson ->
+                                "Gemini Code Assist usage is unavailable."
+                            _ ->
+                                "Google AI Studio does not expose account usage for API keys.")
+                }
         ClaudeCodeProvider ->
             pure account
                 { loginUsage =

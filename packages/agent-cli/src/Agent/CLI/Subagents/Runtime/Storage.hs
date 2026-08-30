@@ -14,7 +14,8 @@ import Agent.CLI.SubagentStore
     )
 import Agent.Loop (BackendSnapshot(..), emptyBackendSnapshot)
 import Agent.CLI.Subagents.Runtime.Types
-    ( SubagentSession(..)
+    ( SubagentResidency(..)
+    , SubagentSession(..)
     , SubagentStoreRoot
     )
 import Agent.GrokBuild.Dialect.Task
@@ -82,24 +83,26 @@ persistAndEvictSubagentSessionWithStatus
     -> IO (Either Text Bool)
 persistAndEvictSubagentSessionWithStatus
         storeRootRef registry typesRef agentId status session =
-    modifyMVar session.subSessionHydrated \hydrated ->
-        if not hydrated || not (evictableStatus status)
-            then pure (hydrated, Right False)
+    modifyMVar session.subSessionResidency \residency ->
+        if residency == SessionEvicted || not (evictableStatus status)
+            then pure (residency, Right False)
             else readIORef storeRootRef >>= \case
-                Nothing -> pure (True, Right False)
+                Nothing -> pure (residency, Right False)
                 Just sessionDir ->
                     saveSubagentSnapshotWithStatus
                         sessionDir registry typesRef agentId status session >>= \case
-                            Left err -> pure (True, Left err)
-                            Right () -> do
-                                pinned <- readIORef session.subSessionPinned
-                                if pinned
-                                    then pure (True, Right False)
-                                    else do
+                            Left err -> pure (residency, Left err)
+                            Right () ->
+                                case residency of
+                                    SessionPinned ->
+                                        pure (SessionPinned, Right False)
+                                    SessionResident -> do
                                         writeIORef session.subSessionTranscript
                                             emptyBackendSnapshot
                                         writeIORef session.subSessionContextTokens Nothing
-                                        pure (False, Right True)
+                                        pure (SessionEvicted, Right True)
+                                    SessionEvicted ->
+                                        pure (SessionEvicted, Right False)
   where
     evictableStatus = \case
         Completed{} -> True
@@ -156,8 +159,8 @@ flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
     sessions <- readIORef sessionsRef
     mapM_
         (\(agentId, session) ->
-            withMVar session.subSessionHydrated \hydrated ->
-                when hydrated do
+            withMVar session.subSessionResidency \residency ->
+                when (residency /= SessionEvicted) do
                     status <- getStatus registry agentId
                     persistSubagentSnapshotWithStatus
                         storeRootRef registry typesRef agentId status session)

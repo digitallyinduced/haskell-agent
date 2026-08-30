@@ -2,6 +2,7 @@ module Agent.Error
     ( ApiError(..)
     , ErrorType(..)
     , CredentialExhaustionReason(..)
+    , CredentialRefreshFailure(..)
     , RetryDisposition(..)
     , errorTypeFromText
     , errorTypeText
@@ -63,6 +64,23 @@ data CredentialExhaustionReason
         { exhaustionErrorType :: !(Maybe ErrorType)
         , exhaustionStatusCode :: !(Maybe Int)
         }
+    | ExhaustedByCredentialRefresh
+        { refreshFailure :: !CredentialRefreshFailure
+        , exhaustionErrorType :: !(Maybe ErrorType)
+        , exhaustionStatusCode :: !(Maybe Int)
+        }
+    deriving (Eq, Ord, Show)
+
+-- | Redacted origin of a failed credential refresh.
+--
+-- Provider response bodies, exception text, paths, and token material are
+-- deliberately excluded. The category is specific enough to distinguish an
+-- upstream rejection from failures in the local credential source or refresh
+-- transport without retaining secrets.
+data CredentialRefreshFailure
+    = RefreshCredentialSourceFailed
+    | RefreshTransportFailed
+    | RefreshProviderFailed
     deriving (Eq, Ord, Show)
 
 -- | Whether retrying can help, and which layer should own the retry.
@@ -224,20 +242,14 @@ credentialExhaustionReasonFromApiError = \case
                     , exhaustionStatusCode = Nothing
                     , exhaustionRetryAfter = retryAfter
                     }
-    HttpError status _
-        | status == 401 || status == 403 ->
-            Just ExhaustedByAuthentication
-                { exhaustionErrorType = Nothing
-                , exhaustionStatusCode = Just status
-                }
+    HttpError 401 _ ->
+        Just ExhaustedByAuthentication
+            { exhaustionErrorType = Nothing
+            , exhaustionStatusCode = Just 401
+            }
     ProviderError AuthenticationError _ _ ->
         Just ExhaustedByAuthentication
             { exhaustionErrorType = Just AuthenticationError
-            , exhaustionStatusCode = Nothing
-            }
-    CredentialError{} ->
-        Just ExhaustedByAuthentication
-            { exhaustionErrorType = Nothing
             , exhaustionStatusCode = Nothing
             }
     _ -> Nothing

@@ -1,8 +1,10 @@
 -- | CLI-owned runtime state and provider adapters for child agents.
 module Agent.CLI.Subagents.Runtime
-    ( SubagentRuntime(..), SubagentSession(..), SubagentStoreRoot
+    ( SubagentResidency(..), SubagentRuntime(..), SubagentSession(..)
+    , SubagentStoreRoot
     , flushAllSubagentSnapshots, freshOpenAiBackend
     , lookupOrCreateSubagentSession, persistAndEvictSubagentSessionWithStatus
+    , pinSubagentSession, unpinSubagentSession
     , persistSubagentSnapshotWithStatus, prepareCollaborationSpawn
     , restoreAgentFromDisk, resolveChildModelAndEffort, runCodexSubagent
     , runHttpSubagent, runXaiParentSubagent, grokSpawnedChildIdentity
@@ -26,7 +28,12 @@ import Agent.CLI.SubagentStore
     , subagentDiskFields
     )
 import Agent.CLI.Subagents.Runtime.Types
-    (PreparedChild(..), SubagentRuntime(..), SubagentSession(..), SubagentStoreRoot)
+    ( PreparedChild(..)
+    , SubagentResidency(..)
+    , SubagentRuntime(..)
+    , SubagentSession(..)
+    , SubagentStoreRoot
+    )
 import Agent.CLI.Subagents.Runtime.Storage
     (flushAllSubagentSnapshots, persistAndEvictSubagentSessionWithStatus,
      persistSubagentSnapshotWithStatus, syncStoreRootFromPlan)
@@ -290,30 +297,35 @@ restoreAgentFromDisk
                                         Left err -> pure (Left err)
                                         Right () -> pure (Right ())
     restoreSession session loaded reopen =
-        modifyMVar session.subSessionHydrated \hydrated -> do
+        modifyMVar session.subSessionResidency \residency -> do
             currentStatus <- getStatus registry agentId
             case currentStatus of
-                NotFound -> finish hydrated
-                Closed -> finish hydrated
+                NotFound -> finish residency
+                Closed -> finish residency
                 _ -> do
-                    hydrated' <-
-                        ensureSubagentSessionHydratedLocked
+                    residency' <-
+                        ensureSubagentSessionResidentLocked
                             storeRootRef typesRef legacyTarget
-                            agentId session hydrated
-                    pure (hydrated', Right ())
+                            agentId session residency
+                    pure (residency', Right ())
       where
-        finish hydrated =
-            reopen hydrated >>= \case
-                Left err -> pure (hydrated, Left err)
+        finish residency =
+            reopen (isSessionResident residency) >>= \case
+                Left err -> pure (residency, Left err)
                 Right () -> do
                     case loaded of
                         Nothing -> pure ()
                         Just (items, fields) -> do
                             recordPersistedAgentSpec typesRef agentId fields
-                            unless hydrated $
+                            unless (isSessionResident residency) $
                                 writeIORef session.subSessionTranscript
                                     (initialBackendSnapshot items)
-                    pure (True, Right ())
+                    pure
+                        ( case residency of
+                            SessionPinned -> SessionPinned
+                            _ -> SessionResident
+                        , Right ()
+                        )
     reopenPersisted fields =
         case fields.diskTaskPath of
             Nothing -> restoreAt taskPathRoot
@@ -567,7 +579,8 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                         (\config ->
                             runLoopInputs config previous [AgentMessage prompt])
 
--- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
+-- | Child xAI/OpenRouter/Gemini agent: HTTP backend, filtered tools by
+-- @subagent_type@.
 runHttpSubagent
     :: SubagentRuntime
     -> Dialect
@@ -943,10 +956,31 @@ lookupOrCreateSubagentSession
     session <-
         getOrInstallSubagentSession
             sessionsRef provider connection currentEffectiveModel currentDialect agentId
-    modifyMVar_ session.subSessionHydrated $
-        ensureSubagentSessionHydratedLocked
+    modifyMVar_ session.subSessionResidency $
+        ensureSubagentSessionResidentLocked
             storeRootRef typesRef legacyTarget agentId session
     pure session
+
+-- | Ensure a session is resident and pin it against eviction in one critical
+-- section.
+pinSubagentSession
+    :: SubagentStoreRoot
+    -> GrokSubagentSpecs
+    -> Maybe LegacySubagentTarget
+    -> SubagentId
+    -> SubagentSession
+    -> IO ()
+pinSubagentSession storeRootRef typesRef legacyTarget agentId session =
+    modifyMVar_ session.subSessionResidency \residency ->
+        SessionPinned <$ ensureSubagentSessionResidentLocked
+            storeRootRef typesRef legacyTarget agentId session residency
+
+-- | Allow a pinned session to be evicted after its next successful snapshot.
+unpinSubagentSession :: SubagentSession -> IO ()
+unpinSubagentSession session =
+    modifyMVar_ session.subSessionResidency \case
+        SessionPinned -> pure SessionResident
+        residency -> pure residency
 
 getOrInstallSubagentSession
     :: IORef (Map SubagentId SubagentSession)
@@ -960,8 +994,7 @@ getOrInstallSubagentSession
         sessionsRef provider connection effectiveModel dialect agentId = do
     transcript <- newIORef emptyBackendSnapshot
     contextTokens <- newIORef Nothing
-    pinned <- newIORef False
-    hydrated <- newMVar False
+    residency <- newMVar SessionEvicted
     let candidate = SubagentSession
             { subSessionTranscript = transcript
             , subSessionContextTokens = contextTokens
@@ -969,25 +1002,24 @@ getOrInstallSubagentSession
             , subSessionConnection = connection
             , subSessionEffectiveModel = effectiveModel
             , subSessionDialect = dialect
-            , subSessionPinned = pinned
-            , subSessionHydrated = hydrated
+            , subSessionResidency = residency
             }
     atomicModifyIORef' sessionsRef \sessions ->
         case Map.lookup agentId sessions of
             Just existing -> (sessions, existing)
             Nothing -> (Map.insert agentId candidate sessions, candidate)
 
-ensureSubagentSessionHydratedLocked
+ensureSubagentSessionResidentLocked
     :: SubagentStoreRoot
     -> GrokSubagentSpecs
     -> Maybe LegacySubagentTarget
     -> SubagentId
     -> SubagentSession
-    -> Bool
-    -> IO Bool
-ensureSubagentSessionHydratedLocked
-        storeRootRef typesRef legacyTarget agentId session hydrated
-    | hydrated = pure True
+    -> SubagentResidency
+    -> IO SubagentResidency
+ensureSubagentSessionResidentLocked
+        storeRootRef typesRef legacyTarget agentId session residency
+    | isSessionResident residency = pure residency
     | otherwise = do
         mroot <- readIORef storeRootRef
         loaded <- case mroot of
@@ -1028,7 +1060,12 @@ ensureSubagentSessionHydratedLocked
                             typesRef
                             agentId
                             (subagentDiskFields meta)
-        pure True
+        pure SessionResident
+
+isSessionResident :: SubagentResidency -> Bool
+isSessionResident = \case
+    SessionEvicted -> False
+    _ -> True
 
 recordPersistedAgentSpec
     :: GrokSubagentSpecs

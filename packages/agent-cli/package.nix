@@ -1,14 +1,15 @@
 { mkDerivation, aeson, agent-claude, agent-codex-dialect
-, agent-core, agent-grok-build-dialect, agent-json, agent-mcp
-, agent-openai, agent-openrouter, agent-process, agent-responses
-, agent-responses-types, agent-store, agent-syntax, agent-tui
-, agent-xai, ansi-terminal, async, base, base64-bytestring, brick
-, bytestring, colour, containers, crypton, deepseq, directory
-, entropy, filelock, filepath, haskeline, hasql-pool, hspec
-, http-client, http-client-tls, http-types, JuicyPixels, lib
-, memory, mtl, network, network-uri, optparse-applicative, process
-, QuickCheck, retry, safe-exceptions, scientific, stm, tagsoup
-, text, time, transformers, unix, vector, vty, vty-crossplatform
+, agent-core, agent-gemini, agent-grok-build-dialect, agent-json
+, agent-mcp, agent-openai, agent-openrouter, agent-process
+, agent-responses, agent-responses-types, agent-store, agent-syntax
+, agent-tui, agent-xai, ansi-terminal, async, base
+, base64-bytestring, brick, bytestring, colour, containers, crypton
+, deepseq, directory, entropy, filelock, filepath, haskeline
+, hasql-pool, hspec, http-client, http-client-tls, http-types
+, JuicyPixels, lib, memory, mtl, network, network-uri
+, optparse-applicative, process, QuickCheck, retry, safe-exceptions
+, scientific, stm, tagsoup, text, time, transformers, unix, vector
+, vty, vty-crossplatform
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -18,7 +19,7 @@ mkDerivation {
   isExecutable = true;
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
-    aeson agent-claude agent-codex-dialect agent-core
+    aeson agent-claude agent-codex-dialect agent-core agent-gemini
     agent-grok-build-dialect agent-json agent-mcp agent-openai
     agent-openrouter agent-process agent-responses
     agent-responses-types agent-store agent-syntax agent-tui agent-xai
@@ -35,7 +36,7 @@ mkDerivation {
     text time unix
   ];
   testHaskellDepends = [
-    aeson agent-claude agent-codex-dialect agent-core
+    aeson agent-claude agent-codex-dialect agent-core agent-gemini
     agent-grok-build-dialect agent-json agent-mcp agent-openai
     agent-openrouter agent-responses agent-responses-types agent-store
     agent-tui agent-xai ansi-terminal async base brick bytestring

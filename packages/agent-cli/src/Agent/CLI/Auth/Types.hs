@@ -89,6 +89,8 @@ credentialAccountLabel credential = case credential.provider of
             XAIAuth.emailFromToken credential.accessToken
     OpenRouterProvider ->
         fallback "OpenRouter"
+    GeminiProvider ->
+        fallback "Google Gemini"
     ClaudeCodeProvider ->
         fallback "Claude"
   where
@@ -108,6 +110,7 @@ credentialEmail credential = case credential.provider of
     OpenAIProvider -> OpenAI.deriveEmail credential.accessToken
     XAIProvider -> XAIAuth.emailFromToken credential.accessToken
     OpenRouterProvider -> Nothing
+    GeminiProvider -> Nothing
     ClaudeCodeProvider -> Nothing
 
 nonEmptyText :: Text -> Maybe Text

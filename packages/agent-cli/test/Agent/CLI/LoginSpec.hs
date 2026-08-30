@@ -8,6 +8,7 @@ import Data.Either (isLeft)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime)
+import qualified System.Timeout as Timeout
 import Test.Hspec
 
 spec :: Spec
@@ -41,6 +42,12 @@ spec = do
         it "closes an empty dashboard instead of refreshing" do
             applyLoginKey PickerKeyConfirm (initialLoginState [])
                 `shouldSatisfy` isLeft
+
+    describe "launchBrowserCommand" do
+        it "does not wait for a foreground browser process to exit" do
+            result <- Timeout.timeout 1_000_000
+                (launchBrowserCommand "sleep" "2")
+            result `shouldBe` Just True
 
     describe "renderLoginFrame" do
         it "shows providers, billing modes, sources, and usage" do
@@ -109,9 +116,13 @@ spec = do
 
     describe "fullscreen login dashboard" do
         it "offers account connection before any credentials exist" do
-            let labels = map fst (loginDashboardRows [])
+            let rows = loginDashboardRows []
+                labels = map fst rows
+                rendered = Text.unlines
+                    [label <> " " <> description | (label, description) <- rows]
             labels `shouldSatisfy` any (Text.isInfixOf "Connect account")
             labels `shouldSatisfy` not . any (Text.isInfixOf "Refresh")
+            rendered `shouldSatisfy` Text.isInfixOf "Google Gemini"
 
         it "offers usage refresh and opens each discovered account" do
             let rows = loginDashboardRows [openai, openRouter]

@@ -41,6 +41,8 @@ import Agent.CLI.Session.History
     , writeLiveTranscript
     )
 import Agent.Error (ApiError(..), ErrorType(..))
+import qualified Agent.Gemini.Client as Gemini
+import qualified Agent.Gemini.Options as Gemini
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -195,6 +197,21 @@ runProviderCompactWithContextWindow contextWindow openAiSender recordUsage
                         (\request ->
                             runWithTokenProvider tokens \credential ->
                                 OpenRouter.createResponseWith
+                                    options credential request)
+                        params
+                        history
+                        focus
+        GeminiProvider ->
+            case tokenProvider of
+                Nothing ->
+                    pure (compactTextFailure
+                        "gemini compact requires a token provider")
+                Just tokens -> do
+                    options <- Gemini.clientOptionsFromEnv
+                    summarizeTextAttempt
+                        (\request ->
+                            runWithTokenProvider tokens \credential ->
+                                Gemini.createResponseWith
                                     options credential request)
                         params
                         history
@@ -781,7 +798,7 @@ isPortableLocalSummaryItem :: ResponseItem -> Bool
 isPortableLocalSummaryItem = \case
     -- OpenAI checkpoints are opaque provider protocol items. Preserve them
     -- for focused OpenAI summaries, but never replay them through
-    -- xAI/OpenRouter or user-configured Responses endpoints.
+    -- xAI/OpenRouter/Gemini or user-configured Responses endpoints.
     CompactionItemValue{} -> False
     ContextCompactionItemValue{} -> False
     CompactionTriggerItemValue{} -> False

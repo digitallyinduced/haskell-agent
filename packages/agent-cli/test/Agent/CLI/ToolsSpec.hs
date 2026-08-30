@@ -30,6 +30,7 @@ import Agent.Codex.Dialect.Runtime
     )
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.CodeMode.Tool (ToolMode(..))
+import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -86,12 +87,25 @@ spec = describe "schemasFromAppTools" do
             KnownResponseTool ToolWebSearch : _ -> pure ()
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
-    it "builds a strict function tool for OpenAI JSON tools" do
+    it "disables strict mode for all OpenAI JSON tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
-                tool.strict `shouldBe` Just True
+                tool.strict `shouldBe` Just False
+                required_ tool `shouldBe` Just ["target_file"]
+                propertyNames tool `shouldContain` ["offset"]
             other -> expectationFailure ("expected function tool, got " <> show other)
+
+    it "keeps grep path optional" do
+        env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
+        case schemasFromAppTools codexDialect [grepTool env] of
+            [_, FunctionToolValue tool] -> do
+                tool.name `shouldBe` "grep"
+                tool.strict `shouldBe` Just False
+                required_ tool `shouldBe` Just ["pattern"]
+                propertyNames tool `shouldContain` ["path"]
+            other -> expectationFailure
+                ("expected non-strict grep function tool, got " <> show other)
 
     it "keeps shell_command workdir optional in direct and code-only mode" do
         env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
@@ -354,11 +368,9 @@ spec = describe "schemasFromAppTools" do
                         ]
                 case worktreeFunctions of
                     [function] -> do
-                        function.strict `shouldBe` Just True
+                        function.strict `shouldBe` Just False
                         required_ function `shouldBe` Just
-                            [ "task_name", "message", "model"
-                            , "reasoning_effort", "fork_turns"
-                            ]
+                            ["task_name", "message"]
                         propertyNames function `shouldMatchList`
                             [ "task_name", "message", "model"
                             , "reasoning_effort", "fork_turns"

@@ -50,6 +50,7 @@ data ManagedAuthKind
     = ManagedBearerToken
     | ManagedOpenAIAuthJson
     | ManagedGrokAuthJson
+    | ManagedGeminiAuthJson
     deriving (Eq, Show)
 
 data ManagedCredential = ManagedCredential
@@ -90,12 +91,14 @@ instance Aeson.ToJSON ManagedAuthKind where
         ManagedBearerToken -> "bearer"
         ManagedOpenAIAuthJson -> "openai_oauth"
         ManagedGrokAuthJson -> "grok_oauth"
+        ManagedGeminiAuthJson -> "gemini_oauth"
 
 managedAuthKindDecoder :: Hermes.Decoder ManagedAuthKind
 managedAuthKindDecoder = Hermes.withText \case
         "bearer" -> pure ManagedBearerToken
         "openai_oauth" -> pure ManagedOpenAIAuthJson
         "grok_oauth" -> pure ManagedGrokAuthJson
+        "gemini_oauth" -> pure ManagedGeminiAuthJson
         other -> fail ("unknown managed auth kind: " <> Text.unpack other)
 
 instance Aeson.ToJSON ManagedCredential where
@@ -269,7 +272,7 @@ upsertManagedCredential
 upsertManagedCredential credential secret =
     case managedCredentialEntry credential secret of
         Left err -> pure (Left err)
-        Right entry -> mutateStore (upsertStoreEntry entry)
+        Right entry -> mutateStoreSecretFirst (upsertStoreEntry entry)
 
 -- | Persist a rotated OAuth secret before derived metadata. If the process
 -- exits between writes, the new one-time refresh token is already durable.
@@ -280,23 +283,47 @@ upsertManagedCredentialAfterRefresh
 upsertManagedCredentialAfterRefresh credential secret =
     case managedCredentialEntry credential secret of
         Left err -> pure (Left err)
-        Right entry -> do
+        Right refreshedEntry -> do
             home <- getHomeDirectory
             withCredentialStoreLock home do
                 loaded <- loadManagedCredentialStoreUnlocked home
                 case loaded of
                     Left err -> pure (Left err)
-                    Right store -> do
-                        let store' = upsertStoreEntry entry store
-                        writePrivateJson
-                            (managedSecretsPath home)
-                            (secretsFile store')
-                            >>= \case
-                                Left err -> pure (Left err)
-                                Right () ->
+                    Right store ->
+                        case find
+                            ((== credential.managedId) . (.entryManagedId))
+                            store.storeEntries of
+                            Nothing ->
+                                pure $ Left
+                                    ("managed credential "
+                                        <> credential.managedId
+                                        <> " no longer exists during refresh")
+                            Just current
+                                | not current.entryCredential.managedEnabled ->
+                                    pure $ Left
+                                        ("managed credential "
+                                            <> credential.managedId
+                                            <> " is disabled")
+                                | current.entryCredential.managedProvider
+                                    /= credential.managedProvider
+                                    || current.entryCredential.managedAuthKind
+                                        /= credential.managedAuthKind ->
+                                    pure $ Left
+                                        ("managed credential "
+                                            <> credential.managedId
+                                            <> " changed auth type during refresh")
+                                | otherwise -> do
+                                    let store' =
+                                            upsertStoreEntry refreshedEntry store
                                     writePrivateJson
-                                        (managedCredentialsPath home)
-                                        (metadataFile store')
+                                        (managedSecretsPath home)
+                                        (secretsFile store')
+                                        >>= \case
+                                            Left err -> pure (Left err)
+                                            Right () ->
+                                                writePrivateJson
+                                                    (managedCredentialsPath home)
+                                                    (metadataFile store')
 
 setManagedCredentialEnabled :: Text -> Bool -> IO (Either Text ())
 setManagedCredentialEnabled credentialId enabled =
@@ -331,6 +358,31 @@ updateManagedCredentialSecret credentialId payload = do
             { entrySecret =
                 entry.entrySecret { secretPayload = payload }
             }
+
+-- New credentials must persist their secret before metadata can reference it.
+-- An interrupted first write may leave an ignored orphan secret; the reverse
+-- order can leave metadata without a secret and make the whole store unloadable.
+-- Deletes keep using 'mutateStore', where metadata-first avoids that failure.
+mutateStoreSecretFirst
+    :: (ManagedCredentialStore -> ManagedCredentialStore)
+    -> IO (Either Text ())
+mutateStoreSecretFirst update = do
+    home <- getHomeDirectory
+    withCredentialStoreLock home do
+        loaded <- loadManagedCredentialStoreUnlocked home
+        case loaded of
+            Left err -> pure (Left err)
+            Right store -> do
+                let store' = update store
+                writePrivateJson
+                    (managedSecretsPath home)
+                    (secretsFile store')
+                    >>= \case
+                        Left err -> pure (Left err)
+                        Right () ->
+                            writePrivateJson
+                                (managedCredentialsPath home)
+                                (metadataFile store')
 
 deleteManagedCredential :: Text -> IO (Either Text ())
 deleteManagedCredential credentialId =

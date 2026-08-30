@@ -76,6 +76,8 @@ spec = do
                 `shouldReturn` Left "xai compact requires a token provider"
             runProviderCompact OpenRouterProvider Nothing params transcript Nothing
                 `shouldReturn` Left "openrouter compact requires a token provider"
+            runProviderCompact GeminiProvider Nothing params transcript Nothing
+                `shouldReturn` Left "gemini compact requires a token provider"
 
         it "short-circuits an empty transcript before using credentials" do
             params <- newIORef defaultResponseCreateParams

@@ -1,0 +1,107 @@
+cabal-version:      2.2
+name:               agent-gemini
+version:            0.1.0.0
+synopsis:           Native Google Gemini transports for haskell-agent
+description:        Google OAuth and AI Studio API-key authentication,
+                    Code Assist and GenerateContent streaming transports,
+                    request projection, tool calls, and provider errors.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Web
+build-type:         Simple
+extra-source-files: README.md
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , NumericUnderscores
+                      , TypeApplications
+                      , ScopedTypeVariables
+                      , PackageImports
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.Gemini
+                    , Agent.Gemini.Auth
+                    , Agent.Gemini.Client
+                    , Agent.Gemini.Credential
+                    , Agent.Gemini.Error
+                    , Agent.Gemini.LoopBackend
+                    , Agent.Gemini.Options
+                    , Agent.Gemini.Request
+                    , Agent.Gemini.Response
+                    , Agent.Gemini.Stream
+                    , Agent.Gemini.Types
+    hs-source-dirs:   src
+    build-depends:    base                  >= 4.14 && < 5
+                    , agent-core            >= 0.1 && < 0.2
+                    , agent-json            >= 0.1 && < 0.2
+                    , agent-responses       >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
+                    , aeson                 >= 2.0
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , crypton
+                    , entropy
+                    , http-client
+                    , http-client-tls
+                    , http-conduit
+                    , http-types
+                    , memory
+                    , network
+                    , retry >= 0.9.3.1 && < 0.10
+                    , safe-exceptions
+                    , scientific
+                    , text
+                    , time
+
+test-suite agent-gemini-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.Gemini.AuthSpec
+                    , Agent.Gemini.ClientSpec
+                    , Agent.Gemini.CredentialSpec
+                    , Agent.Gemini.ErrorSpec
+                    , Agent.Gemini.RequestSpec
+                    , Agent.Gemini.ResponseSpec
+                    , Agent.Gemini.StreamSpec
+    ghc-options:      -threaded
+    build-depends:    base >= 4.14 && < 5
+                    , agent-core
+                    , agent-gemini
+                    , agent-json
+                    , agent-responses
+                    , agent-responses-types
+                    , aeson
+                    , async
+                    , bytestring
+                    , containers
+                    , hspec
+                    , http-conduit
+                    , http-types
+                    , network
+                    , retry
+                    , safe-exceptions
+                    , text
+                    , wai
+                    , warp
