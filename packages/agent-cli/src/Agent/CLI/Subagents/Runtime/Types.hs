@@ -1,6 +1,7 @@
 -- | Shared state for CLI-owned child-agent runtimes.
 module Agent.CLI.Subagents.Runtime.Types
     ( PreparedChild(..)
+    , SubagentResidency(..)
     , SubagentRuntime(..)
     , SubagentSession(..)
     , SubagentStoreRoot
@@ -23,6 +24,16 @@ import Data.Map.Strict (Map)
 import Data.Text (Text)
 import System.OsPath (OsPath)
 
+-- | Lifecycle state for an in-memory child session.
+--
+-- A pinned session is necessarily resident. Keeping these states in one
+-- lock prevents the impossible combination of an evicted, pinned session.
+data SubagentResidency
+    = SessionEvicted
+    | SessionResident
+    | SessionPinned
+    deriving (Eq, Show)
+
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
     , subSessionContextTokens :: !(IORef (Maybe OccupancySnapshot))
@@ -30,8 +41,7 @@ data SubagentSession = SubagentSession
     , subSessionConnection :: !Text
     , subSessionEffectiveModel :: !Text
     , subSessionDialect :: !DialectId
-    , subSessionPinned :: !(IORef Bool)
-    , subSessionHydrated :: !(MVar Bool)
+    , subSessionResidency :: !(MVar SubagentResidency)
     }
 
 -- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).

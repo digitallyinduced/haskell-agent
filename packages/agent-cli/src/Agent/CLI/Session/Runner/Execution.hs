@@ -192,7 +192,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     restartEffortRef <- newIORef Nothing
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
-    let hydrateSelectedAgent agentId = do
+    let loadSelectedAgent agentId = do
             effectiveModel <- readIORef modelRef
             lookupOrCreateSubagentSession
                 subagentSessions
@@ -204,28 +204,19 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 effectiveModel
                 (dialectId dialect)
                 agentId
-        selectChild agentId = do
-            session <-
-                (Just <$> hydrateSelectedAgent agentId)
-                    `catchAny` \err -> do
-                        reportSessionError
-                            ("failed to load selected agent: "
-                                <> formatException err)
-                        pure Nothing
-            forM_ session \selectedSession -> do
-                withMVar selectedSession.subSessionHydrated \_ ->
-                    writeIORef selectedSession.subSessionPinned True
-                void
-                    (hydrateSelectedAgent agentId)
-                    `catchAny` \err ->
-                        reportSessionError
-                            ("failed to pin selected agent: "
-                                <> formatException err)
+        selectChild agentId =
+            (do
+                session <- loadSelectedAgent agentId
+                pinSubagentSession
+                    storeRoot agentTypes legacyTarget agentId session)
+                `catchAny` \err ->
+                    reportSessionError
+                        ("failed to select agent: "
+                            <> formatException err)
         releaseChild agentId = do
             sessions <- readIORef subagentSessions
             forM_ (Map.lookup agentId sessions) \session -> do
-                withMVar session.subSessionHydrated \_ ->
-                    writeIORef session.subSessionPinned False
+                unpinSubagentSession session
                 case multiCtx of
                     Nothing -> pure ()
                     Just ctx -> do
