@@ -15,7 +15,10 @@ import Agent.MCP.Client
     )
 import Agent.MCP.Types
     ( McpClient(..)
+    , McpClientTransport(..)
     , McpHeaderParam(..)
+    , McpHttpTransport(..)
+    , McpStdioTransport(..)
     , McpTool(..)
     )
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder, rawJsonFromEncoding)
@@ -95,6 +98,36 @@ spec = describe "Agent.MCP" do
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "super-secret"
+
+    describe "client transport" do
+        it "stores only HTTP state for an HTTP client" $
+            bracket (startMcpClient workerClientConfig) closeMcpClient \client ->
+                case client.clientTransport of
+                    McpClientHttp transport -> do
+                        transport.httpUrl `shouldBe` "http://127.0.0.1:1/mcp"
+                        readIORef transport.httpSession `shouldReturn` Nothing
+                    McpClientStdio _ ->
+                        expectationFailure "expected an HTTP transport"
+
+        it "stores only process state for a stdio client" $
+            withFakeServer \script ->
+                bracket
+                    (startMcpClient (baseConfig "stdio-transport" script))
+                    closeMcpClient
+                    \client -> case client.clientTransport of
+                        McpClientStdio transport -> do
+                            readIORef transport.stdioReader >>= \case
+                                Just _ -> pure ()
+                                Nothing ->
+                                    expectationFailure
+                                        "stdio response reader was not started"
+                            readIORef transport.stdioStderrReader >>= \case
+                                Just _ -> pure ()
+                                Nothing ->
+                                    expectationFailure
+                                        "stdio stderr reader was not started"
+                        McpClientHttp _ ->
+                            expectationFailure "expected a stdio transport"
 
     describe "client worker lifecycle" do
         it "does not start owned workers after the client is closed" $
