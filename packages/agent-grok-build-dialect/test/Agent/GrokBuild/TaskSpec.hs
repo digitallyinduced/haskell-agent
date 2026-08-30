@@ -111,6 +111,10 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             Text.isInfixOf "gpt-5.6-luna"
         tool.appToolDescription `shouldSatisfy`
             Text.isInfixOf "ONLY use model slugs"
+        tool.appToolDescription `shouldSatisfy`
+            Text.isInfixOf "Do not use Luna as a blanket default"
+        tool.appToolDescription `shouldSatisfy`
+            Text.isInfixOf "Inherit the parent for ambiguous"
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
                 "{\"prompt\":\"hello\",\"description\":\"luna child\",\"model\":\"luna\"}")

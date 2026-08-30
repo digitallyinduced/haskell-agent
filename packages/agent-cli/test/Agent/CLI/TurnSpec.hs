@@ -15,10 +15,12 @@ import Agent.Loop
     , LoopExecution(..)
     , LoopProgress(..)
     , TokenUsage(..)
+    , TurnAttachment(..)
     , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , emptyTurnOutput
+    , userMessageWithAttachments
     )
 import Agent.Responses.LoopBackend (toolResultToItem, turnInputsToItems)
 import Agent.Responses.Types
@@ -105,7 +107,10 @@ spec = do
                     { preparedBeforeItems = history
                     , preparedConsumedStartup = Nothing
                     , preparedTurnInputs =
-                        [UserMultimodal "inspect this" [image]]
+                        [ userMessageWithAttachments
+                            "inspect this"
+                            [ImageAttachmentItem image]
+                        ]
                     }
                 final = applyConversationPatch
                     (finishConversation
@@ -117,7 +122,10 @@ spec = do
                 `shouldBe`
                     history
                         <> turnInputsToItems
-                            [UserMultimodal "inspect this" [image]]
+                            [ userMessageWithAttachments
+                                "inspect this"
+                                [ImageAttachmentItem image]
+                            ]
 
         it "restores startup without changing conversation state for retry" do
             let final = applyConversationPatch
@@ -410,11 +418,14 @@ spec = do
         it "wraps multimodal user text without changing images" do
             let image = ImageAttachment "image/png" "png"
             grokFrameLastUserInput
-                [UserMultimodal "describe this" [image]]
+                [ userMessageWithAttachments
+                    "describe this"
+                    [ImageAttachmentItem image]
+                ]
                 `shouldBe`
-                    [ UserMultimodal
+                    [ userMessageWithAttachments
                         "<user_query>\ndescribe this\n</user_query>"
-                        [image]
+                        [ImageAttachmentItem image]
                     ]
 
         it "renders first-turn environment and optional git status" do

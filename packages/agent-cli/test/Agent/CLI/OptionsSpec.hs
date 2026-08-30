@@ -14,6 +14,15 @@ fromFilePath = unsafeEncodeUtf
 spec :: Spec
 spec = do
     describe "parseArgs" do
+        it "parses gateway account commands" do
+            parseArgs ["gateway", "connect", "--url", "https://gateway.example"]
+                `shouldBe` Right
+                    (Gateway (GatewayConnect "https://gateway.example"))
+            parseArgs ["gateway", "status"]
+                `shouldBe` Right (Gateway GatewayStatus)
+            parseArgs ["gateway", "disconnect"]
+                `shouldBe` Right (Gateway GatewayDisconnect)
+
         it "prints help and version without running" do
             parseArgs ["--help"] `shouldBe` Right ShowHelp
             parseArgs ["-h"] `shouldBe` Right ShowHelp

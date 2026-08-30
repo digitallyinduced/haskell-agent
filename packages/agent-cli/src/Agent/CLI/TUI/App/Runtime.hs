@@ -2,7 +2,10 @@
 {-# OPTIONS_GHC -O0 -Wno-unused-imports #-}
 module Agent.CLI.TUI.App.Runtime where
 
-import Agent.CLI.TUI.App.Mailbox (enqueueAppEvent)
+import Agent.CLI.TUI.App.Mailbox
+    ( appEventChannelCapacity
+    , enqueueAppEvent
+    )
 
 import Agent.Provider (Provider)
 import Agent.CLI.Clipboard ( formatImageSize )
@@ -103,6 +106,7 @@ import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPane
 import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     , nativePreviewPlacements
+    , prepareNativeTuiImagePreview
     , prepareTuiImagePreview
     , previewCountForWidth
     , previewCellSize
@@ -233,8 +237,14 @@ newFullscreenRuntimeWithSyntaxLoader
     motionMode
     color
     initial = do
-        events <- newBChan 512
-        mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
+        events <- newBChan appEventChannelCapacity
+        mailbox <- AppEventMailbox <$> newTVarIO AppEventMailboxState
+            { mailboxPendingEvents = Seq.empty
+            , mailboxPendingCount = 0
+            , mailboxPendingBytes = 0
+            , mailboxHighWaterCount = 0
+            , mailboxHighWaterBytes = 0
+            }
         motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
         motionTickQueued <- newTVarIO False
         historyRequests <- newTQueueIO
@@ -256,7 +266,7 @@ newFullscreenRuntimeWithSyntaxLoader
         sessionActions <- newIORef FullscreenSessionActions
             { sessionProvider = Nothing
             , sessionCancel = cancelAction
-            , sessionSteer = const (pure ())
+            , sessionSteer = const (pure (Right ()))
             , sessionBtw = const (pure ())
             , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
@@ -322,7 +332,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> Maybe Provider
     -> IO ()
-    -> (Text -> IO ())
+    -> (Text -> IO (Either Text ()))
     -> (Text -> IO ())
     -> IO ()
     -> (Text -> IO ())
@@ -590,7 +600,7 @@ showFullscreenToolImage
     -> ImageAttachment
     -> IO (Either Text ())
 showFullscreenToolImage runtime callId image =
-    case prepareTuiImagePreview image of
+    case prepareForRuntime runtime image of
         Left err -> pure (Left ("cannot decode image: " <> err))
         Right preview -> do
             unless runtime.runtimeNativeImagePreviews $
@@ -606,7 +616,7 @@ prepareFullscreenImagePreviews runtime images = do
     let prepared =
             mapMaybe
                 (\image ->
-                    case prepareTuiImagePreview image of
+                    case prepareForRuntime runtime image of
                         Left _ -> Nothing
                         Right preview -> Just (image, preview))
                 images
@@ -618,6 +628,16 @@ prepareFullscreenImagePreviews runtime images = do
                 void $ pure $! pixelAt preview.previewSample 0 0)
             prepared
     pure prepared
+
+prepareForRuntime
+    :: FullscreenRuntime
+    -> ImageAttachment
+    -> Either Text TuiImagePreview
+prepareForRuntime runtime
+    | runtime.runtimeNativeImagePreviews =
+        prepareNativeTuiImagePreview
+    | otherwise =
+        prepareTuiImagePreview
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =

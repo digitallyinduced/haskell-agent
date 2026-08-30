@@ -5,6 +5,7 @@ module Agent.OpenRouter.Stream
     , feedSseDecoder
     , finishSseDecoder
     , parseSseEvents
+    , streamAssemblyConfig
     , buildResponse
     ) where
 
@@ -26,7 +27,10 @@ import Agent.OpenRouter.Error (classifyStreamError)
 
 -- | Merge streamed output-item events into the terminal completed response.
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response
-buildResponse = buildStreamResponse StreamAssemblyConfig
+buildResponse = buildStreamResponse streamAssemblyConfig
+
+streamAssemblyConfig :: StreamAssemblyConfig
+streamAssemblyConfig = StreamAssemblyConfig
     { missingCompletionMessage =
         "No terminal response event found in OpenRouter SSE stream"
     , classifyStreamError

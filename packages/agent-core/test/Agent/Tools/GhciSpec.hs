@@ -24,6 +24,7 @@ import Agent.Tools.Types
     ( ToolEnv(..)
     , defaultToolEnv
     , mkToolRegistry
+    , setToolSessionTmp
     , toolSchedulingPlanFor
     )
 import Control.Concurrent (threadDelay)
@@ -32,7 +33,8 @@ import Control.Exception.Safe (SomeException, bracket, try)
 import Data.Either (isRight)
 import qualified Data.Text as Text
 import System.Directory
-    ( getTemporaryDirectory
+    ( createDirectory
+    , getTemporaryDirectory
     , removeDirectoryRecursive
     )
 import System.FilePath ((</>))
@@ -185,6 +187,34 @@ spec = describe "Agent.Tools.Ghci" do
                 result.ghciOk `shouldBe` True
                 result.ghciOutput `shouldSatisfy`
                     Text.isInfixOf (Text.pack (toFilePath env.toolCwd))
+
+    it "refreshes the private temp environment after suspension" do
+        withTempEnv \env -> do
+            let firstScratch = toFilePath env.toolCwd </> "first-session"
+                nextScratch = toFilePath env.toolCwd </> "next-session"
+            createDirectory firstScratch
+            createDirectory nextScratch
+            setToolSessionTmp env (Just (fromFilePath firstScratch))
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                first <- evalGhci ghci
+                    "cmd \"sh\" [\"-c\", \"printf '%s|%s|%s' \\\"$TMPDIR\\\" \\\"$HASKELL_AGENT_TMPDIR\\\" \\\"${HASKELL_AGENT_HOST_TMPDIR-unset}\\\"\"]"
+                    10000
+                first.ghciOk `shouldBe` True
+                first.ghciOutput `shouldSatisfy`
+                    Text.isInfixOf
+                        (Text.pack
+                            (firstScratch <> "|" <> firstScratch <> "|unset"))
+
+                setToolSessionTmp env (Just (fromFilePath nextScratch))
+                suspendGhciSession ghci
+                next <- evalGhci ghci
+                    "cmd \"sh\" [\"-c\", \"printf '%s|%s|%s' \\\"$TMPDIR\\\" \\\"$HASKELL_AGENT_TMPDIR\\\" \\\"${HASKELL_AGENT_HOST_TMPDIR-unset}\\\"\"]"
+                    10000
+                next.ghciOk `shouldBe` True
+                next.ghciOutput `shouldSatisfy`
+                    Text.isInfixOf
+                        (Text.pack
+                            (nextScratch <> "|" <> nextScratch <> "|unset"))
 
     it "restores helpers after loading a module clears interactive bindings" do
         withTempEnv \env -> do

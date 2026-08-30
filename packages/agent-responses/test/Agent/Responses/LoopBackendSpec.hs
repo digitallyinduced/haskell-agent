@@ -6,7 +6,9 @@ import Agent.Loop
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
+    , TurnAttachment(..)
     , TurnInput(..)
+    , userMessageWithAttachments
     )
 import Agent.Provider
     ( Credential(..)
@@ -114,13 +116,18 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         let image = ImageAttachment "image/png" "png-bytes"
             file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
         case turnInputsToItems
-                [UserMultimodalFiles "see this" [image] [file]] of
+                [ userMessageWithAttachments
+                    "see this"
+                    [ ImageAttachmentItem image
+                    , FileAttachmentItem file
+                    ]
+                ] of
             [MessageItem message] -> do
                 message.role `shouldBe` RoleUser
                 case message.content of
-                    MessageContentParts parts ->
-                        parts `shouldSatisfy` \ps ->
-                            any isInputFile ps && any isInputImage ps
+                    MessageContentParts
+                        [InputTextPart{}, InputImagePart{}, InputFilePart{}] ->
+                            pure ()
                     _ -> expectationFailure "expected multimodal message parts"
             other -> expectationFailure ("unexpected items: " <> show other)
 
@@ -771,16 +778,6 @@ credential label = Credential
     , leaseId = Nothing
     , provider = OpenRouterProvider
     }
-
-isInputFile :: ResponseContentPart -> Bool
-isInputFile = \case
-    InputFilePart{} -> True
-    _ -> False
-
-isInputImage :: ResponseContentPart -> Bool
-isInputImage = \case
-    InputImagePart{} -> True
-    _ -> False
 
 isUserMessage :: ResponseItem -> Bool
 isUserMessage = \case

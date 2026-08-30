@@ -144,6 +144,7 @@ import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
+import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
 import Data.List ( find , findIndex , intersperse , nub , sort , sortOn )
@@ -180,6 +181,15 @@ historyWindowBlockBudget = 1200
 historyWindowByteBudget :: Int
 historyWindowByteBudget = 8 * 1024 * 1024
 
+-- | Conversation image payloads are intentionally bounded independently of
+-- the text history window. A preview's decoded ANSI sample is lazy, so this
+-- accounting only inspects strict encoded-payload metadata.
+submittedImagePreviewCountBudget :: Int
+submittedImagePreviewCountBudget = 64
+
+submittedImagePreviewByteBudget :: Int
+submittedImagePreviewByteBudget = 64 * 1024 * 1024
+
 resetHistoryPage :: HistoryPage -> AppState -> AppState
 resetHistoryPage page state =
     let
@@ -201,6 +211,7 @@ resetHistoryPage page state =
         , appNextHistoryBlockId = nextBlockId
         , appCompletionFlashes = Map.empty
         , appConversationAnchor = Nothing
+        , appSubmittedImagePreviews = Map.empty
         }
 
 setHistoryGeneration :: HistoryGeneration -> AppState -> AppState
@@ -241,10 +252,15 @@ applyLoadedHistoryPage page state =
                         if historyContainsBlock blockId window
                             then Just blockId
                             else Nothing
-            in state
-                { appHistoryWindow = window
-                , appHistorySelectedBlock = selected
-                , appNextHistoryBlockId = nextBlockId
+                nextState = state
+                    { appHistoryWindow = window
+                    , appHistorySelectedBlock = selected
+                    , appNextHistoryBlockId = nextBlockId
+                    }
+            in nextState
+                { appSubmittedImagePreviews =
+                    retainSubmittedImagePreviews nextState
+                        nextState.appSubmittedImagePreviews
                 }
 
 clearHistoryPending :: HistoryRequest -> AppState -> AppState
@@ -270,7 +286,7 @@ commitLiveHistoryTurn durableTurn commit state =
                         unarchivedLiveStart
                             state.appUi.uiBlocks
                             durableTurn.historyTurnBlocks
-        (nextBlockId, remappedBlocks) =
+        (nextBlockId, remappedBlocks, blockIdRemap) =
             remapHistoryBlocks
                 state.appNextHistoryBlockId
                 durableTurn.historyTurnBlocks
@@ -308,17 +324,27 @@ commitLiveHistoryTurn durableTurn commit state =
                 _ ->
                     appendHistoryTurn remappedTurn baseWindow
         ui = truncateUiBlocks start state.appUi
-    in state
-        { appUi = ui
-        , appHistoryWindow = window
-        , appHistorySelectedBlock = Nothing
-        , appHistoryLiveStart = Nothing
-        , appNextHistoryBlockId = nextBlockId
-        , appConversationAnchor = Nothing
-        , appCompletionFlashes =
-            Map.filterWithKey
-                (\blockId _ -> any ((== blockId) . (.blockId)) (toList ui.uiBlocks))
-                state.appCompletionFlashes
+        remappedPreviews =
+            remapSubmittedImagePreviewBlocks
+                blockIdRemap
+                state.appSubmittedImagePreviews
+        nextState = state
+            { appUi = ui
+            , appHistoryWindow = window
+            , appHistorySelectedBlock = Nothing
+            , appHistoryLiveStart = Nothing
+            , appNextHistoryBlockId = nextBlockId
+            , appConversationAnchor = Nothing
+            , appCompletionFlashes =
+                Map.filterWithKey
+                    (\blockId _ ->
+                        any ((== blockId) . (.blockId))
+                            (toList ui.uiBlocks))
+                    state.appCompletionFlashes
+            }
+    in nextState
+        { appSubmittedImagePreviews =
+            retainSubmittedImagePreviews nextState remappedPreviews
         }
 
 truncateUiBlocks :: Int -> UiState -> UiState
@@ -354,7 +380,7 @@ remapHistoryPage nextId page =
         (remaining, turns) =
             foldl'
                 (\(current, accumulated) turn ->
-                    let (next, blocks) =
+                    let (next, blocks, _) =
                             remapHistoryBlocks
                                 current
                                 turn.historyTurnBlocks
@@ -364,14 +390,95 @@ remapHistoryPage nextId page =
                 page.historyPageTurns
     in (remaining, page { historyPageTurns = turns })
 
-remapHistoryBlocks :: Int -> Seq UiBlock -> (Int, Seq UiBlock)
+remapHistoryBlocks
+    :: Int
+    -> Seq UiBlock
+    -> (Int, Seq UiBlock, Map.Map BlockId BlockId)
 remapHistoryBlocks nextId =
     foldl'
-        (\(current, blocks) block ->
-            ( current - 1
-            , blocks |> block { blockId = BlockId current }
-            ))
-        (nextId, Seq.empty)
+        (\(current, blocks, remappedIds) block ->
+            let durableId = BlockId current
+            in ( current - 1
+               , blocks |> block { blockId = durableId }
+               , Map.insert block.blockId durableId remappedIds
+               ))
+        (nextId, Seq.empty, Map.empty)
+
+-- | Retain previews only for blocks still present in the bounded conversation,
+-- then discard the oldest payloads until both preview budgets are satisfied.
+-- Conversation order, rather than 'BlockId' ordering, is authoritative because
+-- durable IDs count down while live IDs count up.
+retainSubmittedImagePreviews
+    :: AppState
+    -> Map.Map BlockId [TuiImagePreview]
+    -> Map.Map BlockId [TuiImagePreview]
+retainSubmittedImagePreviews state previews =
+    retainSubmittedImagePreviewsForBlocks
+        (conversationBlockIds state)
+        previews
+
+retainSubmittedImagePreviewsForBlocks
+    :: [BlockId]
+    -> Map.Map BlockId [TuiImagePreview]
+    -> Map.Map BlockId [TuiImagePreview]
+retainSubmittedImagePreviewsForBlocks blockIds previews =
+    Map.fromListWith (flip (<>))
+        [ (blockId, [preview])
+        | (blockId, _, preview) <- retained
+        ]
+  where
+    chronological =
+        [ (blockId, index, preview)
+        | blockId <- blockIds
+        , (index, preview) <-
+            zip [0 :: Int ..] (Map.findWithDefault [] blockId previews)
+        ]
+    retained =
+        dropOldestOverBudget
+            (length chronological)
+            (sum
+                (map
+                    (toInteger . previewLogicalEncodedBytes . third)
+                    chronological))
+            chronological
+
+    dropOldestOverBudget count bytes entries
+        | count <= submittedImagePreviewCountBudget
+        , bytes <= toInteger submittedImagePreviewByteBudget =
+            entries
+        | (_, _, preview) : rest <- entries =
+            dropOldestOverBudget
+                (count - 1)
+                (bytes - toInteger (previewLogicalEncodedBytes preview))
+                rest
+        | otherwise = []
+
+    third (_, _, value) = value
+
+previewLogicalEncodedBytes :: TuiImagePreview -> Int
+previewLogicalEncodedBytes preview =
+    max
+        preview.previewBytes
+        (BS.length preview.previewKittyAttachment.imageBytes)
+
+conversationBlockIds :: AppState -> [BlockId]
+conversationBlockIds state =
+    map (.blockId) $
+        concatMap
+            (toList . (.historyTurnBlocks))
+            (toList state.appHistoryWindow.historyWindowTurns)
+            <> toList state.appUi.uiBlocks
+
+remapSubmittedImagePreviewBlocks
+    :: Map.Map BlockId BlockId
+    -> Map.Map BlockId [TuiImagePreview]
+    -> Map.Map BlockId [TuiImagePreview]
+remapSubmittedImagePreviewBlocks remapped =
+    Map.fromListWith (flip (<>))
+        . map
+            (\(blockId, previews) ->
+                (Map.findWithDefault blockId blockId remapped, previews))
+        . Map.toList
 
 historyContainsBlock :: BlockId -> HistoryWindow -> Bool
 historyContainsBlock blockId =

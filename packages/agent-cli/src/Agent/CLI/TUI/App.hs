@@ -18,7 +18,9 @@ module Agent.CLI.TUI.App
     , choiceClosesOnUiTransition
     , drawApp
     , elapsedMillisSince
+    , appEventLogicalBytes
     , emitUiEvent
+    , enqueueAppEvent
     , externalUrlCommand
     , hasQueuedFullscreenInput
     , initialFullscreenAppState
@@ -44,6 +46,10 @@ module Agent.CLI.TUI.App
     , readFullscreenLineOrWithCatalog
     , readFullscreenLineOrWithModels
     , repositoryHeaderText
+    , submittedImagePreviewByteBudget
+    , submittedImagePreviewCountBudget
+    , retainSubmittedImagePreviewsForBlocks
+    , previewLogicalEncodedBytes
     , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
     , requestFullscreenPermission

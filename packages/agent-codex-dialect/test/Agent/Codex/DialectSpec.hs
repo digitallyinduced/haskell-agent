@@ -4,12 +4,22 @@ import Agent.Codex.Dialect.ApplyPatch
     ( applyPatch
     , streamingPatchReadTarget
     )
-import Agent.Tools.FileSystem.FilePrefetch (PathProgress(..))
 import Agent.Codex.Dialect.ProjectInstructions (formatCodexAgentsMd)
-import Agent.Codex.Dialect.Prompt (codexSystemPrompt)
+import Agent.Codex.Dialect.Prompt
+    ( codexSystemPrompt
+    , codexSystemPromptForTools
+    )
 import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
+    )
+import Agent.Codex.Dialect.Shell
+    ( CodexShellResult(..)
+    , closeCodexShellSession
+    , continueCodexShellCommand
+    , newCodexShellSession
+    , resetCodexShellSession
+    , startCodexShellCommand
     )
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
@@ -22,6 +32,7 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
+import Agent.Tools.FileSystem.FilePrefetch (PathProgress(..))
 import Agent.Tools.Speculation
     ( closeToolSpeculationRuntime
     , newToolSpeculationRuntime
@@ -33,17 +44,22 @@ import Agent.Tools.Speculation
 import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Types
     ( AppTool(..)
+    , ToolEnv(..)
     , appToolHandlers
     , defaultToolEnv
     , mkToolRegistry
+    , setToolSessionTmp
     , toolSchedulingPlanFor
     )
+import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
 import System.Directory
-    ( doesFileExist
+    ( canonicalizePath
+    , createDirectory
+    , doesFileExist
     , getTemporaryDirectory
     , removeDirectoryRecursive
     )
@@ -62,6 +78,20 @@ spec = describe "Codex dialect" do
         prompt `shouldSatisfy` Text.isInfixOf "shell_command"
         prompt `shouldSatisfy` Text.isInfixOf "apply_patch"
         prompt `shouldSatisfy` Text.isInfixOf "<proposed_plan>"
+        Text.toLower prompt
+            `shouldSatisfy` Text.isInfixOf "omit workdir"
+        Text.toLower prompt
+            `shouldNotSatisfy` Text.isInfixOf "always set workdir"
+
+        let dynamicPrompt =
+                codexSystemPromptForTools
+                    ["shell_command"]
+                    (unsafeEncodeUtf "/repo")
+                    (fromGregorian 2026 8 23)
+        Text.toLower dynamicPrompt
+            `shouldSatisfy` Text.isInfixOf "omit workdir"
+        Text.toLower dynamicPrompt
+            `shouldNotSatisfy` Text.isInfixOf "always set workdir"
 
     it "constructs only the Codex tool surface" do
         withTempDir \dir -> do
@@ -77,6 +107,101 @@ spec = describe "Codex dialect" do
                 `shouldBe` replicate 4 True
             names `shouldNotContain` ["run_terminal_cmd", "search_replace"]
             coding.codexClose
+
+    it "defaults shell_command to the turn cwd when workdir is omitted" do
+        withTempDir \dir -> do
+            Text.writeFile (dir </> "cwd-marker") "present"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-default-cwd"
+                            "shell_command"
+                            "{\"command\":\"test -f cwd-marker && printf cwd-defaulted\"}")
+                    result.output
+                        `shouldSatisfy` Text.isInfixOf "cwd-defaulted"
+
+    it "rejects literal system temp paths in shell commands" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-system-tmp"
+                            "shell_command"
+                            "{\"command\":\"touch /tmp/agent-output\"}")
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf "Blocked hardcoded system temp path"
+                    result.output `shouldSatisfy` Text.isInfixOf "$TMPDIR"
+
+    it "maps a /tmp shell workdir to the private session directory" do
+        withTempDir \dir -> do
+            let scratch = dir </> "session-scratch"
+            createDirectory scratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            canonicalScratch <- canonicalizePath scratch
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-system-tmp-workdir"
+                            "shell_command"
+                            "{\"command\":\"pwd\",\"workdir\":\"/tmp\"}")
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf (Text.pack canonicalScratch)
+
+    it "stops retained shell commands when resetting a session" do
+        withTempDir \dir -> do
+            let scratch = dir </> "session-scratch"
+                output = scratch </> "retained-output"
+            createDirectory scratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            bracket
+                (newCodexShellSession env)
+                closeCodexShellSession
+                \session -> do
+                    started <- startCodexShellCommand
+                        session
+                        env.toolCwd
+                        "while :; do printf x >> \"$TMPDIR/retained-output\"; sleep 0.02; done"
+                        100
+                        (\_ _ -> pure ())
+                    commandId <- case started of
+                        Right CodexShellRunning
+                                { codexShellSessionId = runningId } ->
+                            pure runningId
+                        _ -> expectationFailure
+                            "expected a retained command"
+                            >> pure 0
+                    waitForFile output `shouldReturn` True
+                    resetCodexShellSession session
+                    before <- Text.readFile output
+                    threadDelay 100000
+                    Text.readFile output `shouldReturn` before
+                    continued <-
+                        continueCodexShellCommand session commandId "" 1
+                    case continued of
+                        Left message ->
+                            message `shouldBe` "Unknown session_id: "
+                                <> Text.pack (show commandId)
+                        Right _ ->
+                            expectationFailure "stale command remained available"
 
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd
@@ -306,3 +431,22 @@ withTempDir action = do
         (mkdtemp (tmp </> "agent-codex-dialect-XXXXXX"))
         removeDirectoryRecursive
         action
+
+waitForFile :: FilePath -> IO Bool
+waitForFile path = go (100 :: Int)
+  where
+    go 0 = doesFileExist path
+    go remaining =
+        doesFileExist path >>= \case
+            True -> pure True
+            False -> threadDelay 10000 >> go (remaining - 1)
+
+testDispatchConfig :: ToolDispatchConfig
+testDispatchConfig = ToolDispatchConfig
+    { toolDispatchUnknownTool = \name -> "unknown:" <> name
+    , toolDispatchFormatResult = either ("ERR " <>) id
+    , toolDispatchFormatException = \name _ -> "EX " <> name
+    , toolDispatchOnException = \_ _ -> pure ()
+    , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
+    }

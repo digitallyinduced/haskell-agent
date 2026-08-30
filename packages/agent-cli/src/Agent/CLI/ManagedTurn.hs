@@ -16,7 +16,9 @@ module Agent.CLI.ManagedTurn
 import Agent.Loop
     ( FileAttachment(..)
     , ImageAttachment(..)
-    , TurnInput(..)
+    , TurnAttachment(..)
+    , TurnInput(UserMessage)
+    , userMessageWithAttachments
     )
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.CLI.Json (decodeLazy, integer)
@@ -176,11 +178,11 @@ managedTurnInputs _ request
         let images = [image | Left image <- loaded]
             files = [file | Right file <- loaded]
         pure
-            [ UserMultimodalFiles
-                { userText = request.managedTurnText
-                , userImages = images
-                , userFiles = files
-                }
+            [ userMessageWithAttachments
+                request.managedTurnText
+                ( map ImageAttachmentItem images
+                    <> map FileAttachmentItem files
+                )
             ]
   where
     loadMedia = \case

@@ -113,6 +113,39 @@ spec = describe "Agent.Tools.MultiAgents" do
             }
         closeSubagentRegistry registry
 
+    it "lets host tools inherit instead of forcing a child model" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiPrepareSpawn = Just
+                    (\_ options -> atomically (putTMVar prepared options))
+                }
+            call = ToolCall
+                { callId = "host-tool-inherit"
+                , name = "analyze_tool_output"
+                , arguments = "{}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- spawnSharedSubagent
+            context
+            call
+            "artifact_analysis"
+            "inspect the artifact"
+            Nothing
+            Nothing
+            (Just "none")
+        result `shouldSatisfy` isRightResult
+        options <- atomically (takeTMVar prepared)
+        options `shouldBe` CollaborationSpawnOptions
+            { collaborationModel = Nothing
+            , collaborationReasoningEffort = Nothing
+            , collaborationForkTurns = Just "none"
+            }
+        closeSubagentRegistry registry
+
     it "spawns canonical paths through depth four and rejects depth five" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))

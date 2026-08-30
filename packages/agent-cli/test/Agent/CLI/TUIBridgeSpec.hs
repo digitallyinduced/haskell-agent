@@ -3,7 +3,9 @@ module Agent.CLI.TUIBridgeSpec (spec) where
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
-    ( emitUiEvent
+    ( appEventLogicalBytes
+    , emitUiEvent
+    , enqueueAppEvent
     , loadSyntaxHighlighterForRuntime
     , newFullscreenInputBuffer
     , newFullscreenRuntime
@@ -11,23 +13,28 @@ import Agent.CLI.TUI.App
     , setFullscreenSessionActions
     )
 import Agent.CLI.TUI.Bridge
+import Agent.CLI.TUI.ImagePreview (TuiImagePreview(..))
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
     , AppEventMailbox(..)
+    , AppEventMailboxState(..)
     , FullscreenRuntime(..)
     , FullscreenSessionActions(..)
     , PendingAppEvent(..)
+    , PendingUiEvent(..)
     , SyntaxHighlighterState(..)
     )
 import Agent.TUI.Model
-import Agent.Loop (LoopEvent(..), emptyTurnOutput)
+import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Agent.Provider (Provider(XAIProvider))
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (readTVarIO)
 import Control.Exception.Safe (throwString)
 import Control.Monad (replicateM_)
+import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Text as Text
@@ -138,6 +145,99 @@ spec = describe "fullscreen TUI bridge" do
                 emitUiEvent runtime (UiLoop TurnStarted)
         completed `shouldBe` Just ()
 
+    it "coalesces keyed snapshots without crossing lifecycle barriers" do
+        runtime <- newBridgeTestRuntime
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "old"))
+        emitUiEvent runtime (UiLoop (TextDelta "text"))
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "latest"))
+        emitUiEvent runtime (UiLoop TurnStarted)
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "next"))
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "newest"))
+        let AppEventMailbox stateRef = runtime.runtimeMailbox
+        pending <- (.mailboxPendingEvents) <$> readTVarIO stateRef
+        [ output
+            | PendingUi
+                (PendingExactUi
+                    (UiLoop (ToolOutputUpdated "c1" output))) <-
+                toList pending
+            ]
+            `shouldBe` ["latest", "newest"]
+        let newestFollowsBoundary =
+                case dropWhile (not . isTurnStarted) (toList pending) of
+                    PendingUi (PendingExactUi (UiLoop TurnStarted)) : rest ->
+                        any isNewestOutput rest
+                    _ -> False
+        newestFollowsBoundary `shouldBe` True
+
+    it "backpressures a single streaming mailbox node by payload bytes" do
+        runtime <- newBridgeTestRuntime
+        let exactBudgetText =
+                Text.replicate
+                    ((16 * 1024 * 1024 - 64) `div` 4)
+                    "x"
+        emitUiEvent runtime (UiLoop (TextDelta exactBudgetText))
+        withAsync
+            (emitUiEvent runtime (UiLoop (TextDelta "blocked")))
+            \publishing -> do
+                timeout 100000 (wait publishing)
+                    `shouldReturn` Nothing
+                let AppEventMailbox stateRef = runtime.runtimeMailbox
+                state <- readTVarIO stateRef
+                state.mailboxPendingBytes
+                    `shouldBe` 16 * 1024 * 1024
+                state.mailboxHighWaterCount `shouldBe` 1
+
+    it "admits one indivisible event larger than the mailbox byte budget" do
+        runtime <- newBridgeTestRuntime
+        let oversizedOutput =
+                Text.replicate ((16 * 1024 * 1024 `div` 4) + 1) "x"
+        timeout 2000000
+            (emitUiEvent
+                runtime
+                (UiLoop (ToolOutputUpdated "oversized" oversizedOutput)))
+            `shouldReturn` Just ()
+        -- Replacing that sole keyed snapshot must not compare the new
+        -- oversized value against the ordinary byte budget and deadlock.
+        timeout 2000000
+            (emitUiEvent
+                runtime
+                (UiLoop (ToolOutputUpdated "oversized" oversizedOutput)))
+            `shouldReturn` Just ()
+        let AppEventMailbox stateRef = runtime.runtimeMailbox
+        state <- readTVarIO stateRef
+        state.mailboxPendingCount `shouldBe` 1
+
+    it "accounts and backpressures encoded image events by payload bytes" do
+        runtime <- newBridgeTestRuntime
+        let encoded = BS.replicate (10 * 1024 * 1024) 0
+            attachment = ImageAttachment
+                { imageMime = "image/png"
+                , imageBytes = encoded
+                }
+            preview = TuiImagePreview
+                { previewMime = "image/png"
+                , previewBytes = BS.length encoded
+                , previewSourceWidth = 1
+                , previewSourceHeight = 1
+                , previewSample =
+                    error "mailbox accounting forced the lazy preview sample"
+                , previewKittyAttachment = attachment
+                }
+        appEventLogicalBytes (AppSetImagePreviews [(attachment, preview)])
+            `shouldSatisfy` (> BS.length encoded)
+        appEventLogicalBytes (AppCommitImagePreviews [(attachment, preview)])
+            `shouldSatisfy` (> BS.length encoded)
+        enqueueAppEvent runtime (AppToolImage "first" preview)
+        withAsync
+            (enqueueAppEvent runtime (AppToolImage "second" preview))
+            \publishing -> do
+                timeout 100000 (wait publishing)
+                    `shouldReturn` Nothing
+                let AppEventMailbox stateRef = runtime.runtimeMailbox
+                state <- readTVarIO stateRef
+                state.mailboxPendingBytes
+                    `shouldSatisfy` (>= BS.length encoded)
+
     it "rebinds provider-specific actions without replacing the runtime" do
         calls <- newIORef ([] :: [String])
         input <- newFullscreenInputBuffer
@@ -161,7 +261,9 @@ spec = describe "fullscreen TUI bridge" do
             runtime
             (Just XAIProvider)
             (modifyIORef' calls (<> ["new cancel"]))
-            (const (modifyIORef' calls (<> ["new steer"])))
+            (const
+                (modifyIORef' calls (<> ["new steer"])
+                    >> pure (Right ())))
             (const (modifyIORef' calls (<> ["new btw"])))
             (modifyIORef' calls (<> ["new recap"]))
             (const (modifyIORef' calls (<> ["new effort"])))
@@ -269,10 +371,41 @@ spec = describe "fullscreen TUI bridge" do
 hasPendingUnavailableSyntax :: FullscreenRuntime -> IO Bool
 hasPendingUnavailableSyntax runtime = do
     let AppEventMailbox pendingRef = runtime.runtimeMailbox
-    pending <- readTVarIO pendingRef
+    pending <- (.mailboxPendingEvents) <$> readTVarIO pendingRef
     syntaxState <- readIORef runtime.runtimeSyntaxHighlighter
     pure case (toList pending, syntaxState) of
         ( [PendingEvent AppSyntaxHighlighterChanged]
             , SyntaxHighlighterActive _ Nothing
             ) -> True
         _ -> False
+
+newBridgeTestRuntime :: IO FullscreenRuntime
+newBridgeTestRuntime = do
+    input <- newFullscreenInputBuffer
+    newFullscreenRuntime
+        input
+        (pure ())
+        (const (pure ()))
+        (pure WarnExit)
+        (const (pure True))
+        (const (pure ()))
+        (const (pure ()))
+        (pure (AgentRoot, []))
+        (const (pure ()))
+        (pure ())
+        (const (pure ()))
+        MotionFull
+        False
+        initialUiState
+
+isTurnStarted :: PendingAppEvent -> Bool
+isTurnStarted = \case
+    PendingUi (PendingExactUi (UiLoop TurnStarted)) -> True
+    _ -> False
+
+isNewestOutput :: PendingAppEvent -> Bool
+isNewestOutput = \case
+    PendingUi
+        (PendingExactUi
+            (UiLoop (ToolOutputUpdated "c1" "newest"))) -> True
+    _ -> False

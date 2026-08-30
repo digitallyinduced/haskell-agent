@@ -27,11 +27,13 @@ import qualified Agent.CLI.ErrorSpec as ErrorSpec
 import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
+import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.LearnedSkillsSpec as LearnedSkillsSpec
+import qualified Agent.CLI.ManagedTurnSpec as ManagedTurnSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
@@ -110,11 +112,13 @@ main = hspec do
     ExternalProgramSpec.spec
     FileUriSpec.spec
     GatewayBridgeSpec.spec
+    GatewayClientSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
     InterruptSpec.spec
     LoginSpec.spec
     LearnedSkillsSpec.spec
+    ManagedTurnSpec.spec
     MarkdownSpec.spec
     McpManagerSpec.spec
     MetaConsoleSpec.spec

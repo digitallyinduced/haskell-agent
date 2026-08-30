@@ -43,20 +43,30 @@ import Data.Time.Calendar (Day)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.OsPath (OsPath)
 
--- | Nudge subscription-backed OpenAI sessions toward the inexpensive model
--- for bounded delegation without encouraging unnecessary or risky spawning.
+-- | Help subscription-backed OpenAI sessions choose a child model by the
+-- delegated outcome. Keep this as guidance rather than a hard-coded override:
+-- the parent has the goal and context needed to judge ambiguity and risk.
 subscriptionSubagentModelGuidance :: Provider -> BillingMode -> Maybe Text
 subscriptionSubagentModelGuidance provider billing
     | provider == OpenAIProvider
     , billing == SubscriptionBilled =
         Just $ Text.unwords
-            [ "When OpenAI subscription billing is active, prefer"
-            , "`gpt-5.6-luna` for small, bounded tasks such as codebase searches,"
-            , "locating definitions, straightforward reviews, test investigation,"
-            , "and concise summaries. Keep the parent model for complex debugging,"
-            , "architecture, security-sensitive analysis, or work requiring"
-            , "substantial judgment. Do not spawn a subagent when doing the work"
-            , "directly would be faster."
+            [ "Choose the subagent model from the delegated goal's complexity,"
+            , "ambiguity, and risk—not"
+            , "just its apparent size. Consider how much the parent outcome depends"
+            , "on the result and how easily errors can be detected. Use"
+            , "`gpt-5.6-luna` (fast · low cost) only"
+            , "for mechanical, bounded, easily verified work such as locating"
+            , "definitions or summarizing known material. Use `gpt-5.6-terra`"
+            , "(balanced) for routine implementation, debugging, test investigation,"
+            , "and reviews needing moderate judgment. Use `gpt-5.6-sol` (frontier)"
+            , "for complex or ambiguous debugging, architecture, security- or"
+            , "correctness-sensitive analysis, cross-cutting work, or substantial"
+            , "judgment. Do not use Luna as a blanket default; when uncertain,"
+            , "prefer the stronger tier. Honor an explicitly requested model."
+            , "Omit the override when the parent model already matches the chosen"
+            , "tier. Do not spawn a subagent when doing the work directly would"
+            , "be faster."
             ]
     | otherwise = Nothing
 
@@ -192,7 +202,8 @@ sessionTempGuidance = \case
             [ "Session temporary directory: " <> toText path
             , "Use this private directory for clones, downloads, extracted files, generated assets, and other scratch work."
             , "Filesystem tools may access both the workspace and this directory; relative paths still resolve against the workspace."
-            , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands."
+            , "Filesystem-tool paths under /tmp or /private/tmp are redirected into this directory."
+            , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands; use $TMPDIR instead of a literal /tmp or /private/tmp path."
             ]
 
 -- | Keep sensitive values outside model-visible text and tool arguments when

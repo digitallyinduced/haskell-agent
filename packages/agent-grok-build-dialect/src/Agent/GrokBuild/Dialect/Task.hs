@@ -154,7 +154,10 @@ grokChildModelGuidance slugs =
         | lunaSubagentModel `elem` slugs =
             " Use `"
                 <> lunaSubagentModel
-                <> "` for small, bounded tasks; it runs at high reasoning effort."
+                <> "` only for mechanical, bounded, easily verified work; it runs"
+                <> " at high reasoning effort. Do not use Luna as a blanket default."
+                <> " Inherit the parent for ambiguous, high-risk, or"
+                <> " judgment-heavy work."
         | otherwise = ""
 
 taskModelProperty :: Maybe [Text] -> Text

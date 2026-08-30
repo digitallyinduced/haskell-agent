@@ -4,6 +4,7 @@ import Test.Hspec (hspec)
 
 import qualified Agent.Responses.ClientSpec as ClientSpec
 import qualified Agent.Responses.GenericClientSpec as GenericClientSpec
+import qualified Agent.Responses.HttpSSESpec as HttpSSESpec
 import qualified Agent.Responses.LoopBackendSpec as LoopBackendSpec
 import qualified Agent.Responses.ResponseMergeSpec as ResponseMergeSpec
 import qualified Agent.Responses.SSESpec as SSESpec
@@ -13,6 +14,7 @@ main :: IO ()
 main = hspec do
     ClientSpec.spec
     GenericClientSpec.spec
+    HttpSSESpec.spec
     LoopBackendSpec.spec
     ResponseMergeSpec.spec
     SSESpec.spec

@@ -27,8 +27,10 @@ import Agent.CLI.TUI.App
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Turn ( runOneTurn )
 import Agent.Loop
-    ( TurnInput(UserMultimodal, userImages, userText),
-      ImageAttachment(imageBytes, imageMime) )
+    ( ImageAttachment(imageBytes, imageMime)
+    , TurnAttachment(ImageAttachmentItem)
+    , userMessageWithAttachments
+    )
 import Agent.TUI.Model
     ( UiEvent(UiUserSubmitted, UiSetNotice, UiErrorMessage, UiSystemMessage) )
 import Control.Monad ( forM_, when )
@@ -180,10 +182,9 @@ handleAttachmentAction
                         fullscreenEvent
                             (UiUserSubmitted promptText)
                         let turnInputs =
-                                [ UserMultimodal
-                                    { userText = promptText
-                                    , userImages = images
-                                    }
+                                [ userMessageWithAttachments
+                                    promptText
+                                    (map ImageAttachmentItem images)
                                 ]
                         result <- runOneTurn env promptText turnInputs
                         finishTurn False result

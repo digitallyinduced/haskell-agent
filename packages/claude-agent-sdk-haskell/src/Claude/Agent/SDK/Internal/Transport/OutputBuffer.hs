@@ -111,7 +111,10 @@ readOutputLine bufferRef maximumBytes readChunk =
         writeIORef bufferRef emptyOutputBuffer
         if pending.recordLength == 0
             then pure OutputReadEnd
-            else pure $! OutputReadLine (joinRecord pending ByteString.empty)
+            else
+                if pending.recordLength > maximumBytes
+                    then pure OutputReadTooLarge
+                    else pure $! OutputReadLine (joinRecord pending ByteString.empty)
 
 -- | Move the newline-free 'unscanned' bytes into the current record.
 bufferScannedBytes :: OutputBuffer -> OutputBuffer

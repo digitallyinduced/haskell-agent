@@ -11,6 +11,7 @@ module Agent.OpenAI.Client
     , createCodexMessageWithProviderAtWithTurnState
     , createCodexMessageWithProviderAtWithOptions
     , createCodexMessageWithProviderAtWithOptionsAndTurnState
+    , readCodexSseChunks
     , defaultCodexBaseUrl
     , retryTransientCodexResultWithPolicy
     ) where
@@ -24,7 +25,12 @@ import Agent.OpenAI.Features
     ( betaFeaturesHeaderValue
     , remoteCompactionV2Feature
     )
-import Agent.OpenAI.Http (decodeCodexHttpBodyBytesWithModel, postCodexJson)
+import Agent.OpenAI.Http
+    ( decodeCodexHttpBodyBytesWithModel
+    , finishCodexStreamResponse
+    , postCodexJson
+    , stepCodexStreamResponse
+    )
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
@@ -40,7 +46,15 @@ import Agent.Provider
     , runWithTokenProvider
     )
 import Agent.Retry (handleSyncExceptions)
-import Agent.Responses.SSE (feedSseDecoder, newSseDecoder)
+import Agent.Responses.SSE
+    ( feedSseDecoder
+    , finishSseDecoder
+    , newSseDecoder
+    )
+import Agent.Responses.StreamAssembly
+    ( StreamAssemblyState
+    , emptyStreamAssemblyState
+    )
 import qualified Agent.Responses.Types as OpenAI
 import Control.Monad (forM_, when)
 import Control.Retry
@@ -51,7 +65,9 @@ import Control.Retry
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -319,23 +335,28 @@ responseHandler
 responseHandler idleTimeoutMicros modelHint turnState response stream = do
     let status = getStatusCode response
     captureResponseTurnState turnState response
-    bodyResult <- readBodyWithIdleTimeout idleTimeoutMicros stream
-    let bodyBytes = LBS.toStrict (bodyReadBytes bodyResult)
-        bodyText = Text.decodeUtf8With Text.lenientDecode bodyBytes
-    case bodyResult of
-        BodyReadTimedOut _
-            | status >= 200 && status < 300 ->
-                pure $ Left (ConnectionError
-                    "Codex HTTP response idle timeout")
-            | otherwise ->
-                pure $ Left $ withRetryAfterHeader response $
-                    classifyTimedOutHttpFailure status bodyText
-        BodyReadComplete _
-            | status >= 200 && status < 300 ->
-                pure (decodeCodexHttpBodyBytesWithModel modelHint bodyBytes)
-            | otherwise -> pure $ Left
-                (withRetryAfterHeader response
-                    (classifyHttpFailure status bodyText))
+    if status >= 200 && status < 300
+        then
+            if responseIsEventStream response
+                then readCodexSseResponse
+                    idleTimeoutMicros modelHint stream []
+                else sniffSuccessfulResponse
+                    idleTimeoutMicros modelHint stream
+        else do
+            bodyResult <- readBoundedBodyWithIdleTimeout
+                idleTimeoutMicros maxErrorBodyBytes stream [] 0
+            let bodyBytes = LBS.toStrict (bodyReadBytes bodyResult)
+                bodyText = Text.decodeUtf8With Text.lenientDecode bodyBytes
+                classified = case bodyResult of
+                    BodyReadComplete _ ->
+                        classifyHttpFailure status bodyText
+                    BodyReadTimedOut _ ->
+                        classifyTimedOutHttpFailure status bodyText
+                    BodyReadTooLarge _ ->
+                        appendBodyTruncatedMessage
+                            maxErrorBodyBytes
+                            (classifyHttpFailure status bodyText)
+            pure $ Left (withRetryAfterHeader response classified)
 
 captureResponseTurnState :: Maybe CodexTurnState -> Response -> IO ()
 captureResponseTurnState Nothing _ = pure ()
@@ -380,20 +401,25 @@ parseRetryAfterHeader (Just value) = parseRetryAfterSeconds [value]
 data BodyReadResult
     = BodyReadComplete !LBS.ByteString
     | BodyReadTimedOut !LBS.ByteString
+    | BodyReadTooLarge !LBS.ByteString
 
 bodyReadBytes :: BodyReadResult -> LBS.ByteString
 bodyReadBytes = \case
     BodyReadComplete bytes -> bytes
     BodyReadTimedOut bytes -> bytes
+    BodyReadTooLarge bytes -> bytes
 
-readBodyWithIdleTimeout
+readBoundedBodyWithIdleTimeout
     :: Int
+    -> Int
     -> Streams.InputStream BS.ByteString
+    -> [BS.ByteString]
+    -> Int
     -> IO BodyReadResult
-readBodyWithIdleTimeout idleMicros stream =
-    go (Just newSseDecoder) []
+readBoundedBodyWithIdleTimeout idleMicros byteLimit stream =
+    go
   where
-    go decoder reversedChunks = do
+    go reversedChunks bytesRead = do
         next <- System.Timeout.timeout idleMicros (Streams.read stream)
         case next of
             Nothing ->
@@ -403,27 +429,218 @@ readBodyWithIdleTimeout idleMicros stream =
                 pure (BodyReadComplete
                     (LBS.fromChunks (reverse reversedChunks)))
             Just (Just chunk) -> do
-                let reversedChunks' = chunk : reversedChunks
-                    complete =
-                        BodyReadComplete
-                            (LBS.fromChunks (reverse reversedChunks'))
-                case decoder of
-                    Nothing -> go Nothing reversedChunks'
-                    Just current ->
-                        case feedSseDecoder current chunk of
-                            Left _ -> go Nothing reversedChunks'
-                            Right (nextDecoder, events)
-                                | any isTerminalSseEvent events ->
-                                    pure complete
-                                | otherwise ->
-                                    go (Just nextDecoder) reversedChunks'
+                let remaining = byteLimit - bytesRead
+                if BS.length chunk > remaining
+                    then pure $ BodyReadTooLarge $ LBS.fromChunks $
+                        reverse (BS.take remaining chunk : reversedChunks)
+                    else go (chunk : reversedChunks)
+                        (bytesRead + BS.length chunk)
 
-isTerminalSseEvent :: OpenAI.ResponseStreamEvent -> Bool
-isTerminalSseEvent = \case
-    OpenAI.ResponseCompletedEvent{} -> True
-    OpenAI.ResponseDoneEvent{} -> True
-    OpenAI.ResponseIncompleteEvent{} -> True
-    OpenAI.ResponseFailedEvent{} -> True
-    OpenAI.ResponseErrorEvent{} -> True
-    OpenAI.ResponseNestedErrorEvent{} -> True
-    _ -> False
+sniffSuccessfulResponse
+    :: Int
+    -> Maybe Text
+    -> Streams.InputStream BS.ByteString
+    -> IO (Either ApiError OpenAI.Response)
+sniffSuccessfulResponse idleMicros modelHint stream =
+    sniff [] 0 ""
+  where
+    sniff reversedChunks bytesRead probe = do
+        next <- System.Timeout.timeout idleMicros (Streams.read stream)
+        case next of
+            Nothing -> pure $ Left $ ConnectionError
+                "Codex HTTP response idle timeout"
+            Just Nothing ->
+                pure $ decodeCodexHttpBodyBytesWithModel modelHint $
+                    LBS.toStrict (LBS.fromChunks (reverse reversedChunks))
+            Just (Just chunk) -> do
+                let chunks' = chunk : reversedChunks
+                    bytesRead' = bytesRead + BS.length chunk
+                    probe' = advanceResponseProbe
+                        (maxResponseSniffBytes - bytesRead)
+                        probe
+                        chunk
+                case classifyResponseProbe probe' of
+                    Just ResponseBodySse ->
+                        readCodexSseResponse
+                            idleMicros modelHint stream (reverse chunks')
+                    Just ResponseBodyJson ->
+                        readSuccessfulJsonResponse
+                            idleMicros modelHint stream chunks' bytesRead'
+                    Nothing
+                        | bytesRead' >= maxResponseSniffBytes ->
+                            readSuccessfulJsonResponse
+                                idleMicros modelHint stream chunks' bytesRead'
+                        | otherwise -> sniff chunks' bytesRead' probe'
+
+readSuccessfulJsonResponse
+    :: Int
+    -> Maybe Text
+    -> Streams.InputStream BS.ByteString
+    -> [BS.ByteString]
+    -> Int
+    -> IO (Either ApiError OpenAI.Response)
+readSuccessfulJsonResponse idleMicros modelHint stream reversedChunks bytesRead
+    | bytesRead > maxSuccessfulJsonBytes =
+        pure $ Left $ ProviderError PayloadTooLargeError
+            successfulJsonTooLargeMessage
+            Nothing
+    | otherwise = do
+        bodyResult <- readBoundedBodyWithIdleTimeout
+            idleMicros
+            maxSuccessfulJsonBytes
+            stream
+            reversedChunks
+            bytesRead
+        pure $ case bodyResult of
+            BodyReadComplete bytes ->
+                decodeCodexHttpBodyBytesWithModel modelHint (LBS.toStrict bytes)
+            BodyReadTimedOut _ ->
+                Left (ConnectionError "Codex HTTP response idle timeout")
+            BodyReadTooLarge _ ->
+                Left $ ProviderError PayloadTooLargeError
+                    successfulJsonTooLargeMessage
+                    Nothing
+
+readCodexSseResponse
+    :: Int
+    -> Maybe Text
+    -> Streams.InputStream BS.ByteString
+    -> [BS.ByteString]
+    -> IO (Either ApiError OpenAI.Response)
+readCodexSseResponse idleMicros modelHint stream initialChunks =
+    readCodexSseChunks
+        idleMicros modelHint (Streams.read stream) initialChunks
+
+-- | Incrementally decode a Codex SSE body from an arbitrary chunk source.
+-- The idle timeout applies independently to every source read, and decoding
+-- stops immediately at a terminal event without retaining earlier wire data.
+readCodexSseChunks
+    :: Int
+    -> Maybe Text
+    -> IO (Maybe BS.ByteString)
+    -> [BS.ByteString]
+    -> IO (Either ApiError OpenAI.Response)
+readCodexSseChunks idleMicros modelHint readChunk initialChunks =
+    case feedInitial newSseDecoder emptyStreamAssemblyState initialChunks of
+        Left err -> pure (Left err)
+        Right (_, _, Just response) -> pure (Right response)
+        Right (decoder, state, Nothing) -> go decoder state
+  where
+    feedInitial decoder state [] = Right (decoder, state, Nothing)
+    feedInitial decoder state (chunk : rest) = do
+        (nextDecoder, events) <- feedSseDecoder decoder chunk
+        (nextState, completed) <- applyEvents modelHint state events
+        case completed of
+            Just response -> Right (nextDecoder, nextState, Just response)
+            Nothing -> feedInitial nextDecoder nextState rest
+
+    go decoder state = do
+        next <- System.Timeout.timeout idleMicros readChunk
+        case next of
+            Nothing -> pure $ Left $ ConnectionError
+                "Codex HTTP response idle timeout"
+            Just Nothing -> pure $ do
+                trailing <- finishSseDecoder decoder
+                (nextState, completed) <- applyEvents modelHint state trailing
+                maybe (finishCodexStreamResponse nextState) Right completed
+            Just (Just chunk) ->
+                case feedSseDecoder decoder chunk of
+                    Left err -> pure (Left err)
+                    Right (nextDecoder, events) ->
+                        case applyEvents modelHint state events of
+                            Left err -> pure (Left err)
+                            Right (_, Just response) -> pure (Right response)
+                            Right (nextState, Nothing) ->
+                                go nextDecoder nextState
+
+applyEvents
+    :: Maybe Text
+    -> StreamAssemblyState
+    -> [OpenAI.ResponseStreamEvent]
+    -> Either ApiError (StreamAssemblyState, Maybe OpenAI.Response)
+applyEvents _ state [] = Right (state, Nothing)
+applyEvents modelHint state (event : rest) = do
+    (next, completed) <- stepCodexStreamResponse modelHint state event
+    case completed of
+        Just response -> Right (next, Just response)
+        Nothing -> applyEvents modelHint next rest
+
+responseIsEventStream :: Response -> Bool
+responseIsEventStream response =
+    maybe False isEventStreamContentType
+        (Network.Http.Client.getHeader response "Content-Type")
+
+isEventStreamContentType :: BS.ByteString -> Bool
+isEventStreamContentType =
+    (== "text/event-stream")
+        . BS8.dropWhileEnd (`elem` [' ', '\t'])
+        . BS8.map toLower
+        . BS8.takeWhile (/= ';')
+        . BS8.dropWhile (`elem` [' ', '\t'])
+
+data ResponseBodyKind = ResponseBodySse | ResponseBodyJson
+
+-- Keep only the first non-whitespace token needed to distinguish JSON from
+-- SSE. This remains O(total sniff bytes), even when a proxy sends one byte per
+-- chunk; the complete pending chunks are bounded separately by 8 KiB.
+advanceResponseProbe
+    :: Int -> BS.ByteString -> BS.ByteString -> BS.ByteString
+advanceResponseProbe remaining current chunk
+    | remaining <= 0 || BS.length current >= maxProbeTokenBytes = current
+    | otherwise =
+        BS.take maxProbeTokenBytes $
+            current <> candidate
+  where
+    candidate =
+        (if BS.null current then dropAsciiSpace else id)
+            (BS.take remaining chunk)
+
+classifyResponseProbe :: BS.ByteString -> Maybe ResponseBodyKind
+classifyResponseProbe probe =
+    case BS.uncons probe of
+        Nothing -> Nothing
+        Just (byte, _)
+            | byte == 0x7b || byte == 0x5b -> Just ResponseBodyJson
+            | byte == 0x3a -> Just ResponseBodySse
+            | any (`BS.isPrefixOf` probe) sseFieldPrefixes ->
+                Just ResponseBodySse
+            | any (probe `BS.isPrefixOf`) sseFieldPrefixes -> Nothing
+            | otherwise -> Just ResponseBodyJson
+  where
+    -- Content-Type is absent or wrong on some compatible proxies. All four
+    -- standard SSE fields may legally be the first line of a stream.
+    sseFieldPrefixes = ["event:", "data:", "id:", "retry:"]
+
+dropAsciiSpace :: BS.ByteString -> BS.ByteString
+dropAsciiSpace = BS.dropWhile (`elem` [0x20, 0x09, 0x0a, 0x0d])
+
+appendBodyTruncatedMessage :: Int -> ApiError -> ApiError
+appendBodyTruncatedMessage limit apiError =
+    let suffix = "\n[response body truncated after "
+            <> Text.pack (show limit) <> " bytes]"
+    in case apiError of
+        HttpError status message -> HttpError status (message <> suffix)
+        ProviderError errorType message retryAfter ->
+            ProviderError errorType (message <> suffix) retryAfter
+        JsonDecodeError message body ->
+            JsonDecodeError (message <> suffix) body
+        ConnectionError message -> ConnectionError (message <> suffix)
+        other -> other
+
+successfulJsonTooLargeMessage :: Text
+successfulJsonTooLargeMessage =
+    "Codex successful JSON response exceeds "
+        <> Text.pack (show maxSuccessfulJsonBytes)
+        <> " bytes"
+
+maxResponseSniffBytes :: Int
+maxResponseSniffBytes = 8 * 1024
+
+maxProbeTokenBytes :: Int
+maxProbeTokenBytes = 6
+
+maxSuccessfulJsonBytes :: Int
+maxSuccessfulJsonBytes = 64 * 1024 * 1024
+
+maxErrorBodyBytes :: Int
+maxErrorBodyBytes = 1024 * 1024

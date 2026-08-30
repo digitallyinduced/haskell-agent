@@ -7,7 +7,10 @@ import Agent.ToolDispatch
     , ToolCallStreamRef(..)
     , functionToolCall
     )
-import Agent.Tools.FileSystem.ReadFile (readFileToolWithSpeculation)
+import Agent.Tools.FileSystem.ReadFile
+    ( readFileTool
+    , readFileToolWithSpeculation
+    )
 import Agent.Tools.FileSystem.ReadFileSpeculation
 import Agent.Tools.Speculation
     ( ToolSpeculationRuntime
@@ -48,6 +51,27 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "read_file speculation" do
+    it "is enabled by the production read_file tool" do
+        withTempDir \dir -> do
+            Text.writeFile (dir </> "default-tool.txt") "prefetched"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newToolSpeculationRuntime [readFileTool env])
+                closeToolSpeculationRuntime
+                \runtime -> do
+                    let callId = "call-default-tool"
+                        itemId = Just "item-default-tool"
+                        arguments = readArguments "default-tool.txt"
+                    observeToolArgumentEvent runtime $
+                        outputItemAdded itemId (Just 0) callId ""
+                    observeToolArgumentEvent runtime $
+                        argumentsDelta itemId (Just 0) arguments
+                    waitForToolSpeculation runtime
+                    retainRead runtime callId arguments
+                    takeToolSpeculation runtime
+                        (functionToolCall callId "read_file" arguments)
+                        `shouldReturn` Just (Right "1→prefetched")
+
     it "prefetches a complete target from argument deltas before done" do
         withSpeculation \dir env cache runtime -> do
             Text.writeFile (dir </> "alpha.txt") "prefetched"
@@ -67,6 +91,115 @@ spec = describe "read_file speculation" do
             retainRead runtime callId arguments
             dispatchRead env cache runtime callId arguments
                 `shouldReturn` "1→prefetched"
+            metrics <- readReadFileSpeculationMetrics cache
+            metrics.speculativeReadHits `shouldBe` 1
+            metrics.speculativeReadMisses `shouldBe` 0
+
+    it "reuses an exact bounded read for a negative offset" do
+        withSpeculation \dir env cache runtime -> do
+            Text.writeFile (dir </> "tail.txt") "first\nsecond\nlast\n"
+            let callId = "call-negative-offset"
+                itemId = Just "item-negative-offset"
+                arguments = readRangeArguments "tail.txt" (-1) Nothing
+            observeToolArgumentEvent runtime $
+                outputItemAdded itemId (Just 0) callId ""
+            observeToolArgumentEvent runtime $
+                argumentsDelta itemId (Just 0) arguments
+            waitForToolSpeculation runtime
+            retainRead runtime callId arguments
+
+            dispatchRead env cache runtime callId arguments
+                `shouldReturn` "3→last"
+            metrics <- readReadFileSpeculationMetrics cache
+            metrics.speculativeReadHits `shouldBe` 1
+            metrics.speculativeReadMisses `shouldBe` 0
+
+    it "keeps speculative reads under the normal 1000-line cap" do
+        withSpeculation \dir env cache runtime -> do
+            Text.writeFile
+                (dir </> "many-lines.txt")
+                (Text.unlines
+                    ["line-" <> Text.pack (show n) | n <- [1 :: Int .. 1200]])
+            let callId = "call-line-cap"
+                itemId = Just "item-line-cap"
+                arguments = readRangeArguments "many-lines.txt" 1 (Just 1200)
+            observeToolArgumentEvent runtime $
+                outputItemAdded itemId (Just 0) callId ""
+            observeToolArgumentEvent runtime $
+                argumentsDelta itemId (Just 0) arguments
+            waitForToolSpeculation runtime
+            retainRead runtime callId arguments
+
+            output <- dispatchRead env cache runtime callId arguments
+            length (Text.lines output) `shouldBe` 1000
+            Text.lines output `shouldSatisfy`
+                maybe False ("1000→line-1000" ==) . lastMay
+            metrics <- readReadFileSpeculationMetrics cache
+            metrics.speculativeReadHits `shouldBe` 1
+
+    it "falls back without retaining a giant speculative line" do
+        withSpeculation \dir env cache runtime -> do
+            Text.writeFile (dir </> "giant.txt") (Text.replicate 300000 "x")
+            let callId = "call-giant-line"
+                itemId = Just "item-giant-line"
+                arguments = readArguments "giant.txt"
+            observeToolArgumentEvent runtime $
+                outputItemAdded itemId (Just 0) callId ""
+            observeToolArgumentEvent runtime $
+                argumentsDelta itemId (Just 0) arguments
+            waitForToolSpeculation runtime
+            retainRead runtime callId arguments
+
+            output <- dispatchRead env cache runtime callId arguments
+            output `shouldSatisfy` Text.isInfixOf "exceeds"
+            metrics <- readReadFileSpeculationMetrics cache
+            metrics.speculativeReadHits `shouldBe` 0
+            metrics.speculativeReadMisses `shouldBe` 1
+
+    it "matches normal binary detection after the first 8 KiB" do
+        withSpeculation \dir env cache runtime -> do
+            Text.writeFile
+                (dir </> "late-nul.txt")
+                (Text.replicate 9000 "a" <> "\0suffix\n")
+            let callId = "call-late-nul"
+                itemId = Just "item-late-nul"
+                arguments = readArguments "late-nul.txt"
+            observeToolArgumentEvent runtime $
+                outputItemAdded itemId (Just 0) callId ""
+            observeToolArgumentEvent runtime $
+                argumentsDelta itemId (Just 0) arguments
+            waitForToolSpeculation runtime
+            retainRead runtime callId arguments
+
+            output <- dispatchRead env cache runtime callId arguments
+            output `shouldSatisfy` Text.isInfixOf "\0suffix"
+            metrics <- readReadFileSpeculationMetrics cache
+            metrics.speculativeReadHits `shouldBe` 1
+            metrics.speculativeReadMisses `shouldBe` 0
+
+    it "ignores unselected bytes after the prefetched line window" do
+        withSpeculation \dir env cache runtime -> do
+            let line = Text.replicate 49 "\128512" <> "xx"
+                selected =
+                    Text.concat (replicate 999 (line <> "\n"))
+                        <> line
+                        <> Text.replicate 999 "q"
+                        <> "\n"
+            Text.writeFile
+                (dir </> "chunk-tail.txt")
+                (selected <> Text.replicate 100000 "z")
+            let callId = "call-chunk-tail"
+                itemId = Just "item-chunk-tail"
+                arguments = readArguments "chunk-tail.txt"
+            observeToolArgumentEvent runtime $
+                outputItemAdded itemId (Just 0) callId ""
+            observeToolArgumentEvent runtime $
+                argumentsDelta itemId (Just 0) arguments
+            waitForToolSpeculation runtime
+            retainRead runtime callId arguments
+
+            output <- dispatchRead env cache runtime callId arguments
+            length (Text.lines output) `shouldBe` 1000
             metrics <- readReadFileSpeculationMetrics cache
             metrics.speculativeReadHits `shouldBe` 1
             metrics.speculativeReadMisses `shouldBe` 0
@@ -198,7 +331,10 @@ spec = describe "read_file speculation" do
 
     it "does not restart a completed-path prefetch when range fields arrive" do
         withSpeculation \dir env cache runtime -> do
-            Text.writeFile (dir </> "range-after-path.txt") "first\nsecond"
+            Text.writeFile
+                (dir </> "range-after-path.txt")
+                (Text.unlines
+                    ["line-" <> Text.pack (show n) | n <- [1 :: Int .. 1200]])
             let callId = "call-range-after-path"
                 itemId = Just "item-range-after-path"
                 outputIndex = Just 0
@@ -225,9 +361,46 @@ spec = describe "read_file speculation" do
 
             retainRead runtime callId arguments
             dispatchRead env cache runtime callId arguments
-                `shouldReturn` "2→second"
+                `shouldReturn` "2→line-2"
             metrics <- readReadFileSpeculationMetrics cache
             metrics.speculativeReadHits `shouldBe` 1
+
+    it "falls back for a range outside the prefetched window" do
+        withSpeculation \dir env cache runtime -> do
+            Text.writeFile
+                (dir </> "range-outside-window.txt")
+                (Text.unlines
+                    ["line-" <> Text.pack (show n) | n <- [1 :: Int .. 1200]])
+            let callId = "call-range-outside-window"
+                itemId = Just "item-range-outside-window"
+                outputIndex = Just 0
+                arguments =
+                    "{\"target_file\":\"range-outside-window.txt\",\"offset\":1100,\"limit\":1}"
+            observeToolArgumentEvent runtime $
+                outputItemAdded itemId outputIndex callId ""
+            observeToolArgumentEvent runtime $
+                argumentsDelta
+                    itemId
+                    outputIndex
+                    "{\"target_file\":\"range-outside-window.txt\""
+            waitForToolSpeculation runtime
+            observeToolArgumentEvent runtime $
+                argumentsDelta
+                    itemId
+                    outputIndex
+                    ",\"offset\":1100,\"limit\":1}"
+            waitForToolSpeculation runtime
+
+            beforeDispatch <- readReadFileSpeculationMetrics cache
+            beforeDispatch.speculativeReadsStarted `shouldBe` 1
+            beforeDispatch.speculativeReadsCancelled `shouldBe` 0
+
+            retainRead runtime callId arguments
+            dispatchRead env cache runtime callId arguments
+                `shouldReturn` "1100→line-1100"
+            metrics <- readReadFileSpeculationMetrics cache
+            metrics.speculativeReadHits `shouldBe` 0
+            metrics.speculativeReadMisses `shouldBe` 1
 
     it "falls back when the consumed target differs from the prediction" do
         withSpeculation \dir env cache runtime -> do
@@ -334,6 +507,46 @@ spec = describe "read_file speculation" do
                                 retainRead runtime callId arguments
                                 dispatchRead env cache runtime callId arguments
                                     `shouldReturn` "1→external"
+                                readIORef requests `shouldReturn` 1
+
+    it "requests denied external-root access only once" do
+        withTempDir \workspace ->
+            withTempDir \external -> do
+                let target = external </> "denied.txt"
+                    callId = "call-denied-external"
+                    arguments = readArguments (Text.pack target)
+                Text.writeFile target "external"
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                requests <- newIORef (0 :: Int)
+                setToolRootAccessRequest env $ Just \_ -> do
+                    modifyIORef' requests (+ 1)
+                    pure False
+                bracket
+                    (newReadFileSpeculation env)
+                    closeReadFileSpeculation
+                    \cache -> do
+                        let tool = readFileToolWithSpeculation env (Just cache)
+                        bracket
+                            (newToolSpeculationRuntime [tool])
+                            closeToolSpeculationRuntime
+                            \runtime -> do
+                                observeToolArgumentEvent runtime $
+                                    outputItemAdded
+                                        (Just "item-denied-external")
+                                        (Just 0)
+                                        callId
+                                        ""
+                                observeToolArgumentEvent runtime $
+                                    argumentsDelta
+                                        (Just "item-denied-external")
+                                        (Just 0)
+                                        arguments
+                                waitForToolSpeculation runtime
+
+                                retainRead runtime callId arguments
+                                dispatchRead env cache runtime callId arguments
+                                    >>= (`shouldSatisfy`
+                                        Text.isPrefixOf "Error:")
                                 readIORef requests `shouldReturn` 1
 
     it "caps concurrent speculative reads" do
@@ -534,6 +747,22 @@ readArguments target =
         LazyByteString.toStrict $
             Aeson.encode $
                 Aeson.object ["target_file" Aeson..= target]
+
+readRangeArguments :: Text -> Int -> Maybe Int -> Text
+readRangeArguments target offset limit =
+    Text.decodeUtf8 $
+        LazyByteString.toStrict $
+            Aeson.encode $
+                Aeson.object $
+                    [ "target_file" Aeson..= target
+                    , "offset" Aeson..= offset
+                    ]
+                        <> maybe [] (\value -> ["limit" Aeson..= value]) limit
+
+lastMay :: [a] -> Maybe a
+lastMay = \case
+    [] -> Nothing
+    values -> Just (last values)
 
 outputItemAdded
     :: Maybe Text

@@ -20,6 +20,8 @@ module Agent.Tools.IO
     , runShellCommandStreaming
     , startShellCommand
     , startShellCommandWithInput
+    , configuredProcessEnv
+    , sessionTempProcessEnv
     , writeShellCommandInput
     , interruptShellCommand
     , stopShellCommand
@@ -423,19 +425,27 @@ startShellCommandWithStdin keepStdin env workdir command = do
 configuredProcessEnv :: ToolEnv -> IO (Maybe [(String, String)])
 configuredProcessEnv env = readIORef env.toolSessionTmp >>= \case
     Nothing -> pure Nothing
-    Just temp -> do
-        inherited <- getEnvironment
-        let tempPath = unsafeToFilePath temp
-            withoutTemp =
-                filter
-                    (\(name, _) ->
-                        name /= "TMPDIR" && name /= "HASKELL_AGENT_TMPDIR")
-                    inherited
-        pure $ Just
-            ( ("TMPDIR", tempPath)
-            : ("HASKELL_AGENT_TMPDIR", tempPath)
-            : withoutTemp
-            )
+    Just temp ->
+        Just . sessionTempProcessEnv temp <$> getEnvironment
+
+-- | Point a child process at one session's private scratch directory without
+-- mutating the parent process environment (several sessions may coexist).
+sessionTempProcessEnv :: OsPath -> [(String, String)] -> [(String, String)]
+sessionTempProcessEnv temp inherited =
+    ( ("TMPDIR", tempPath)
+    : ("HASKELL_AGENT_TMPDIR", tempPath)
+    : withoutTemp
+    )
+  where
+    tempPath = unsafeToFilePath temp
+    withoutTemp =
+        filter
+            (\(name, _) ->
+                name /= "TMPDIR"
+                    && name /= "HASKELL_AGENT_TMPDIR"
+                    -- Never propagate an ambient host-temp escape.
+                    && name /= "HASKELL_AGENT_HOST_TMPDIR")
+            inherited
 
 acquireRunningCommand :: ToolEnv -> CreateProcess -> Bool -> IO RunningCommand
 acquireRunningCommand env spec keepStdin = mask \restore -> do

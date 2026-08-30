@@ -64,6 +64,26 @@ spec = do
                                 && message `Text.isInfixOf` notice
                     _ -> False
 
+        it "rejects hardcoded system temp paths before prompting" do
+            let call = functionToolCall
+                    "call-shell"
+                    "shell_command"
+                    "{\"command\":\"render input.svg /tmp/output.png\"}"
+                facts = (approvalFacts call)
+                    { policy = ApproveAll
+                    , allowedForSession = Just True
+                    }
+            planApproval facts
+                `shouldSatisfy` \case
+                    CompleteApproval
+                        (Left message)
+                        [ReportApprovalNotice (ApprovalWarning notice)] ->
+                            "Blocked hardcoded system temp path"
+                                `Text.isInfixOf` message
+                                && "$TMPDIR" `Text.isInfixOf` message
+                                && message `Text.isInfixOf` notice
+                    _ -> False
+
         it "requests facts in security-precedence order" do
             let initial = approvalFacts mutatingCall
                 classified = initial { readOnly = Just False }

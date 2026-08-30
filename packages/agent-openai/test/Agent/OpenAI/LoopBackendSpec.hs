@@ -137,7 +137,10 @@ spec = do
         it "encodes multimodal turns as input_text plus input_image data URLs" do
             let image = ImageAttachment "image/png" "png-bytes"
             case turnInputsToItems
-                    [UserMultimodal "see this" [image]] of
+                    [ userMessageWithAttachments
+                        "see this"
+                        [ImageAttachmentItem image]
+                    ] of
                 [MessageItem message] -> do
                     message.role `shouldBe` RoleUser
                     case message.content of
@@ -164,7 +167,12 @@ spec = do
             let image = ImageAttachment "image/png" "png-bytes"
                 file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
             case turnInputsToItems
-                    [UserMultimodalFiles "see this" [image] [file]] of
+                    [ userMessageWithAttachments
+                        "see this"
+                        [ ImageAttachmentItem image
+                        , FileAttachmentItem file
+                        ]
+                    ] of
                 [MessageItem message] -> do
                     message.role `shouldBe` RoleUser
                     case message.content of

@@ -21,6 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
 import Data.IORef (readIORef)
+import Data.List (stripPrefix)
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory.OsPath
@@ -35,8 +36,10 @@ import System.Directory.OsPath
     )
 import System.OsPath
     ( OsPath
+    , dropTrailingPathSeparator
     , equalFilePath
     , isAbsolute
+    , joinPath
     , makeRelative
     , splitDirectories
     , takeDirectory
@@ -48,7 +51,9 @@ import System.IO.Error (isDoesNotExistError)
 
 -- | Resolve a model-supplied path against the tool cwd and reject anything
 -- that canonicalizes outside the cwd or an explicitly allowed root, including
--- via symlinks. Relative paths are always cwd-relative.
+-- via symlinks. Relative paths are always cwd-relative. When a private session
+-- temp root is configured, absolute paths under the system @/tmp@ and
+-- @/private/tmp@ aliases are resolved under that private root instead.
 resolveUnderCwd :: ToolEnv -> OsPath -> IO (Either Text OsPath)
 resolveUnderCwd env requested =
     resolveWithRoots env requested []
@@ -132,25 +137,118 @@ resolveWithRootsAttempt env requested extraRoots = do
     sessionTmp <- readIORef env.toolSessionTmp
     canonicalRoots <-
         mapConcurrentlyBounded rootCanonicalizationConcurrency canonicalizePath
-            ( env.toolCwd
-            : configuredRoots <> extraRoots <> maybe [] pure sessionTmp
-            )
-    let (absCwd, allowedRoots) = case canonicalRoots of
+            (env.toolCwd : configuredRoots <> extraRoots)
+    canonicalSessionTmp <- traverse canonicalizePath sessionTmp
+    let (absCwd, configuredAndExtraRoots) = case canonicalRoots of
             root : roots -> (root, roots)
             [] -> error "resolveWithRoots: cwd canonicalization omitted"
+        allowedRoots =
+            configuredAndExtraRoots <> maybe [] pure canonicalSessionTmp
     let combined
             | isAbsolute requested = requested
             | otherwise = absCwd </> requested
-    exists <- doesPathExist combined
-    resolvedResult <- if exists
-        then Right <$> canonicalizePath combined
-        else resolveMissing combined
-    pure $ case resolvedResult of
-        Left err -> Left (ResolverFailure err)
+        roots = absCwd : allowedRoots
+        tempAlias
+            | isAbsolute requested = systemTempRelative combined
+            | otherwise = Nothing
+    case (canonicalSessionTmp, tempAlias) of
+        (Just tempRoot, Just (aliasRoot, relative)) -> do
+            explicitlyAllowed <-
+                systemTempPathIsAllowed roots aliasRoot relative
+            if explicitlyAllowed
+                then resolveOrdinary roots combined
+                else resolvePrivateTemp requested tempRoot relative
+        _ -> resolveOrdinary roots combined
+
+resolveOrdinary :: [OsPath] -> OsPath -> IO (Either ResolveFailure OsPath)
+resolveOrdinary roots path =
+    resolvePath path >>= \case
+        Left err -> pure (Left (ResolverFailure err))
         Right resolved
-            | any (`isInside` resolved) (absCwd : allowedRoots) ->
-                Right resolved
-            | otherwise -> Left (OutsideAllowedRoots resolved)
+            | any (`isInside` resolved) roots -> pure (Right resolved)
+            | otherwise -> pure (Left (OutsideAllowedRoots resolved))
+
+resolvePrivateTemp
+    :: OsPath
+    -> OsPath
+    -> OsPath
+    -> IO (Either ResolveFailure OsPath)
+resolvePrivateTemp requested tempRoot relative =
+    resolvePath (tempRoot </> relative) >>= \case
+        Left err -> pure (Left (ResolverFailure err))
+        Right resolved
+            | tempRoot `isInside` resolved -> pure (Right resolved)
+            | otherwise ->
+                pure (Left (ResolverFailure (tempEscapeMessage requested)))
+
+resolvePath :: OsPath -> IO (Either Text OsPath)
+resolvePath path = do
+    exists <- doesPathExist path
+    if exists
+        then Right <$> canonicalizePath path
+        else resolveMissing path
+
+-- | Treat both common spellings of the conventional POSIX temp namespace as
+-- aliases for the session-private temp root. Match components before resolving
+-- the path so macOS's @/tmp@ symlink and its @/private/tmp@ target behave the
+-- same way, while preserving @..@ and symlink semantics in the remapped path.
+systemTempRelative :: OsPath -> Maybe (OsPath, OsPath)
+systemTempRelative path =
+    firstMatch [systemTmpRoot, privateSystemTmpRoot]
+  where
+    components =
+        normalizePosixRoot $
+            splitDirectories (dropTrailingPathSeparator path)
+    normalizePosixRoot = \case
+        root : rest
+            | let display = toText root
+            , not (Text.null display)
+            , Text.all (== '/') display ->
+                posixRoot : rest
+        other -> other
+    firstMatch [] = Nothing
+    firstMatch (alias : aliases) =
+        case
+            stripPrefix
+                (splitDirectories (dropTrailingPathSeparator alias))
+                components
+        of
+            Just [] -> Just (alias, currentDirectory)
+            Just relative -> Just (alias, joinPath relative)
+            Nothing -> firstMatch aliases
+
+-- | A preconfigured host-temp root is an explicit escape hatch from the
+-- private alias. Canonicalize only the alias root, not its descendants, so
+-- shared-host files and symlinks cannot affect the default remapping decision.
+systemTempPathIsAllowed
+    :: [OsPath]
+    -> OsPath
+    -> OsPath
+    -> IO Bool
+systemTempPathIsAllowed roots aliasRoot relative =
+    tryAny (canonicalizePath aliasRoot) >>= \case
+        Left _ -> pure False
+        Right canonicalAlias ->
+            pure $
+                any
+                    (`isInside` (canonicalAlias </> relative))
+                    roots
+
+systemTmpRoot :: OsPath
+systemTmpRoot = unsafeEncodeUtf "/tmp"
+
+privateSystemTmpRoot :: OsPath
+privateSystemTmpRoot = unsafeEncodeUtf "/private/tmp"
+
+currentDirectory :: OsPath
+currentDirectory = unsafeEncodeUtf "."
+
+posixRoot :: OsPath
+posixRoot = unsafeEncodeUtf "/"
+
+tempEscapeMessage :: OsPath -> Text
+tempEscapeMessage requested =
+    "Path escapes the private session temp directory: " <> toText requested
 
 outsideRootsMessage :: OsPath -> Text
 outsideRootsMessage requested =

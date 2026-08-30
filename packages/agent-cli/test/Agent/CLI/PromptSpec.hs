@@ -327,9 +327,13 @@ spec = describe "systemPrompt" do
             "clones, downloads, extracted files, generated assets"
         childPrompt `shouldSatisfy` Text.isInfixOf
             "relative paths still resolve against the workspace"
+        rootPrompt `shouldSatisfy` Text.isInfixOf
+            "paths under /tmp or /private/tmp are redirected"
         rootPrompt `shouldSatisfy` Text.isInfixOf "HASKELL_AGENT_TMPDIR"
         childPrompt `shouldSatisfy` Text.isInfixOf "TMPDIR"
-    it "recommends Luna only for subscription-backed OpenAI subagents" do
+        childPrompt `shouldSatisfy` Text.isInfixOf
+            "use $TMPDIR instead of a literal /tmp"
+    it "gives subscription-backed OpenAI subagents task-based model guidance" do
         let subscriptionGuidance =
                 subscriptionSubagentModelGuidance
                     OpenAIProvider
@@ -337,7 +341,17 @@ spec = describe "systemPrompt" do
         subscriptionGuidance `shouldSatisfy`
             maybe False (Text.isInfixOf "`gpt-5.6-luna`")
         subscriptionGuidance `shouldSatisfy`
-            maybe False (Text.isInfixOf "small, bounded tasks")
+            maybe False (Text.isInfixOf "complexity, ambiguity, and risk")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "parent outcome depends on the result")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "`gpt-5.6-terra`")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "`gpt-5.6-sol`")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "Do not use Luna as a blanket default")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "Honor an explicitly requested model")
         subscriptionSubagentModelGuidance OpenAIProvider ApiBilled
             `shouldBe` Nothing
         subscriptionSubagentModelGuidance XAIProvider SubscriptionBilled

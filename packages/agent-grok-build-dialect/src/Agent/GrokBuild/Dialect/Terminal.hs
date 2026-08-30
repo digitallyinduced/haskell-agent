@@ -7,7 +7,7 @@ import Agent.ToolDispatch
     , decodeToolArguments
     , typedStreamingTool
     )
-import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
+import Agent.Tools.Dangerous (blockedShellCommandReason)
 import Agent.GrokBuild.Dialect.Common (jsonTool, stripAnsi)
 import Agent.GrokBuild.Dialect.Json
     ( optionalBool
@@ -90,6 +90,7 @@ terminalDescription :: Text
 terminalDescription =
     "Run a bash command and return its output.\n\
     \- Always set a timeout for commands that may hang.\n\
+    \- Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\
     \- Prefer dedicated tools (read_file, grep, list_dir, search_replace) over shell equivalents when they exist."
 
 runTerminal
@@ -100,8 +101,8 @@ runTerminal
 runTerminal session emitOutput args
     | Text.null args.description =
         pure (Left "Missing parameter: description")
-    | commandLooksLikeRmRf args.command =
-        pure (Left (forbiddenRmRfReason args.command))
+    | Just reason <- blockedShellCommandReason args.command =
+        pure (Left reason)
     | not args.background && hasUnwaitedBackgroundOp args.command =
         pure $ Left
             "The command contains a background '&'. Set background=true to run it as a background task, or append `wait` if you meant to wait for the children."

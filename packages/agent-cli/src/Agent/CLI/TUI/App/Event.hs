@@ -171,7 +171,10 @@ import System.Process (callProcess)
 import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.History
-import Agent.CLI.TUI.App.Reduce hiding (queueConversationReflow)
+import Agent.CLI.TUI.App.Reduce hiding
+    ( clearSubmittedImagePlacements
+    , queueConversationReflow
+    )
 import Agent.CLI.TUI.App.Overlay hiding (handleCtrlC)
 import Agent.CLI.TUI.App.Navigation hiding (handleCtrlC)
 
@@ -445,15 +448,20 @@ handleEventInner event = case event of
                         nextBlockId
                         previews
                         state.appSubmittedImagePreviews
+            retained =
+                retainSubmittedImagePreviewsForBlocks
+                    (nub (conversationBlockIds state <> [nextBlockId]))
+                    submitted
         liftIO do
             writeIORef state.appRuntime.runtimeImagePreviews []
             modifyIORef'
                 state.appRuntime.runtimeImagePreviewRevision
                 (+ 1)
+        clearSubmittedImagePlacements state.appRuntime
         modify' \current ->
             current
                 { appImagePreviews = []
-                , appSubmittedImagePreviews = submitted
+                , appSubmittedImagePreviews = retained
                 }
         queueConversationReflow
     AppEvent (AppToolImage callId preview) -> do
@@ -461,14 +469,17 @@ handleEventInner event = case event of
         case toolImageBlockId callId state.appUi of
             Nothing -> pure ()
             Just blockId -> do
+                clearSubmittedImagePlacements state.appRuntime
                 modify' \current ->
-                    current
-                        { appSubmittedImagePreviews =
+                    let inserted =
                             Map.insertWith
                                 (flip (<>))
                                 blockId
                                 [preview]
                                 current.appSubmittedImagePreviews
+                    in current
+                        { appSubmittedImagePreviews =
+                            retainSubmittedImagePreviews current inserted
                         }
                 -- Running tool bodies are cached while empty; the new image
                 -- section must not be served from that entry.
@@ -527,6 +538,8 @@ handleEventInner event = case event of
                     }
             invalidateCache
     AppEvent (AppHistoryReset page) -> do
+        state <- get
+        clearSubmittedImagePlacements state.appRuntime
         modify' (resetHistoryPage page)
         invalidateCache
         resolveConversationFollow
@@ -551,7 +564,9 @@ handleEventInner event = case event of
                                             <> err))))
                                 (clearHistoryPending request current)
                     Right page ->
-                        modify' (applyLoadedHistoryPage page)
+                        do
+                            clearSubmittedImagePlacements state.appRuntime
+                            modify' (applyLoadedHistoryPage page)
                 invalidateCache
                 case anchorBlock of
                     Nothing -> pure ()
@@ -578,6 +593,7 @@ handleEventInner event = case event of
                 _ ->
                     currentGeneration < generation
         when applicable do
+            clearSubmittedImagePlacements state.appRuntime
             modify'
                 (commitLiveHistoryTurn turn commit
                     . setHistoryGeneration generation)

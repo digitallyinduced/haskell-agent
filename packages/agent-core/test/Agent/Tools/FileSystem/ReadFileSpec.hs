@@ -3,9 +3,16 @@ module Agent.Tools.FileSystem.ReadFileSpec (spec) where
 import Agent.Tools.FileSystem.ReadFile
     ( ReadFileArgs(..)
     , formatReadFile
+    , streamReadFile
     )
+import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
+import Control.Exception.Safe (bracket)
+import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.FilePath ((</>))
+import System.OsPath (unsafeEncodeUtf)
+import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
 spec :: Spec
@@ -60,6 +67,57 @@ spec = describe "formatReadFile" do
                     ]
                 )
 
+    describe "streamReadFile" do
+        it "matches empty-file offset semantics" do
+            withFile "" \path -> do
+                streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
+                    `shouldReturn` Right "1\8594"
+                streamReadFile (unsafeEncodeUtf path) (readArgs (Just 2) Nothing)
+                    `shouldReturn` Right "Offset 2 is beyond the end of the file (1 lines)."
+
+        it "preserves CRLF and trailing newline behavior" do
+            withFile "a\r\nb\r\n" \path ->
+                streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
+                    `shouldReturn` Right "1\8594a\r\nb\r"
+
+        it "supports negative offsets" do
+            withFile "a\nb\nc\n" \path ->
+                streamReadFile (unsafeEncodeUtf path) (readArgs (Just (-2)) (Just 2))
+                    `shouldReturn` Right "2\8594b\nc"
+
+        it "decodes invalid UTF-8 leniently across chunks" do
+            withBytes (BS.replicate 65535 97 <> BS.pack [0xc3, 0x28] <> "\n") \path ->
+                streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
+                    >>= (`shouldSatisfy`
+                        either (const False) (Text.isInfixOf "\xfffd("))
+
+        it "rejects NUL bytes in the first 8 KiB" do
+            withBytes "prefix\0suffix" \path ->
+                streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
+                    `shouldReturn` Left "Cannot read binary file"
+
+        it "preserves NUL bytes after the binary-detection prefix" do
+            withBytes
+                (BS.replicate 9000 97 <> BS.pack [0] <> "suffix\n")
+                \path ->
+                    streamReadFile
+                        (unsafeEncodeUtf path)
+                        (readArgs Nothing Nothing)
+                        >>= (`shouldSatisfy`
+                            either
+                                (const False)
+                                (Text.isInfixOf "\0suffix"))
+
+        it "skips giant unselected lines without retaining them" do
+            withBytes (BS.replicate 300000 120 <> "\nsmall\n") \path ->
+                streamReadFile (unsafeEncodeUtf path) (readArgs (Just 2) (Just 1))
+                    `shouldReturn` Right "2\8594small"
+
+        it "fails early on a giant selected line" do
+            withBytes (BS.replicate 300000 120 <> "\n") \path ->
+                streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
+                    >>= (`shouldSatisfy` isLeft)
+
 readArgs :: Maybe Int -> Maybe Int -> ReadFileArgs
 readArgs offset limit =
     ReadFileArgs
@@ -69,3 +127,14 @@ readArgs offset limit =
         , pages = Nothing
         , format = Nothing
         }
+
+withFile :: String -> (FilePath -> IO a) -> IO a
+withFile content = withBytes (BS.pack (map (fromIntegral . fromEnum) content))
+
+withBytes :: BS.ByteString -> (FilePath -> IO a) -> IO a
+withBytes bytes action = do
+    root <- getTemporaryDirectory
+    bracket (mkdtemp (root </> "agent-read-file-test-")) removeDirectoryRecursive \dir -> do
+        let path = dir </> "input.txt"
+        BS.writeFile path bytes
+        action path

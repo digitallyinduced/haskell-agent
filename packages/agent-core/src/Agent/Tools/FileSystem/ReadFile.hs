@@ -3,18 +3,18 @@ module Agent.Tools.FileSystem.ReadFile
     , readFileToolWithSpeculation
     , ReadFileArgs(..)
     , formatReadFile
+    , streamReadFile
     ) where
 
 import Agent.OsPath (fromText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch
-    ( typedTool
-    )
+import Agent.ToolDispatch (typedTool)
 import Agent.Tools.FileSystem.ReadFile.Internal
     ( ReadFileArgs(..)
     , formatReadFileContent
     , readFileArgsDecoder
     , runReadFile
+    , streamReadFile
     )
 import Agent.Tools.FileSystem.ReadFileSpeculation
     ( ReadFileSpeculation

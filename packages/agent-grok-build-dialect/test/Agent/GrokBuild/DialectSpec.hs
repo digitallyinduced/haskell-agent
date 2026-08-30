@@ -5,6 +5,10 @@ import Agent.GrokBuild.Dialect.Shell
     , PersistentShell(..)
     , closeGrokSession
     , newGrokSession
+    , readTaskOutput
+    , resetGrokSessionTemp
+    , runForegroundStreaming
+    , startBackground
     )
 import Agent.GrokBuild.Dialect.ProjectInstructions (formatGrokAgentsMd)
 import Agent.GrokBuild.Dialect.Prompt
@@ -20,13 +24,16 @@ import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolDispatch (ToolCall, functionToolCall)
 import Agent.Tools.Scheduling (schedulingPlansConflict)
+import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolRegistry
     , defaultToolEnv
     , mkToolRegistry
+    , setToolSessionTmp
     , toolSchedulingPlanFor
     )
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception.Safe (bracket)
 import Data.Bits ((.&.))
@@ -34,8 +41,14 @@ import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
-import System.Directory (doesFileExist)
+import System.Directory
+    ( createDirectory
+    , doesFileExist
+    , removeDirectoryRecursive
+    )
+import System.FilePath ((</>), takeDirectory)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
@@ -223,6 +236,84 @@ spec = describe "Grok Build dialect" do
         doesFileExist path `shouldReturn` False
         doesFileExist (path <> ".cwd") `shouldReturn` False
 
+    it "stores shell state in the private session temp directory" do
+        withTempDir \dir -> do
+            let scratch = dir </> "session-scratch"
+            createDirectory scratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                shell <- readMVar session.grokShell
+                takeDirectory (unsafeToFilePath shell.shellEnvFile)
+                    `shouldBe` scratch
+
+    it "recreates shell state after the session temp directory changes" do
+        withTempDir \dir -> do
+            let firstScratch = dir </> "first-session"
+                nextScratch = dir </> "next-session"
+            createDirectory firstScratch
+            createDirectory nextScratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf firstScratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                moved <- runForegroundStreaming
+                    session
+                    "cd \"$TMPDIR\""
+                    10000
+                    (\_ _ -> pure ())
+                moved.commandExitCode `shouldBe` Just 0
+                firstShell <- readMVar session.grokShell
+                let firstEnvFile =
+                        unsafeToFilePath firstShell.shellEnvFile
+                unsafeToFilePath firstShell.shellCwd
+                    `shouldBe` firstScratch
+                removeDirectoryRecursive firstScratch
+
+                resetGrokSessionTemp session (unsafeEncodeUtf nextScratch)
+                setToolSessionTmp env (Just (unsafeEncodeUtf nextScratch))
+
+                nextShell <- readMVar session.grokShell
+                let nextEnvFile =
+                        unsafeToFilePath nextShell.shellEnvFile
+                nextEnvFile `shouldNotBe` firstEnvFile
+                takeDirectory nextEnvFile `shouldBe` nextScratch
+                unsafeToFilePath nextShell.shellCwd `shouldBe` dir
+                doesFileExist nextEnvFile `shouldReturn` True
+
+                result <- runForegroundStreaming
+                    session
+                    "printf reset-ok"
+                    10000
+                    (\_ _ -> pure ())
+                result.commandExitCode `shouldBe` Just 0
+                result.commandStdout `shouldBe` "reset-ok"
+
+    it "stops background tasks when the session temp directory changes" do
+        withTempDir \dir -> do
+            let firstScratch = dir </> "first-session"
+                nextScratch = dir </> "next-session"
+                output = firstScratch </> "background-output"
+            createDirectory firstScratch
+            createDirectory nextScratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf firstScratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                started <- startBackground session
+                    "while :; do printf x >> \"$TMPDIR/background-output\"; sleep 0.02; done"
+                taskId <- case started of
+                    Right runningId -> pure runningId
+                    Left err -> expectationFailure (Text.unpack err) >> pure ""
+                waitForFile output `shouldReturn` True
+
+                resetGrokSessionTemp session (unsafeEncodeUtf nextScratch)
+                setToolSessionTmp env (Just (unsafeEncodeUtf nextScratch))
+
+                before <- Text.readFile output
+                threadDelay 100000
+                Text.readFile output `shouldReturn` before
+                readTaskOutput session taskId Nothing
+                    `shouldReturn` ("Unknown task_id: " <> taskId)
+
     it "formats and neutralizes project instruction reminders" do
         let loaded = LoadedAgentsMd
                 { loadedGlobal = Nothing
@@ -242,6 +333,15 @@ spec = describe "Grok Build dialect" do
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir = withSystemTempDirectory "agent-grok-build-dialect"
+
+waitForFile :: FilePath -> IO Bool
+waitForFile path = go (100 :: Int)
+  where
+    go 0 = doesFileExist path
+    go remaining =
+        doesFileExist path >>= \case
+            True -> pure True
+            False -> threadDelay 10000 >> go (remaining - 1)
 
 withGrokRegistry
     :: (ToolRegistry -> IO () -> IO a)

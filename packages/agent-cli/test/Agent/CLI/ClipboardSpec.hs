@@ -89,6 +89,22 @@ spec = do
             appendUniqueImageAttachments [] [first, first, second]
                 `shouldBe` ([first, second], [first, second])
 
+    describe "appendBoundedImageAttachments" do
+        it "bounds pending image count across repeated pastes" do
+            let existing =
+                    [ ImageAttachment
+                        "image/png"
+                        (BS.singleton (fromIntegral index))
+                    | index <- [1 .. pendingImageAttachmentCountLimit]
+                    ]
+                incoming = ImageAttachment "image/png" "new-image"
+                (pending, added, duplicates, rejected) =
+                    appendBoundedImageAttachments existing [incoming]
+            pending `shouldBe` existing
+            added `shouldBe` []
+            duplicates `shouldBe` 0
+            rejected `shouldBe` 1
+
     describe "loadImagesFromPastedText" do
         it "returns Nothing for ordinary prompt text" do
             result <- loadImagesFromPastedText "fix the bug in Main.hs"

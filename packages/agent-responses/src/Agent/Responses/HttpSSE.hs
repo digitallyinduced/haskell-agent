@@ -13,6 +13,14 @@ import Agent.Responses.SSE
     , finishSseDecoder
     , newSseDecoder
     )
+import Agent.Responses.StreamAssembly
+    ( StreamAssemblyConfig
+    , StreamAssemblyState
+    , StreamAssemblyStep(..)
+    , emptyStreamAssemblyState
+    , finishStreamWithoutTerminal
+    , stepStreamResponse
+    )
 import Agent.Responses.Types
 import Control.Exception.Safe (Exception, throwIO, tryAny)
 import qualified Data.ByteString as BS
@@ -47,9 +55,15 @@ data HttpSseConfig = HttpSseConfig
       -- ^ Prefix used when request setup, transport, or callback code throws.
     , classifyFailure :: !(Int -> Maybe Int -> Text -> ApiError)
       -- ^ Classify a non-success status, optional @Retry-After@, and body.
-    , buildResponse :: !([ResponseStreamEvent] -> Either ApiError Response)
-      -- ^ Assemble retained terminal events into the provider response.
+    , assemblyConfig :: !StreamAssemblyConfig
+      -- ^ Incremental provider-specific stream assembly and classification.
+    , responseModelHint :: !(Maybe Text)
+      -- ^ Request model used when a provider sends partial lifecycle objects.
     }
+
+data ConsumeResult
+    = ConsumeMore !StreamAssemblyState
+    | ConsumeDone !(Either ApiError Response)
 
 -- | POST one streaming Responses request and deliver decoded events in wire
 -- order. The request modifier supplies provider-specific authentication and
@@ -64,7 +78,12 @@ performResponsesHttpSse
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 performResponsesHttpSse
-    HttpSseConfig{exceptionPrefix, classifyFailure, buildResponse}
+    HttpSseConfig
+        { exceptionPrefix
+        , classifyFailure
+        , assemblyConfig
+        , responseModelHint
+        }
     baseUrl
     timeoutSeconds
     requestBody
@@ -112,84 +131,81 @@ performResponsesHttpSse
         if status >= 200 && status < 300
             then consumeSse (HttpClient.responseBody response)
             else do
-                body <- consumeBody (HttpClient.responseBody response)
-                let bodyText = Text.decodeUtf8With Text.lenientDecode
-                        (LBS.toStrict body)
+                (body, truncated) <-
+                    consumeBodyBounded (HttpClient.responseBody response)
+                let decoded = Text.decodeUtf8With Text.lenientDecode body
+                    bodyText
+                        | truncated =
+                            decoded
+                                <> "\n[response body truncated after "
+                                <> Text.pack (show maxErrorBodyBytes)
+                                <> " bytes]"
+                        | otherwise = decoded
                 pure $ Left $
                     classifyFailure status
                         (parseRetryAfterSeconds
                             (getResponseHeader "Retry-After" response))
                         bodyText
 
-    consumeSse body = go newSseDecoder []
+    consumeSse body = go newSseDecoder emptyStreamAssemblyState
       where
-        go decoder reversedEvents = do
+        go decoder state = do
             chunk <- readChunkWithin body
             if BS.null chunk
                 then case finishSseDecoder decoder of
                     Left err -> pure (Left err)
-                    Right trailing -> do
-                        let delivered = takeThroughTerminal trailing
-                        mapM_ emit delivered
-                        pure $ buildResponse
-                            (reverse reversedEvents
-                                <> filter retainForResponse delivered)
+                    Right trailing ->
+                        consumeEvents state trailing >>= \case
+                            ConsumeDone result -> pure result
+                            ConsumeMore finalState ->
+                                pure (finishStreamWithoutTerminal
+                                    assemblyConfig
+                                    finalState)
                 else case feedSseDecoder decoder chunk of
                     Left err -> pure (Left err)
                     Right (nextDecoder, events) -> do
-                        let delivered = takeThroughTerminal events
-                        mapM_ emit delivered
-                        let retained = filter retainForResponse delivered
-                            allEvents = reverse retained <> reversedEvents
-                        if any isTerminal delivered
-                            then pure (buildResponse (reverse allEvents))
-                            else go nextDecoder allEvents
+                        consumeEvents state events >>= \case
+                            ConsumeDone result -> pure result
+                            ConsumeMore nextState -> go nextDecoder nextState
 
-    consumeBody body = LBS.fromChunks <$> readChunks []
+    consumeEvents state = \case
+        [] -> pure (ConsumeMore state)
+        event : rest -> do
+            emit event
+            case stepStreamResponse
+                    assemblyConfig
+                    responseModelHint
+                    state
+                    event of
+                StreamFinished result -> pure (ConsumeDone result)
+                StreamContinue next -> consumeEvents next rest
+
+    consumeBodyBounded body = readChunks [] 0
       where
-        readChunks reversedChunks = do
+        readChunks reversedChunks total = do
             chunk <- readChunkWithin body
             if BS.null chunk
-                then pure (reverse reversedChunks)
-                else readChunks (chunk : reversedChunks)
+                then pure (BS.concat (reverse reversedChunks), False)
+                else
+                    let remaining = maxErrorBodyBytes - total
+                    in if BS.length chunk > remaining
+                        then pure
+                            ( BS.concat
+                                (reverse
+                                    (BS.take remaining chunk : reversedChunks))
+                            , True
+                            )
+                        else if BS.length chunk == remaining
+                            then do
+                                next <- readChunkWithin body
+                                pure
+                                    ( BS.concat
+                                        (reverse (chunk : reversedChunks))
+                                    , not (BS.null next)
+                                    )
+                            else readChunks
+                                (chunk : reversedChunks)
+                                (total + BS.length chunk)
 
-retainForResponse :: ResponseStreamEvent -> Bool
-retainForResponse = \case
-    ResponseCreatedEvent {} -> True
-    ResponseInProgressEvent {} -> True
-    ResponseQueuedEvent {} -> True
-    ResponseOutputItemAddedEvent {} -> True
-    ResponseOutputItemDoneEvent {} -> True
-    ResponseCustomToolInputDeltaEvent {} -> True
-    ResponseCustomToolInputDoneEvent {} -> True
-    ResponseFunctionCallArgumentsDeltaEvent {} -> True
-    ResponseFunctionCallArgumentsDoneEvent {} -> True
-    ResponseReasoningSummaryPartAddedEvent {} -> True
-    ResponseReasoningSummaryTextDoneEvent {} -> True
-    event
-        | responseStreamEventType event
-            == EventReasoningSummaryTextDelta -> True
-    ResponseCompletedEvent {} -> True
-    ResponseDoneEvent {} -> True
-    ResponseIncompleteEvent {} -> True
-    ResponseErrorEvent {} -> True
-    ResponseNestedErrorEvent {} -> True
-    ResponseFailedEvent {} -> True
-    _ -> False
-
-isTerminal :: ResponseStreamEvent -> Bool
-isTerminal = \case
-    ResponseCompletedEvent {} -> True
-    ResponseDoneEvent {} -> True
-    ResponseIncompleteEvent {} -> True
-    ResponseFailedEvent {} -> True
-    ResponseErrorEvent {} -> True
-    ResponseNestedErrorEvent {} -> True
-    _ -> False
-
-takeThroughTerminal :: [ResponseStreamEvent] -> [ResponseStreamEvent]
-takeThroughTerminal = \case
-    [] -> []
-    event : rest
-        | isTerminal event -> [event]
-        | otherwise -> event : takeThroughTerminal rest
+maxErrorBodyBytes :: Int
+maxErrorBodyBytes = 1024 * 1024

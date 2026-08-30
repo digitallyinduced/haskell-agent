@@ -36,9 +36,9 @@ import qualified Agent.Json.Decode as Json
 import Agent.Tools.FileSystem.ReadFile.Internal
     ( FileWindow(..)
     , ReadFileArgs(..)
-    , readFileArgsDecoder
     , fileWindowCoversArgs
-    , formatReadFileContent
+    , formatFileWindow
+    , readFileArgsDecoder
     , readFileWindowForArgs
     , runReadFile
     )
@@ -249,8 +249,8 @@ refreshCallCandidate speculation partial = mask \_ -> do
                 progress
     case (partial.partialCandidate, desired) of
         (Just existing, Just (arguments, _))
-            -- The prefetch stores complete raw file contents. Later
-            -- offset/limit fields only change formatting.
+            -- Keep a same-target read while the remaining fields stream.
+            -- Consumption validates whether its bounded window covers them.
             | existing.candidateArguments.targetFile
                 == arguments.targetFile ->
                 pure partial
@@ -296,31 +296,15 @@ consumeReadFile speculation args partial =
             recordMiss speculation
             runReadFile speculation.environment args
         Just selected ->
-            resolveForRead
-                speculation.environment
-                (fromText args.targetFile) >>= \case
-                    Left _ -> missExecute selected
-                    Right finalPath ->
-                        waitCatch selected.candidateTask >>= \case
-                            Left _ -> do
-                                releaseCandidate selected
-                                recordMiss speculation
-                                runReadFile speculation.environment args
-                            Right Nothing -> do
-                                releaseCandidate selected
-                                recordMiss speculation
-                                runReadFile speculation.environment args
-                            Right (Just prefetched)
-                                | equalFilePath
-                                    finalPath
-                                    prefetched.prefetchedResolvedPath ->
-                                        consumePrefetch selected prefetched
-                                | otherwise ->
-                                    missExecute selected
+            waitCatch selected.candidateTask >>= \case
+                Left _ -> fallback selected
+                Right Nothing -> fallback selected
+                Right (Just prefetched) ->
+                    consumePrefetch selected prefetched
   where
-    missExecute :: ReadCandidate -> IO ToolResult
-    missExecute selected = do
-        cancelReadCandidate speculation selected
+    fallback :: ReadCandidate -> IO ToolResult
+    fallback selected = do
+        releaseCandidate selected
         recordMiss speculation
         runReadFile speculation.environment args
 
@@ -337,9 +321,9 @@ consumeReadFile speculation args partial =
         resolveForRead
             speculation.environment
             (fromText args.targetFile) >>= \case
-                Left _ -> do
+                Left err -> do
                     recordMiss speculation
-                    runReadFile speculation.environment args
+                    pure (Left err)
                 Right finalPath
                     | not
                         (equalFilePath
@@ -361,8 +345,8 @@ consumeReadFile speculation args partial =
                                                         metrics.speculativeReadHits + 1
                                                     }
                                             pure $
-                                                formatReadFileContent
-                                                    prefetched.prefetchedWindow.fileWindowText
+                                                formatFileWindow
+                                                    prefetched.prefetchedWindow
                                                     args
                                         else do
                                             recordMiss speculation

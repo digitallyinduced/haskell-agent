@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
 -- | Session-scoped storage for oversized tool output.
@@ -36,18 +37,22 @@ import Control.Concurrent.MVar
     , modifyMVar_
     , newMVar
     )
+import Control.Exception (evaluate)
 import Control.Exception.Safe
     ( SomeException
     , tryAny
     )
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (readIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
 import qualified Data.Text.Encoding.Error as EncodingError
+import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Encoding as LazyEncoding
 import System.Directory
     ( createDirectoryIfMissing
     , doesFileExist
@@ -59,7 +64,10 @@ import System.FilePath ((</>), takeFileName)
 import System.IO
     ( Handle
     , hClose
+    , hFileSize
+    , IOMode(ReadMode)
     , openBinaryTempFile
+    , withBinaryFile
     )
 import System.Posix.Files (setFileMode)
 
@@ -126,7 +134,8 @@ artifactTools env analysis =
     ]
     <> maybe [] (\spawn ->
         [ jsonTool "analyze_tool_output"
-            "Spawn a tracked gpt-5.6-luna child to analyze an oversized tool-output artifact. Use wait_agent for its report."
+            "Spawn a tracked child agent to analyze an oversized tool-output artifact. \
+            \Use wait_agent for its report."
             [ PropertySchema "handle" PropertyString True Nothing
             , PropertySchema "instruction" PropertyString True Nothing
             ]
@@ -171,46 +180,279 @@ analyzeArgsDecoder = objectArgs \o ->
 
 readToolOutput :: ToolEnv -> ReadArgs -> IO (Either Text Text)
 readToolOutput env args =
-    readOutputArtifact env args.handle >>= \case
+    resolveArtifactPath env args.handle >>= \case
         Left err -> pure (Left err)
-        Right content -> do
+        Right path -> do
             let start = max 1 (fromMaybe 1 args.offset)
                 count = min 1000 (max 1 (fromMaybe 200 args.limit))
-                selected = take count (drop (start - 1) (Text.lines content))
-                end = start + length selected - 1
-                body = Text.intercalate "\n" selected
-            pure . Right . boundResult $
-                "artifact " <> args.handle <> " lines "
-                    <> Text.pack (show start) <> "-"
-                    <> Text.pack (show end)
-                    <> ":\n" <> body
+            tryAny (withBinaryFile path ReadMode \handle -> do
+                content <- LazyEncoding.decodeUtf8With EncodingError.lenientDecode
+                    <$> LazyByteString.hGetContents handle
+                let selected =
+                        take count
+                            (drop (start - 1) (LazyText.lines content))
+                    rendered =
+                        [ previewArtifactLine line
+                        | line <- selected
+                        ]
+                    end = start + length rendered - 1
+                    body = Text.intercalate "\n" rendered
+                    result = boundResult $
+                        "artifact " <> args.handle <> " lines "
+                            <> Text.pack (show start) <> "-"
+                            <> Text.pack (show end)
+                            <> ":\n" <> body
+                -- Force the bounded result while the handle is open.  This
+                -- keeps lazy I/O exceptions on the tool call and avoids
+                -- returning a thunk that retains the file handle.
+                _ <- evaluate (Text.length result)
+                pure (Right result))
+                >>= \case
+                    Left exception ->
+                        pure (Left ("failed to read artifact: "
+                            <> exceptionText exception))
+                    Right result -> pure result
 
 searchToolOutput :: ToolEnv -> SearchArgs -> IO (Either Text Text)
 searchToolOutput env args =
-    readOutputArtifact env args.handle >>= \case
+    resolveArtifactPath env args.handle >>= \case
         Left err -> pure (Left err)
-        Right content -> do
-            let needle = foldCase args.caseInsensitive args.pattern
-                matches =
-                    [ Text.pack (show n) <> ":" <> line
-                    | (n, line) <- zip [1 :: Int ..] (Text.lines content)
-                    , needle `Text.isInfixOf` foldCase args.caseInsensitive line
-                    ]
-                cap = min 200 (max 1 (fromMaybe 50 args.headLimit))
-                shown = take cap matches
-                suffix
-                    | length matches > cap =
-                        "\n[search truncated: "
-                            <> Text.pack (show (length matches - cap))
-                            <> " matches omitted]"
-                    | otherwise = ""
-            pure . Right . boundResult $
-                if null shown
-                    then "No matches in artifact " <> args.handle
-                    else Text.intercalate "\n" shown <> suffix
+        Right path -> do
+            let cap = min 200 (max 1 (fromMaybe 50 args.headLimit))
+            tryAny (withBinaryFile path ReadMode \handle -> do
+                (shownRev, matchCount) <-
+                    if args.caseInsensitive
+                        then do
+                            content <-
+                                LazyEncoding.decodeUtf8With
+                                    EncodingError.lenientDecode
+                                    <$> LazyByteString.hGetContents handle
+                            collectFoldedMatches
+                                (LazyText.toCaseFold
+                                    (LazyText.fromStrict args.pattern))
+                                cap
+                                (LazyText.lines content)
+                        else
+                            collectByteMatches
+                                (Encoding.encodeUtf8 args.pattern)
+                                cap
+                                handle
+                let shown = reverse shownRev
+                    suffix
+                        | matchCount > cap =
+                            "\n[search truncated after "
+                                <> Text.pack (show cap)
+                                <> " matches]"
+                        | otherwise = ""
+                    result =
+                        boundResult $
+                            if null shown
+                                then "No matches in artifact " <> args.handle
+                                else Text.intercalate "\n" shown <> suffix
+                _ <- evaluate (Text.length result)
+                pure (Right result))
+                >>= \case
+                    Left exception ->
+                        pure (Left ("failed to read artifact: "
+                            <> exceptionText exception))
+                    Right result -> pure result
   where
-    foldCase True = Text.toCaseFold
-    foldCase False = id
+    collectFoldedMatches
+        :: LazyText.Text
+        -> Int
+        -> [LazyText.Text]
+        -> IO ([Text], Int)
+    collectFoldedMatches needle cap =
+        go 1 [] 0
+      where
+        go :: Int -> [Text] -> Int -> [LazyText.Text] -> IO ([Text], Int)
+        go _ shown !matchCount _
+            | matchCount > cap = pure (shown, matchCount)
+        go _ shown !matchCount [] = pure (shown, matchCount)
+        go lineNumber shown !matchCount (line : rest) = do
+            let matched =
+                    needle `LazyText.isInfixOf`
+                        LazyText.toCaseFold line
+                nextCount = if matched then matchCount + 1 else matchCount
+                nextShown =
+                    if matched && matchCount < cap
+                        then
+                            (Text.pack (show lineNumber) <> ":"
+                                <> previewArtifactLine line) : shown
+                        else shown
+            -- Do not retain the lazy line list while processing a line.  The
+            -- recursive call is strict in the counters and the shown prefix
+            -- is capped at 200 entries.
+            nextCount `seq` go (lineNumber + 1) nextShown nextCount rest
+
+data ByteSearchState = ByteSearchState
+    { byteSearchLineNumber :: !Int
+    , byteSearchShownRev :: ![Text]
+    , byteSearchMatchCount :: !Int
+    , byteSearchMatched :: !Bool
+    , byteSearchCarry :: !BS.ByteString
+    , byteSearchPreview :: !BS.ByteString
+    , byteSearchLineBytes :: !Int
+    }
+
+collectByteMatches
+    :: BS.ByteString
+    -> Int
+    -> Handle
+    -> IO ([Text], Int)
+collectByteMatches needle cap handle =
+    go initialState
+  where
+    initialState = ByteSearchState
+        { byteSearchLineNumber = 1
+        , byteSearchShownRev = []
+        , byteSearchMatchCount = 0
+        , byteSearchMatched = False
+        , byteSearchCarry = BS.empty
+        , byteSearchPreview = BS.empty
+        , byteSearchLineBytes = 0
+        }
+
+    go :: ByteSearchState -> IO ([Text], Int)
+    go !state
+        | state.byteSearchMatchCount > cap =
+            pure (state.byteSearchShownRev, state.byteSearchMatchCount)
+        | otherwise = do
+            chunk <- BS.hGetSome handle 32768
+            if BS.null chunk
+                then
+                    let finalState =
+                            if state.byteSearchLineBytes > 0
+                                then finishLine state
+                                else state
+                    in pure
+                        ( finalState.byteSearchShownRev
+                        , finalState.byteSearchMatchCount
+                        )
+                else go (consumeChunk state chunk)
+
+    consumeChunk :: ByteSearchState -> BS.ByteString -> ByteSearchState
+    consumeChunk !state bytes
+        | BS.null bytes || state.byteSearchMatchCount > cap = state
+        | otherwise =
+            let (part, restWithNewline) = BS.break (== 10) bytes
+                !withPart = consumePart state part
+            in if BS.null restWithNewline
+                then withPart
+                else
+                    consumeChunk
+                        (finishLine withPart)
+                        (BS.tail restWithNewline)
+
+    consumePart :: ByteSearchState -> BS.ByteString -> ByteSearchState
+    consumePart !state part
+        | BS.null part = state
+        | otherwise =
+            let candidate
+                    | BS.null state.byteSearchCarry = part
+                    | otherwise = state.byteSearchCarry <> part
+                !matched =
+                    state.byteSearchMatched
+                        || needle `BS.isInfixOf` candidate
+                !carry
+                    | matched = BS.empty
+                    | otherwise = retainedNeedlePrefix candidate
+                remainingPreview =
+                    max 0
+                        (artifactLinePreviewSourceBytes
+                            - BS.length state.byteSearchPreview)
+                keptPreview
+                    | state.byteSearchMatchCount >= cap = BS.empty
+                    | otherwise = BS.take remainingPreview part
+                !preview
+                    | BS.null keptPreview = state.byteSearchPreview
+                    | BS.null state.byteSearchPreview = BS.copy keptPreview
+                    | otherwise =
+                        state.byteSearchPreview <> keptPreview
+            in state
+                { byteSearchMatched = matched
+                , byteSearchCarry = carry
+                , byteSearchPreview = preview
+                , byteSearchLineBytes =
+                    state.byteSearchLineBytes + BS.length part
+                }
+
+    retainedNeedlePrefix :: BS.ByteString -> BS.ByteString
+    retainedNeedlePrefix bytes
+        | BS.length needle <= 1 = BS.empty
+        | otherwise =
+            let keep = min
+                    (BS.length bytes)
+                    (BS.length needle - 1)
+            in BS.copy (BS.drop (BS.length bytes - keep) bytes)
+
+    finishLine :: ByteSearchState -> ByteSearchState
+    finishLine !state =
+        let matched =
+                state.byteSearchMatched || BS.null needle
+            !nextCount =
+                if matched
+                    then state.byteSearchMatchCount + 1
+                    else state.byteSearchMatchCount
+            !nextShown
+                | matched && state.byteSearchMatchCount < cap =
+                    ( Text.pack (show state.byteSearchLineNumber)
+                        <> ":"
+                        <> previewArtifactBytes
+                            state.byteSearchPreview
+                            state.byteSearchLineBytes
+                    ) : state.byteSearchShownRev
+                | otherwise = state.byteSearchShownRev
+        in ByteSearchState
+            { byteSearchLineNumber = state.byteSearchLineNumber + 1
+            , byteSearchShownRev = nextShown
+            , byteSearchMatchCount = nextCount
+            , byteSearchMatched = False
+            , byteSearchCarry = BS.empty
+            , byteSearchPreview = BS.empty
+            , byteSearchLineBytes = 0
+            }
+
+previewArtifactBytes :: BS.ByteString -> Int -> Text
+previewArtifactBytes prefix totalBytes =
+    let decoded =
+            Encoding.decodeUtf8With EncodingError.lenientDecode prefix
+        preview = Text.take artifactLinePreviewChars decoded
+        truncated =
+            totalBytes > BS.length prefix
+                || Text.length decoded > artifactLinePreviewChars
+    in if truncated
+        then boundedPreview artifactLinePreviewBytes
+            (preview <> "\n… [line omitted] …")
+        else decoded
+
+-- Four bytes per character are enough to decide whether a UTF-8 line exceeds
+-- the character preview limit, plus one complete maximum-width code point.
+artifactLinePreviewSourceBytes :: Int
+artifactLinePreviewSourceBytes =
+    artifactLinePreviewChars * 4 + 4
+
+-- A selected/search-matching line may itself be enormous (for example, a
+-- minified JSON document).  Keep only a small prefix before applying the
+-- final result bound, while still scanning the complete lazy line for
+-- searches.
+previewArtifactLine :: LazyText.Text -> Text
+previewArtifactLine line =
+    let previewChars = fromIntegral artifactLinePreviewChars
+        prefix = LazyText.take (previewChars + 1) line
+        truncated = LazyText.length prefix > previewChars
+        compact = LazyText.toStrict
+            (LazyText.take previewChars prefix)
+    in if truncated
+        then boundedPreview artifactLinePreviewBytes
+                (compact <> "\n… [line omitted] …")
+        else LazyText.toStrict line
+
+artifactLinePreviewChars :: Int
+artifactLinePreviewChars = 16 * 1024
+
+artifactLinePreviewBytes :: Int
+artifactLinePreviewBytes = 32 * 1024
 
 -- | Replace an oversized provider-facing result with a compact artifact marker.
 finalizeToolOutput :: ToolEnv -> ToolCall -> Text -> IO Text
@@ -367,14 +609,24 @@ outputArtifactMetadata
     -> Text
     -> IO (Either Text OutputArtifactMetadata)
 outputArtifactMetadata env handle =
-    readOutputArtifact env handle >>= \case
+    resolveArtifactPath env handle >>= \case
         Left err -> pure (Left err)
-        Right content ->
-            pure $ Right OutputArtifactMetadata
-                { metadataHandle = handle
-                , metadataBytes = BS.length (Encoding.encodeUtf8 content)
-                , metadataCharacters = Text.length content
-                }
+        Right path ->
+            tryAny (withBinaryFile path ReadMode \fileHandle -> do
+                bytes <- hFileSize fileHandle
+                content <- LazyEncoding.decodeUtf8With EncodingError.lenientDecode
+                    <$> LazyByteString.hGetContents fileHandle
+                characters <- evaluate (LazyText.length content)
+                pure OutputArtifactMetadata
+                    { metadataHandle = handle
+                    , metadataBytes = fromIntegral bytes
+                    , metadataCharacters = fromIntegral characters
+                    })
+                >>= \case
+                    Left exception ->
+                        pure (Left ("failed to read artifact metadata: "
+                            <> exceptionText exception))
+                    Right metadata -> pure (Right metadata)
 
 artifactExists :: ToolEnv -> Text -> IO (Either Text ())
 artifactExists env handle =
@@ -441,7 +693,7 @@ renderOutputArtifactNotice source artifact =
                 else "")
         <> ". Full stored output is excluded from model context. "
         <> "Use read_tool_output/search_tool_output, or analyze_tool_output "
-        <> "when available for bounded Luna analysis.]"
+        <> "when available for delegated analysis.]"
 
 -- | Return a bounded head/tail preview.  The bound is in UTF-8 bytes (the
 -- same unit used by the inline and artifact caps). Partial UTF-8 code points

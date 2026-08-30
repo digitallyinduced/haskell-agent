@@ -52,7 +52,7 @@ import Agent.Codex.Dialect.Shell
     , startCodexShellCommand
     )
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
-import Agent.Tools.Dangerous (forbiddenRmRfReason, commandLooksLikeRmRf)
+import Agent.Tools.Dangerous (blockedShellCommandReason)
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
@@ -188,6 +188,7 @@ shellDescription :: Text
 shellDescription =
     "Runs a shell command and returns its output.\n\
     \- `workdir` is optional; omit it to use the turn cwd. Do not use `cd` unless absolutely necessary.\n\
+    \- Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\
     \- For a long-running command, set `yield_time_ms`; if it is still running, use `write_stdin` with the returned session_id to poll or send input."
 
 runShell
@@ -197,8 +198,8 @@ runShell
     -> ShellCommandArgs
     -> IO (Either Text Text)
 runShell env session emitOutput args
-    | commandLooksLikeRmRf args.command =
-        pure (Left (forbiddenRmRfReason args.command))
+    | Just reason <- blockedShellCommandReason args.command =
+        pure (Left reason)
     | args.timeoutMs /= Nothing && args.yieldTimeMs /= Nothing =
         pure (Left "timeout_ms and yield_time_ms are mutually exclusive")
     | otherwise = do

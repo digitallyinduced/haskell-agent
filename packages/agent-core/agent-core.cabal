@@ -134,6 +134,36 @@ library
                     , websockets
                     , yaml
 
+benchmark grep-streaming-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          GrepStreaming.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , async
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , process
+                    , safe-exceptions
+                    , time
+                    , unix
+
+benchmark output-artifact-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          OutputArtifact.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , text
+
 benchmark streaming-text-bench
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -144,6 +174,20 @@ benchmark streaming-text-bench
                     , base >= 4.14 && < 5
                     , text
                     , text-builder >= 1.0 && < 1.1
+
+benchmark read-file-streaming-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ReadFileStreaming.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , text
+                    , unix
 
 benchmark tool-scheduling-bench
     import:           common-opts
