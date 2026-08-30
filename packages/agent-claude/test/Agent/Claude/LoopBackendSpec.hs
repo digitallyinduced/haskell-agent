@@ -26,6 +26,10 @@ import Agent.Loop
     , TurnOutput(..)
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Telemetry
+    ( ModelTelemetry(..)
+    , TurnTelemetry(..)
+    )
 import Agent.Responses.Types
     ( FunctionCall(..)
     , FunctionCallOutput(..)
@@ -44,6 +48,7 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     )
 import Control.Exception.Safe (bracket, finally)
+import qualified Data.Foldable as Foldable
 import Data.IORef
     ( modifyIORef'
     , newIORef
@@ -165,6 +170,29 @@ spec = do
                 turn.tokenUsage.inputTokens `shouldBe` 10
                 turn.tokenUsage.outputTokens `shouldBe` 7
                 turn.tokenUsage.cachedTokens `shouldBe` 5
+                turn.providerTelemetry `shouldSatisfy` \case
+                    Just telemetry ->
+                        telemetry.telemetryDurationMs == Just 1250
+                            && telemetry.telemetryApiDurationMs == Just 1100
+                            && telemetry.telemetryCostUsd == Just 0.0125
+                            && telemetry.telemetryStopReason == Just "end_turn"
+                            && telemetry.telemetryProviderTurns == Just 2
+                            && telemetry.telemetryStructuredOutput /= Nothing
+                            && Foldable.toList telemetry.telemetryModels
+                                == [ModelTelemetry
+                                    { modelInputTokens = 2
+                                    , modelOutputTokens = 7
+                                    , modelCacheReadInputTokens = 5
+                                    , modelCacheCreationInputTokens = 3
+                                    , modelWebSearchRequests = Just 1
+                                    , modelCostUsd = Just 0.0125
+                                    , modelContextWindow = Just 200000
+                                    , modelMaxOutputTokens = Just 32000
+                                    , modelCanonicalName =
+                                        Just "claude-test-202608"
+                                    , modelProviderName = Just "firstParty"
+                                    }]
+                    Nothing -> False
                 observedEvents <- readIORef events
                 observedEvents `shouldBe`
                     [ ToolStarted expectedFakeToolCall
@@ -207,8 +235,7 @@ spec = do
                     "<--output-format>\n<stream-json>"
                 arguments `shouldNotContain` "<--include-partial-messages>"
                 arguments `shouldContain` "<--verbose>"
-                arguments `shouldContain`
-                    "<--disallowedTools>\n<AskUserQuestion>"
+                arguments `shouldNotContain` "<AskUserQuestion>"
                 arguments `shouldContain`
                     "<--permission-mode>\n<dontAsk>"
                 arguments `shouldContain` "<--safe-mode>"
@@ -676,8 +703,7 @@ spec = do
                     _ -> False
                 arguments <- readFile fake.argumentLog
                 arguments `shouldContain` "<--tools>\n<>"
-                arguments `shouldContain`
-                    "<--disallowedTools>\n<AskUserQuestion>"
+                arguments `shouldNotContain` "<AskUserQuestion>"
 
         it "maps none effort to Claude Code's default effort" $
             withFakeClaude \fake -> do
@@ -1526,7 +1552,7 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  if [ \"$FAKE_CLAUDE_OMIT_MODEL_USAGE_TURN\" = \"$turn\" ]; then"
         , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7}}\\n' \"$turn\" \"$result_session_id\""
         , "  else"
-        , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7},\"modelUsage\":{\"fake-model\":{\"inputTokens\":%s,\"cacheCreationInputTokens\":%s,\"cacheReadInputTokens\":%s,\"outputTokens\":%s}}}\\n' \"$turn\" \"$result_session_id\" \"$cumulative_input\" \"$cumulative_cache_creation\" \"$cumulative_cache_read\" \"$cumulative_output\""
+        , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"duration_ms\":1250,\"duration_api_ms\":1100,\"num_turns\":2,\"stop_reason\":\"end_turn\",\"total_cost_usd\":0.0125,\"structured_output\":{\"answer\":42},\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7},\"modelUsage\":{\"fake-model\":{\"inputTokens\":%s,\"cacheCreationInputTokens\":%s,\"cacheReadInputTokens\":%s,\"outputTokens\":%s,\"webSearchRequests\":1,\"costUSD\":0.0125,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"canonicalModel\":\"claude-test-202608\",\"provider\":\"firstParty\"}}}\\n' \"$turn\" \"$result_session_id\" \"$cumulative_input\" \"$cumulative_cache_creation\" \"$cumulative_cache_read\" \"$cumulative_output\""
         , "  fi"
         , "  if [ \"$FAKE_CLAUDE_BLOCK_AFTER_FIRST_TURN\" = 1 ] && [ \"$turn\" = 1 ]; then"
         , "    sleep 30"

@@ -574,6 +574,7 @@ sessionTurn effect userText items =
         , turnEffect = effect
         , turnItems = items
         , turnUsage = Nothing
+        , turnProviderTelemetry = []
         }
 
 userMessage :: Text.Text -> ResponseItem

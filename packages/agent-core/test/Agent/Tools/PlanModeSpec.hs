@@ -15,6 +15,7 @@ import Agent.Tools.Types
     , jsonToolParameters
     )
 import Control.Exception.Safe (bracket)
+import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -175,6 +176,54 @@ spec = describe "Agent.Tools.PlanMode" do
                         <> "You can now continue with the user's answers in mind."
                 readIORef seen `shouldReturn`
                     [("Which database?", ["Postgres", "SQLite"])]
+
+        it "adds structured answers for Claude's native callback" do
+            let hooks = testHooks \_ _ -> pure (Just "Blue")
+                input =
+                    Aeson.object
+                        [ "questions" Aeson..=
+                            [ Aeson.object
+                                [ "question" Aeson..=
+                                    ("Choose a color?" :: Text)
+                                , "options" Aeson..=
+                                    [ Aeson.object
+                                        [ "label" Aeson..= ("Red" :: Text)
+                                        , "description" Aeson..= ("" :: Text)
+                                        ]
+                                    , Aeson.object
+                                        [ "label" Aeson..= ("Blue" :: Text)
+                                        , "description" Aeson..= ("" :: Text)
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ]
+            withTempPlanHooks hooks \env ->
+                answerAskUserQuestionInput env input `shouldReturn`
+                    Right
+                        (Aeson.object
+                            [ "questions" Aeson..=
+                                [ Aeson.object
+                                    [ "question" Aeson..=
+                                        ("Choose a color?" :: Text)
+                                    , "options" Aeson..=
+                                        [ Aeson.object
+                                            [ "label" Aeson..= ("Red" :: Text)
+                                            , "description" Aeson..= ("" :: Text)
+                                            ]
+                                        , Aeson.object
+                                            [ "label" Aeson..= ("Blue" :: Text)
+                                            , "description" Aeson..= ("" :: Text)
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            , "answers" Aeson..=
+                                Aeson.object
+                                    [ "Choose a color?" Aeson..=
+                                        ("Blue" :: Text)
+                                    ]
+                            ])
 
 withTempPlan :: (PlanModeEnv -> IO a) -> IO a
 withTempPlan = withTempPlanHooks testHooksDefault

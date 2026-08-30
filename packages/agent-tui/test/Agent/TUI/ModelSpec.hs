@@ -18,7 +18,9 @@ import Agent.ToolDispatch
     , customToolCall
     , functionToolCall
     )
+import Agent.Telemetry (TurnTelemetry(..))
 import qualified Data.Foldable as Foldable
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -63,6 +65,28 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) blocks
             `shouldBe` ["hello", "checking", "answer"]
         state.uiRunning `shouldBe` False
+
+    it "shows compact provider telemetry in the completion status" do
+        let telemetry = TurnTelemetry
+                { telemetryDurationMs = Just 1250
+                , telemetryApiDurationMs = Just 1100
+                , telemetryCostUsd = Just 0.0125
+                , telemetryStopReason = Just "end_turn"
+                , telemetryProviderTurns = Just 2
+                , telemetryModels = Map.empty
+                , telemetryStructuredOutput = Nothing
+                }
+            output =
+                (emptyTurnOutput "r1" [] Nothing)
+                    { providerTelemetry = Just telemetry }
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (TurnFinished output)
+                    ]
+        state.uiActivity
+            `shouldBe`
+                "Finished · $0.0125 · 1.2s · 2 provider turns · stop end_turn"
 
     it "timestamps only newly appended user and assistant messages" do
         let existing =

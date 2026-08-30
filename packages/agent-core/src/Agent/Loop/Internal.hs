@@ -11,6 +11,7 @@ import Agent.TextBuffer
     , emptyTextBuffer
     , textBufferToText
     )
+import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -195,6 +196,7 @@ data TurnOutput = TurnOutput
     , toolCalls :: ![ToolCall]
     , assistantText :: !(Maybe Text)
     , tokenUsage :: !TokenUsage
+    , providerTelemetry :: !(Maybe TurnTelemetry)
     , completion :: !TurnCompletion
     } deriving (Eq, Show)
 
@@ -227,6 +229,8 @@ data LoopExecution = LoopExecution
     -- 'executionState'. This is display metadata only: callers must not add
     -- it to backend state.
     , executionUncommittedAssistantText :: !(Maybe Text)
+    -- | Rich provider metadata for every response committed during this loop.
+    , executionProviderTelemetry :: ![TurnTelemetry]
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
 
@@ -236,6 +240,7 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     , toolCalls
     , assistantText
     , tokenUsage = emptyTokenUsage
+    , providerTelemetry = Nothing
     , completion = TurnCompleted
     }
 
@@ -464,6 +469,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
     uncommittedTextRef <- newIORef ([], [])
+    providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
     withAsync (runLoopEventPump eventPump) \eventWorker -> do
@@ -493,6 +499,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 writeIORef progressRef (state, progress)
                 pending <- readIORef pendingRef
                 (finishedChunks, currentChunks) <- readIORef uncommittedTextRef
+                providerTelemetry <-
+                    reverse <$> readIORef providerTelemetryRef
                 let uncommittedText = Text.intercalate "\n\n" $
                         filter (not . Text.null) $
                             map (Text.concat . reverse)
@@ -505,6 +513,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                         if Text.null uncommittedText
                             then Nothing
                             else Just uncommittedText
+                    , executionProviderTelemetry = providerTelemetry
                     , executionResult = result
                     }
             finishCursor
@@ -606,6 +615,12 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 -- it, and its assistant text now lives in the committed state.
                 writeIORef pendingRef []
                 writeIORef uncommittedTextRef ([], [])
+                -- Result metadata belongs to the response commit even when a
+                -- cancellation lands before the completion event is painted.
+                case turn.providerTelemetry of
+                    Nothing -> pure ()
+                    Just telemetry ->
+                        modifyIORef' providerTelemetryRef (telemetry :)
                 protect cursor do
                     -- A cancel that landed during submitTurn after the race chose
                     -- Right still counts, but its returned state is committed.

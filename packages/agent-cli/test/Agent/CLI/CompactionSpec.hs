@@ -665,6 +665,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -721,6 +722,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -755,6 +757,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -795,6 +798,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -828,6 +832,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -863,6 +868,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -901,6 +907,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1132,6 +1139,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1178,6 +1186,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1236,6 +1245,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1275,6 +1285,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1386,6 +1397,7 @@ spec = do
                                     , toolCalls = []
                                     , assistantText = Just "ok"
                                     , tokenUsage = TokenUsage 20 5 0
+                                    , providerTelemetry = Nothing
                                     , completion = TurnCompleted
                                     }
                 reconnectingContinuation =
@@ -1448,6 +1460,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1526,6 +1539,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1572,6 +1586,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = usage
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1614,6 +1629,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1671,6 +1687,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1727,6 +1744,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1768,6 +1786,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = emptyTokenUsage
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1827,6 +1846,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1886,6 +1906,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1951,6 +1972,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =
@@ -1988,6 +2010,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
                 backend =

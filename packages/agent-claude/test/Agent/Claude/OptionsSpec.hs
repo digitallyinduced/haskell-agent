@@ -1,9 +1,11 @@
 module Agent.Claude.OptionsSpec (spec) where
 
+import Agent.Claude.Control
 import Agent.Claude.Options
 import Agent.Claude.Transport
 import Claude.Agent.SDK.Types (ClaudeAgentOptions(..), PermissionMode(..))
 import Control.Exception.Safe (finally)
+import qualified Data.Aeson as Aeson
 import Data.List (isInfixOf)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
@@ -56,6 +58,36 @@ spec =
             let environment = maybe [] id sdk.environment
             lookup "ANTHROPIC_BASE_URL" environment `shouldBe` Nothing
             lookup "ANTHROPIC_AUTH_TOKEN" environment `shouldBe` Nothing
+
+        it "configures host MCP tools behind the SDK bridge" do
+            sdk <-
+                toClaudeAgentOptions
+                    ClaudeCodeDefaultTools
+                    (defaultClaudeCodeOptions "/bin/claude" "/tmp")
+            let host =
+                    defaultClaudeCodeHostHandlers
+                        { handleMcpMessage = Just (\_ -> pure Aeson.Null)
+                        , mcpToolNames = ["ask_secret", "database_query"]
+                        }
+                configured = configureClaudeCodeHostTools host sdk
+            configured.allowedTools `shouldBe`
+                [ "mcp__haskell-agent__ask_secret"
+                , "mcp__haskell-agent__database_query"
+                ]
+            configured.mcpServers `shouldBe`
+                Just
+                    (Aeson.object
+                        [ "mcpServers" Aeson..=
+                            Aeson.object
+                                [ "haskell-agent" Aeson..=
+                                    Aeson.object
+                                        [ "type" Aeson..= ("sdk" :: String)
+                                        , "name" Aeson..=
+                                            ("haskell-agent" :: String)
+                                        ]
+                                ]
+                        ])
+            configured.disallowedTools `shouldNotContain` ["AskUserQuestion"]
 
 withEnvironmentVariables
     :: [(String, Maybe String)]

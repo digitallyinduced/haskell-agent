@@ -415,6 +415,7 @@ responseToTurnOutput response = TurnOutput
     , toolCalls = mapMaybe responseItemToToolCall response.output
     , assistantText = assistantTextFromResponse response
     , tokenUsage = responseTokenUsage response
+    , providerTelemetry = Nothing
     , completion = case response.status of
         ResponseIncomplete
             | hasContinuableReasoningOnlyOutput response -> TurnCompleted

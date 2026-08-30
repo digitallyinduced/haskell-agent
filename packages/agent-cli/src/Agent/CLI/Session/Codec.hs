@@ -21,6 +21,10 @@ import qualified Agent.Json.Decode as Hermes
 import Agent.Dialect (dialectSlug, parseDialect, providerSupportsDialect)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Loop (TokenUsage(..))
+import Agent.Telemetry
+    ( TurnTelemetry
+    , turnTelemetryListDecoder
+    )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (parseProvider, providerSlug)
 import Agent.Store.Postgres.Connection (StorePool)
@@ -30,6 +34,7 @@ import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, except, throwE)
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Aeson as Aeson
 import Data.Bits (xor)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -220,11 +225,15 @@ toStoredTurn turn = Store.SessionTurn
     , sessionTurnEffect = turn.turnEffect
     , sessionTurnItems = map toStoredResponseItem turn.turnItems
     , sessionTurnUsage = toStoredUsage <$> turn.turnUsage
+    , sessionTurnProviderTelemetry =
+        encodeProviderTelemetry turn.turnProviderTelemetry
     }
 
 fromStoredTurn :: Store.SessionTurn -> Either Text SessionTurn
 fromStoredTurn stored = do
     items <- traverse fromStoredResponseItem stored.sessionTurnItems
+    providerTelemetry <-
+        decodeProviderTelemetry stored.sessionTurnProviderTelemetry
     pure SessionTurn
         { turnAt = stored.sessionTurnOccurredAt
         , turnUserText = stored.sessionTurnUserText
@@ -234,7 +243,25 @@ fromStoredTurn stored = do
         , turnEffect = stored.sessionTurnEffect
         , turnItems = items
         , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
+        , turnProviderTelemetry = providerTelemetry
         }
+
+encodeProviderTelemetry :: [TurnTelemetry] -> Maybe Text
+encodeProviderTelemetry telemetry
+    | null telemetry = Nothing
+    | otherwise =
+        Just . TextEncoding.decodeUtf8 . LBS.toStrict $
+            Aeson.encode telemetry
+
+decodeProviderTelemetry :: Maybe Text -> Either Text [TurnTelemetry]
+decodeProviderTelemetry Nothing = Right []
+decodeProviderTelemetry (Just encoded) =
+    case Hermes.decodeText turnTelemetryListDecoder encoded of
+        Left err ->
+            Left
+                ("invalid stored provider telemetry: "
+                    <> err.jsonErrorMessage)
+        Right telemetry -> Right telemetry
 
 toStoredUsage :: TokenUsage -> Store.SessionUsage
 toStoredUsage usage = Store.SessionUsage

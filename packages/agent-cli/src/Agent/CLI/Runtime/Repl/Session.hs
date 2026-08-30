@@ -89,7 +89,7 @@ import Agent.CLI.Session
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
-                  turnItems) )
+                  turnItems, turnProviderTelemetry) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ()
@@ -253,6 +253,7 @@ handleSessionAction
                                 , turnEffect = TranscriptReset
                                 , turnItems = []
                                 , turnUsage = Nothing
+                                , turnProviderTelemetry = []
                                 }
                         (handle', turnIndex) <-
                             appendTurnKeepTitleIndexed handle turn
@@ -354,6 +355,7 @@ handleSessionAction
                         , turnEffect = TranscriptReset
                         , turnItems = []
                         , turnUsage = Nothing
+                        , turnProviderTelemetry = []
                         }
                 (handle', _) <-
                     appendTurnKeepTitleIndexed handle turn

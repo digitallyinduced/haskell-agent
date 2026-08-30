@@ -22,6 +22,7 @@ import Agent.TextBuffer
     ( emptyTextBuffer
     , textBufferToText
     )
+import Agent.Telemetry (TurnTelemetry(..))
 import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
@@ -394,6 +395,7 @@ spec = do
                 , toolCalls = []
                 , assistantText = Just "almost"
                 , tokenUsage = emptyTokenUsage
+                , providerTelemetry = Nothing
                 , completion = TurnCompleted
                 })
                 `shouldSatisfy` (/= "")
@@ -405,6 +407,7 @@ spec = do
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
                         { outputTokens = 32768 }
+                    , providerTelemetry = Nothing
                     , completion = TurnIncomplete
                         { incompleteReason = "max_output_tokens"
                         , incompleteReasoningTokens = Just 32000
@@ -497,6 +500,28 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "Retry the message."
 
     describe "renderEvent" do
+        it "prints compact provider telemetry after a completed turn" do
+            withRenderConfig False False \config handle path -> do
+                renderEvent config
+                    (TurnFinished
+                        (emptyTurnOutput "r1" [] Nothing)
+                            { providerTelemetry =
+                                Just TurnTelemetry
+                                    { telemetryDurationMs = Just 1250
+                                    , telemetryApiDurationMs = Just 1100
+                                    , telemetryCostUsd = Just 0.0125
+                                    , telemetryStopReason = Just "end_turn"
+                                    , telemetryProviderTurns = Just 2
+                                    , telemetryModels = Map.empty
+                                    , telemetryStructuredOutput = Nothing
+                                    }
+                            })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy`
+                    Text.isInfixOf
+                        "$0.0125 · 1.2s · 2 provider turns · stop end_turn"
+
         it "prints canonical streamed tool metadata once" do
             withRenderConfig False False \config handle path -> do
                 let early = functionToolCall "c1" "shell_command" ""
@@ -616,6 +641,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "Complete"
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 activity <- stateActivity <$> readIORef config.renderState
@@ -644,6 +670,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle
@@ -666,6 +693,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 (stateReasoningBuffer <$> readIORef config.renderState)
@@ -696,6 +724,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle
@@ -717,6 +746,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle
@@ -748,6 +778,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle
@@ -777,6 +808,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Nothing
                         , tokenUsage = emptyTokenUsage
+                        , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         })
                     hClose handle
@@ -809,6 +841,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle
@@ -828,6 +861,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle
@@ -847,6 +881,7 @@ spec = do
                     , toolCalls = [call]
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle
@@ -861,6 +896,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "see `file.txt`"
                     , tokenUsage = emptyTokenUsage
+                    , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
                 hClose handle

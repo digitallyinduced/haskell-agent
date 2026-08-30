@@ -11,6 +11,7 @@ import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
+import qualified Agent.CLI.ClaudeSpec as ClaudeSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
@@ -87,6 +88,7 @@ main = hspec do
     BtwSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec
+    ClaudeSpec.spec
     CommandSpec.spec
     ConfigSpec.spec
     CompactionSpec.spec

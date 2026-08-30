@@ -329,6 +329,7 @@ data TurnRow = TurnRow
     , turnRowUsageInput :: !(Maybe Int64)
     , turnRowUsageOutput :: !(Maybe Int64)
     , turnRowUsageCached :: !(Maybe Int64)
+    , turnRowProviderTelemetry :: !(Maybe Text)
     }
 
 loadStoredTurn :: TurnRow -> Transaction.Transaction (Either Text StoredTurn)
@@ -361,6 +362,8 @@ loadStoredTurnWith implementation row = do
                 , sessionTurnEffect = effect
                 , sessionTurnItems = decodedItems
                 , sessionTurnUsage = usage
+                , sessionTurnProviderTelemetry =
+                    row.turnRowProviderTelemetry
                 }
             }
 
@@ -439,7 +442,8 @@ loadTurnsManyStatement = mkStatement
     "SELECT s.session_key, t.turn_id::text, t.turn_index, t.event_sequence,\
     \ t.occurred_at, t.user_text, t.assistant_text, t.error_text,\
     \ t.response_id, t.transcript_effect, t.usage_input_tokens,\
-    \ t.usage_output_tokens, t.usage_cached_tokens\
+    \ t.usage_output_tokens, t.usage_cached_tokens,\
+    \ t.provider_telemetry_json\
     \ FROM harness.session_turns t\
     \ JOIN harness.sessions s ON s.session_id = t.session_id\
     \ WHERE s.session_key = ANY($1::text[]) AND s.deleted_at IS NULL\
@@ -615,7 +619,8 @@ turnSelectSql =
     "SELECT t.turn_id::text, t.turn_index, t.event_sequence, t.occurred_at,\
     \ t.user_text, t.assistant_text, t.error_text, t.response_id,\
     \ t.transcript_effect,\
-    \ t.usage_input_tokens, t.usage_output_tokens, t.usage_cached_tokens\
+    \ t.usage_input_tokens, t.usage_output_tokens, t.usage_cached_tokens,\
+    \ t.provider_telemetry_json\
     \ FROM harness.session_turns t\
     \ JOIN harness.sessions s ON s.session_id = t.session_id"
 
@@ -634,6 +639,7 @@ turnRowDecoder =
         <*> Decoders.column (Decoders.nullable Decoders.int8)
         <*> Decoders.column (Decoders.nullable Decoders.int8)
         <*> Decoders.column (Decoders.nullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
 
 textArrayParams :: Encoders.Params [Text]
 textArrayParams =

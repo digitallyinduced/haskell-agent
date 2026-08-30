@@ -391,7 +391,13 @@ tolerantModelUsageDecoder = Json.withType \case
             "cacheReadInputTokens"
         cacheCreationInputTokens <- optionalNonNegativeNumberDefault
             "cacheCreationInputTokens"
+        webSearchRequests <- optionalNonNegativeNumberDefault
+            "webSearchRequests"
         costUSD <- optionalNumber "costUSD" Json.double
+        contextWindow <- optionalNonNegativeNumber "contextWindow"
+        maxOutputTokens <- optionalNonNegativeNumber "maxOutputTokens"
+        canonicalModel <- optionalNonEmptyText "canonicalModel"
+        provider <- optionalNonEmptyText "provider"
         pure do
             input <- inputTokens
             output <- outputTokens

@@ -5,6 +5,7 @@ import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
+import Agent.Telemetry (TurnTelemetry(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import Agent.Tools.Scheduling
@@ -40,6 +41,17 @@ import qualified Data.Text as Text
 import System.Timeout (timeout)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
+
+emptyTestTelemetry :: TurnTelemetry
+emptyTestTelemetry = TurnTelemetry
+    { telemetryDurationMs = Nothing
+    , telemetryApiDurationMs = Nothing
+    , telemetryCostUsd = Nothing
+    , telemetryStopReason = Nothing
+    , telemetryProviderTurns = Nothing
+    , telemetryModels = mempty
+    , telemetryStructuredOutput = Nothing
+    }
 
 spec :: Spec
 spec = describe "runLoop" do
@@ -1386,12 +1398,21 @@ spec = describe "runLoop" do
 
     it "sums token usage across model steps in one user turn" do
         submissions <- newIORef []
+        let firstTelemetry = emptyTestTelemetry
+                { telemetryDurationMs = Just 100
+                , telemetryCostUsd = Just 0.01
+                }
+            secondTelemetry = emptyTestTelemetry
+                { telemetryDurationMs = Just 200
+                , telemetryCostUsd = Just 0.02
+                }
         backend <- scriptedBackend submissions
             [ Right TurnOutput
                 { responseId = "resp-1"
                 , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 , assistantText = Just "calling"
                 , tokenUsage = TokenUsage 10 4 2
+                , providerTelemetry = Just firstTelemetry
                 , completion = TurnCompleted
                 }
             , Right TurnOutput
@@ -1399,17 +1420,20 @@ spec = describe "runLoop" do
                 , toolCalls = []
                 , assistantText = Just "done"
                 , tokenUsage = TokenUsage 12 6 0
+                , providerTelemetry = Just secondTelemetry
                 , completion = TurnCompleted
                 }
             ]
         config <- testConfig backend
-        result <- runLoop config Nothing "hello"
-        result `shouldBe` Right LoopResult
+        execution <- runLoopDetailed config Nothing "hello"
+        execution.executionResult `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "done"
             , turnsUsed = 2
             , tokenUsage = TokenUsage 22 10 2
             }
+        execution.executionProviderTelemetry
+            `shouldBe` [firstTelemetry, secondTelemetry]
 
     it "continues after a reasoning-only completion until the model answers" do
         events <- newIORef []
@@ -1587,6 +1611,7 @@ spec = describe "runLoop" do
                     [functionToolCall "c1" "echo" "{\"message\":\"unsafe\"}"]
                 , assistantText = Just "partial"
                 , tokenUsage = TokenUsage 120 32768 0
+                , providerTelemetry = Nothing
                 , completion = TurnIncomplete
                     { incompleteReason = "max_output_tokens"
                     , incompleteReasoningTokens = Just 32000
@@ -1614,6 +1639,7 @@ spec = describe "runLoop" do
                             "c1" "echo" "{\"message\":\"unsafe\"}"]
                     , assistantText = Just "partial"
                     , tokenUsage = TokenUsage 120 32768 0
+                    , providerTelemetry = Nothing
                     , completion = TurnIncomplete
                         { incompleteReason = "max_output_tokens"
                         , incompleteReasoningTokens = Just 32000

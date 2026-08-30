@@ -28,10 +28,12 @@ module Agent.Tools.PlanMode
     , writePlanTool
     , exitPlanModeTool
     , askUserQuestionTool
+    , answerAskUserQuestionInput
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Json.Decode (Decoder)
+import qualified Agent.Json.Decode as Json
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optList, optText, reqText)
 import Agent.ToolDSL
@@ -46,6 +48,9 @@ import Agent.Tools.Types
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -436,21 +441,22 @@ runAskUserQuestion env args
     | null args.questions =
         pure (Right "No questions provided. Continue with the task.")
     | otherwise = do
-        answers <- collectAnswers args.questions
+        answers <- collectAskUserQuestionAnswers env args.questions
         pure (formatAnswers <$> answers)
-  where
-    collectAnswers
-        :: [AskUserQuestion]
-        -> IO (Either Text [(Text, Text)])
-    collectAnswers [] = pure (Right [])
-    collectAnswers (question : rest) =
-        ask question >>= \case
-            Left err -> pure (Left err)
-            Right answer ->
-                collectAnswers rest >>= \case
-                    Left err -> pure (Left err)
-                    Right answers -> pure (Right (answer : answers))
 
+collectAskUserQuestionAnswers
+    :: PlanModeEnv
+    -> [AskUserQuestion]
+    -> IO (Either Text [(Text, Text)])
+collectAskUserQuestionAnswers _ [] = pure (Right [])
+collectAskUserQuestionAnswers env (question : rest) =
+    ask question >>= \case
+        Left err -> pure (Left err)
+        Right answer ->
+            collectAskUserQuestionAnswers env rest >>= \case
+                Left err -> pure (Left err)
+                Right answers -> pure (Right (answer : answers))
+  where
     ask :: AskUserQuestion -> IO (Either Text (Text, Text))
     ask question
         | question.multiSelect == Just True =
@@ -515,6 +521,37 @@ runAskUserQuestion env args
             | null selected = pure (Left "No answer from user.")
             | otherwise =
                 pure (Right (Text.intercalate ", " (reverse selected)))
+
+-- | Run the same host question UI used by 'askUserQuestionTool', then add the
+-- @answers@ object expected by Claude Code's native AskUserQuestion tool.
+answerAskUserQuestionInput
+    :: PlanModeEnv
+    -> Aeson.Value
+    -> IO (Either Text Aeson.Value)
+answerAskUserQuestionInput env input =
+    case input of
+        Aeson.Object object ->
+            case
+                Json.decodeEither
+                    askUserQuestionArgsDecoder
+                    (LazyByteString.toStrict (Aeson.encode input))
+              of
+                Left err ->
+                    pure (Left err.jsonErrorMessage)
+                Right args ->
+                    collectAskUserQuestionAnswers env args.questions >>= \case
+                        Left err -> pure (Left err)
+                        Right answers ->
+                            pure $
+                                Right $
+                                    Aeson.Object $
+                                        KeyMap.insert
+                                            "answers"
+                                            (Aeson.toJSON
+                                                (Map.fromList answers))
+                                            object
+        _ ->
+            pure (Left "AskUserQuestion input must be an object.")
 
 formatOption :: AskUserQuestionOption -> Text
 formatOption option =

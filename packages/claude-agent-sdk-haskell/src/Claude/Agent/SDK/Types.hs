@@ -189,7 +189,12 @@ data ModelUsage = ModelUsage
     , outputTokens :: !Int
     , cacheReadInputTokens :: !Int
     , cacheCreationInputTokens :: !Int
+    , webSearchRequests :: !Int
     , costUSD :: !(Maybe Double)
+    , contextWindow :: !(Maybe Int)
+    , maxOutputTokens :: !(Maybe Int)
+    , canonicalModel :: !(Maybe Text)
+    , provider :: !(Maybe Text)
     } deriving (Eq, Show)
 
 modelUsageToUsage :: ModelUsage -> Usage

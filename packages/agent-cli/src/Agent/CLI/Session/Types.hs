@@ -32,6 +32,10 @@ import Agent.Dialect
 import Agent.Json.Decode (optionalKey)
 import qualified Agent.Json.Decode as Hermes
 import Agent.Loop (TokenUsage, tokenUsageDecoder)
+import Agent.Telemetry
+    ( TurnTelemetry
+    , turnTelemetryListDecoder
+    )
 import Agent.OpenAI.Compaction
     ( hasCompactionCheckpoint
     , isClearSessionTurn
@@ -232,6 +236,7 @@ data SessionTurn = SessionTurn
     , turnEffect :: !TranscriptEffect
     , turnItems :: ![ResponseItem]
     , turnUsage :: !(Maybe TokenUsage)
+    , turnProviderTelemetry :: ![TurnTelemetry]
     } deriving (Eq, Show)
 
 data SessionTurnPage = SessionTurnPage
@@ -259,6 +264,7 @@ instance ToJSON SessionTurn where
         , "effect" .= transcriptEffectText turn.turnEffect
         , "items" .= turn.turnItems
         , "usage" .= turn.turnUsage
+        , "providerTelemetry" .= turn.turnProviderTelemetry
         ]
 
 sessionTurnDecoder :: Hermes.Decoder SessionTurn
@@ -270,6 +276,9 @@ sessionTurnDecoder = Hermes.object do
         responseId <- optionalKey "responseId" Hermes.text
         items <- Hermes.atKey "items" (Hermes.list responseItemDecoder)
         usage <- optionalKey "usage" tokenUsageDecoder
+        providerTelemetry <-
+            Hermes.defaultKey [] "providerTelemetry"
+                turnTelemetryListDecoder
         effect <- optionalKey "effect" Hermes.text >>= \case
             Nothing -> pure (inferTranscriptEffect userText items)
             Just value ->
@@ -284,6 +293,7 @@ sessionTurnDecoder = Hermes.object do
             , turnEffect = effect
             , turnItems = items
             , turnUsage = usage
+            , turnProviderTelemetry = providerTelemetry
             }
 
 transcriptEffectText :: TranscriptEffect -> Text

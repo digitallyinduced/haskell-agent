@@ -35,6 +35,11 @@ spec = describe "query" do
                     , outputTokens = 8
                     , cacheReadInputTokens = 6
                     , cacheCreationInputTokens = 2
+                    , webSearchRequests = 1
+                    , contextWindow = Just 200000
+                    , maxOutputTokens = Just 32000
+                    , canonicalModel = Just "claude-test-202608"
+                    , provider = Just "firstParty"
                     } -> True
                 _ -> False
 
@@ -921,7 +926,11 @@ canonicalResponseLines =
       \\"cache_read_input_tokens\":4,\"output_tokens\":5},\
       \\"modelUsage\":{\"claude-test\":{\"inputTokens\":20,\
       \\"outputTokens\":8,\"cacheReadInputTokens\":6,\
-      \\"cacheCreationInputTokens\":2,\"costUSD\":0.01}}}"
+      \\"cacheCreationInputTokens\":2,\"webSearchRequests\":1,\
+      \\"costUSD\":0.01,\"contextWindow\":200000,\
+      \\"maxOutputTokens\":32000,\
+      \\"canonicalModel\":\"claude-test-202608\",\
+      \\"provider\":\"firstParty\"}}}"
     ]
 
 assistantLine :: Text -> Text -> Text

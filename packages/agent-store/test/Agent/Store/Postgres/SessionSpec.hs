@@ -605,6 +605,8 @@ testTurn now = SessionTurn
         , sessionUsageOutputTokens = 5
         , sessionUsageCachedTokens = 2
         }
+    , sessionTurnProviderTelemetry =
+        Just "[{\"duration_ms\":1200,\"models\":{}}]"
     }
 
 isBatchableItem :: StoredResponseItem -> Bool

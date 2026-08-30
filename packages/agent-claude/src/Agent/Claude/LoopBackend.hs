@@ -2,6 +2,7 @@
 -- provider-neutral agent loop.
 module Agent.Claude.LoopBackend
     ( withClaudeCodeBackend
+    , withClaudeCodeBackendWithHost
     , claudeCodeOneShotBackend
     , appendHostTranscript
     , sdkErrorToApiError
@@ -11,6 +12,12 @@ import Agent.Claude.Options
     ( ClaudeCodeOptions(..)
     , ClaudeCodeToolMode(..)
     , toClaudeAgentOptions
+    )
+import Agent.Claude.Control
+    ( ClaudeCodeBackendHandle(..)
+    , ClaudeCodeHostHandlers
+    , configureClaudeCodeHostTools
+    , toClaudeAgentHandlers
     )
 import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Agent.Claude.Internal.Messages
@@ -42,6 +49,10 @@ import Agent.Loop
     , TurnOutput(..)
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Telemetry
+    ( ModelTelemetry(..)
+    , TurnTelemetry(..)
+    )
 import Agent.Responses.Types
     ( CustomToolCall(..)
     , CustomToolCallOutput(..)
@@ -65,7 +76,9 @@ import Claude.Agent.SDK.Client
     , ClaudeSDKTurn
     , resolveTurnUsage
     , turnIsNewSession
+    , abort
     , withClaudeSDKClient
+    , withClaudeSDKClientWithHandlers
     , withClaudeSDKTurn
     )
 import qualified Data.Aeson as Aeson
@@ -103,6 +116,7 @@ import Claude.Agent.SDK.Query
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
     , Message(..)
+    , ModelUsage(..)
     , ResultMessage(..)
     , SystemMessage(..)
     , UserContentBlock(..)
@@ -141,6 +155,39 @@ withClaudeCodeBackend options initialPrevious getParams transcript callback =
                 checkpoint
                 getParams
                 transcript)
+
+-- | Handler-aware variant used by interactive hosts. The callback receives an
+-- in-band interrupt action in addition to the provider-neutral backend.
+withClaudeCodeBackendWithHost
+    :: ClaudeCodeOptions
+    -> ClaudeCodeHostHandlers
+    -> Maybe Text
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> (ClaudeCodeBackendHandle -> IO a)
+    -> IO a
+withClaudeCodeBackendWithHost
+        options host initialPrevious getParams transcript callback =
+    toClaudeAgentOptions ClaudeCodeDefaultTools options >>= \baseOptions ->
+    let sdkOptions =
+            configureClaudeCodeHostTools host
+                baseOptions
+                    { resume = initialPrevious >>= canonicalClaudeSessionId }
+    in withClaudeSDKClientWithHandlers
+        sdkOptions
+        (toClaudeAgentHandlers host)
+        \session -> do
+            checkpoint <- newIORef Nothing
+            callback ClaudeCodeBackendHandle
+                { loopBackend =
+                    backendForSession
+                        options.transport
+                        session
+                        checkpoint
+                        getParams
+                        transcript
+                , interruptActiveTurn = abort session
+                }
 
 -- | A backend for isolated side requests. Every submission owns and cleans up
 -- its own structured Claude process, while still using subscription auth.
@@ -339,6 +386,7 @@ submitClaudeCodeTurn
                 , toolCalls = []
                 , assistantText = completed.assistantText
                 , tokenUsage = sdkUsageToTokenUsage usage
+                , providerTelemetry = claudeResultTelemetry result
                 , completion = TurnCompleted
                 }
             commit =
@@ -350,6 +398,42 @@ submitClaudeCodeTurn
                     completed.turnItems
         mapM_ onEvent (remainingClaudeEvents eventState completed)
         pure (Right (output, commit))
+
+claudeResultTelemetry :: ResultMessage -> Maybe TurnTelemetry
+claudeResultTelemetry result
+    | result.durationMs == Nothing
+    , result.durationApiMs == Nothing
+    , result.totalCostUsd == Nothing
+    , result.stopReason == Nothing
+    , result.numTurns == Nothing
+    , null result.modelUsage
+    , result.structuredOutput == Nothing =
+        Nothing
+    | otherwise =
+        Just TurnTelemetry
+            { telemetryDurationMs = result.durationMs
+            , telemetryApiDurationMs = result.durationApiMs
+            , telemetryCostUsd = result.totalCostUsd
+            , telemetryStopReason = result.stopReason
+            , telemetryProviderTurns = result.numTurns
+            , telemetryModels =
+                fmap claudeModelTelemetry result.modelUsage
+            , telemetryStructuredOutput = result.structuredOutput
+            }
+
+claudeModelTelemetry :: ModelUsage -> ModelTelemetry
+claudeModelTelemetry usage = ModelTelemetry
+    { modelInputTokens = usage.inputTokens
+    , modelOutputTokens = usage.outputTokens
+    , modelCacheReadInputTokens = usage.cacheReadInputTokens
+    , modelCacheCreationInputTokens = usage.cacheCreationInputTokens
+    , modelWebSearchRequests = Just usage.webSearchRequests
+    , modelCostUsd = usage.costUSD
+    , modelContextWindow = usage.contextWindow
+    , modelMaxOutputTokens = usage.maxOutputTokens
+    , modelCanonicalName = usage.canonicalModel
+    , modelProviderName = usage.provider
+    }
 
 collectTurnInputs :: [TurnInput] -> IO (Text, [ImageAttachment], [FilePath])
 collectTurnInputs inputs = do

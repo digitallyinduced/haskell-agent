@@ -864,6 +864,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 , turnEffect = TranscriptReplace
                                 , turnItems = durableHistory
                                 , turnUsage = Nothing
+                                , turnProviderTelemetry = []
                                 }
                         (updated, _) <-
                             appendTurnWithMetaUpdateIndexed

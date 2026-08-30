@@ -86,7 +86,10 @@ toClaudeAgentOptions toolMode options = do
             { tools = case toolMode of
                 ClaudeCodeDefaultTools -> Nothing
                 ClaudeCodeNoTools -> Just []
-            , disallowedTools = ["AskUserQuestion"]
+            -- Older Claude Code releases expose AskUserQuestion natively and
+            -- route it through can_use_tool. Newer releases omit it in SDK
+            -- mode, where the host's MCP question tool remains available.
+            , disallowedTools = []
             , permissionMode = Just case options.permission of
                 ClaudeCodeDontAsk -> PermissionDontAsk
                 ClaudeCodeManual -> PermissionManual

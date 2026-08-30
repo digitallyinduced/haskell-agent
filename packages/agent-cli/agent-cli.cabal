@@ -147,6 +147,7 @@ library
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
+                    , Agent.CLI.Claude
                     , Agent.CLI.CodeModeRuntime
                     , Agent.CLI.Compaction
                     , Agent.CLI.Connectivity
@@ -398,6 +399,7 @@ test-suite agent-cli-test
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
+                    , Agent.CLI.ClaudeSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec

@@ -39,6 +39,7 @@ library
     hs-source-dirs:   src
     exposed-modules:  Agent.Claude
                     , Agent.Claude.Auth
+                    , Agent.Claude.Control
                     , Agent.Claude.LoopBackend
                     , Agent.Claude.Options
                     , Agent.Claude.ReasoningEffort
@@ -79,6 +80,7 @@ test-suite agent-claude-test
                     , agent-responses
                     , agent-responses-types
                     , claude-agent-sdk-haskell
+                    , aeson
                     , bytestring
                     , directory
                     , filepath

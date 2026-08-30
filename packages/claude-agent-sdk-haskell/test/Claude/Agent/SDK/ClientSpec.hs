@@ -494,7 +494,12 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                     , outputTokens = output
                     , cacheReadInputTokens = 0
                     , cacheCreationInputTokens = 0
+                    , webSearchRequests = 0
                     , costUSD = Nothing
+                    , contextWindow = Nothing
+                    , maxOutputTokens = Nothing
+                    , canonicalModel = Nothing
+                    , provider = Nothing
                     }
             reset = ConversationResetMessage
                 { newConversationId = Just newSessionId

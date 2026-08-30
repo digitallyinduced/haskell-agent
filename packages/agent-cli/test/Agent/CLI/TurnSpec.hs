@@ -243,6 +243,7 @@ spec = do
                         history <> inputs <> [assistantMessage "checking"] <> calls
                     , executionPendingInputs = [CompletedTool result]
                     , executionUncommittedAssistantText = Nothing
+                    , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopCancelled [result])
                     }
@@ -279,6 +280,7 @@ spec = do
                             <> [assistantMessage "partial", complete, truncated]
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopIncomplete turn)
                     }
@@ -309,6 +311,7 @@ spec = do
                     { executionState = history <> inputs <> [truncated]
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopIncomplete turn)
                     }
@@ -326,6 +329,7 @@ spec = do
                     { executionState = history <> inputs <> [call]
                     , executionPendingInputs = [CompletedTool result]
                     , executionUncommittedAssistantText = Nothing
+                    , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult =
                         Left (LoopTransport (ConnectionError "down"))
@@ -349,6 +353,7 @@ spec = do
                             <> [functionCallItem "c1" "read" "{}" Nothing]
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult =
                         Left (LoopTransport (ConnectionError "down"))
@@ -361,6 +366,7 @@ spec = do
                     { executionState = history <> inputOnlyTurnItems prepared
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopCancelled [])
                     }
@@ -474,6 +480,7 @@ uncommittedExecution turn = LoopExecution
     { executionState = turn.preparedBeforeItems
     , executionPendingInputs = turn.preparedTurnInputs
     , executionUncommittedAssistantText = Nothing
+    , executionProviderTelemetry = []
     , executionProgress = NoResponseCommitted
     , executionResult = Left (LoopTransport (ConnectionError "down"))
     }
