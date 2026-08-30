@@ -4,6 +4,7 @@ import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
 import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , gatewayCredentialPath
     , saveGatewayCredentialAt
     )
 import qualified Agent.CLI.Login as Login
@@ -61,6 +62,13 @@ fromFilePath = unsafeEncodeUtf
 
 toFilePath :: OsPath -> FilePath
 toFilePath path = either (error . show) id (decodeUtf path)
+
+expectRightResult :: Show err => Either err value -> IO value
+expectRightResult = \case
+    Left err -> do
+        expectationFailure ("expected Right, got " <> show err)
+        fail "unreachable after expectation failure"
+    Right value -> pure value
 
 spec :: Spec
 spec = do
@@ -161,6 +169,178 @@ spec = do
                         loaded.loadedProvider `shouldBe` OpenAIProvider
                         loaded.loadedSelectionId
                             `shouldBe` Just gatewayAuthSelectionId
+
+        it "falls back from a rejected gateway to local ChatGPT auth" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth (Just OpenAIProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            case loaded.loadedOpenAiPool of
+                                Nothing ->
+                                    expectationFailure
+                                        "expected local OpenAI fallback pool"
+                                Just _ -> pure ()
+                            gatewayCredential <-
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    Nothing
+                                    >>= expectRightResult
+                            gatewayCredential.accountId
+                                `shouldBe`
+                                    "wss://gateway.example/v1/responses"
+                            localCredential <-
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    (Just FailedCredential
+                                        { credential = gatewayCredential
+                                        , failure =
+                                            AccountAuthenticationRejected
+                                        , failureReason =
+                                            testAuthenticationReason
+                                        })
+                                    >>= expectRightResult
+                            localCredential.accountId
+                                `shouldBe` "local-account"
+                            getNextToken
+                                loaded.loadedTokenProvider
+                                Nothing
+                                `shouldReturn` Right localCredential
+
+        it "does not turn a rejected gateway into API-credit spending" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccountWithBilling
+                        ApiBilled
+                        "api-openai"
+                        "api-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth (Just OpenAIProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            case loaded.loadedOpenAiPool of
+                                Nothing -> pure ()
+                                Just _ ->
+                                    expectationFailure
+                                        "API-credit pool must not be attached"
+                            gatewayCredential <-
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    Nothing
+                                    >>= expectRightResult
+                            getNextToken
+                                loaded.loadedTokenProvider
+                                (Just FailedCredential
+                                    { credential = gatewayCredential
+                                    , failure =
+                                        AccountAuthenticationRejected
+                                    , failureReason =
+                                        testAuthenticationReason
+                                    })
+                                >>= \case
+                                    Left (CredentialError _) -> pure ()
+                                    other ->
+                                        expectationFailure $
+                                            "expected gateway rejection, got "
+                                                <> show other
+
+        it "uses local OpenAI auth when the gateway file is invalid" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    let path = toFilePath (gatewayCredentialPath home)
+                    createDirectoryIfMissing True
+                        (toFilePath home </> ".haskell-agent"
+                            </> "credentials")
+                    LBS.writeFile path "{not-json"
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth (Just OpenAIProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            loaded.loadedSelectionId `shouldBe` Nothing
+                            getNextToken
+                                loaded.loadedTokenProvider
+                                Nothing
+                                >>= \case
+                                    Left err ->
+                                        expectationFailure (show err)
+                                    Right credential ->
+                                        credential.accountId
+                                            `shouldBe` "local-account"
+
+        it "does not turn an invalid gateway into API-credit spending" $
+            withTempHome \home ->
+                withCleanOpenAiEnv $
+                withCleanGrokEnv do
+                    let path = toFilePath (gatewayCredentialPath home)
+                    createDirectoryIfMissing True
+                        (toFilePath home </> ".haskell-agent"
+                            </> "credentials")
+                    LBS.writeFile path "{not-json"
+                    storeOpenAiAccountWithBilling
+                        ApiBilled
+                        "api-openai"
+                        "api-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth Nothing >>= \case
+                        Left err ->
+                            err `shouldSatisfy`
+                                Text.isInfixOf
+                                    "refusing automatic fallback to API-credit billing"
+                        Right _ ->
+                            expectationFailure
+                                "expected invalid gateway to preserve the billing boundary"
+
+        it "uses another subscription provider when the gateway file is invalid" $
+            withTempHome \home ->
+                withCleanOpenAiEnv $
+                withCleanGrokEnv $
+                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
+                    let path = toFilePath (gatewayCredentialPath home)
+                    createDirectoryIfMissing True
+                        (toFilePath home </> ".haskell-agent"
+                            </> "credentials")
+                    LBS.writeFile path "{not-json"
+                    loadAuth Nothing >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded ->
+                            loaded.loadedProvider `shouldBe` XAIProvider
+
+        it "skips API-credit auth to use another subscription provider" $
+            withTempHome \home ->
+                withCleanOpenAiEnv $
+                withCleanGrokEnv $
+                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
+                    let path = toFilePath (gatewayCredentialPath home)
+                    createDirectoryIfMissing True
+                        (toFilePath home </> ".haskell-agent"
+                            </> "credentials")
+                    LBS.writeFile path "{not-json"
+                    storeOpenAiAccountWithBilling
+                        ApiBilled
+                        "api-openai"
+                        "api-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth Nothing >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            loaded.loadedProvider `shouldBe` XAIProvider
+                            tokenProviderBillingMode
+                                loaded.loadedTokenProvider
+                                `shouldBe` SubscriptionBilled
 
         it "does not let a gateway override an explicit non-OpenAI provider" $
             withTempHome \home ->
@@ -394,6 +574,74 @@ spec = do
                         `shouldReturn` Right second
 
     describe "loadAuthForAccount" do
+        it "keeps local fallback when the gateway route is selected" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    loadAuthForAccount
+                        OpenAIProvider
+                        gatewayAuthSelectionId
+                        >>= \case
+                            Left err ->
+                                expectationFailure (Text.unpack err)
+                            Right loaded -> do
+                                gatewayCredential <-
+                                    getNextToken
+                                        loaded.loadedTokenProvider
+                                        Nothing
+                                        >>= expectRightResult
+                                localCredential <-
+                                    getNextToken
+                                        loaded.loadedTokenProvider
+                                        (Just FailedCredential
+                                            { credential = gatewayCredential
+                                            , failure =
+                                                AccountAuthenticationRejected
+                                            , failureReason =
+                                                testAuthenticationReason
+                                            })
+                                        >>= expectRightResult
+                                localCredential.accountId
+                                    `shouldBe` "local-account"
+
+        it "loads the selected local OpenAI account while a gateway is connected" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai-a"
+                        "local-account-a"
+                        True
+                        farFutureAccessToken
+                    storeOpenAiAccount
+                        "local-openai-b"
+                        "local-account-b"
+                        True
+                        farFutureAccessToken
+                    loadAuthForAccount
+                        OpenAIProvider
+                        "local-account-b"
+                        >>= \case
+                            Left err ->
+                                expectationFailure (Text.unpack err)
+                            Right loaded -> do
+                                loaded.loadedSelectionId
+                                    `shouldBe` Just "local-account-b"
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    Nothing
+                                    >>= \case
+                                        Left err ->
+                                            expectationFailure (show err)
+                                        Right credential ->
+                                            credential.accountId
+                                                `shouldBe` "local-account-b"
+
         it "does not let a gateway override a selected non-OpenAI account" $
             withTempHome \home ->
                 withCleanGrokEnv $
@@ -647,6 +895,41 @@ spec = do
                                     `shouldReturn` Right "openrouter"
 
     describe "discoverSelectableLoginAccounts" do
+        it "shows a gateway in login management but not account selection" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    managed <- Login.discoverLoginAccounts
+                    selectable <- Login.discoverSelectableLoginAccounts
+                    map (.loginSource) managed
+                        `shouldSatisfy` elem "gateway"
+                    map (.loginSource) selectable
+                        `shouldSatisfy` not . elem "gateway"
+
+        it "keeps an unreadable gateway visible so it can be disconnected" $
+            withTempHome \home -> do
+                createDirectoryIfMissing True
+                    (toFilePath home </> ".haskell-agent"
+                        </> "credentials")
+                LBS.writeFile
+                    (toFilePath (gatewayCredentialPath home))
+                    "{not-json"
+                accounts <- Login.discoverLoginAccounts
+                case filter ((== "gateway") . (.loginSource)) accounts of
+                    [gateway] ->
+                        gateway.loginUsage
+                            `shouldSatisfy` \case
+                                Login.UsageUnavailable _ -> True
+                                _ -> False
+                    _ ->
+                        expectationFailure
+                            "expected one repairable gateway entry"
+
         it "does not let a disabled managed account shadow an external source" $
             withTempHome \_ ->
                 withCleanGrokEnv $
@@ -1637,6 +1920,10 @@ testAuthenticationReason = ExhaustedByAuthentication
     { exhaustionErrorType = Nothing
     , exhaustionStatusCode = Just 401
     }
+
+farFutureAccessToken :: Text
+farFutureAccessToken =
+    "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
 
 testRateLimitReason :: Maybe Int -> CredentialExhaustionReason
 testRateLimitReason retryAfter = ExhaustedByRateLimit

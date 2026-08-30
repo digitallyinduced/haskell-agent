@@ -20,6 +20,7 @@ import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
+      gatewayAuthSelectionId,
       preferredOpenAiTokenProvider,
       loadAuth,
       loadAuthForAccount,
@@ -701,6 +702,15 @@ runAgentInitializedWithLock
                                 Right (credential, usable) -> do
                                     label <-
                                         usable.loadedAccountLabel credential
+                                    when
+                                        (loaded.loadedProvider
+                                            == OpenAIProvider) $
+                                        writeIORef
+                                            preferredOpenAiAccountRef
+                                            (if selectedSelectionId
+                                                    == gatewayAuthSelectionId
+                                                then Nothing
+                                                else Just credential.accountId)
                                     let selectionId =
                                             fromMaybe
                                                 selectedSelectionId

@@ -73,6 +73,18 @@ import Agent.CLI.Error
     , formatException
     )
 import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.CLI.GatewayClient
+    ( GatewayAuthorization(..)
+    , GatewayCredential(..)
+    , GatewayDeviceAuthorization(..)
+    , GatewayPollResult(..)
+    , loadGatewayCredential
+    , openGatewayAuthorizationPage
+    , pollGatewayAuthorization
+    , removeGatewayCredential
+    , saveGatewayCredential
+    , startGatewayAuthorization
+    )
 import Agent.CLI.Input (readApprovalLine)
 import Agent.CLI.Picker
     ( PickerKey(..)
@@ -93,6 +105,7 @@ import Agent.CLI.TUI.App
     , emitUiEvent
     , requestFullscreenChoiceWithBody
     , requestFullscreenSecret
+    , requestFullscreenText
     )
 import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -223,10 +236,19 @@ runFullscreenLoginManager runtime = do
                 result <- connectFullscreenAccount runtime
                 rediscovered <- discoverLoginAccounts
                 dashboardLoop (result <|> notice) rediscovered
+            Just (LoginDashboardGateway, _) -> do
+                result <- connectFullscreenGateway runtime
+                rediscovered <- discoverLoginAccounts
+                dashboardLoop (result <|> notice) rediscovered
             Just (LoginDashboardRefreshAll, _) -> do
                 refreshed <-
                     withLoginProgress runtime "Refreshing provider usage…" $
-                        mapConcurrently refreshLoginAccountSafely accounts
+                        mapConcurrently
+                            (\account ->
+                                if isGatewayLoginAccount account
+                                    then pure account
+                                    else refreshLoginAccountSafely account)
+                            accounts
                 dashboardLoop
                     (Just (refreshAllNotice refreshed))
                     refreshed
@@ -340,8 +362,30 @@ advanceDevicePollSchedule slowedDown polledAt schedule =
         schedule.devicePollIntervalSeconds
             + if slowedDown then 5 else 0
 
+advanceGatewayPollSchedule
+    :: Bool
+    -> Maybe Int
+    -> UTCTime
+    -> DevicePollSchedule
+    -> DevicePollSchedule
+advanceGatewayPollSchedule slowedDown serverInterval polledAt schedule =
+    schedule
+        { devicePollIntervalSeconds = intervalSeconds
+        , devicePollNextAt =
+            addUTCTime (fromIntegral intervalSeconds) polledAt
+        }
+  where
+    requestedInterval =
+        maybe schedule.devicePollIntervalSeconds (max 1) serverInterval
+    intervalSeconds
+        | slowedDown =
+            max requestedInterval
+                (schedule.devicePollIntervalSeconds + 5)
+        | otherwise = requestedInterval
+
 data LoginDashboardAction
     = LoginDashboardConnect
+    | LoginDashboardGateway
     | LoginDashboardRefreshAll
     | LoginDashboardOpen !Int
 
@@ -364,6 +408,17 @@ loginDashboardEntries accounts =
         , "OpenAI, xAI / Grok, OpenRouter, Google Gemini, or Claude Code"
         )
       )
+    , ( LoginDashboardGateway
+      , if gatewayConnected
+            then
+                ( "↻ Reconnect gateway"
+                , "Replace the saved gateway authorization"
+                )
+            else
+                ( "＋ Connect gateway"
+                , "Route OpenAI requests through an agent gateway"
+                )
+      )
     ]
         <> refreshEntry
         <> zipWith
@@ -372,12 +427,19 @@ loginDashboardEntries accounts =
             [0 ..]
             accounts
   where
+    gatewayConnected = any isGatewayLoginAccount accounts
     refreshEntry
-        | null accounts = []
+        | not (any (not . isGatewayLoginAccount) accounts) = []
         | otherwise =
             [ ( LoginDashboardRefreshAll
               , ( "↻ Refresh all usage"
-                , Text.pack (show (length accounts)) <> " accounts"
+                , Text.pack
+                    (show
+                        (length
+                            (filter
+                                (not . isGatewayLoginAccount)
+                                accounts)))
+                    <> " accounts"
                 )
               )
             ]
@@ -390,12 +452,179 @@ loginDashboardAccountRow account =
         <> displayText 48 account.loginLabel
     , Text.intercalate " · " $
         [ accountIdentifier account
-        , if isJust account.loginManagedId then "managed" else "external"
+        , if account.loginSource == "gateway"
+            then "gateway"
+            else if isJust account.loginManagedId then "managed" else "external"
         , if account.loginEnabled then "enabled" else "disabled"
         , billingSummary account.loginBilling
-        , usageSummary account.loginUsage
+        , if isGatewayLoginAccount account
+            then case account.loginUsage of
+                UsageUnavailable _ -> "needs repair"
+                _ -> "connected"
+            else usageSummary account.loginUsage
         ]
     )
+
+connectFullscreenGateway :: FullscreenRuntime -> IO (Maybe LoginNotice)
+connectFullscreenGateway runtime = do
+    existing <- loadGatewayCredential
+    let initial = case existing of
+            Right (Just credential) -> credential.gatewayBaseUrl
+            _ -> ""
+    requestFullscreenText
+        runtime
+        "Connect gateway"
+        ( "Enter the HTTPS base URL of the agent gateway. The next screen "
+            <> "will show a browser link and one-time authorization code."
+        )
+        initial >>= \case
+            Nothing -> pure Nothing
+            Just rawUrl -> do
+                let url = Text.strip rawUrl
+                if Text.null url
+                    then pure Nothing
+                    else do
+                        requestedAt <- getCurrentTime
+                        requested <-
+                            withLoginProgress runtime
+                                "Starting gateway device authorization…" $
+                                    startGatewayAuthorization url
+                        case requested of
+                            Left err ->
+                                pure $ Just $
+                                    LoginNotice False
+                                        ("Gateway connection failed: " <> err)
+                            Right authorization -> do
+                                opened <-
+                                    openGatewayAuthorizationPage authorization
+                                let device =
+                                        authorization.authorizationDevice
+                                    notice
+                                        | opened = Nothing
+                                        | otherwise =
+                                            Just
+                                                "Could not open a browser automatically; use the verification link below."
+                                awaitAuthorization
+                                    authorization
+                                    (initialDevicePollSchedule
+                                        requestedAt
+                                        device.pollIntervalSeconds
+                                        device.expiresInSeconds)
+                                    notice
+  where
+    awaitAuthorization authorization schedule notice = do
+        let device = authorization.authorizationDevice
+        choice <-
+            requestFullscreenChoiceWithBody
+                runtime
+                "Connect gateway"
+                (deviceAuthorizationBody
+                    "gateway"
+                    device.verificationUriComplete
+                    device.userCode
+                    notice)
+                0
+                [ ( "Check authorization"
+                  , "Return after approving the one-time code in your browser"
+                  )
+                , ("Cancel", "Stop without changing the saved gateway")
+                ]
+        case choice of
+            Just 0 -> do
+                now <- getCurrentTime
+                case devicePollReadiness now schedule of
+                    DevicePollExpired ->
+                        gatewayTimedOut
+                    DevicePollWait seconds ->
+                        awaitAuthorization
+                            authorization
+                            schedule
+                            (Just (pollWaitNotice seconds))
+                    DevicePollReady -> do
+                        polled <-
+                            withLoginProgress runtime
+                                "Checking gateway authorization…" $
+                                    pollGatewayAuthorization authorization
+                        polledAt <- getCurrentTime
+                        case polled of
+                            Left err ->
+                                pure $ Just $
+                                    LoginNotice False
+                                        ("Gateway connection failed: " <> err)
+                            Right result ->
+                                handlePoll
+                                    authorization
+                                    schedule
+                                    polledAt
+                                    result
+            _ -> pure Nothing
+
+    handlePoll authorization schedule polledAt = \case
+        GatewayAuthorized accessToken websocketUrl
+            | devicePollReadiness polledAt schedule
+                == DevicePollExpired ->
+                    gatewayTimedOut
+            | otherwise -> do
+                saved <-
+                    saveGatewayCredential GatewayCredential
+                        { gatewayBaseUrl =
+                            authorization.authorizationBaseUrl
+                        , gatewayWebSocketUrl = websocketUrl
+                        , gatewayAccessToken = accessToken
+                        }
+                pure $ Just $ case saved of
+                    Left err ->
+                        LoginNotice False
+                            ("Could not save gateway connection: " <> err)
+                    Right () ->
+                        LoginNotice True
+                            "Gateway connected. Restart the agent to apply the new route immediately."
+        GatewayAuthorizationPending serverInterval ->
+            continuePending
+                authorization
+                polledAt
+                (advanceGatewayPollSchedule
+                    False serverInterval polledAt schedule)
+                authorizationPendingNotice
+        GatewaySlowDown serverInterval ->
+            let nextSchedule =
+                    advanceGatewayPollSchedule
+                        True serverInterval polledAt schedule
+                seconds = case devicePollReadiness polledAt nextSchedule of
+                    DevicePollWait waitSeconds -> waitSeconds
+                    _ -> 0
+            in continuePending
+                authorization
+                polledAt
+                nextSchedule
+                ( "The gateway asked this client to slow down. "
+                    <> "The next check is available in "
+                    <> Text.pack (show seconds)
+                    <> " seconds."
+                )
+        GatewayAccessDenied ->
+            pure $ Just $
+                LoginNotice False "Gateway authorization was denied."
+        GatewayExpired ->
+            gatewayTimedOut
+        GatewayPollFailed code ->
+            pure $ Just $
+                LoginNotice False
+                    ("Gateway authorization failed: " <> code)
+
+    continuePending authorization polledAt nextSchedule notice
+        | devicePollReadiness polledAt nextSchedule
+            == DevicePollExpired =
+                gatewayTimedOut
+        | otherwise =
+            awaitAuthorization
+                authorization
+                nextSchedule
+                (Just notice)
+
+    gatewayTimedOut =
+        pure $ Just $
+            LoginNotice False "Gateway device authorization timed out."
 
 accountIdentifier :: LoginAccount -> Text
 accountIdentifier account
@@ -406,9 +635,10 @@ loginDashboardBody :: Maybe LoginNotice -> [LoginAccount] -> Text
 loginDashboardBody notice accounts =
     Text.intercalate "\n\n" $
         [ "Manage credentials and inspect provider usage without leaving the fullscreen UI."
-        , "**" <> Text.pack (show (length accounts)) <> " accounts**"
+        , "**" <> Text.pack (show (length providerAccounts)) <> " accounts**"
             <> " · " <> Text.pack (show managedCount) <> " managed"
             <> " · " <> Text.pack (show enabledCount) <> " enabled"
+        , gatewaySummary
         ]
             <> maybe [] (pure . formatLoginNotice) notice
             <> [ if null accounts
@@ -416,8 +646,16 @@ loginDashboardBody notice accounts =
                     else "Select an account for usage details, importing, enable/disable, or disconnect."
                ]
   where
-    managedCount = length (filter (isJust . (.loginManagedId)) accounts)
-    enabledCount = length (filter (.loginEnabled) accounts)
+    providerAccounts = filter (not . isGatewayLoginAccount) accounts
+    managedCount =
+        length (filter (isJust . (.loginManagedId)) providerAccounts)
+    enabledCount = length (filter (.loginEnabled) providerAccounts)
+    gatewaySummary =
+        case filter isGatewayLoginAccount accounts of
+            gateway : _ ->
+                "**Gateway:** " <> markdownText 160 gateway.loginAccountId
+            [] ->
+                "**Gateway:** not connected"
 
 loginAccountActionRows :: LoginAccount -> [(Text, Text)]
 loginAccountActionRows = map snd . loginAccountMenuEntries
@@ -426,12 +664,24 @@ loginAccountMenuEntries
     :: LoginAccount
     -> [(LoginAccountMenuAction, (Text, Text))]
 loginAccountMenuEntries account =
-    [ (LoginAccountRefresh, ("↻ Refresh usage", "Fetch the latest provider limits"))
-    ]
+    refreshEntries
         <> managementEntries
         <> [(LoginAccountBack, ("← Back to accounts", "Return to the dashboard"))]
   where
-    managementEntries = case account.loginManagedId of
+    refreshEntries
+        | isGatewayLoginAccount account = []
+        | otherwise =
+            [ ( LoginAccountRefresh
+              , ("↻ Refresh usage", "Fetch the latest provider limits")
+              )
+            ]
+    managementEntries
+        | isGatewayLoginAccount account =
+            [ ( LoginAccountDisconnect
+              , ("− Disconnect gateway", "Stop routing OpenAI requests through the gateway")
+              )
+            ]
+        | otherwise = case account.loginManagedId of
         Just _ ->
             [ ( LoginAccountToggle
               , ( if account.loginEnabled
@@ -467,6 +717,23 @@ loginAccountBody notice account =
             <> [loginAccountDetail account]
 
 loginAccountDetail :: LoginAccount -> Text
+loginAccountDetail account
+    | isGatewayLoginAccount account =
+        Text.intercalate "\n"
+            [ "**" <> markdownText 100 account.loginLabel <> "**"
+            , ""
+            , "Gateway URL: "
+                <> markdownText 160 account.loginAccountId
+            , "Status: " <> gatewayStatus
+            , ""
+            , "The gateway is preferred for OpenAI requests. If its saved "
+                <> "authorization is rejected, compatible local ChatGPT "
+                <> "accounts remain available as fallbacks."
+            ]
+      where
+        gatewayStatus = case account.loginUsage of
+            UsageUnavailable _ -> "saved credential is unreadable"
+            _ -> "saved"
 loginAccountDetail account =
     Text.intercalate "\n" $
         [ "**" <> markdownText 100 account.loginLabel <> "**"
@@ -529,6 +796,9 @@ usageBar usedPercent =
 
 accountHealthGlyph :: LoginAccount -> Text
 accountHealthGlyph account
+    | isGatewayLoginAccount account = case account.loginUsage of
+        UsageUnavailable _ -> "✗ "
+        _ -> "✓ "
     | not account.loginEnabled = "○ "
     | otherwise = case account.loginUsage of
         UsageNotChecked -> "◌ "
@@ -553,6 +823,10 @@ usageSummary = \case
             [] -> case usage.creditsRemaining of
                 Just remaining -> remaining <> " remaining"
                 Nothing -> maybe "usage available" id usage.usagePlan
+
+isGatewayLoginAccount :: LoginAccount -> Bool
+isGatewayLoginAccount account =
+    account.loginSource == "gateway"
 
 displayText :: Int -> Text -> Text
 displayText limit =
@@ -595,10 +869,11 @@ refreshAllNotice accounts
             ("Usage refreshed; " <> Text.pack (show unavailable)
                 <> " of " <> count <> " accounts were unavailable.")
   where
-    count = Text.pack (show (length accounts))
+    providerAccounts = filter (not . isGatewayLoginAccount) accounts
+    count = Text.pack (show (length providerAccounts))
     unavailable = length
         [()
-        | account <- accounts
+        | account <- providerAccounts
         , UsageUnavailable _ <- [account.loginUsage]
         ]
 
@@ -629,12 +904,17 @@ confirmFullscreenDisconnect runtime account = do
         requestFullscreenChoiceWithBody
             runtime
             "Disconnect credential?"
-            ( "Delete **" <> markdownText 100 account.loginLabel
-                <> "** from the managed credential store?\n\n"
-                <> "This cannot be undone."
+            ( if account.loginSource == "gateway"
+                then "Disconnect **" <> markdownText 100 account.loginLabel
+                    <> "**?\n\nThe saved gateway credential will be removed."
+                else "Delete **" <> markdownText 100 account.loginLabel
+                    <> "** from the managed credential store?\n\n"
+                    <> "This cannot be undone."
             )
             1
-            [ ("Disconnect", "Delete the stored credential")
+            [ ("Disconnect", if account.loginSource == "gateway"
+                then "Remove the saved gateway connection"
+                else "Delete the stored credential")
             , ("Keep credential", "Return without changing anything")
             ]
     pure (choice == Just 0)
@@ -684,7 +964,12 @@ discoverLoginAccounts = do
 -- and distinct managed credentials remain separately addressable.
 discoverSelectableLoginAccounts :: IO [LoginAccount]
 discoverSelectableLoginAccounts = do
-    accounts <- filter (.loginEnabled) <$> discoverLoginAccountSources
+    accounts <-
+        filter
+            (\account ->
+                account.loginEnabled
+                    && not (isGatewayLoginAccount account))
+            <$> discoverLoginAccountSources
     pure (nubOrdOn loginAccountSelectionId accounts)
 
 loginAccountSelectionId :: LoginAccount -> Text
@@ -709,11 +994,12 @@ discoverLoginAccountSources = do
     openRouter <- discoverOpenRouter
     gemini <- discoverGemini
     managed <- loadManagedCredentials
+    gateway <- loadGatewayLoginAccount
     let managedAccounts = case managed of
             Left _ -> []
             Right entries -> map (managedLoginAccount now) entries
     pure $
-        managedAccounts
+        maybe managedAccounts (:managedAccounts) gateway
             <> catMaybes
                 [ openaiEnv
                 , openaiFile
@@ -722,6 +1008,39 @@ discoverLoginAccountSources = do
                 , openRouter
                 , gemini
                 ]
+
+loadGatewayLoginAccount :: IO (Maybe LoginAccount)
+loadGatewayLoginAccount =
+    loadGatewayCredential >>= \case
+        Right (Just credential) ->
+            pure $ Just LoginAccount
+                { loginManagedId = Nothing
+                , loginProvider = OpenAIProvider
+                , loginAccountId = credential.gatewayBaseUrl
+                , loginLabel = "Gateway · " <> credential.gatewayBaseUrl
+                , loginBilling = SubscriptionBilling Nothing
+                , loginSource = "gateway"
+                , loginUsage = UsageNotChecked
+                , loginAccessToken = ""
+                , loginAuthKind = ManagedOpenAIAuthJson
+                , loginSecretPayload = ""
+                , loginEnabled = True
+                }
+        Left err ->
+            pure $ Just LoginAccount
+                { loginManagedId = Nothing
+                , loginProvider = OpenAIProvider
+                , loginAccountId = "(invalid saved credential)"
+                , loginLabel = "Gateway connection needs repair"
+                , loginBilling = SubscriptionBilling Nothing
+                , loginSource = "gateway"
+                , loginUsage = UsageUnavailable err
+                , loginAccessToken = ""
+                , loginAuthKind = ManagedOpenAIAuthJson
+                , loginSecretPayload = ""
+                , loginEnabled = True
+                }
+        Right Nothing -> pure Nothing
 
 managedLoginAccount
     :: UTCTime
@@ -801,20 +1120,32 @@ deleteAt color index accounts =
     case accountAt index accounts of
         Nothing -> pure ()
         Just account -> case account.loginManagedId of
+            Nothing
+                | isGatewayLoginAccount account ->
+                    confirmDisconnect account
             Nothing ->
                 disconnectLoginAccount account >>= printLoginResult color
-            Just _ ->
-                readApprovalLine
-                    ("Disconnect " <> account.loginLabel <> "? [y/N] ")
-                    >>= \case
-                        Just answer
-                            | Text.toLower (Text.strip answer) `elem` ["y", "yes"] ->
-                                disconnectLoginAccount account
-                                    >>= printLoginResult color
-                        _ -> pure ()
+            Just _ -> confirmDisconnect account
+  where
+    confirmDisconnect account =
+        readApprovalLine
+            ("Disconnect " <> account.loginLabel <> "? [y/N] ")
+            >>= \case
+                Just answer
+                    | Text.toLower (Text.strip answer) `elem` ["y", "yes"] ->
+                        disconnectLoginAccount account
+                            >>= printLoginResult color
+                _ -> pure ()
 
 disconnectLoginAccount :: LoginAccount -> IO (Either Text Text)
 disconnectLoginAccount account = case account.loginManagedId of
+    Nothing
+        | isGatewayLoginAccount account ->
+            fmap
+                (fmap
+                    (const
+                        "Gateway disconnected. Restart the agent to apply the route change immediately."))
+                removeGatewayCredential
     Nothing ->
         pure (Left
             "external credentials are read-only; remove them from their source")
@@ -1786,6 +2117,7 @@ prepareGrokLoginAccount account
 
 refreshLoginAccount :: LoginAccount -> IO LoginAccount
 refreshLoginAccount account
+    | isGatewayLoginAccount account = pure account
     | Text.null account.loginAccessToken = pure case account.loginUsage of
         UsageNotChecked ->
             account
@@ -1973,6 +2305,9 @@ renderAccount color selected index account =
   where
     cursor = if selected == index then roleWarn color "› " else "  "
     health
+        | isGatewayLoginAccount account = case account.loginUsage of
+            UsageUnavailable _ -> roleError color glyphErr
+            _ -> roleSuccess color glyphOk
         | not account.loginEnabled = roleWarn color "○ "
         | otherwise = case account.loginUsage of
             UsageNotChecked -> roleMuted color "◌ "
@@ -1990,15 +2325,26 @@ renderAccount color selected index account =
     accountId
         | Text.null account.loginAccountId = "(unknown account)"
         | otherwise = Text.take 24 account.loginAccountId
-    usageLines = case account.loginUsage of
-        UsageNotChecked ->
-            ["    " <> roleMuted color "checking usage…"]
-        UsageUnavailable err ->
-            ["    " <> roleError color ("usage unavailable · " <> Text.take 100 err)]
-        UsageAvailable usage ->
-            map ("    " <>) $
-                map (roleMuted color . formatWindow) usage.usageWindows
-                    <> creditLines usage
+    usageLines
+        | isGatewayLoginAccount account = case account.loginUsage of
+            UsageUnavailable err ->
+                [ "    "
+                    <> roleError color
+                        ("gateway needs repair · " <> Text.take 100 err)
+                ]
+            _ -> ["    " <> roleMuted color "gateway connected"]
+        | otherwise = case account.loginUsage of
+            UsageNotChecked ->
+                ["    " <> roleMuted color "checking usage…"]
+            UsageUnavailable err ->
+                [ "    "
+                    <> roleError color
+                        ("usage unavailable · " <> Text.take 100 err)
+                ]
+            UsageAvailable usage ->
+                map ("    " <>) $
+                    map (roleMuted color . formatWindow) usage.usageWindows
+                        <> creditLines usage
 
 formatWindow :: UsageWindow -> Text
 formatWindow window =

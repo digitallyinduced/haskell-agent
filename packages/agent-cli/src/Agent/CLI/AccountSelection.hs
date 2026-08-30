@@ -26,7 +26,7 @@ import Agent.CLI.Login
 import Agent.CLI.Auth
     ( LoadedAuth(..)
     , isGatewayLoadedAuth
-    , loadAuth
+    , loadDirectOpenAiAuth
     , loadAuthForAccount
     , probeLoadedAuthCredential
     )
@@ -237,7 +237,7 @@ refreshSelectableAccount account =
   where
     refreshCredential candidate = case candidate.loginProvider of
         OpenAIProvider ->
-            loadAuth (Just OpenAIProvider) >>= \case
+            loadDirectOpenAiAuth >>= \case
                 Left err -> pure (Left err)
                 Right loaded -> case loaded.loadedOpenAiPool of
                     Nothing ->
