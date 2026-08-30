@@ -1168,8 +1168,7 @@ ha_engine_stage_turn_images
     :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize -> IO CInt
 ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
     | pointer == nullPtr = pure 1
-    | turnID == nullPtr || turnIDLength == 0 = pure 2
-    | toInteger turnIDLength > maxNativeTurnIDBytes = pure 2
+    | turnID == nullPtr || not (validNativeTurnIDLength turnIDLength) = pure 2
     | imagePointer == nullPtr && imageCount > 0 = pure 4
     | toInteger imageCount > toInteger (maxBound :: Int) = pure 4
     | otherwise = do
@@ -1280,10 +1279,9 @@ enqueueSessionMutation pointer mutation callback context
 
 ha_engine_stage_turn_options
     :: Ptr () -> Ptr Word8 -> CSize -> CInt -> CInt -> IO CInt
-ha_engine_stage_turn_options pointer turnID (CSize turnIDLength) rawMode rawShell
+ha_engine_stage_turn_options pointer turnID turnIDLength rawMode rawShell
     | pointer == nullPtr = pure 1
-    | turnID == nullPtr || turnIDLength == 0 = pure 2
-    | toInteger turnIDLength > maxNativeTurnIDBytes = pure 2
+    | turnID == nullPtr || not (validNativeTurnIDLength turnIDLength) = pure 2
     | otherwise =
         case (interactionModeFromCode rawMode, shellModeFromCode rawShell) of
             (Just interactionMode, Just shellMode) -> do
@@ -1316,10 +1314,9 @@ ha_engine_stage_turn_options pointer turnID (CSize turnIDLength) rawMode rawShel
 
 ha_engine_discard_turn_staging
     :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
-ha_engine_discard_turn_staging pointer turnID (CSize turnIDLength)
+ha_engine_discard_turn_staging pointer turnID turnIDLength
     | pointer == nullPtr = pure 1
-    | turnID == nullPtr || turnIDLength == 0 = pure 2
-    | toInteger turnIDLength > maxNativeTurnIDBytes = pure 2
+    | turnID == nullPtr || not (validNativeTurnIDLength turnIDLength) = pure 2
     | otherwise = do
         result <- tryAny do
             let stable = castPtrToStablePtr pointer :: StablePtr Engine
@@ -1343,6 +1340,13 @@ ha_engine_discard_turn_staging pointer turnID (CSize turnIDLength)
 
 maxNativeTurnIDBytes :: Integer
 maxNativeTurnIDBytes = 1_024
+
+validNativeTurnIDLength :: CSize -> Bool
+validNativeTurnIDLength length =
+    let integerLength = toInteger length
+    in integerLength > 0
+        && integerLength <= toInteger (maxBound :: Int)
+        && integerLength <= maxNativeTurnIDBytes
 
 ha_engine_set_interaction_callback
     :: Ptr () -> FunPtr InteractionCallback -> Ptr () -> IO CInt

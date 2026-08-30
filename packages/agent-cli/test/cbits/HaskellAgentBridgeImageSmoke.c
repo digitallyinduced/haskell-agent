@@ -140,6 +140,7 @@ int ha_turn_staging_discard_smoke(void) {
     const uint8_t both[] = "both";
     const uint8_t rejected[] = "rejected";
     const uint8_t invalid_utf8[] = {0xff};
+    const uint8_t *unreadable_turn_id = (const uint8_t *)(uintptr_t)1;
     const uint8_t mime[] = "image/png";
     const uint8_t bytes[] = {0x89, 0x50, 0x4e, 0x47};
     const ha_image_attachment image = {
@@ -214,6 +215,22 @@ int ha_turn_staging_discard_smoke(void) {
                 engine, both, SIZE_MAX,
                 HA_INTERACTION_MODE_ASK, HA_SHELL_MODE_NONE) != 2) {
         status = 26;
+    }
+    if (status == 0
+            && ha_engine_discard_turn_staging(
+                engine, unreadable_turn_id, 1025) != 2) {
+        status = 27;
+    }
+    if (status == 0
+            && ha_engine_stage_turn_images(
+                engine, unreadable_turn_id, 1025, &image, 1) != 2) {
+        status = 28;
+    }
+    if (status == 0
+            && ha_engine_stage_turn_options(
+                engine, unreadable_turn_id, 1025,
+                HA_INTERACTION_MODE_ASK, HA_SHELL_MODE_NONE) != 2) {
+        status = 29;
     }
     if (status == 0) {
         status = ha_engine_stage_turn_images(

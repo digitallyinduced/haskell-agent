@@ -234,12 +234,14 @@ void ha_runtime_exit(void);
  */
 void *ha_engine_create(ha_event_callback callback, void *context);
 /*
- * Stage an ordered image batch for a turn before its turn.start request.
- * A later call for the same turn replaces the previous batch. Passing zero
- * images discards that turn's batch, which callers should do if they abandon
- * the request. Both image and execution-option staging are discarded when
- * turn.start parameters are rejected or a turn.start is rejected while
- * another turn is active, and are consumed by the matching valid turn.start.
+ * Stage an ordered image batch for a turn before its turn.start request. The
+ * turn ID is required, non-empty UTF-8, at most 1024 bytes, and is copied
+ * before return. A later call for the same turn replaces the previous batch.
+ * Passing zero images discards that turn's batch, which callers should do if
+ * they abandon the request. Both image and execution-option staging are
+ * discarded when turn.start parameters are rejected or a turn.start is
+ * rejected while another turn is active, and are consumed by the matching
+ * valid turn.start.
  * Returns 0 when accepted, 1 for a null engine, 2 for an invalid turn ID, 3
  * for an internal failure, and 4 for an invalid image array or UTF-8 MIME.
  */
@@ -252,11 +254,11 @@ int32_t ha_engine_stage_turn_images(
 );
 /*
  * Stage execution and shell modes for one turn. The turn ID is required,
- * non-empty UTF-8 and is copied before return. A later call for the same turn
- * replaces the previous options; the matching valid turn.start consumes them.
- * Unstaged turns default to ASK + BASH. Returns 0 when accepted, 1 for a null
- * engine, 2 for an invalid turn ID, 3 for an internal failure, and 4 for an
- * unknown mode code.
+ * non-empty UTF-8, at most 1024 bytes, and is copied before return. A later
+ * call for the same turn replaces the previous options; the matching valid
+ * turn.start consumes them. Unstaged turns default to ASK + BASH. Returns 0
+ * when accepted, 1 for a null engine, 2 for an invalid turn ID, 3 for an
+ * internal failure, and 4 for an unknown mode code.
  */
 int32_t ha_engine_stage_turn_options(
     void *engine,
@@ -268,9 +270,10 @@ int32_t ha_engine_stage_turn_options(
 /*
  * Atomically discard both the staged image batch and staged execution options
  * for one turn. The turn ID pointer must be non-NULL, its length must be
- * non-zero, and its bytes must be valid non-empty UTF-8; the ID is copied
- * before return. The operation is idempotent and safe while the engine command
- * worker is running, but must be serialized with ha_engine_destroy.
+ * between 1 and 1024 bytes, and its bytes must be valid non-empty UTF-8; the ID
+ * is copied before return. The operation is idempotent and safe while the
+ * engine command worker is running, but must be serialized with
+ * ha_engine_destroy.
  *
  * Returns 0 after discarding (including when nothing was staged), 1 for a null
  * engine, 2 for an invalid turn ID pointer/length/UTF-8, and 3 for an internal
