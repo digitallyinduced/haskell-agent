@@ -125,6 +125,16 @@ spec = do
                 `shouldSatisfy` \case
                     ProviderError{errorType = PermissionError} -> True
                     _ -> False
+        it "classifies an expired OAuth session reported in the result" do
+            sdkErrorToApiError
+                (ResultError
+                    "error"
+                    Nothing
+                    []
+                    (Just "Failed to authenticate: OAuth session expired and could not be refreshed"))
+                `shouldSatisfy` \case
+                    ProviderError{errorType = AuthenticationError} -> True
+                    _ -> False
 
     describe "appendHostTranscript" do
         it "appends turn inputs followed by assistant text" $ do
