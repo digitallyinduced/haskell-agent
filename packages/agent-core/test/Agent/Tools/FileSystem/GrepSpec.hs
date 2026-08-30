@@ -43,6 +43,36 @@ spec = describe "grepTool" do
                     , "1:needle"
                     , "</workspace_result>"
                     ]
+    it "bounds truncated output without retaining all matching lines" do
+        findExecutable "rg" >>= \case
+            Nothing -> pendingWith "rg is not installed"
+            Just _ -> withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                createDirectory workspace
+                writeFile (workspace </> "many.txt")
+                    (unlines (replicate 10000 "needle"))
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                result <- dispatchToolCall testConfig
+                    [(grepTool env).appToolHandler]
+                    (functionToolCall "grep-2" "grep"
+                        "{\"pattern\":\"needle\",\"head_limit\":2}")
+                result.output `shouldContain`
+                    "[at least 2 lines; output truncated]"
+                result.output `shouldContain` "many.txt"
+
+    it "reports an invalid regular expression without leaking a child process" do
+        findExecutable "rg" >>= \case
+            Nothing -> pendingWith "rg is not installed"
+            Just _ -> withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                createDirectory workspace
+                writeFile (workspace </> "one.txt") "needle\n"
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                result <- dispatchToolCall testConfig
+                    [(grepTool env).appToolHandler]
+                    (functionToolCall "grep-3" "grep"
+                        "{\"pattern\":\"[\"}")
+                result.output `shouldContain` "ERR"
 
 testConfig :: ToolDispatchConfig
 testConfig = ToolDispatchConfig
