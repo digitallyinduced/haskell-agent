@@ -26,6 +26,7 @@ import Agent.Tools.Types
     , setToolRootAccessRequest
     )
 import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -71,6 +72,36 @@ spec = describe "list_dir speculation" do
             takeList runtime callId arguments
                 `shouldReturn` Just
                     (Right "Directory listing for absolute:\n- note.txt\n")
+
+    it "keeps speculative listings within the ordinary 200-node limit" do
+        withListSpeculation \dir cache runtime -> do
+            let target = dir </> "wide"
+            createDirectoryIfMissing True target
+            forM_ [1 .. 205 :: Int] \index -> do
+                let suffix = Text.unpack $
+                        Text.justifyRight 3 '0' (Text.pack (show index))
+                createDirectoryIfMissing True (target </> ("dir-" <> suffix))
+            let callId = "call-bounded"
+                arguments = listArguments "wide"
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation cache
+            retainList runtime callId arguments
+            takeList runtime callId arguments >>= \case
+                Just (Right output) -> do
+                    length
+                        (filter
+                            (Text.isPrefixOf "- dir-")
+                            (Text.lines output))
+                        `shouldBe` 200
+                    output `shouldSatisfy`
+                        Text.isInfixOf
+                            "Large directory summarized; some nested entries were omitted."
+                    output `shouldSatisfy` Text.isInfixOf "- dir-200/"
+                    output `shouldNotSatisfy` Text.isInfixOf "- dir-201/"
+                result ->
+                    expectationFailure $
+                        "expected successful bounded listing, got " <> show result
 
     it "predicts a unique workspace directory from a streamed prefix" do
         withPreparedList

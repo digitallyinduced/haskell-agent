@@ -68,7 +68,10 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
+    , osc22MousePointer
     , shiftEnterCsiBodies
+    , terminalSupportsMousePointer
+    , wrapTerminalPassthrough
     )
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
@@ -204,6 +207,7 @@ runFullscreen runtime workerAction = do
                         wrapNativePreviewVty runtime vty
                             >>= wrapFullscreenKeyboardVty
                                 terminal.terminalKittyKeyboard
+                            >>= wrapMarkdownLinkCursorVty terminal
                     applyStoredFullscreenWindowTitle
                         runtime
                         (V.outputIface wrapped)
@@ -373,6 +377,31 @@ runFullscreen runtime workerAction = do
                     DictationTranscript transcript -> Right transcript
                     DictationFailed message -> Left message
 
+-- | Restore the terminal cursor before every fullscreen Vty lifecycle ends.
+-- This includes Brick suspension, which rebuilds Vty later, and protects
+-- terminals that retain OSC 22 pointer state after the alternate screen.
+wrapMarkdownLinkCursorVty
+    :: TerminalCapabilities
+    -> V.Vty
+    -> IO V.Vty
+wrapMarkdownLinkCursorVty terminal vty
+    | not (terminalSupportsMousePointer terminal.terminalKind) = pure vty
+    | otherwise =
+        pure vty
+            { V.shutdown = do
+                alreadyShutdown <- V.isShutdown vty
+                unless alreadyShutdown $
+                    V.outputByteBuffer
+                        (V.outputIface vty)
+                        ( TextEncoding.encodeUtf8
+                            ( wrapTerminalPassthrough
+                                terminal.terminalInsideTmux
+                                (osc22MousePointer terminal.terminalKind False)
+                            )
+                        )
+                        `finally` V.shutdown vty
+            }
+
 -- | Construct the retained application state shared by the live entry point
 -- and renderer tests. Generated tests should start from the same defaults as
 -- a real fullscreen session instead of assembling an approximate state.
@@ -423,6 +452,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents
         , appAgentHover = Nothing
+        , appMarkdownLinkHovered = False
         , appHoveredControl = Nothing
         , appPressedControl = Nothing
         , appWorkerStopped = False

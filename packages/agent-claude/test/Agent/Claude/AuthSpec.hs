@@ -4,7 +4,8 @@ module Agent.Claude.AuthSpec (spec) where
 
 import Agent.Claude.Auth
 import Agent.Claude.Transport
-import Control.Exception.Safe (bracket, finally)
+import Control.Exception.Safe (bracket, finally, onException)
+import Control.Monad (void)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.Text as Text
 import System.Directory
@@ -23,6 +24,14 @@ import System.Posix.Files
     , setFileMode
     , unionFileModes
     )
+import System.Posix.IO
+    ( closeFd
+    , createPipe
+    , dup
+    , dupTo
+    , stdInput
+    )
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -83,6 +92,32 @@ spec = do
                         }
 
     describe "loadClaudeCodeAuth" do
+        it "does not inherit caller stdin for the auth subprocess" $
+            withScratchDirectory "agent-claude-auth-stdin" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable fakeAuthScriptReadsStdin
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [ ("CLAUDE_CODE_EXECUTABLE", Just executable)
+                    , ("HASKELL_AGENT_GATEWAY_URL", Nothing)
+                    , ("HASKELL_AGENT_GATEWAY_TOKEN", Nothing)
+                    ]
+                    do
+                        result <-
+                            withBlockedStandardInput $
+                                timeout 2_000_000 loadClaudeCodeAuth
+                        result `shouldBe`
+                            Just
+                                (Right ClaudeCodeAuth
+                                    { executable
+                                    , accountLabel = "stdin@example.com"
+                                    , subscriptionType = Just "max"
+                                    , transport = ClaudeCodeLocalSubscription
+                                    })
+
         it "does not pass API or provider overrides to the auth subprocess" $
             withScratchDirectory "agent-claude-auth" \root -> do
                 let executable = root </> "fake-claude"
@@ -189,6 +224,14 @@ fakeAuthScript =
         , "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"auth@example.com\",\"subscriptionType\":\"max\"}'"
         ]
 
+fakeAuthScriptReadsStdin :: String
+fakeAuthScriptReadsStdin =
+    unlines
+        [ "#!/bin/sh"
+        , "cat >/dev/null"
+        , "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"stdin@example.com\",\"subscriptionType\":\"max\"}'"
+        ]
+
 withScratchDirectory :: String -> (FilePath -> IO a) -> IO a
 withScratchDirectory prefix =
     bracket acquire removeDirectoryRecursive
@@ -217,3 +260,26 @@ withEnvironmentVariables variables action = do
     install name = \case
         Nothing -> unsetEnv name
         Just value -> setEnv name value
+
+-- | Replace stdin with a pipe whose writer stays open. A child that inherits
+-- stdin will block in @cat@; a child created with a private closed stdin pipe
+-- receives EOF immediately.
+withBlockedStandardInput :: IO a -> IO a
+withBlockedStandardInput action =
+    bracket acquire release (const action)
+  where
+    acquire = do
+        original <- dup stdInput
+        (reader, writer) <- createPipe
+        let cleanup = do
+                closeFd original
+                closeFd reader
+                closeFd writer
+        (do
+            _ <- dupTo reader stdInput
+            closeFd reader
+            pure (original, writer)
+            ) `onException` cleanup
+    release (original, writer) =
+        (void (dupTo original stdInput) `finally` closeFd original)
+            `finally` closeFd writer

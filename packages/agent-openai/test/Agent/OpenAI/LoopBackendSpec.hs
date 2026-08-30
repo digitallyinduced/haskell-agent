@@ -1550,6 +1550,38 @@ spec = do
                 , HttpError 503 "unavailable"
                 ]
 
+        it "retains WebSocket provenance without making replay safe" do
+            let failure =
+                    replayUnsafeAuxiliaryFailure
+                        (ConnectionError
+                            "WebSocket receive error: ParseException \"not enough bytes\"")
+            isOpenAiReplayUnsafeWebSocketTransportFailure failure
+                `shouldBe` True
+            -- Callers use the ordinary predicate only when replaying the same
+            -- logical request over HTTP is safe.
+            isOpenAiWebSocketTransportFailure failure `shouldBe` False
+
+        it "does not label post-output provider failures as transport failures" do
+            let failure =
+                    replayUnsafeAuxiliaryFailure
+                        (ProviderError ApiErrorType "server error" Nothing)
+            isOpenAiReplayUnsafeWebSocketTransportFailure failure
+                `shouldBe` False
+
+    describe "isOpenAiWebSocketTransportFailure" do
+        it "recognizes an exact WebSocket handshake 403" do
+            isOpenAiWebSocketTransportFailure
+                (HttpError 403 "WebSocket handshake returned HTTP 403")
+                `shouldBe` True
+
+        it "does not hide application permission or authentication errors" do
+            isOpenAiWebSocketTransportFailure
+                (HttpError 403 "model access denied")
+                `shouldBe` False
+            isOpenAiWebSocketTransportFailure
+                (HttpError 401 "WebSocket handshake returned HTTP 401")
+                `shouldBe` False
+
     describe "openAiBackendWithTransportFallback" do
         it "switches permanently to fallback after a pre-output connection error" do
             fallbackActive <- newIORef False
@@ -1739,6 +1771,59 @@ spec = do
             readIORef events `shouldReturn` []
             readIORef primaryCalls `shouldReturn` 1
             readIORef fallbackCalls `shouldReturn` 1
+
+        it "falls back after an exhausted websocket upgrade rejection" do
+            fallbackActive <- newIORef False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent -> do
+                    modifyIORef' primaryCalls (+ 1)
+                    pure (Left (HttpError 403
+                        "WebSocket handshake returned HTTP 403"))
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
+            readIORef fallbackActive `shouldReturn` True
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 1
+
+        it "does not mistake a logical HTTP 403 for a websocket upgrade failure" do
+            fallbackActive <- newIORef False
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent ->
+                    pure (Left (HttpError 403 "model access denied"))
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left (HttpError 403 "model access denied")
+            readIORef fallbackActive `shouldReturn` False
+            readIORef fallbackCalls `shouldReturn` 0
+
+        it "keeps websocket handshake 401 on the credential recovery path" do
+            isOpenAiWebSocketTransportFailure
+                (HttpError 401 "WebSocket handshake returned HTTP 401")
+                `shouldBe` False
 
         it "preserves non-transport provider failures" do
             fallbackActive <- newIORef False
@@ -2148,11 +2233,16 @@ isAuxiliaryOutputEvent = streamOutputObserved
 
 replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
 replayUnsafeAuxiliaryFailure failure =
-    ProviderError (UnknownErrorType "replay_unsafe")
+    ProviderError replayUnsafeType
         ( "provider failed after auxiliary response output; refusing to replay: "
             <> Text.pack (show failure)
         )
         Nothing
+  where
+    replayUnsafeType
+        | isOpenAiWebSocketTransportFailure failure =
+            UnknownErrorType "replay_unsafe_websocket_transport"
+        | otherwise = UnknownErrorType "replay_unsafe"
 
 isInputFile :: ResponseContentPart -> Bool
 isInputFile = \case

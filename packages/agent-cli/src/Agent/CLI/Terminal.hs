@@ -10,6 +10,8 @@ module Agent.CLI.Terminal
     , fileUri
     , osc9Notification
     , osc52Clipboard
+    , osc22MousePointer
+    , terminalSupportsMousePointer
     , osc133PromptStart
     , osc133PromptEnd
     , osc133CommandStart
@@ -190,6 +192,33 @@ osc52Clipboard payload =
         <> TextEncoding.decodeLatin1
             (Base64.encode (TextEncoding.encodeUtf8 payload))
         <> "\ESC\\"
+
+-- | Set the terminal mouse pointer to a hand or restore its normal shape.
+--
+-- OSC 22 is implemented by Ghostty, Kitty, and recent iTerm2. It remains
+-- useful while an application has mouse reporting enabled, where the terminal
+-- cannot inspect OSC 8 hyperlinks itself to choose a link cursor. Kitty's
+-- push/pop extension restores any shape selected by the terminal;
+-- Ghostty currently supports the basic explicit-shape form.
+osc22MousePointer :: TerminalKind -> Bool -> Text
+osc22MousePointer kind pointer =
+    "\ESC]22;"
+        <> body
+        <> "\ESC\\"
+  where
+    body = case (kind, pointer) of
+        (TerminalKitty, True) -> ">pointer"
+        (TerminalKitty, False) -> "<"
+        (_, True) -> "pointer"
+        (_, False) -> "default"
+
+-- | Whether a terminal kind implements the OSC 22 mouse-pointer protocol.
+terminalSupportsMousePointer :: TerminalKind -> Bool
+terminalSupportsMousePointer = \case
+    TerminalGhostty -> True
+    TerminalKitty -> True
+    TerminalITerm -> True
+    _ -> False
 
 osc133PromptStart, osc133PromptEnd, osc133CommandStart :: Text
 osc133PromptStart = "\ESC]133;A\ESC\\"

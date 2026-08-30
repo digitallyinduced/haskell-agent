@@ -19,6 +19,16 @@ spec = do
             osc52Clipboard "hello"
                 `shouldBe` "\ESC]52;c;aGVsbG8=\ESC\\"
 
+        it "uses OSC 22 to show and clear a link pointer" do
+            osc22MousePointer TerminalGhostty True
+                `shouldBe` "\ESC]22;pointer\ESC\\"
+            osc22MousePointer TerminalGhostty False
+                `shouldBe` "\ESC]22;default\ESC\\"
+            osc22MousePointer TerminalKitty True
+                `shouldBe` "\ESC]22;>pointer\ESC\\"
+            osc22MousePointer TerminalKitty False
+                `shouldBe` "\ESC]22;<\ESC\\"
+
         it "includes semantic command exit status" do
             osc133CommandFinished (Just 1)
                 `shouldBe` "\ESC]133;D;1\ESC\\"
@@ -34,6 +44,13 @@ spec = do
         it "exposes Kitty keyboard push/pop sequences" do
             Text.null kittyKeyboardPush `shouldBe` False
             Text.null kittyKeyboardPop `shouldBe` False
+
+    describe "mouse-pointer support" do
+        it "is limited to terminals with the OSC 22 protocol" do
+            terminalSupportsMousePointer TerminalGhostty `shouldBe` True
+            terminalSupportsMousePointer TerminalKitty `shouldBe` True
+            terminalSupportsMousePointer TerminalITerm `shouldBe` True
+            terminalSupportsMousePointer TerminalWezTerm `shouldBe` False
 
     describe "stripAnsi" do
         it "leaves plain text unchanged" do

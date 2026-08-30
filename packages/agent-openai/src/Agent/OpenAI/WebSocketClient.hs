@@ -1,7 +1,9 @@
 module Agent.OpenAI.WebSocketClient
     ( withCodexWs
     , withCodexWsWithProvider
+    , withCodexWsWithProviderOrHttpFallback
     , withCodexWsCredential
+    , withCodexWsCredentialOrHttpFallback
     , withCodexWsCredentialUsingTurnState
     , withCodexWsRetrying
     , withCodexWsRetryingAfter
@@ -34,6 +36,8 @@ module Agent.OpenAI.WebSocketClient
     , WebSocketReceiveActions(..)
     , receiveWsResponseWithActions
     , CodexConn
+    , codexConnUsesHttpFallback
+    , shouldFallbackDirectCodexHandshakeToHttp
     , closeCodexConn
     , CodexAuthFailed(..)
     ) where
@@ -110,12 +114,22 @@ newtype CodexTurnState = CodexTurnState (IORef (Maybe Text))
 data CodexConn = CodexWsConn
     !WebSocket.WebSocketSession
     !CodexTurnState
+    | CodexHttpFallback
+    !CodexTurnState
 
 newCodexTurnState :: IO CodexTurnState
 newCodexTurnState = CodexTurnState <$> newIORef Nothing
 
 codexConnTurnState :: CodexConn -> CodexTurnState
 codexConnTurnState (CodexWsConn _ turnState) = turnState
+codexConnTurnState (CodexHttpFallback turnState) = turnState
+
+-- | Whether persistent session acquisition had to bypass WebSockets. The
+-- marker still owns turn-scoped routing state so the HTTP backend can preserve
+-- the same continuation and compaction semantics as a live socket.
+codexConnUsesHttpFallback :: CodexConn -> Bool
+codexConnUsesHttpFallback CodexWsConn{} = False
+codexConnUsesHttpFallback CodexHttpFallback{} = True
 
 readCodexTurnState :: CodexTurnState -> IO (Maybe Text)
 readCodexTurnState (CodexTurnState turnState) = readIORef turnState
@@ -144,6 +158,7 @@ finishCodexTurnStateResponse turnState response
 closeCodexConn :: CodexConn -> IO ()
 closeCodexConn (CodexWsConn session _) =
     WebSocket.closeWebSocketSession session "switching account"
+closeCodexConn CodexHttpFallback{} = pure ()
 
 -- | Carry the current logical turn's sticky-routing token across a physical
 -- reconnect. Codex scopes this state to the turn rather than to the socket.
@@ -180,7 +195,9 @@ wsPath = "/backend-api/codex/responses"
 -- force-refreshed even when its JWT has not expired, then the handshake is
 -- retried once with the rotated token. If refresh or the second handshake
 -- fails, the account is cooled down and the next configured account is tried.
--- HTTP 403 remains a permission/policy failure and does not rotate credentials.
+-- Other upgrade rejections (including HTTP 403) receive bounded connection
+-- retries. They are not generic bearer-authentication failures; after retries,
+-- the caller may switch to HTTPS or apply a credential-source-specific fallback.
 -- This happens before the callback starts, so retrying cannot duplicate caller
 -- side effects.
 --
@@ -211,6 +228,28 @@ withCodexWsWithProvider provider action =
         Left err -> Exception.throwIO (CodexAuthFailed err)
         Right value -> pure value
 
+-- | Persistent-session acquisition with a direct HTTPS escape hatch.
+--
+-- Some ChatGPT accounts can use the Codex Responses API over HTTPS while the
+-- WebSocket upgrade is rejected with HTTP 403 (or 426). Convert only that exact
+-- pre-callback handshake error for a direct credential into an HTTP-fallback
+-- marker. Gateway credentials remain WebSocket-only, so their rejection is
+-- still returned to the token provider and may rotate to a direct account.
+withCodexWsWithProviderOrHttpFallback
+    :: TokenProvider
+    -> (CodexConn -> Credential -> IO a)
+    -> IO a
+withCodexWsWithProviderOrHttpFallback provider action =
+    runWithTokenProvider provider
+        (\credential ->
+            runPersistentConnectionAttempt
+                WebSocket.transientWsConnectRetryPolicy
+                credential
+                action)
+        >>= \case
+            Left err -> Exception.throwIO (CodexAuthFailed err)
+            Right value -> pure value
+
 -- | Open one exact credential for an interactive account switch. Connection
 -- retries are deliberately bounded so the selector cannot hang indefinitely.
 withCodexWsCredential
@@ -222,6 +261,50 @@ withCodexWsCredential credential action =
         (limitRetries 2 <> exponentialBackoff 500000)
         credential
         (\conn activeCredential -> Right <$> action conn activeCredential)
+
+-- | Exact-credential variant of
+-- 'withCodexWsWithProviderOrHttpFallback', used by interactive account
+-- switches.
+withCodexWsCredentialOrHttpFallback
+    :: Credential
+    -> (CodexConn -> Credential -> IO a)
+    -> IO (Either ApiError a)
+withCodexWsCredentialOrHttpFallback credential =
+    runPersistentConnectionAttempt
+        (limitRetries 2 <> exponentialBackoff 500000)
+        credential
+
+runPersistentConnectionAttempt
+    :: RetryPolicyM IO
+    -> Credential
+    -> (CodexConn -> Credential -> IO a)
+    -> IO (Either ApiError a)
+runPersistentConnectionAttempt retryPolicy credential action = do
+    result <-
+        runConnectionAttemptWithPolicy
+            retryPolicy
+            credential
+            (\conn activeCredential ->
+                Right <$> action conn activeCredential)
+    case result of
+        Left err
+            | shouldFallbackDirectCodexHandshakeToHttp credential err -> do
+                turnState <- newCodexTurnState
+                Right <$> action (CodexHttpFallback turnState) credential
+        _ -> pure result
+
+-- | Recognize only the transport's exact pre-upgrade failure. A generic
+-- application-level 403 must remain a permission error, and gateways cannot
+-- use the direct ChatGPT HTTPS endpoint.
+shouldFallbackDirectCodexHandshakeToHttp
+    :: Credential
+    -> ApiError
+    -> Bool
+shouldFallbackDirectCodexHandshakeToHttp credential err =
+    credential.provider == OpenAIProvider
+        && not (isGatewayWebSocketCredential credential)
+        && WebSocket.webSocketHandshakeFailureStatus err `elem`
+            [Just 403, Just 426]
 
 -- | Open a disposable physical connection for an existing logical turn using
 -- one already-selected credential. Keeping credential selection outside this
@@ -632,6 +715,9 @@ sendWsRequestWithEventsAndOptions
 sendWsRequestWithEventsAndOptions completion options cc request previousResponseId
         onEvent = case cc of
     CodexWsConn session turnState -> sendOverWs session turnState
+    CodexHttpFallback{} ->
+        pure $ Left $ ConnectionError
+            "OpenAI WebSocket unavailable; HTTPS fallback required"
   where
     sendOverWs session turnState = do
         turnStateValue <- readCodexTurnState turnState

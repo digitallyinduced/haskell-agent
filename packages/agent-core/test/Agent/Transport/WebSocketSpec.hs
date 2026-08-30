@@ -105,7 +105,7 @@ spec = describe "Agent.Transport.WebSocket" do
         wsHandshakeAuthFailure exception
             `shouldBe` Just (HttpError 401 "WebSocket handshake returned HTTP 401")
 
-    it "keeps handshake 403 as a permission failure" do
+    it "retries a handshake 403 as a transport failure" do
         let exception = transientHandshakeException 403
         wsHandshakeAuthFailureStatus exception `shouldBe` Nothing
         wsHandshakeAuthFailure exception `shouldBe` Nothing
@@ -115,14 +115,33 @@ spec = describe "Agent.Transport.WebSocket" do
         webSocketHandshakeFailureStatus
             (HttpError 403 "request forbidden after connection")
             `shouldBe` Nothing
+        transientWsConnectFailureLabel exception
+            `shouldBe` Just "WebSocket handshake returned HTTP 403"
 
+        attempts <- newIORef (0 :: Int)
         result <- retryTransientWsConnectWithPolicy
             (constantDelay 0 <> limitRetries 3)
-            \_connected -> throwIO exception
+            \_connected -> do
+                modifyIORef' attempts (+ 1)
+                throwIO exception
 
         result `shouldBe`
             (Left (HttpError 403 "WebSocket handshake returned HTTP 403")
                 :: Either ApiError ())
+        readIORef attempts `shouldReturn` 4
+
+    it "retries every non-auth websocket upgrade rejection like Codex" do
+        attempts <- newIORef (0 :: Int)
+        result <- retryTransientWsConnectWithPolicy
+            (constantDelay 0 <> limitRetries 2)
+            \_connected -> do
+                modifyIORef' attempts (+ 1)
+                throwIO (transientHandshakeException 404)
+
+        result `shouldBe`
+            (Left (HttpError 404 "WebSocket handshake returned HTTP 404")
+                :: Either ApiError ())
+        readIORef attempts `shouldReturn` 3
 
     it "retries a transient handshake failure before the connection callback" do
         attempts <- newIORef (0 :: Int)

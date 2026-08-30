@@ -97,7 +97,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -832,7 +832,7 @@ sdkErrorToApiError = \case
         ConnectionError (renderClaudeSDKError sdkError)
 
 classifyResultError :: ClaudeSDKError -> ErrorType
-classifyResultError ResultError{subtype, apiErrorStatus, errors} =
+classifyResultError ResultError{subtype, apiErrorStatus, errors, result} =
     case apiErrorStatus of
         Just 401 -> AuthenticationError
         Just 403 -> PermissionError
@@ -847,13 +847,20 @@ classifyResultError ResultError{subtype, apiErrorStatus, errors} =
             let bySubtype = errorTypeFromText (Text.toLower subtype)
             in case bySubtype of
                 UnknownErrorType _ ->
-                    classifyResultMessage (Text.toLower (Text.intercalate " " errors))
+                    classifyResultMessage
+                        (Text.toLower (Text.intercalate " " (errors <> maybeToList result)))
                 other -> other
 classifyResultError _ = ApiErrorType
 
 classifyResultMessage :: Text -> ErrorType
 classifyResultMessage message
-    | any (`Text.isInfixOf` message) ["authentication", "unauthorized", "invalid api key"] =
+    | any (`Text.isInfixOf` message)
+        [ "authentication"
+        , "failed to authenticate"
+        , "oauth session expired"
+        , "unauthorized"
+        , "invalid api key"
+        ] =
         AuthenticationError
     | any (`Text.isInfixOf` message) ["permission", "forbidden", "not allowed"] =
         PermissionError
