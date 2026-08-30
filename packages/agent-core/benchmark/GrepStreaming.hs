@@ -1,25 +1,27 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
--- Compare the historical whole-process capture with the bounded line reader
--- used by grep. Run with +RTS -T and retain the CSV output as a baseline.
+-- | Memory benchmark for grep's whole-process capture versus the bounded
+-- streaming reader. Run with @+RTS -T@. Five samples are collected for each
+-- representative stdout size and the reported row is the median.
 module Main (main) where
 
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception.Safe (finally)
-import Control.Monad (forM_)
+import Control.Monad (forM_, replicateM)
 import qualified Data.ByteString as BS
-import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
+import Data.List (sort)
 import GHC.Clock (getMonotonicTimeNSec)
+import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
 import System.CPUTime (getCPUTime)
 import System.Directory (findExecutable, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Exit (die)
 import System.FilePath ((</>))
-import System.IO (BufferMode(NoBuffering), hClose, hGetLine, hSetBuffering, hSetEncoding, utf8)
+import System.IO (BufferMode(NoBuffering), Handle, hClose, hGetLine, hSetBuffering)
 import System.Mem (performGC)
 import System.Posix.Temp (mkdtemp)
 import System.Process
-    ( CreateProcess(cwd, std_err, std_in, std_out)
+    ( CreateProcess(std_err, std_in, std_out)
     , StdStream(CreatePipe)
     , createProcess
     , proc
@@ -29,6 +31,17 @@ import System.Process
     )
 import Text.Printf (printf)
 
+sampleCount, outputLineLimit :: Int
+sampleCount = 5
+outputLineLimit = 128
+
+data Measurement = Measurement
+    { elapsedMillis :: !Double
+    , cpuSeconds :: !Double
+    , allocatedBytes :: !Integer
+    , liveBytes :: !Integer
+    }
+
 main :: IO ()
 main = do
     enabled <- getRTSStatsEnabled
@@ -36,26 +49,50 @@ main = do
     rg <- maybe (die "rg is not installed") pure =<< findExecutable "rg"
     tmp <- getTemporaryDirectory
     bracketTemp (tmp </> "grep-streaming-") \dir -> do
-        let path = dir </> "large.txt"
-        BS.writeFile path (BS.replicate (32 * 1024 * 1024) 120 <> "\nneedle\n")
-        forM_ ["buffered", "streaming"] \mode -> do
-            performGC
-            before <- getRTSStats
-            t0 <- getMonotonicTimeNSec
-            c0 <- getCPUTime
-            !n <- if mode == "buffered"
-                then buffered rg path
-                else streaming rg path
-            n `seq` pure ()
-            performGC
-            after <- getRTSStats
-            t1 <- getMonotonicTimeNSec
-            c1 <- getCPUTime
-            printf "%s,%d,%.3f,%.3f,%d,%d\n" mode n
-                (fromIntegral (t1 - t0) / 1.0e6)
-                (fromIntegral (c1 - c0) / 1.0e9)
-                (after.allocated_bytes - before.allocated_bytes)
-                after.gc.gcdetails_live_bytes
+        forM_ [1, 8, 32 :: Int] \sizeMb -> do
+            let path = dir </> show sizeMb <> "mb.txt"
+            writeFixture path sizeMb
+            forM_ ["buffered-old", "streaming-bounded"] \mode -> do
+                measurements <- replicateM sampleCount do
+                    performGC
+                    before <- getRTSStats
+                    t0 <- getMonotonicTimeNSec
+                    c0 <- getCPUTime
+                    !output <- if mode == "buffered-old"
+                        then buffered rg path
+                        else streaming rg path
+                    -- Both implementations return the same first 128 lines;
+                    -- forcing this length keeps the benchmark honest.
+                    output `seq` pure ()
+                    during <- getRTSStats
+                    performGC
+                    after <- getRTSStats
+                    t1 <- getMonotonicTimeNSec
+                    c1 <- getCPUTime
+                    pure Measurement
+                        { elapsedMillis =
+                            fromIntegral (t1 - t0) / 1.0e6
+                        , cpuSeconds =
+                            fromIntegral (c1 - c0) / 1.0e12
+                        , allocatedBytes =
+                            after.allocated_bytes - before.allocated_bytes
+                        , liveBytes =
+                            max during.gc.gcdetails_live_bytes
+                                after.gc.gcdetails_live_bytes
+                        }
+                let median field = medianOf (map field measurements)
+                printf "%d,%s,%d,%.3f,%.3f,%d,%d\n"
+                    sizeMb mode outputLineLimit
+                    (median elapsedMillis)
+                    (median cpuSeconds)
+                    (median allocatedBytes)
+                    (median liveBytes)
+
+writeFixture :: FilePath -> Int -> IO ()
+writeFixture path sizeMb = do
+    let line = "needle " <> BS.replicate 72 120 <> "\n"
+        lineCount = max 1 ((sizeMb * 1024 * 1024) `div` BS.length line)
+    BS.writeFile path (BS.concat (replicate lineCount line))
 
 bracketTemp :: FilePath -> (FilePath -> IO a) -> IO a
 bracketTemp template action = do
@@ -64,13 +101,12 @@ bracketTemp template action = do
 
 command :: FilePath -> FilePath -> CreateProcess
 command rg path =
-    (proc rg ["--no-config", "--color=never", "--regexp", "needle", "--", path])
-        { cwd = Nothing }
+    proc rg ["--no-config", "--color=never", "--regexp", "needle", "--", path]
 
 buffered :: FilePath -> FilePath -> IO Int
 buffered rg path = do
-    (_, out, _) <- readCreateProcessWithExitCode (command rg path) ""
-    pure (length out)
+    (_, output, _) <- readCreateProcessWithExitCode (command rg path) ""
+    pure (length (concat (take outputLineLimit (lines output))))
 
 streaming :: FilePath -> FilePath -> IO Int
 streaming rg path = do
@@ -79,16 +115,27 @@ streaming rg path = do
     maybe (pure ()) hClose mIn
     out <- maybe (die "stdout pipe unavailable") pure mOut
     err <- maybe (die "stderr pipe unavailable") pure mErr
-    hSetEncoding out utf8
     hSetBuffering out NoBuffering
-    -- Only the first line is needed for this representative bounded workload.
     withAsync (drain err) \stderr -> do
-        result <- (length <$> hGetLine out) `finally` terminateProcess ph
+        result <- readLines out outputLineLimit `finally` terminateProcess ph
         _ <- wait stderr
         _ <- waitForProcess ph
         hClose out `finally` hClose err
         pure result
   where
+    readLines :: Handle -> Int -> IO Int
+    readLines handle count = go count 0
+      where
+        go remaining total
+            | remaining <= 0 = pure total
+            | otherwise = do
+                line <- hGetLine handle
+                go (remaining - 1) (total + length line)
     drain handle = do
         bytes <- BS.hGetSome handle 8192
         if BS.null bytes then pure () else drain handle
+
+medianOf :: Ord a => [a] -> a
+medianOf values =
+    let ordered = sort values
+    in ordered !! (length ordered `div` 2)
