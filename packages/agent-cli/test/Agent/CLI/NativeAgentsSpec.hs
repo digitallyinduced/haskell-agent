@@ -324,6 +324,46 @@ spec = describe "provider-native agent tracking" do
         nativeAgentTranscript view
             `shouldBe` [Text.pack ("result-" <> show pairCount)]
 
+    it "keeps a newer live reuse when its canonical call is still unpaired" do
+        let call description = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "reused"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments =
+                    "{\"description\":\"" <> description <> "\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            oldOutput = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "reused"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding $
+                        Aeson.toEncoding ("old result" :: String)
+                , status = Just ItemCompleted
+                }
+            live =
+                applyNativeAgentEvent
+                    (NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing)
+                    emptyNativeAgentStore
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    [call "old canonical", oldOutput, call "new canonical"]
+                    live
+            view = lookupView "reused" restored
+        view.nativeAgentLabel `shouldBe` "new live"
+        view.nativeAgentStatus `shouldBe` "running"
+
     it "does not decode oversized canonical call arguments for metadata" do
         let call = FunctionCallItem FunctionCall
                 { itemId = Nothing

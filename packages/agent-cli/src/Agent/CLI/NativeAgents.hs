@@ -82,6 +82,12 @@ data NativeOutput = NativeOutput
 data NativeAgentOrigin = NativeAgentLive | NativeAgentCanonical
     deriving (Eq, Show)
 
+data CanonicalPending
+    = CanonicalOutput !FunctionCallOutput
+    -- A newer unmatched call is a generation barrier: an older completed
+    -- pair with the same provider-controlled ID must not replace live state.
+    | CanonicalUnpairedNativeCall
+
 -- | Canonical retained state for one provider-managed agent. The streamed
 -- body is held once as append-only chunks; no UiState or duplicate transcript
 -- is retained for every tree row.
@@ -243,7 +249,10 @@ restoreNativeAgents selected items current =
         AgentNative identifier -> boundedNativeAgentIdentifier identifier
         _ -> Nothing
     (canonicalAgents, canonicalOrder) =
-        canonicalNativeAgents selectedIdentifier items
+        canonicalNativeAgents
+            selectedIdentifier
+            (Map.keysSet current.storeAgents)
+            items
     liveUnpersisted =
         Map.restrictKeys current.storeAgents liveUnpersistedIds
     liveUnpersistedIds = closeParents initialLiveIds
@@ -286,12 +295,13 @@ nativeAgentConversation view =
 
 canonicalNativeAgents
     :: Maybe Text
+    -> Set.Set Text
     -> [ResponseItem]
     -> (Map.Map Text NativeAgentView, Seq Text)
-canonicalNativeAgents selected items =
+canonicalNativeAgents selected protected items =
     go Map.empty Map.empty Seq.empty (reverse items)
   where
-    go outputs agents order remaining
+    go pending agents order remaining
         | Map.size agents >= nativeAgentMaxEntries
         , maybe True (`Map.member` agents) selected =
             (agents, order)
@@ -303,45 +313,72 @@ canonicalNativeAgents selected items =
                         | output.provider == Just "claude-code"
                         , Just identifier <-
                             boundedNativeAgentIdentifier output.callId
-                        , Map.member identifier outputs
-                            || Map.size outputs < nativeAgentMaxEntries
-                            || selected == Just identifier ->
-                            go
-                                (Map.insert identifier output outputs)
-                                agents
-                                order
-                                rest
+                        , Map.notMember identifier agents ->
+                            case Map.lookup identifier pending of
+                                Just _ ->
+                                    go pending agents order rest
+                                Nothing
+                                    | mayTrack identifier pending ->
+                                        go
+                                            (Map.insert
+                                                identifier
+                                                (CanonicalOutput output)
+                                                pending)
+                                            agents
+                                            order
+                                            rest
+                                    | otherwise ->
+                                        go pending agents order rest
                     FunctionCallItem call
                         | Just identifier <-
-                            boundedNativeAgentIdentifier call.callId ->
-                            case
-                                ( isClaudeNativeCall call
-                                , Map.lookup identifier outputs
-                                ) of
-                                (True, Just output) ->
-                                    let view = restoredView
-                                            (selected == Just identifier)
-                                            identifier
-                                            call
-                                            output
-                                        (nextAgents, nextOrder) =
-                                            insertCanonical
+                            boundedNativeAgentIdentifier call.callId
+                        , Map.notMember identifier agents ->
+                            case Map.lookup identifier pending of
+                                Just (CanonicalOutput output)
+                                    | isClaudeNativeCall call ->
+                                        let view = restoredView
+                                                (selected == Just identifier)
                                                 identifier
-                                                view
-                                                agents
-                                                order
-                                    in go
-                                        (Map.delete identifier outputs)
-                                        nextAgents
-                                        nextOrder
-                                        rest
-                                _ ->
+                                                call
+                                                output
+                                            (nextAgents, nextOrder) =
+                                                insertCanonical
+                                                    identifier
+                                                    view
+                                                    agents
+                                                    order
+                                        in go
+                                            (Map.delete identifier pending)
+                                            nextAgents
+                                            nextOrder
+                                            rest
+                                Just (CanonicalOutput _) ->
                                     go
-                                        (Map.delete identifier outputs)
+                                        (Map.delete identifier pending)
                                         agents
                                         order
                                         rest
-                    _ -> go outputs agents order rest
+                                Just CanonicalUnpairedNativeCall ->
+                                    go pending agents order rest
+                                Nothing
+                                    | isClaudeNativeCall call
+                                    , mayTrack identifier pending ->
+                                        go
+                                            (Map.insert
+                                                identifier
+                                                CanonicalUnpairedNativeCall
+                                                pending)
+                                            agents
+                                            order
+                                            rest
+                                    | otherwise ->
+                                        go pending agents order rest
+                    _ -> go pending agents order rest
+
+    mayTrack identifier pending =
+        Map.size pending < nativeAgentMaxEntries
+            || selected == Just identifier
+            || Set.member identifier protected
 
     insertCanonical identifier view agents order
         | Map.member identifier agents =
