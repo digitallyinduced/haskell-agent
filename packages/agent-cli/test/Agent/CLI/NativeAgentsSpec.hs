@@ -178,6 +178,38 @@ spec = describe "provider-native agent tracking" do
         nativeAgentStoreBytes tracked
             `shouldSatisfy` (<= nativeAgentAggregateBytes)
 
+    it "bounds rows even when a provider never finishes older agents" do
+        let tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ NativeAgentStarted identifier Nothing identifier Nothing
+                    | index <- [1 .. nativeAgentMaxEntries + 16]
+                    , let identifier = Text.pack ("running-" <> show index)
+                    ]
+        nativeAgentStoreSize tracked `shouldBe` nativeAgentMaxEntries
+        nativeAgentLookup "running-1" tracked `shouldBe` Nothing
+        nativeAgentLookup
+            (Text.pack ("running-" <> show (nativeAgentMaxEntries + 16)))
+            tracked
+            `shouldSatisfy` maybe False (const True)
+
+    it "retains only a bounded tail of one oversized native output" do
+        let suffix = "newest-tail"
+            oversized =
+                Text.replicate ((8 * 1024 * 1024 `div` 4) + 1) "x"
+                    <> suffix
+            tracked =
+                applyNativeAgentEvent
+                    (NativeAgentOutput "large" oversized)
+                    emptyNativeAgentStore
+            view = lookupView "large" tracked
+            retained = Text.concat (nativeAgentTranscript view)
+        nativeAgentStoreBytes tracked
+            `shouldSatisfy` (<= 8 * 1024 * 1024)
+        retained `shouldSatisfy` Text.isSuffixOf suffix
+        retained `shouldContain` "[older native-agent output omitted]"
+
     it "materializes conversation state only for the selected native row" do
         let tracked =
                 foldl

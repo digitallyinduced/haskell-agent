@@ -498,11 +498,29 @@ appendOutput :: Int -> Text -> NativeOutput -> NativeOutput
 appendOutput budget chunk output
     | Text.null chunk = output
     | otherwise =
-        trimOutputTo budget output
-            { outputChunks = output.outputChunks :|> chunk
-            , outputBytes =
-                saturatingNativeAdd output.outputBytes (textBytes chunk)
-            }
+        let appended = trimOutputTo budget output
+                { outputChunks =
+                    if Text.null retainedChunk
+                        then output.outputChunks
+                        else output.outputChunks :|> retainedChunk
+                , outputBytes =
+                    saturatingNativeAdd
+                        output.outputBytes
+                        (textBytes retainedChunk)
+                }
+        in if chunkTruncated
+            then appended { outputOmitted = True }
+            else appended
+  where
+    -- Stream decoders may hand us a slice of a much larger event buffer.
+    -- Copy only the tail which can survive the budget; copying a giant chunk
+    -- in full before immediately trimming it would recreate the memory spike.
+    chunkTruncated = textBytes chunk > max 0 budget
+    retainedChunk =
+        Text.copy $
+            if chunkTruncated
+                then Text.takeEnd (max 0 budget `div` 4) chunk
+                else chunk
 
 trimOutputTo :: Int -> NativeOutput -> NativeOutput
 trimOutputTo budget output
@@ -585,9 +603,19 @@ pruneEntries store
   where
     protected = protectedAgentIds store
     removableOldest =
+        case oldestWhere (`Map.notMember` protected) of
+            Just identifier -> Just identifier
+            Nothing ->
+                -- A provider can start more than the row limit without
+                -- sending terminal events. Preserve the selected row, but
+                -- still enforce the hard entry cap for all other rows.
+                oldestWhere
+                    (\identifier ->
+                        Just identifier /= store.storeSelected)
+    oldestWhere predicate =
         foldr
             (\identifier found ->
-                if Map.notMember identifier protected
+                if predicate identifier
                     then Just identifier
                     else found)
             Nothing
