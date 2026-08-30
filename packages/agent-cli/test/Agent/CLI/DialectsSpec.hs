@@ -68,10 +68,11 @@ spec = describe "Agent.CLI.Dialects" do
         globalAgentsHomeDir claudeCodeDialect home
             `shouldBe` unsafeEncodeUtf "/home/u/.claude"
 
-    it "does not allocate host tools for Claude Code" do
+    it "allocates only the AskUserQuestion MCP fallback for Claude Code" do
         env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
         coding <- codingToolsFor claudeCodeDialect env Nothing Nothing Nothing Nothing
-        length coding.codingAppTools `shouldBe` 0
+        map (.appToolName) coding.codingAppTools
+            `shouldBe` ["ask_user_question"]
         coding.codingClose
 
     it "registers ask_secret only when root prompt hooks are supplied" do

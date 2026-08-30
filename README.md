@@ -255,9 +255,12 @@ agent-cli --provider claude-code --model sonnet
 
 The integration keeps a `claude -p` process alive through the reusable
 [`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md)
-package. Claude Code owns tool execution and compaction while the harness
-renders events and persists its session. Pass `--yolo` to bypass Claude Code's
-permission checks.
+package. Claude Code executes its built-in tools; complementary harness tools
+are exposed through an in-process MCP bridge and use the same host approval
+policy as other providers. The harness renders events, persists the session,
+and performs isolated local-summary compaction before restarting the Claude
+continuation. `--yolo` auto-approves ordinary calls, but host catastrophic
+command and Plan Mode safeguards remain enforced.
 
 Anthropic's [June 15, 2026 subscription-policy
 update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)

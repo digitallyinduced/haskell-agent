@@ -11,6 +11,7 @@ import Agent.CLI.AgentViewport
     ( AgentEntry
     , AgentTarget
     )
+import Agent.CLI.Claude (ClaudeSessionRuntimeSlot)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.CodeModeRuntime
@@ -95,11 +96,14 @@ import System.OsPath (OsPath)
 data SessionBackend = SessionBackend
     { backend :: !Backend
     , btwBackend :: !BtwBackendFactory
+    , interruptBackend :: !(IO ())
     , resetBackendState :: !(IO ())
     }
 
 data SessionRequest = SessionRequest
     { catalog :: !ModelCatalog
+    , claudeRuntimeSlot :: !ClaudeSessionRuntimeSlot
+    , claudeBridgeTools :: ![AppTool]
     , modelInfo :: !(Maybe ModelInfo)
     , connectionId :: !Text
     , options :: !CliOptions

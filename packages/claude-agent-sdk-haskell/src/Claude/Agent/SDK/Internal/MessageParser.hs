@@ -221,9 +221,13 @@ streamToolBlockDecoder = Json.withType \case
 
 conversationResetDecoder :: Json.Decoder ConversationResetMessage
 conversationResetDecoder = Json.object do
-    newConversationId <- optionalNonEmptyText "new_conversation_id"
+    newConversationId <-
+        fmap normalizeSessionId
+            <$> optionalNonEmptyText "new_conversation_id"
     uuid <- optionalNonEmptyText "uuid"
-    sessionId <- optionalNonEmptyText "session_id"
+    sessionId <-
+        fmap normalizeSessionId
+            <$> optionalNonEmptyText "session_id"
     parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
     hasParentToolUseId <- parentFieldPresent
     pure ConversationResetMessage{..}
@@ -387,7 +391,13 @@ tolerantModelUsageDecoder = Json.withType \case
             "cacheReadInputTokens"
         cacheCreationInputTokens <- optionalNonNegativeNumberDefault
             "cacheCreationInputTokens"
+        webSearchRequests <- optionalNonNegativeNumberDefault
+            "webSearchRequests"
         costUSD <- optionalNumber "costUSD" Json.double
+        contextWindow <- optionalNonNegativeNumber "contextWindow"
+        maxOutputTokens <- optionalNonNegativeNumber "maxOutputTokens"
+        canonicalModel <- optionalNonEmptyText "canonicalModel"
+        provider <- optionalNonEmptyText "provider"
         pure do
             input <- inputTokens
             output <- outputTokens
@@ -404,12 +414,33 @@ optionalOrigin
 optionalOrigin key =
     (Json.atKeyOptional key $
         Json.withType \case
-            Json.VObject -> Json.object do
-                kind <- fromMaybe "unclassified"
-                    <$> optionalNonEmptyText "kind"
-                pure (Just MessageOrigin{kind})
+            Json.VObject -> do
+                raw <- rawJsonDecoder
+                case Json.decodeEither
+                        (originDecoder raw)
+                        (rawJsonBytes raw)
+                    of
+                    Left err ->
+                        fail (Text.unpack err.jsonErrorMessage)
+                    Right origin ->
+                        pure (Just origin)
             _ -> pure Nothing)
         >>= pure . (>>= id)
+
+originDecoder :: RawJson -> Json.Decoder MessageOrigin
+originDecoder raw = Json.object do
+    kind <- requiredNonEmptyText
+        "kind"
+        "message origin is missing a non-empty string `kind`"
+    server <- optionalNonEmptyText "server"
+    from <- optionalNonEmptyText "from"
+    name <- optionalNonEmptyText "name"
+    fromSession <- optionalNonEmptyText "fromSession"
+    senderTaskId <- optionalNonEmptyText "senderTaskId"
+    body <- optionalText "body"
+    verifiedPeerPid <- optionalNumber "verifiedPeerPid" Json.int
+    subkind <- optionalNonEmptyText "subkind"
+    pure MessageOrigin{..}
 
 requiredText
     :: Text

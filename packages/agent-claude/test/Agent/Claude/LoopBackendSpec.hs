@@ -3,8 +3,10 @@ module Agent.Claude.LoopBackendSpec (spec) where
 import Agent.Claude.LoopBackend
     ( appendHostTranscript
     , claudeCodeOneShotBackend
+    , sdkErrorToApiError
     , withClaudeCodeBackend
     )
+import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
 import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Agent.Claude.Options
     ( ClaudeCodeOptions(..)
@@ -15,7 +17,11 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Json (rawJsonBytes)
 import Agent.Loop
     ( Backend(..)
+    , BackendContinuation(..)
     , BackendResult(..)
+    , BackendSnapshot
+    , advanceBackendSnapshot
+    , emptyBackendSnapshot
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
@@ -23,9 +29,15 @@ import Agent.Loop
     , TurnAttachment(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , initialBackendSnapshot
+    , userMessageWithAttachments
     , userMessageWithAttachments
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Telemetry
+    ( ModelTelemetry(..)
+    , TurnTelemetry(..)
+    )
 import Agent.Responses.Types
     ( FunctionCall(..)
     , FunctionCallOutput(..)
@@ -44,8 +56,10 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     )
 import Control.Exception.Safe (bracket, finally)
+import qualified Data.Foldable as Foldable
 import Data.IORef
-    ( modifyIORef'
+    ( IORef
+    , modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -79,10 +93,39 @@ submitBackend
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError TurnOutput)
 submitBackend backend previous inputs onEvent =
-    fmap (.backendOutput) <$> backend.submitTurn [] previous inputs onEvent
+    fmap (.backendOutput) <$>
+        backend.submitTurn emptyBackendSnapshot previous inputs onEvent
+
+submitBackendWithState
+    :: IORef BackendSnapshot
+    -> Backend
+    -> Maybe Text
+    -> [TurnInput]
+    -> (LoopEvent -> IO ())
+    -> IO (Either ApiError TurnOutput)
+submitBackendWithState stateRef backend previous inputs onEvent = do
+    state <- readIORef stateRef
+    backend.submitTurn state previous inputs onEvent >>= \case
+        Left err -> pure (Left err)
+        Right BackendResult{backendOutput, backendState} -> do
+            writeIORef stateRef backendState
+            pure (Right backendOutput)
 
 spec :: Spec
 spec = do
+    describe "sdkErrorToApiError" do
+        it "classifies status and subtype categories" do
+            sdkErrorToApiError
+                (ResultError "rate_limit_error" (Just 429) [] Nothing)
+                `shouldSatisfy` \case
+                    ProviderError{errorType = RateLimitError} -> True
+                    _ -> False
+            sdkErrorToApiError
+                (ResultError "permission_error" (Just 403) ["forbidden"] Nothing)
+                `shouldSatisfy` \case
+                    ProviderError{errorType = PermissionError} -> True
+                    _ -> False
+
     describe "appendHostTranscript" do
         it "appends turn inputs followed by assistant text" $ do
             let history =
@@ -152,6 +195,29 @@ spec = do
                 turn.tokenUsage.inputTokens `shouldBe` 10
                 turn.tokenUsage.outputTokens `shouldBe` 7
                 turn.tokenUsage.cachedTokens `shouldBe` 5
+                turn.providerTelemetry `shouldSatisfy` \case
+                    Just telemetry ->
+                        telemetry.telemetryDurationMs == Just 1250
+                            && telemetry.telemetryApiDurationMs == Just 1100
+                            && telemetry.telemetryCostUsd == Just 0.0125
+                            && telemetry.telemetryStopReason == Just "end_turn"
+                            && telemetry.telemetryProviderTurns == Just 2
+                            && telemetry.telemetryStructuredOutput /= Nothing
+                            && Foldable.toList telemetry.telemetryModels
+                                == [ModelTelemetry
+                                    { modelInputTokens = 2
+                                    , modelOutputTokens = 7
+                                    , modelCacheReadInputTokens = 5
+                                    , modelCacheCreationInputTokens = 3
+                                    , modelWebSearchRequests = Just 1
+                                    , modelCostUsd = Just 0.0125
+                                    , modelContextWindow = Just 200000
+                                    , modelMaxOutputTokens = Just 32000
+                                    , modelCanonicalName =
+                                        Just "claude-test-202608"
+                                    , modelProviderName = Just "firstParty"
+                                    }]
+                    Nothing -> False
                 observedEvents <- readIORef events
                 observedEvents `shouldBe`
                     [ ToolStarted expectedFakeToolCall
@@ -194,8 +260,7 @@ spec = do
                     "<--output-format>\n<stream-json>"
                 arguments `shouldNotContain` "<--include-partial-messages>"
                 arguments `shouldContain` "<--verbose>"
-                arguments `shouldContain`
-                    "<--disallowedTools>\n<AskUserQuestion>"
+                arguments `shouldNotContain` "<AskUserQuestion>"
                 arguments `shouldContain`
                     "<--permission-mode>\n<dontAsk>"
                 arguments `shouldContain` "<--safe-mode>"
@@ -660,8 +725,7 @@ spec = do
                     _ -> False
                 arguments <- readFile fake.argumentLog
                 arguments `shouldContain` "<--tools>\n<>"
-                arguments `shouldContain`
-                    "<--disallowedTools>\n<AskUserQuestion>"
+                arguments `shouldNotContain` "<AskUserQuestion>"
 
         it "maps none effort to Claude Code's default effort" $
             withFakeClaude \fake -> do
@@ -714,7 +778,7 @@ spec = do
                                 (\_ -> pure ())
                         result `shouldSatisfy` \case
                             Just (Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 }) ->
                                     "login expired" `Text.isInfixOf` message
@@ -746,7 +810,7 @@ spec = do
                                     modifyIORef' events (<> [event]))
                         result `shouldSatisfy` \case
                             Just (Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 }) ->
                                     "non-subscription credential source"
@@ -901,8 +965,10 @@ spec = do
 
         it "imports existing host history into a fresh Claude session" $
             withFakeClaude \fake -> do
-                transcript <- newIORef
-                    (turnInputsToItems [UserMessage "older context"])
+                let initialHistory =
+                        turnInputsToItems [UserMessage "older context"]
+                transcript <- newIORef initialHistory
+                state <- newIORef (initialBackendSnapshot initialHistory)
                 result <- timeout 5_000_000 $
                     withClaudeCodeBackend
                         (defaultClaudeCodeOptions
@@ -912,7 +978,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         transcript
                         \backend ->
-                            submitBackend backend
+                            submitBackendWithState state backend
                                 Nothing
                                 [UserMessage "continued request"]
                                 (\_ -> pure ())
@@ -931,6 +997,8 @@ spec = do
                         "00000000-0000-4000-8000-000000000001"
                 transcript <- newIORef
                     (turnInputsToItems [UserMessage "must not be re-sent"])
+                state <- newIORef . initialBackendSnapshot
+                    =<< readIORef transcript
                 result <- timeout 5_000_000 $
                     withClaudeCodeBackend
                         (defaultClaudeCodeOptions
@@ -940,7 +1008,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         transcript
                         \backend ->
-                            submitBackend backend
+                            submitBackendWithState state backend
                                 Nothing
                                 [UserMessage "resumed request"]
                                 (\_ -> pure ())
@@ -954,11 +1022,67 @@ spec = do
                 starts `shouldBe`
                     ["resume " <> Text.unpack priorSessionId]
 
+        it "does not retain an explicit initial resume after a host reset" $
+            withFakeClaude \fake -> do
+                let priorSessionId =
+                        "00000000-0000-4000-8000-000000000001"
+                    initialHistory =
+                        turnInputsToItems [UserMessage "persisted history"]
+                    persistedState =
+                        advanceBackendSnapshot
+                            (initialBackendSnapshot initialHistory)
+                            initialHistory
+                            (Just BackendContinuation
+                                { continuationProvider =
+                                    "anthropic.claude-code"
+                                , continuationToken = priorSessionId
+                                })
+                transcript <- newIORef initialHistory
+                state <- newIORef persistedState
+                turns <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                        (Just priorSessionId)
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend -> do
+                            first <- expectTurn =<<
+                                submitBackendWithState state backend
+                                    (Just priorSessionId)
+                                    [UserMessage "resume once"]
+                                    (\_ -> pure ())
+                            writeIORef transcript initialHistory
+                            writeIORef state
+                                (initialBackendSnapshot initialHistory)
+                            second <- expectTurn =<<
+                                submitBackendWithState state backend
+                                    Nothing
+                                    [UserMessage "start fresh"]
+                                    (\_ -> pure ())
+                            pure (first, second)
+                (first, second) <-
+                    maybe
+                        (expectationFailure "resume/reset fake timed out"
+                            >> fail "unreachable")
+                        pure
+                        turns
+                first.responseId `shouldBe` priorSessionId
+                second.responseId `shouldNotBe` priorSessionId
+                starts <- lines <$> readFile fake.startLog
+                starts `shouldBe`
+                    [ "resume " <> Text.unpack priorSessionId
+                    , "new " <> Text.unpack second.responseId
+                    ]
+
         it "starts fresh for a non-Claude previous response ID" $
             withFakeClaude \fake -> do
-                transcript <- newIORef
-                    (turnInputsToItems
-                        [UserMessage "foreign provider history"])
+                let initialHistory =
+                        turnInputsToItems
+                            [UserMessage "foreign provider history"]
+                transcript <- newIORef initialHistory
+                state <- newIORef (initialBackendSnapshot initialHistory)
                 result <- timeout 5_000_000 $
                     withClaudeCodeBackend
                         (defaultClaudeCodeOptions
@@ -968,8 +1092,8 @@ spec = do
                         (pure defaultResponseCreateParams)
                         transcript
                         \backend ->
-                            submitBackend backend
-                                Nothing
+                            submitBackendWithState state backend
+                                (Just "resp_foreign_provider")
                                 [UserMessage "new Claude request"]
                                 (\_ -> pure ())
                 turn <- case result of
@@ -990,6 +1114,7 @@ spec = do
         it "reuses a process, resumes on model or effort changes, and starts a fresh UUID after reset" $
             withFakeClaude \fake -> do
                 transcript <- newIORef []
+                state <- newIORef emptyBackendSnapshot
                 paramsRef <- newIORef
                     defaultResponseCreateParams
                         { model = Just "sonnet" }
@@ -1003,7 +1128,7 @@ spec = do
                         -> Text
                         -> IO (Either ApiError TurnOutput)
                     submit backend previous prompt =
-                        submitBackend backend
+                        submitBackendWithState state backend
                             previous
                             [UserMessage prompt]
                             (\_ -> pure ())
@@ -1049,9 +1174,12 @@ spec = do
                                     "four"
                             let switchedSessionId =
                                     "00000000-0000-4000-8000-000000000002"
-                            writeIORef transcript $
-                                turnInputsToItems
-                                    [UserMessage "switched session history"]
+                            let switchedHistory =
+                                    turnInputsToItems
+                                        [UserMessage "switched session history"]
+                            writeIORef transcript switchedHistory
+                            writeIORef state
+                                (initialBackendSnapshot switchedHistory)
                             afterSessionSwitch <- expectTurn =<<
                                 submit backend
                                     (Just switchedSessionId)
@@ -1100,6 +1228,7 @@ spec = do
                         turnInputsToItems
                             [UserMessage "retained-history-marker"]
                 transcript <- newIORef initialHistory
+                state <- newIORef (initialBackendSnapshot initialHistory)
                 turns <- timeout 5_000_000 $
                     withClaudeCodeBackend
                         (defaultClaudeCodeOptions
@@ -1110,7 +1239,7 @@ spec = do
                         transcript
                         \backend -> do
                             first <- expectTurn =<<
-                                submitBackend backend
+                                submitBackendWithState state backend
                                     Nothing
                                     [UserMessage "rolled-back-prompt-marker"]
                                     (\_ -> pure ())
@@ -1118,8 +1247,10 @@ spec = do
                             -- when cancellation wins immediately after the
                             -- backend has returned a successful turn.
                             writeIORef transcript initialHistory
+                            writeIORef state
+                                (initialBackendSnapshot initialHistory)
                             second <- expectTurn =<<
-                                submitBackend backend
+                                submitBackendWithState state backend
                                     (Just (Text.toUpper first.responseId))
                                     [UserMessage "replacement-prompt-marker"]
                                     (\_ -> pure ())
@@ -1152,6 +1283,7 @@ spec = do
                     [("FAKE_CLAUDE_BLOCK_AFTER_FIRST_TURN", Just "1")]
                     do
                         transcript <- newIORef []
+                        state <- newIORef emptyBackendSnapshot
                         let options =
                                 (defaultClaudeCodeOptions
                                     fake.executable
@@ -1167,17 +1299,17 @@ spec = do
                                 transcript
                                 \backend -> do
                                     first <- expectTurn =<<
-                                        submitBackend backend
+                                        submitBackendWithState state backend
                                             Nothing
                                             [UserMessage "one"]
                                             (\_ -> pure ())
                                     failed <-
-                                        submitBackend backend
+                                        submitBackendWithState state backend
                                             (Just first.responseId)
                                             [UserMessage blockedPrompt]
                                             (\_ -> pure ())
                                     third <- expectTurn =<<
-                                        submitBackend backend
+                                        submitBackendWithState state backend
                                             (Just first.responseId)
                                             [UserMessage "three"]
                                             (\_ -> pure ())
@@ -1215,6 +1347,7 @@ spec = do
                     [("FAKE_CLAUDE_FAIL_TURN", Just "2")]
                     do
                         transcript <- newIORef []
+                        state <- newIORef emptyBackendSnapshot
                         turns <- timeout 5_000_000 $
                             withClaudeCodeBackend
                                 (defaultClaudeCodeOptions
@@ -1225,17 +1358,17 @@ spec = do
                                 transcript
                                 \backend -> do
                                     first <- expectTurn =<<
-                                        submitBackend backend
+                                        submitBackendWithState state backend
                                             Nothing
                                             [UserMessage "one"]
                                             (\_ -> pure ())
                                     failed <-
-                                        submitBackend backend
+                                        submitBackendWithState state backend
                                             (Just first.responseId)
                                             [UserMessage "two"]
                                             (\_ -> pure ())
                                     resumed <- expectTurn =<<
-                                        submitBackend backend
+                                        submitBackendWithState state backend
                                             (Just first.responseId)
                                             [UserMessage "three"]
                                             (\_ -> pure ())
@@ -1248,7 +1381,7 @@ spec = do
                                 turns
                         failed `shouldSatisfy` \case
                             Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 } ->
                                     "login expired"
@@ -1267,6 +1400,7 @@ spec = do
         it "starts fresh after a turn callback throws" $
             withFakeClaude \fake -> do
                 transcript <- newIORef []
+                state <- newIORef emptyBackendSnapshot
                 turns <- timeout 5_000_000 $
                     withClaudeCodeBackend
                         (defaultClaudeCodeOptions
@@ -1277,17 +1411,17 @@ spec = do
                         transcript
                         \backend -> do
                             first <- expectTurn =<<
-                                submitBackend backend
+                                submitBackendWithState state backend
                                     Nothing
                                     [UserMessage "one"]
                                     (\_ -> pure ())
                             failed <-
-                                submitBackend backend
+                                submitBackendWithState state backend
                                     (Just first.responseId)
                                     [UserMessage "two"]
                                     (\_ -> ioError (userError "renderer failed"))
                             resumed <- expectTurn =<<
-                                submitBackend backend
+                                submitBackendWithState state backend
                                     (Just first.responseId)
                                     [UserMessage "three"]
                                     (\_ -> pure ())
@@ -1391,6 +1525,23 @@ fakeClaudeScript :: FilePath -> FilePath -> FilePath -> String
 fakeClaudeScript promptLog startLog argumentLog =
     unlines
         [ "#!/bin/sh"
+        , "if [ \"$1\" = --version ]; then"
+        , "  printf '%s\\n' '2.1.209 (Claude Code)'"
+        , "  exit 0"
+        , "fi"
+        , "if [ \"$1\" = --help ]; then"
+        , "  printf '%s\\n' 'Usage: claude [options]'"
+        , "  printf '%s\\n' '  -p, --print'"
+        , "  printf '%s\\n' '  --input-format <format> (choices: text, stream-json)'"
+        , "  printf '%s\\n' '  --output-format <format> (choices: text, json, stream-json)'"
+        , "  printf '%s\\n' '  --verbose'"
+        , "  printf '%s\\n' '  --safe-mode'"
+        , "  printf '%s\\n' '  --strict-mcp-config'"
+        , "  printf '%s\\n' '  --permission-mode <mode> (choices: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan)'"
+        , "  printf '%s\\n' '  --disallowedTools <tools>'"
+        , "  printf '%s\\n' '  --allowedTools <tools>'"
+        , "  exit 0"
+        , "fi"
         , "test ! -t 0 && test ! -t 1 && test ! -t 2 || exit 42"
         , "test \"$AWS_ACCESS_KEY_ID\" = tool-credential || exit 44"
         , "test \"$ENABLE_CLAUDEAI_MCP_SERVERS\" = 0 || exit 46"
@@ -1493,7 +1644,7 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  if [ \"$FAKE_CLAUDE_OMIT_MODEL_USAGE_TURN\" = \"$turn\" ]; then"
         , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7}}\\n' \"$turn\" \"$result_session_id\""
         , "  else"
-        , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7},\"modelUsage\":{\"fake-model\":{\"inputTokens\":%s,\"cacheCreationInputTokens\":%s,\"cacheReadInputTokens\":%s,\"outputTokens\":%s}}}\\n' \"$turn\" \"$result_session_id\" \"$cumulative_input\" \"$cumulative_cache_creation\" \"$cumulative_cache_read\" \"$cumulative_output\""
+        , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"duration_ms\":1250,\"duration_api_ms\":1100,\"num_turns\":2,\"stop_reason\":\"end_turn\",\"total_cost_usd\":0.0125,\"structured_output\":{\"answer\":42},\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7},\"modelUsage\":{\"fake-model\":{\"inputTokens\":%s,\"cacheCreationInputTokens\":%s,\"cacheReadInputTokens\":%s,\"outputTokens\":%s,\"webSearchRequests\":1,\"costUSD\":0.0125,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"canonicalModel\":\"claude-test-202608\",\"provider\":\"firstParty\"}}}\\n' \"$turn\" \"$result_session_id\" \"$cumulative_input\" \"$cumulative_cache_creation\" \"$cumulative_cache_read\" \"$cumulative_output\""
         , "  fi"
         , "  if [ \"$FAKE_CLAUDE_BLOCK_AFTER_FIRST_TURN\" = 1 ] && [ \"$turn\" = 1 ]; then"
         , "    sleep 30"

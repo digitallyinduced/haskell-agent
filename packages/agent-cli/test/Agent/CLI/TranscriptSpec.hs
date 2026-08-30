@@ -89,6 +89,7 @@ turn effect text = SessionTurn
     , turnEffect = effect
     , turnItems = []
     , turnUsage = Nothing
+    , turnProviderTelemetry = []
     }
 
 testMeta :: SessionMeta

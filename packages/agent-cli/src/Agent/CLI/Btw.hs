@@ -16,6 +16,7 @@ import Agent.Loop
     , BackendResult(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , initialBackendSnapshot
     )
 import Agent.Responses.Types
     ( CustomToolCall(..)
@@ -127,7 +128,7 @@ runBtwWithCancel withCancelScope makeBackend paramsRef transcriptRef question = 
     cancel <- newCancelFlag
     let Backend submit = makeBackend params
         request =
-            submit transcript Nothing
+            submit (initialBackendSnapshot transcript) Nothing
                 [UserMessage (sideQuestionPrompt question)] (\_ -> pure ())
         action = do
             result <- race (waitCancel cancel) request

@@ -5,9 +5,11 @@ module Agent.CLI.Approval
     , ApprovalNotice(..)
     , ApprovalPlan(..)
     , approveToolDecision
+    , approveToolDecisionClassified
     , approveToolDecisionWith
     , approveToolDecisionWithReporter
     , approveToolDecisionWithReporterAndPersistence
+    , approveToolDecisionWithReporterAndPersistenceClassified
     , approveFilesystemRootAccess
     , childApprove
     , planApproval
@@ -82,8 +84,33 @@ approveToolDecision
     -> ToolCall
     -> IO (Either Text Bool)
 approveToolDecision
+        policyRef allowedToolsRef tools planMode projectRoot cwd =
+    approveToolDecisionClassified
+        (const (pure Nothing))
+        policyRef
+        allowedToolsRef
+        tools
+        planMode
+        projectRoot
+        cwd
+
+-- | Approval entry point for provider-native tools. Returning @Just True@ or
+-- @Just False@ supplies the provider-specific read-only classification;
+-- @Nothing@ falls back to the registered host tool.
+approveToolDecisionClassified
+    :: (ToolCall -> IO (Maybe Bool))
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> ToolRegistry
+    -> PlanModeEnv
+    -> OsPath
+    -> OsPath
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionClassified classifyReadOnly
         policyRef allowedToolsRef tools planMode projectRoot cwd call = do
-    approveToolDecisionWithReporterAndPersistence
+    approveToolDecisionWithReporterAndPersistenceClassified
+        classifyReadOnly
         (\requested -> do
             color <- resolveColor stderr
             promptPermission color (toText cwd) requested)
@@ -141,8 +168,31 @@ approveToolDecisionWithReporterAndPersistence
     -> PlanModeEnv
     -> ToolCall
     -> IO (Either Text Bool)
-approveToolDecisionWithReporterAndPersistence
-        requestPermission report persistAlwaysApprove
+approveToolDecisionWithReporterAndPersistence requestPermission report persistAlwaysApprove policyRef allowedToolsRef tools planMode call = do
+    approveToolDecisionWithReporterAndPersistenceClassified
+        (const (pure Nothing))
+        requestPermission
+        report
+        persistAlwaysApprove
+        policyRef
+        allowedToolsRef
+        tools
+        planMode
+        call
+
+approveToolDecisionWithReporterAndPersistenceClassified
+    :: (ToolCall -> IO (Maybe Bool))
+    -> (ToolCall -> IO (Maybe PermissionChoice))
+    -> (ApprovalNotice -> IO ())
+    -> IO ()
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> ToolRegistry
+    -> PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionWithReporterAndPersistenceClassified
+        classifyReadOnly requestPermission report persistAlwaysApprove
         policyRef allowedToolsRef tools planMode call = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
@@ -162,9 +212,11 @@ approveToolDecisionWithReporterAndPersistence
             mapM_ runAction actions
             pure result
         NeedReadOnlyClassification -> do
-            readOnly <- case lookupRegisteredTool call.name tools of
-                Nothing -> pure False
-                Just tool -> toolAllowsWithoutPrompt tool call
+            readOnly <- classifyReadOnly call >>= \case
+                Just value -> pure value
+                Nothing -> case lookupRegisteredTool call.name tools of
+                    Nothing -> pure False
+                    Just tool -> toolAllowsWithoutPrompt tool call
             let nextFacts = facts { readOnly = Just readOnly }
             interpret nextFacts (planApproval nextFacts)
         NeedSessionAllowance -> do

@@ -98,6 +98,10 @@ data SessionTurn = SessionTurn
     , sessionTurnEffect :: !TranscriptEffect
     , sessionTurnItems :: ![StoredResponseItem]
     , sessionTurnUsage :: !(Maybe SessionUsage)
+    -- | Provider-neutral telemetry encoded as versioned JSON by the CLI.
+    -- The store deliberately keeps this opaque to avoid depending on
+    -- provider or loop packages.
+    , sessionTurnProviderTelemetry :: !(Maybe Text)
     }
     deriving (Eq, Show)
 

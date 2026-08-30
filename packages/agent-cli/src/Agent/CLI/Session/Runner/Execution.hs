@@ -5,6 +5,10 @@ module Agent.CLI.Session.Runner.Execution
     , runSession
     ) where
 import Agent.CLI.CodeModeRuntime
+import Agent.CLI.Claude
+    ( ClaudeSessionRuntime(..)
+    , installClaudeSessionRuntime
+    )
 import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
@@ -242,7 +246,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     { childSourceModel =
                         session.subSessionEffectiveModel
                     , childSourceTranscript =
-                        readIORef session.subSessionTranscript
+                        (.backendItems) <$>
+                            readIORef session.subSessionTranscript
                     })
                 <$> readIORef subagentSessions
     agentViewportRuntime <-
@@ -458,12 +463,14 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure $
                 (not (isGhciToolName toolName) || ghciEnabled)
                     && (not (isBashToolName toolName) || bashEnabled)
-        approveRegisteredTool call =
+        approveToolWithClassification classifiedReadOnly call =
             withMVar ioLock \_ ->
-                case promptRequest of
+                let classify = const (pure classifiedReadOnly)
+                in case promptRequest of
                     Just request
                         | isJust request.managedTurnBridgeDirectory ->
-                            approveToolDecisionWithReporterAndPersistence
+                            approveToolDecisionWithReporterAndPersistenceClassified
+                                classify
                                 (requestManagedApproval request)
                                 (const (pure ()))
                                 (pure ())
@@ -475,11 +482,18 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     _ -> case fullscreen of
                         Nothing ->
                             withStdinPaused escPaused $
-                                approveToolDecision
-                                    policyRef allowedToolsRef toolRegistry planMode
-                                    projectRoot cwd call
+                                approveToolDecisionClassified
+                                    classify
+                                    policyRef
+                                    allowedToolsRef
+                                    toolRegistry
+                                    planMode
+                                    projectRoot
+                                    cwd
+                                    call
                         Just runtime ->
-                            approveToolDecisionWithReporterAndPersistence
+                            approveToolDecisionWithReporterAndPersistenceClassified
+                                classify
                                 (requestFullscreenPermission runtime (toText cwd))
                                 (\case
                                     ApprovalWarning _ -> pure ()
@@ -494,11 +508,15 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 toolRegistry
                                 planMode
                                 call
+        approveRegisteredTool =
+            approveToolWithClassification Nothing
         config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
-                { readBackendState = readLiveTranscript conversationRef
-                , commitBackendState = writeLiveTranscript conversationRef
+                { readBackendState =
+                    withLiveBackendState conversationRef pure
+                , commitBackendState =
+                    commitLiveBackendState conversationRef
                 }
             , loopTools = toolRegistry
             , loopDispatch =
@@ -521,6 +539,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 readSteeringInputs steeringInputs
             , loopCommitSteering = \count ->
                 commitSteeringInputs steeringInputs count
+            , loopInterrupt = interruptBackend
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -643,6 +662,12 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 Nothing -> pure ()
             saveProjectMaxConcurrentAgents projectRoot next
             pure ("concurrent agent limit: " <> Text.pack (show next))
+    installClaudeSessionRuntime claudeRuntimeSlot ClaudeSessionRuntime
+        { approveNativeTool = \call readOnly ->
+            approveToolWithClassification readOnly call
+        , approveRegisteredTool
+        , planMode
+        }
     forM_ codeModeNestedSlot \slot ->
         setCodeModeNestedInvoke slot \call -> do
             allowed <- shellToolAllowed call
@@ -693,6 +718,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 , turnEffect = TranscriptReplace
                                 , turnItems = durableHistory
                                 , turnUsage = Nothing
+                                , turnProviderTelemetry = []
                                 }
                         (updated, _) <-
                             appendTurnWithMetaUpdateIndexed

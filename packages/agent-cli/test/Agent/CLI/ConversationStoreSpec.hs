@@ -1,7 +1,14 @@
 module Agent.CLI.ConversationStoreSpec (spec) where
 
 import Agent.CLI.Session.ConversationStore
-import Agent.Loop (ImageAttachment(..))
+import Agent.Loop
+    ( BackendContinuation(..)
+    , BackendRevision(..)
+    , BackendSnapshot(..)
+    , ImageAttachment(..)
+    , advanceBackendSnapshot
+    , emptyBackendSnapshot
+    )
 import Agent.Responses.Types
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar
@@ -214,6 +221,42 @@ spec = do
             readConversationPreviousResponseId store `shouldReturn` Nothing
             readConversationAttachments store `shouldReturn` []
             withConversationTranscript store (`shouldBe` [])
+
+        it "atomically commits items, continuation, and a monotonic revision" do
+            store <- newConversationStore Nothing [] []
+            let first = advanceBackendSnapshot emptyBackendSnapshot
+                    [messageItem "first"]
+                    (Just (BackendContinuation "claude" "session-1"))
+            committedFirst <- commitConversationBackendState store first
+            committedFirst.backendRevision `shouldBe` BackendRevision 1
+            committedFirst.backendContinuation
+                `shouldBe` Just (BackendContinuation "claude" "session-1")
+            readConversationPreviousResponseId store
+                `shouldReturn` Just "session-1"
+
+            -- A stale provider candidate cannot move the store revision back.
+            committedSecond <-
+                commitConversationBackendState store emptyBackendSnapshot
+            committedSecond.backendRevision `shouldBe` BackendRevision 2
+            withConversationBackendState store (`shouldBe` committedSecond)
+
+        it "clears provider continuation on non-backend transcript writes" do
+            store <- newConversationStore Nothing [] []
+            _ <- commitConversationBackendState store
+                (advanceBackendSnapshot emptyBackendSnapshot
+                    [messageItem "provider"]
+                    (Just (BackendContinuation "claude" "session-1")))
+            _ <- commitConversationTranscript store [messageItem "manual"]
+            withConversationBackendState store \snapshot -> do
+                snapshot.backendItems `shouldBe` [messageItem "manual"]
+                snapshot.backendContinuation `shouldBe` Nothing
+
+        it "clears provider continuation on transcript replacement" do
+            store <- newConversationStore (Just "response-1") [] []
+            _ <- replaceConversationTranscript
+                store (Just "response-2") [messageItem "replacement"]
+            withConversationBackendState store \snapshot ->
+                snapshot.backendContinuation `shouldBe` Nothing
 
 messageItem :: Text -> ResponseItem
 messageItem text = MessageItem ResponseMessage

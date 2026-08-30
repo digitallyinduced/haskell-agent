@@ -9,6 +9,7 @@ import Agent.Loop
     , LoopResult(..)
     , defaultLoopDispatch
     , defaultLoopMaxTurns
+    , emptyBackendSnapshot
     , emptyTurnOutput
     , runLoop
     )
@@ -123,7 +124,7 @@ parseNonNegative label raw =
 runWorkload :: Workload -> Int -> Int -> IO Int
 runWorkload workload callCount delayMicros = do
     turnIndex <- newIORef (0 :: Int)
-    state <- newIORef []
+    state <- newIORef emptyBackendSnapshot
     cancel <- newCancelFlag
     let names =
             [ "tool-" <> Text.pack (show index)
@@ -154,7 +155,9 @@ runWorkload workload callCount delayMicros = do
             { loopBackend = backend
             , loopBackendState = BackendStateStore
                 { readBackendState = readIORef state
-                , commitBackendState = writeIORef state
+                , commitBackendState = \snapshot -> do
+                    writeIORef state snapshot
+                    pure snapshot
                 }
             , loopTools = registry
             , loopDispatch = defaultLoopDispatch
@@ -163,6 +166,7 @@ runWorkload workload callCount delayMicros = do
             , loopApprove = \_ -> pure (Right True)
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
+            , loopInterrupt = pure ()
             , loopCancel = cancel
             }
     result <- runLoop config Nothing "benchmark"

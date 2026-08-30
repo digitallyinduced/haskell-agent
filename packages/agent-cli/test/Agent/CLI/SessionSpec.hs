@@ -11,6 +11,7 @@ import Agent.Dialect (DialectId(..))
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Loop (TokenUsage(..))
+import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import Agent.Store.SessionItem
@@ -788,6 +789,7 @@ spec = describe "Agent.CLI.Session" do
                             , cachedTokens = 1
                             }
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 source <- appendTurnWithMetaUpdate source0 sourceTurn
                     \meta -> meta
@@ -873,6 +875,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 source <- appendTurn source0 sourceTurn
                 let outside = source.sessionDir </> unsafeEncodeUtf "outside"
@@ -920,6 +923,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 source <- appendTurn source0 sourceTurn
                 let reset = SessionTurn
@@ -931,6 +935,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptReset
+                        , turnProviderTelemetry = []
                         }
                 resetSource <- appendTurnKeepTitle source reset
 
@@ -1019,6 +1024,7 @@ spec = describe "Agent.CLI.Session" do
                             , cachedTokens = 2
                             }
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = [sampleTurnTelemetry]
                         }
                     compactTurn = SessionTurn
                         { turnAt = fixedTime
@@ -1029,6 +1035,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptReplace
+                        , turnProviderTelemetry = []
                         }
                 withNormal <- appendTurn handle normalTurn
                 final <- appendTurnWithMetaUpdate withNormal compactTurn
@@ -1088,6 +1095,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
                         }
                 createDirectory dir
                 LBS.writeFile (toFilePath metaPath) (Aeson.encode meta)
@@ -1149,6 +1157,7 @@ spec = describe "Agent.CLI.Session" do
                     , turnItems = []
                     , turnUsage = Nothing
                     , turnEffect = TranscriptAppend
+                    , turnProviderTelemetry = [sampleTurnTelemetry]
                     }
             Hermes.decodeEither sessionTurnDecoder
                 (LBS.toStrict (Aeson.encode turn))
@@ -1231,6 +1240,17 @@ testMeta sessionId = SessionMeta
 
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 19) (secondsToDiffTime 0)
+
+sampleTurnTelemetry :: TurnTelemetry
+sampleTurnTelemetry = TurnTelemetry
+    { telemetryDurationMs = Just 1250
+    , telemetryApiDurationMs = Just 1100
+    , telemetryCostUsd = Just 0.0125
+    , telemetryStopReason = Just "end_turn"
+    , telemetryProviderTurns = Just 2
+    , telemetryModels = mempty
+    , telemetryStructuredOutput = Nothing
+    }
 
 modeOf :: OsPath -> IO Integer
 modeOf path = do

@@ -28,6 +28,7 @@ import qualified Data.Text as Text
 -- the hidden subprocess to ask the terminal user for confirmation.
 data ClaudeCodePermission
     = ClaudeCodeDontAsk
+    | ClaudeCodeManual
     | ClaudeCodeBypass
     deriving (Eq, Show)
 
@@ -85,9 +86,13 @@ toClaudeAgentOptions toolMode options = do
             { tools = case toolMode of
                 ClaudeCodeDefaultTools -> Nothing
                 ClaudeCodeNoTools -> Just []
-            , disallowedTools = ["AskUserQuestion"]
+            -- Older Claude Code releases expose AskUserQuestion natively and
+            -- route it through can_use_tool. Newer releases omit it in SDK
+            -- mode, where the host's MCP question tool remains available.
+            , disallowedTools = []
             , permissionMode = Just case options.permission of
                 ClaudeCodeDontAsk -> PermissionDontAsk
+                ClaudeCodeManual -> PermissionManual
                 ClaudeCodeBypass -> PermissionBypassPermissions
             , allowDangerouslySkipPermissions =
                 options.permission == ClaudeCodeBypass
@@ -99,6 +104,7 @@ toClaudeAgentOptions toolMode options = do
             , noChrome = True
             , environment = Just environment
             , clientApplication = Just clientApplicationName
+            , validateCapabilities = True
             , promptWriteTimeoutMicros =
                 options.promptWriteTimeoutMicros
             }

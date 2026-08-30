@@ -95,6 +95,7 @@ sessionSchemaStatements =
       \ usage_input_tokens bigint,\
       \ usage_output_tokens bigint,\
       \ usage_cached_tokens bigint,\
+      \ provider_telemetry_json text,\
       \ search_vector tsvector GENERATED ALWAYS AS (\
       \   setweight(to_tsvector('english', coalesce(user_text, '')), 'A') ||\
       \   setweight(to_tsvector('english', coalesce(assistant_text, '')), 'B')\

@@ -397,9 +397,11 @@ insertTurnStatement = mkStatement
     \ session_id, event_id, turn_index, event_sequence, occurred_at,\
     \ user_text, assistant_text, error_text, response_id,\
     \ transcript_effect,\
-    \ usage_input_tokens, usage_output_tokens, usage_cached_tokens\
+    \ usage_input_tokens, usage_output_tokens, usage_cached_tokens,\
+    \ provider_telemetry_json\
     \ ) VALUES (\
-    \ $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
+    \ $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,\
+    \ $14\
     \ ) RETURNING turn_id::text"
     ( ((.turnInsertSessionId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> ((.turnInsertEventId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
@@ -417,6 +419,8 @@ insertTurnStatement = mkStatement
             >$< Encoders.param (Encoders.nullable Encoders.int8))
         <> ((usageField (.sessionUsageCachedTokens) . (.turnInsertTurn))
             >$< Encoders.param (Encoders.nullable Encoders.int8))
+        <> ((.sessionTurnProviderTelemetry) . (.turnInsertTurn)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
     )
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True

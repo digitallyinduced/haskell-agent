@@ -1,5 +1,9 @@
 module Agent.CLI.PendingInputsSpec (spec) where
 
+import Agent.CLI.InputBudget
+    ( logicalTextBytes
+    , logicalTurnInputBytes
+    )
 import Agent.CLI.PendingInputs
     ( PendingNoticeKind(..)
     , clearPendingInputs
@@ -21,8 +25,18 @@ import Agent.Error (ApiError(..))
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , FileAttachment(..)
+    , ImageAttachment(..)
+    , TurnAttachment(..)
     , TurnInput(..)
+    , emptyBackendSnapshot
     , emptyTurnOutput
+    , userMessageWithAttachments
+    )
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , ToolResultImage(..)
     )
 import Control.Concurrent
     ( forkIO
@@ -38,6 +52,38 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+  describe "logicalTurnInputBytes" do
+    it "counts ordered attachments and rich tool-result images" do
+        let attached =
+                userMessageWithAttachments "é"
+                    [ ImageAttachmentItem
+                        (ImageAttachment "image/png" "abc")
+                    , FileAttachmentItem
+                        (FileAttachment (Just "a") "text/plain" "xy")
+                    ]
+            richResult =
+                CompletedTool
+                    (ToolCallResultWithImages
+                        { callId = "id"
+                        , output = "ok"
+                        , callKind = FunctionCallKind
+                        , toolResultImages =
+                            [ ToolResultImage
+                                "data:image/png;base64,abc"
+                                (Just "high")
+                            ]
+                        })
+        logicalTurnInputBytes attached `shouldBe`
+            logicalTextBytes "é"
+                + logicalTextBytes "image/png" + 3
+                + logicalTextBytes "a"
+                + logicalTextBytes "text/plain" + 2
+        logicalTurnInputBytes richResult `shouldBe`
+            logicalTextBytes "id"
+                + logicalTextBytes "ok"
+                + logicalTextBytes "data:image/png;base64,abc"
+                + logicalTextBytes "high"
+
   describe "withPendingInputs" do
     it "commits queued inputs after a successful submission" do
         pending <- newPendingInputs
@@ -51,7 +97,7 @@ spec = do
                             emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn [] Nothing
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing
             [UserMessage "parent"] (const (pure ()))
         readIORef seen `shouldReturn`
             [UserMessage "child result", UserMessage "parent"]
@@ -62,7 +108,7 @@ spec = do
         mapM_ (enqueuePendingInput pending) queued
         let backend = withPendingInputs pending $ Backend
                 \_ _ _ _ -> pure (Left (ConnectionError "offline"))
-        _ <- backend.submitTurn [] Nothing
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing
             [UserMessage "parent"] (const (pure ()))
         seen <- newIORef []
         let retry = withPendingInputs pending $ Backend
@@ -72,7 +118,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` queued
 
     it "requeues inputs when submission is interrupted by an exception" do
@@ -82,7 +128,7 @@ spec = do
         let backend = withPendingInputs pending $ Backend
                 \_ _ _ _ -> ioError (userError "interrupted")
         result <- tryAny $
-            backend.submitTurn [] Nothing
+            backend.submitTurn emptyBackendSnapshot Nothing
                 [UserMessage "parent"] (const (pure ()))
         result `shouldSatisfy` isLeft
         seen <- newIORef []
@@ -93,7 +139,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` queued
 
     it "prepends drained inputs ahead of concurrent enqueues when requeuing" do
@@ -107,7 +153,7 @@ spec = do
                     takeMVar release
                     pure (Left (ConnectionError "offline"))
         done <- newEmptyMVar
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done
         takeMVar entered
         enqueuePendingInput pending (UserMessage "new")
         putMVar release ()
@@ -120,7 +166,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn`
             [UserMessage "old", UserMessage "new"]
 
@@ -136,7 +182,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` []
 
     it "does not resurrect a batch cleared during an in-flight failure" do
@@ -150,7 +196,7 @@ spec = do
                     takeMVar release
                     pure (Left (ConnectionError "offline"))
         done <- newEmptyMVar
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done
         takeMVar entered
         clearPendingInputs pending
         putMVar release ()
@@ -163,7 +209,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` []
 
     it "serializes concurrent submission batches" do
@@ -180,10 +226,10 @@ spec = do
                     pure $ Left (ConnectionError "offline")
         done1 <- newEmptyMVar
         done2 <- newEmptyMVar
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done1
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done1
         takeMVar entered
         enqueuePendingInput pending (UserMessage "second")
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done2
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done2
         putMVar release ()
         _ <- takeMVar done1
         -- The second submission cannot overtake the first batch.
@@ -222,7 +268,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "ok" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` [UserMessage "settled"]
 
     it "keeps the previous MCP snapshot when its replacement is rejected" do
@@ -243,7 +289,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "ok" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` [UserMessage "settled"]
 
     it "drops a stale drained MCP snapshot after an in-flight failure" do
@@ -260,7 +306,7 @@ spec = do
                     pure (Left (ConnectionError "offline"))
         done <- newEmptyMVar
         _ <- forkIO $
-            failing.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done
+            failing.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done
         takeMVar entered
         enqueuePendingNotice pending PendingMcpNotice
             (UserMessage "settled")
@@ -275,7 +321,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "ok" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` [UserMessage "settled"]
 
     it "reports synthetic overflow once without exceeding the queue bound" do
@@ -299,7 +345,7 @@ spec = do
                         { backendOutput = emptyTurnOutput "ok" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         inputs <- readIORef seen
         length inputs `shouldBe` pendingInputCountLimit
         inputs `shouldSatisfy`

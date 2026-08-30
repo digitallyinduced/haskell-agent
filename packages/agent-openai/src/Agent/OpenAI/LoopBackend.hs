@@ -40,9 +40,13 @@ import Agent.Error
 import qualified Agent.Responses.LoopBackend as Responses
 import Agent.Loop
     ( Backend(..)
+    , BackendContinuation(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , LoopEvent(..)
     , TurnInput(..)
+    , advanceBackendSnapshot
+    , backendContinuationToken
     )
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
@@ -75,6 +79,7 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
 import Control.Concurrent (threadDelay)
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (onException)
 import Control.Monad (when)
 import Control.Retry
@@ -490,30 +495,32 @@ openAiBackendWithTransportFallback
     -> Backend
     -> Backend
 openAiBackendWithTransportFallback fallbackActive primary fallback =
-    Backend \state previousResponseId inputs onEvent -> do
+    Backend \state legacyPreviousResponseId inputs onEvent -> do
         active <- readIORef fallbackActive
         if active
-            then fallback.submitTurn state previousResponseId inputs onEvent
-            else tryPrimary state previousResponseId inputs onEvent
+            then fallback.submitTurn state legacyPreviousResponseId inputs onEvent
+            else tryPrimary state legacyPreviousResponseId inputs onEvent
   where
-    tryPrimary state previousResponseId inputs onEvent = do
+    tryPrimary state legacyPreviousResponseId inputs onEvent = do
         emittedModelOutput <- newIORef False
         announcedToolCall <- newIORef False
         let resetAttempt = do
                 writeIORef emittedModelOutput False
                 writeIORef announcedToolCall False
-        result <- primary.submitTurn state previousResponseId inputs \event -> do
-            case event of
-                -- The primary already closed that attempt; only activity from
-                -- its newest attempt still needs a boundary before a replay.
-                ResponseRestarted _ -> resetAttempt
-                ResponseAttemptDiscarded -> resetAttempt
-                _ -> do
-                    when (isModelOutput event) $
-                        writeIORef emittedModelOutput True
-                    when (isToolAnnouncement event) $
-                        writeIORef announcedToolCall True
-            onEvent event
+        result <-
+            primary.submitTurn state legacyPreviousResponseId inputs \event -> do
+                case event of
+                    -- The primary already closed that attempt; only activity
+                    -- from its newest attempt still needs a boundary before a
+                    -- replay.
+                    ResponseRestarted _ -> resetAttempt
+                    ResponseAttemptDiscarded -> resetAttempt
+                    _ -> do
+                        when (isModelOutput event) $
+                            writeIORef emittedModelOutput True
+                        when (isToolAnnouncement event) $
+                            writeIORef announcedToolCall True
+                onEvent event
         case result of
             Left err
                 | isOpenAiWebSocketTransportFailure err -> do
@@ -527,7 +534,7 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
                             -- linger as running next to the replayed attempt.
                             when announced (onEvent ResponseAttemptDiscarded)
                     fallback.submitTurn
-                        state previousResponseId inputs onEvent
+                        state legacyPreviousResponseId inputs onEvent
             _ -> pure result
 
     isModelOutput = \case
@@ -559,10 +566,10 @@ isOpenAiWebSocketTransportFailure = \case
 -- and recovery retries must replay the same turn state rather than clearing it.
 withCodexTurnStateScope :: IO CodexTurnState -> Backend -> Backend
 withCodexTurnStateScope getTurnState (Backend submit) =
-    Backend \state previousResponseId inputs onEvent -> do
+    Backend \state legacyPreviousResponseId inputs onEvent -> do
         when (startsNewLogicalTurn inputs) $
             getTurnState >>= resetCodexTurnState
-        submit state previousResponseId inputs onEvent
+        submit state legacyPreviousResponseId inputs onEvent
   where
     startsNewLogicalTurn turnInputs =
         not (null turnInputs) && not (any isCompletedTool turnInputs)
@@ -661,9 +668,13 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
     -> Backend
 openAiBackendWithRetryPoliciesAndReasoningVisibility
         showRawReasoning transientPolicy reconnectPolicy send getParams =
-    Backend \history previousResponseId inputs onLoopEvent -> do
+    Backend \snapshot legacyPreviousResponseId inputs onLoopEvent -> do
         baseParams <- sanitizeCodexRequest <$> getParams
-        let newItems = turnInputsToItems inputs
+        let history = snapshot.backendItems
+            previousResponseId =
+                backendContinuationToken "openai.responses" snapshot
+                    <|> legacyPreviousResponseId
+            newItems = turnInputsToItems inputs
             deltaRequest = withRequestInput baseParams newItems
             -- Live and resumed transcripts already apply compaction snapshots
             -- as full replacements. Remote v2 intentionally keeps retained
@@ -688,7 +699,13 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
             Right response ->
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
-                    , backendState = history <> newItems <> response.output
+                    , backendState =
+                        advanceBackendSnapshot snapshot
+                            (history <> newItems <> response.output)
+                            (Just BackendContinuation
+                                { continuationProvider = "openai.responses"
+                                , continuationToken = response.responseId
+                                })
                     }
   where
     sendRetrying onLoopEvent request previousResponseId = do
