@@ -126,7 +126,8 @@ artifactTools env analysis =
     ]
     <> maybe [] (\spawn ->
         [ jsonTool "analyze_tool_output"
-            "Spawn a tracked gpt-5.6-luna child to analyze an oversized tool-output artifact. Use wait_agent for its report."
+            "Spawn a tracked child agent to analyze an oversized tool-output artifact. \
+            \Use wait_agent for its report."
             [ PropertySchema "handle" PropertyString True Nothing
             , PropertySchema "instruction" PropertyString True Nothing
             ]
@@ -441,7 +442,7 @@ renderOutputArtifactNotice source artifact =
                 else "")
         <> ". Full stored output is excluded from model context. "
         <> "Use read_tool_output/search_tool_output, or analyze_tool_output "
-        <> "when available for bounded Luna analysis.]"
+        <> "when available for delegated analysis.]"
 
 -- | Return a bounded head/tail preview.  The bound is in UTF-8 bytes (the
 -- same unit used by the inline and artifact caps). Partial UTF-8 code points
