@@ -25,7 +25,7 @@ import Agent.Tools.Types
     ( defaultToolEnv
     , setToolRootAccessRequest
     )
-import Control.Exception.Safe (bracket, finally)
+import Control.Exception.Safe (bracket)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -57,6 +57,20 @@ spec = describe "list_dir speculation" do
             takeList runtime callId arguments
                 `shouldReturn` Just
                     (Right "Directory listing for alpha:\n- note.txt\n")
+
+    it "renders an absolute workspace target with its workspace-relative name" do
+        withListSpeculation \dir cache runtime -> do
+            createDirectoryIfMissing True (dir </> "absolute")
+            Text.writeFile (dir </> "absolute" </> "note.txt") "hi"
+            let callId = "call-absolute"
+                arguments = listArguments (Text.pack (dir </> "absolute"))
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation cache
+            retainList runtime callId arguments
+            takeList runtime callId arguments
+                `shouldReturn` Just
+                    (Right "Directory listing for absolute:\n- note.txt\n")
 
     it "predicts a unique workspace directory from a streamed prefix" do
         withPreparedList
@@ -111,25 +125,27 @@ spec = describe "list_dir speculation" do
         withTempDir \workspace ->
             withTempDir \external -> do
                 env <- defaultToolEnv (unsafeEncodeUtf workspace)
-                requests <- newIORef 0
+                requests <- newIORef (0 :: Int)
                 setToolRootAccessRequest env $ Just \_ -> do
                     modifyIORef' requests (+ 1)
                     pure False
-                cache <- newListDirSpeculation env
-                let tool = listDirToolWithSpeculation env (Just cache)
                 bracket
-                    (newToolSpeculationRuntime [tool])
-                    closeToolSpeculationRuntime
-                    \runtime -> do
-                        createDirectoryIfMissing True (external </> "nested")
-                        let callId = "call-external"
-                            arguments =
-                                listArguments (Text.pack external)
-                        streamList runtime callId arguments
-                        waitForToolSpeculation runtime
-                        waitForListDirSpeculation cache
-                        readIORef requests `shouldReturn` 0
-                        closeListDirSpeculation cache
+                    (newListDirSpeculation env)
+                    closeListDirSpeculation
+                    \cache -> do
+                        let tool = listDirToolWithSpeculation env (Just cache)
+                        bracket
+                            (newToolSpeculationRuntime [tool])
+                            closeToolSpeculationRuntime
+                            \runtime -> do
+                                createDirectoryIfMissing True (external </> "nested")
+                                let callId = "call-external"
+                                    arguments =
+                                        listArguments (Text.pack external)
+                                streamList runtime callId arguments
+                                waitForToolSpeculation runtime
+                                waitForListDirSpeculation cache
+                                readIORef requests `shouldReturn` 0
 
     it "falls back when a nested directory changes after prefetch" do
         withListSpeculation \dir cache runtime -> do
@@ -148,6 +164,49 @@ spec = describe "list_dir speculation" do
                     "new.txt" `Text.isInfixOf` output
                 _ -> False
 
+    it "falls back when repository excludes begin hiding a listed entry" do
+        withPreparedList
+            (\dir -> do
+                createDirectoryIfMissing True (dir </> "root")
+                Text.writeFile (dir </> "root" </> "visible.tmp") "visible"
+                initializeGitRepository dir)
+            \dir cache runtime -> do
+                let callId = "call-exclude-added"
+                    arguments = listArguments "root"
+                streamList runtime callId arguments
+                waitForToolSpeculation runtime
+                waitForListDirSpeculation cache
+                Text.writeFile
+                    (dir </> ".git" </> "info" </> "exclude")
+                    "/root/visible.tmp\n"
+                retainList runtime callId arguments
+                takeList runtime callId arguments
+                    `shouldReturn` Just
+                        (Right "Directory listing for root:\n")
+
+    it "falls back when repository excludes stop hiding an entry" do
+        withPreparedList
+            (\dir -> do
+                createDirectoryIfMissing True (dir </> "root")
+                Text.writeFile (dir </> "root" </> "hidden.tmp") "hidden"
+                initializeGitRepository dir
+                Text.writeFile
+                    (dir </> ".git" </> "info" </> "exclude")
+                    "/root/hidden.tmp\n")
+            \dir cache runtime -> do
+                let callId = "call-exclude-removed"
+                    arguments = listArguments "root"
+                streamList runtime callId arguments
+                waitForToolSpeculation runtime
+                waitForListDirSpeculation cache
+                Text.writeFile
+                    (dir </> ".git" </> "info" </> "exclude")
+                    ""
+                retainList runtime callId arguments
+                takeList runtime callId arguments
+                    `shouldReturn` Just
+                        (Right "Directory listing for root:\n- hidden.tmp\n")
+
 withListSpeculation
     :: (FilePath -> ListDirSpeculation -> ToolSpeculationRuntime -> IO a)
     -> IO a
@@ -161,14 +220,15 @@ withPreparedList prepare action =
     withTempDir \dir -> do
         prepare dir
         env <- defaultToolEnv (unsafeEncodeUtf dir)
-        cache <- newListDirSpeculation env
-        let tool = listDirToolWithSpeculation env (Just cache)
         bracket
-            (newToolSpeculationRuntime [tool])
-            closeToolSpeculationRuntime
-            (\runtime ->
-                action dir cache runtime
-                    `finally` closeListDirSpeculation cache)
+            (newListDirSpeculation env)
+            closeListDirSpeculation
+            \cache -> do
+                let tool = listDirToolWithSpeculation env (Just cache)
+                bracket
+                    (newToolSpeculationRuntime [tool])
+                    closeToolSpeculationRuntime
+                    (action dir cache)
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do

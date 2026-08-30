@@ -31,7 +31,6 @@ import Agent.Tools.FileSystem.PathPrefix
     , PathProgress(..)
     , cancelAndJoin
     , directoryFingerprint
-    , fileFingerprint
     , fingerprintsMatch
     , jsonStringFieldProgress
     , maximumConcurrentSpeculativeTasks
@@ -182,15 +181,17 @@ collectDir cwd path = do
                     ]
             Right <$> (fmap concat $ mapM (toNode cwd path) visible)
 
--- | Collect a listing and fingerprints for every directory visited. A root
--- fingerprint alone is insufficient for recursive listings: changing an
--- entry in a nested directory does not necessarily change the root's
--- metadata. The snapshot is built during traversal so the output and all
--- validation fingerprints describe the same observation.
+-- | Collect a listing, fingerprints for every directory visited, and every
+-- git-ignore decision that affected the output. A root fingerprint alone is
+-- insufficient for recursive listings: changing an entry in a nested
+-- directory does not necessarily change the root's metadata. Likewise,
+-- fingerprinting nearby .gitignore files misses repository excludes and
+-- global Git configuration. Replaying the decisions at consumption verifies
+-- the effective policy rather than trying to enumerate all of its inputs.
 collectDirSnapshot
     :: OsPath
     -> OsPath
-    -> IO (Either Text ([DirNode], Map.Map OsPath FileFingerprint))
+    -> IO (Either Text ([DirNode], ListingSnapshot))
 collectDirSnapshot cwd path = do
     before <- directoryFingerprint path
     case before of
@@ -211,25 +212,17 @@ collectDirSnapshot cwd path = do
                         Left err -> pure (Left err)
                         Right collected
                             | fingerprintsMatch after (Just fingerprint) ->
-                                do
-                                    ignoreFingerprint <-
-                                        fileFingerprint
-                                            (path </> fromText ".gitignore")
-                                    let childrenFingerprints =
-                                            Map.unions (map snd collected)
-                                        ownFingerprints =
-                                            Map.insert path fingerprint
-                                                childrenFingerprints
-                                        allFingerprints =
-                                            maybe ownFingerprints
-                                                (\ignore ->
-                                                    Map.insert
-                                                        (path </> fromText ".gitignore")
-                                                        ignore
-                                                        ownFingerprints)
-                                                ignoreFingerprint
-                                    pure $ Right
-                                        (concatMap fst collected, allFingerprints)
+                                let childrenSnapshot =
+                                        mergeListingSnapshots (map snd collected)
+                                    snapshot = childrenSnapshot
+                                        { snapshotDirectories =
+                                            Map.insert
+                                                path
+                                                fingerprint
+                                                childrenSnapshot.snapshotDirectories
+                                        }
+                                in pure $ Right
+                                    (concatMap fst collected, snapshot)
                             | otherwise ->
                                 pure (Left "directory changed during speculation")
 
@@ -237,24 +230,29 @@ toNodeSnapshot
     :: OsPath
     -> OsPath
     -> (OsPath, Bool)
-    -> IO (Either Text ([DirNode], Map.Map OsPath FileFingerprint))
+    -> IO (Either Text ([DirNode], ListingSnapshot))
 toNodeSnapshot cwd parent (name, isDir) = do
     let full = parent </> name
     ignored <- isGitIgnored cwd full
+    let decision = emptyListingSnapshot
+            { snapshotIgnoreDecisions = Map.singleton full ignored
+            }
     if ignored
-        then pure (Right ([], Map.empty))
+        then pure (Right ([], decision))
         else if not isDir
-            then pure (Right ([FileNode name], Map.empty))
+            then pure (Right ([FileNode name], decision))
             else do
                 isLink <- pathIsSymbolicLink full
                 if isLink
-                    then pure (Right ([FileNode name], Map.empty))
+                    then pure (Right ([FileNode name], decision))
                     else do
                         collectDirSnapshot cwd full >>= \case
                             Left err -> pure (Left err)
-                            Right (children, fingerprints) ->
+                            Right (children, snapshot) ->
                                 pure $ Right
-                                    ([summarizeDir name children], fingerprints)
+                                    ( [summarizeDir name children]
+                                    , mergeListingSnapshots [decision, snapshot]
+                                    )
 
 toNode :: OsPath -> OsPath -> (OsPath, Bool) -> IO [DirNode]
 toNode cwd parent (name, isDir) = do
@@ -393,8 +391,27 @@ data ListDirState = ListDirState
 
 data PrefetchedListing = PrefetchedListing
     { listingPath :: !OsPath
-    , listingFingerprints :: !(Map.Map OsPath FileFingerprint)
+    , listingSnapshot :: !ListingSnapshot
     , listingOutput :: !ToolResult
+    }
+
+data ListingSnapshot = ListingSnapshot
+    { snapshotDirectories :: !(Map.Map OsPath FileFingerprint)
+    , snapshotIgnoreDecisions :: !(Map.Map OsPath Bool)
+    }
+
+emptyListingSnapshot :: ListingSnapshot
+emptyListingSnapshot = ListingSnapshot
+    { snapshotDirectories = Map.empty
+    , snapshotIgnoreDecisions = Map.empty
+    }
+
+mergeListingSnapshots :: [ListingSnapshot] -> ListingSnapshot
+mergeListingSnapshots snapshots = ListingSnapshot
+    { snapshotDirectories =
+        Map.unions (map (.snapshotDirectories) snapshots)
+    , snapshotIgnoreDecisions =
+        Map.unions (map (.snapshotIgnoreDecisions) snapshots)
     }
 
 data ListCandidate = ListCandidate
@@ -619,16 +636,7 @@ prefetchListing env target =
         Right path -> do
             collectDirSnapshot env.toolCwd path >>= \case
                 Left _ -> pure Nothing
-                Right (entries, fingerprints) -> do
-                    cwdIgnore <- fileFingerprint
-                        (env.toolCwd </> fromText ".gitignore")
-                    let fingerprints' = maybe fingerprints
-                            (\ignore ->
-                                Map.insert
-                                    (env.toolCwd </> fromText ".gitignore")
-                                    ignore
-                                    fingerprints)
-                            cwdIgnore
+                Right (entries, snapshot) -> do
                     display <- displayPathInWorkspace env path
                     let (shown, truncated) = capNodes maxListItems entries
                         tree = renderTree 0 shown
@@ -642,7 +650,7 @@ prefetchListing env target =
                     void (evaluate (Text.length output))
                     pure $ Just PrefetchedListing
                         { listingPath = path
-                        , listingFingerprints = fingerprints'
+                        , listingSnapshot = snapshot
                         , listingOutput = Right output
                         }
 
@@ -678,30 +686,38 @@ consumeListDir speculation args partial =
                             Right finalPath
                                 | not (equalFilePath finalPath prefetched.listingPath) ->
                                     miss selected
-                                | otherwise ->
-                                    mapM
-                                        (\(directory, expected) -> do
-                                            actual <- snapshotFingerprint directory
-                                            pure (actual, expected))
-                                        (Map.toList prefetched.listingFingerprints)
-                                        >>= \current ->
-                                            if all
-                                                (\(actual, expected) ->
-                                                    fingerprintsMatch actual (Just expected))
-                                                current
-                                                then do
-                                                    releaseListCandidate speculation selected
-                                                    pure prefetched.listingOutput
-                                                else miss selected
+                                | otherwise -> do
+                                    valid <- listingSnapshotMatches
+                                        speculation.listEnv.toolCwd
+                                        prefetched.listingSnapshot
+                                    if valid
+                                        then do
+                                            releaseListCandidate speculation selected
+                                            pure prefetched.listingOutput
+                                        else miss selected
   where
-    snapshotFingerprint path =
-        directoryFingerprint path >>= \case
-            Just fingerprint -> pure (Just fingerprint)
-            Nothing -> fileFingerprint path
-
     miss selected = do
         cancelListCandidate speculation selected
         runListDir speculation.listEnv args
+
+listingSnapshotMatches :: OsPath -> ListingSnapshot -> IO Bool
+listingSnapshotMatches cwd snapshot = do
+    directoriesBefore <- directoriesMatch
+    if not directoriesBefore
+        then pure False
+        else do
+            decisionsMatch <- and <$> mapM
+                (\(path, expected) ->
+                    (== expected) <$> isGitIgnored cwd path)
+                (Map.toList snapshot.snapshotIgnoreDecisions)
+            directoriesAfter <- directoriesMatch
+            pure (decisionsMatch && directoriesAfter)
+  where
+    directoriesMatch = and <$> mapM
+        (\(path, expected) ->
+            (`fingerprintsMatch` Just expected)
+                <$> directoryFingerprint path)
+        (Map.toList snapshot.snapshotDirectories)
 
 decodeListDirArgs :: Text -> Maybe ListDirArgs
 decodeListDirArgs text =

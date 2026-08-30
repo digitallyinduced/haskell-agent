@@ -35,7 +35,6 @@ import Agent.Tools.FileSystem.ReadFile.Internal
     , runReadFile
     )
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Applicative ((<|>))
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -56,7 +55,6 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, guard, void, when)
 import Data.Acquire (mkAcquire)
-import Data.Char (isSpace)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -68,7 +66,6 @@ import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import System.Exit (ExitCode(..))
 import System.OsPath (OsPath, equalFilePath, isAbsolute)
 import System.Posix.Files
@@ -194,7 +191,8 @@ readFileArgumentInterpreter environment =
             (newReadFileSpeculation environment)
             closeReadFileSpeculation
 
--- | Attach an already-created cache, primarily for tests and benchmarks.
+-- | Attach a caller-owned cache, primarily for tests and benchmarks. The
+-- factory borrows the cache; its owner remains responsible for closing it.
 readFileArgumentInterpreterWithCache
     :: ReadFileSpeculation
     -> StreamedToolFactory
@@ -202,7 +200,7 @@ readFileArgumentInterpreterWithCache speculation =
     streamedReadFile
         <$> mkAcquire
             (pure speculation)
-            closeReadFileSpeculation
+            (\_ -> pure ())
 
 streamedReadFile :: ReadFileSpeculation -> StreamedTool
 streamedReadFile speculation =

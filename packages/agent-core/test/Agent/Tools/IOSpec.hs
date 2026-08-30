@@ -245,6 +245,11 @@ spec = describe "Agent.Tools.IO" do
             resolveUnderCwd env (fromFilePath target)
                 `shouldReturn` Right (fromFilePath target)
             readIORef requests `shouldReturn` [fromFilePath outside]
+            roots <- readIORef env.toolAllowedRoots
+            roots `shouldSatisfy` any (equalFilePath (fromFilePath outside))
+            resolveUnderCwd env (fromFilePath target)
+                `shouldReturn` Right (fromFilePath target)
+            readIORef requests `shouldReturn` [fromFilePath outside]
 
     it "does not request access while resolving a speculative escaped path" do
         withTempDir \dir -> do

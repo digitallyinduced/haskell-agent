@@ -22,18 +22,21 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     , mkToolRegistry
     , toolExecutionPolicyFor
+    , withToolArgumentInterpreter
     , withToolResourceClaims
     )
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
-    ( newEmptyMVar
+    ( MVar
+    , newEmptyMVar
     , putMVar
     , readMVar
     , takeMVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
+import Data.Acquire (mkAcquire)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -896,6 +899,15 @@ spec = describe "runLoop" do
         result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
+    it "resets streamed tool speculation when a response restarts" do
+        assertSpeculationResetAfter (ResponseRestarted "retrying")
+
+    it "resets streamed tool speculation when an attempt is discarded" do
+        assertSpeculationResetAfter ResponseAttemptDiscarded
+
+    it "discards streamed tool speculation when a call is retracted" do
+        assertSpeculationResetAfter (ToolRetracted "retry-call")
+
     it "returns explicit backend state and progress after success" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -1672,6 +1684,81 @@ spec = describe "runLoop" do
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
+
+assertSpeculationResetAfter :: LoopEvent -> Expectation
+assertSpeculationResetAfter boundary = do
+    starts <- newIORef (0 :: Int)
+    firstStarted <- newEmptyMVar
+    secondStarted <- newEmptyMVar
+    let streamedEvent =
+            ToolArgumentEvent $
+                ToolArgumentsStarted
+                    { argumentStreamRefs =
+                        [ToolCallStreamItem "retry-item"]
+                    , argumentStreamCallId = "retry-call"
+                    , argumentStreamName = Just "retry_probe"
+                    , argumentStreamArguments = ""
+                    }
+        requireStart label started =
+            timeout 1000000 (takeMVar started) >>= \case
+                Just () -> pure ()
+                Nothing ->
+                    Exception.throwIO $
+                        userError ("timed out waiting for " <> label)
+        backend = Backend \state _previous _inputs onEvent -> do
+            onEvent streamedEvent
+            requireStart "first speculative start" firstStarted
+            onEvent boundary
+            onEvent streamedEvent
+            requireStart "replacement speculative start" secondStarted
+            pure $ Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "retry-response" [] (Just "done")
+                , backendState = state
+                }
+        tool = retryProbeTool starts firstStarted secondStarted
+    config0 <- testConfig backend
+    result <- runLoop
+        config0 { loopTools = registryFromTools [tool] }
+        Nothing
+        "go"
+    result `shouldBe` Right LoopResult
+        { finalResponseId = "retry-response"
+        , finalText = Just "done"
+        , turnsUsed = 1
+        , tokenUsage = emptyTokenUsage
+        }
+    readIORef starts `shouldReturn` 2
+
+retryProbeTool :: IORef Int -> MVar () -> MVar () -> AppTool
+retryProbeTool starts firstStarted secondStarted =
+    withToolArgumentInterpreter
+        (mkAcquire (pure streamed) (\_ -> pure ())) $
+        jsonAppToolWithExecution
+            "retry_probe"
+            ""
+            []
+            AlwaysReadOnly
+            ParallelSafe
+            (noArgsTool "retry_probe" (pure (Right "ordinary")))
+  where
+    streamed = StreamedTool
+        { streamedStart = do
+            started <- atomicModifyIORef' starts \count ->
+                let next = count + 1
+                in (next, next)
+            case started of
+                1 -> putMVar firstStarted ()
+                2 -> putMVar secondStarted ()
+                _ -> pure ()
+            pure ()
+        , streamedInterpret = \() -> \case
+            ToolPrefix _ -> pure (Right ())
+            ToolDone arguments -> pure (Left (arguments, ()))
+        , streamedConsume = \_call _emit arguments () ->
+            pure (Right arguments)
+        , streamedClose = \() -> pure ()
+        }
 
 testConfig :: Backend -> IO LoopConfig
 testConfig backend = do

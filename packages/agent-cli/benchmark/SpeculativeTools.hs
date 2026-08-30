@@ -1,8 +1,9 @@
 -- | Replay a mixed coding-turn tool stream with and without speculation.
 --
 -- This keeps the LLM off the clock: the same argument deltas, delays, and
--- consume order run against a fixture repo. Baseline waits out the stream
--- tail then dispatches. Speculative feeds prefixes so reads overlap the tail.
+-- consume order run against a fixture repo. Baseline uses the default streamed
+-- interpreters, while speculative uses the prefetching interpreters so file
+-- system work can overlap the stream tail.
 module Main (main) where
 
 import Agent.Codex.Dialect.Tools (applyPatchTool)
@@ -20,24 +21,19 @@ import Agent.Tools.FileSystem.FilePrefetch
     ( FilePrefetch
     , closeFilePrefetch
     , newFilePrefetch
-    , waitForFilePrefetch
     )
 import Agent.Tools.FileSystem.ListDir
     ( ListDirSpeculation
     , closeListDirSpeculation
     , listDirToolWithSpeculation
     , newListDirSpeculation
-    , waitForListDirSpeculation
     )
 import Agent.Tools.FileSystem.ReadFile
-    ( readFileTool
-    , readFileToolWithSpeculation
-    )
+    ( readFileToolWithSpeculation )
 import Agent.Tools.FileSystem.ReadFileSpeculation
     ( ReadFileSpeculation
     , closeReadFileSpeculation
     , newReadFileSpeculation
-    , waitForReadFileSpeculation
     )
 import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Speculation
@@ -56,10 +52,11 @@ import Agent.Tools.Types
     , defaultToolEnv
     , dispatchRegisteredToolCall
     , mkToolRegistry
+    , withDefaultArgumentInterpreter
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception (evaluate)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, bracketOnError, finally)
 import Control.Monad (forM, unless, when)
 import Data.Char (ord)
 import Data.List (sort)
@@ -146,56 +143,56 @@ main = do
     getArgs >>= \case
         [modeArg, fileKiBArg, tailMillisArg, sampleCountArg] -> do
             mode <- parseMode modeArg
-            fileKiB <- parsePositive "file KiB" fileKiBArg
-            tailMillis <- parseNonNegative "tail milliseconds" tailMillisArg
+            fileKiB <-
+                parsePositiveUpTo
+                    "file KiB"
+                    (maxBound `div` 1024)
+                    fileKiBArg
+            tailMillis <-
+                parseNonNegativeUpTo
+                    "tail milliseconds"
+                    (maxBound `div` 1000)
+                    tailMillisArg
             sampleCount <- parsePositive "sample count" sampleCountArg
             withTempDir \dir -> do
                 fixture <- setupFixture dir fileKiB
                 env <- defaultToolEnv (unsafeEncodeUtf dir)
                 plan <- newPlanModeEnv (unsafeEncodeUtf dir) Nothing
                 case mode of
-                    Baseline -> do
-                        registry <-
-                            requireRegistry
-                                [ readFileTool env
+                    Baseline ->
+                        runWithTools
+                            modeArg
+                            fileKiB
+                            tailMillis
+                            sampleCount
+                            fixture
+                            (map
+                                withDefaultArgumentInterpreter
+                                [ readFileToolWithSpeculation env Nothing
                                 , listDirToolWithSpeculation env Nothing
                                 , searchReplaceToolWithPrefetch env plan Nothing
                                 , applyPatchTool env
-                                ]
-                        runBenchmark
-                            modeArg mode fileKiB tailMillis sampleCount
-                            fixture env registry Nothing
-                    Speculative -> do
-                        caches <- newCaches env
-                        planTool <-
-                            pure (searchReplaceToolWithPrefetch env plan (Just caches.cacheFiles))
-                        let tools =
-                                [ readFileToolWithSpeculation env (Just caches.cacheReads)
-                                , listDirToolWithSpeculation env (Just caches.cacheLists)
-                                , planTool
+                                ])
+                    Speculative ->
+                        bracket (newCaches env) closeCaches \caches ->
+                            runWithTools
+                                modeArg
+                                fileKiB
+                                tailMillis
+                                sampleCount
+                                fixture
+                                [ readFileToolWithSpeculation
+                                    env
+                                    (Just caches.cacheReads)
+                                , listDirToolWithSpeculation
+                                    env
+                                    (Just caches.cacheLists)
+                                , searchReplaceToolWithPrefetch
+                                    env
+                                    plan
+                                    (Just caches.cacheFiles)
                                 , applyPatchTool env
                                 ]
-                        registry <- requireRegistry tools
-                        bracket
-                            (newToolSpeculationRuntime tools)
-                            closeToolSpeculationRuntime
-                            \runtime -> do
-                                warmCaches caches runtime
-                                restoreFixture fixture
-                                _ <-
-                                    runTurn
-                                        Speculative
-                                        tailMillis
-                                        fixture
-                                        env
-                                        registry
-                                        (Just (caches, runtime))
-                                        0
-                                resetToolSpeculationRuntime runtime
-                                runBenchmark
-                                    modeArg mode fileKiB tailMillis sampleCount
-                                    fixture env registry (Just (caches, runtime))
-                        closeCaches caches
         _ ->
             die $
                 "usage: speculative-tools-bench "
@@ -216,73 +213,95 @@ parseMode = \case
     other -> die ("unknown mode: " <> other)
 
 parsePositive :: String -> String -> IO Int
-parsePositive label raw =
-    case reads raw of
-        [(value, "")]
-            | value > 0 -> pure value
-        _ -> die ("invalid " <> label <> ": " <> raw)
+parsePositive label =
+    parseBounded label 1 maxBound
 
-parseNonNegative :: String -> String -> IO Int
-parseNonNegative label raw =
-    case reads raw of
+parsePositiveUpTo :: String -> Int -> String -> IO Int
+parsePositiveUpTo label upper =
+    parseBounded label 1 upper
+
+parseNonNegativeUpTo :: String -> Int -> String -> IO Int
+parseNonNegativeUpTo label upper =
+    parseBounded label 0 upper
+
+parseBounded :: String -> Int -> Int -> String -> IO Int
+parseBounded label lower upper raw =
+    case reads raw :: [(Integer, String)] of
         [(value, "")]
-            | value >= 0 -> pure value
+            | value >= fromIntegral lower
+            , value <= fromIntegral upper ->
+                pure (fromInteger value)
         _ -> die ("invalid " <> label <> ": " <> raw)
 
 newCaches :: ToolEnv -> IO ToolCaches
-newCaches env = do
-    readsCache <- newReadFileSpeculation env
-    listsCache <- newListDirSpeculation env
-    filesCache <- newFilePrefetch env
-    pure ToolCaches
-        { cacheReads = readsCache
-        , cacheLists = listsCache
-        , cacheFiles = filesCache
-        }
+newCaches env =
+    bracketOnError
+        (newReadFileSpeculation env)
+        closeReadFileSpeculation
+        \readsCache ->
+            bracketOnError
+                (newListDirSpeculation env)
+                closeListDirSpeculation
+                \listsCache -> do
+                    filesCache <- newFilePrefetch env
+                    pure ToolCaches
+                        { cacheReads = readsCache
+                        , cacheLists = listsCache
+                        , cacheFiles = filesCache
+                        }
 
 closeCaches :: ToolCaches -> IO ()
-closeCaches caches = do
+closeCaches caches =
     closeReadFileSpeculation caches.cacheReads
-    closeListDirSpeculation caches.cacheLists
-    closeFilePrefetch caches.cacheFiles
+        `finally` (closeListDirSpeculation caches.cacheLists
+            `finally` closeFilePrefetch caches.cacheFiles)
 
-warmCaches :: ToolCaches -> ToolSpeculationRuntime -> IO ()
-warmCaches caches runtime = do
-    observePrefix runtime "warmup-list" "list_dir"
-        "{\"target_directory\":\"src/unique-li"
-    observePrefix runtime "warmup-read" "read_file"
-        "{\"target_file\":\"src/alp"
-    observePrefix runtime "warmup-replace" "search_replace"
-        "{\"file_path\":\"src/replace-target.hs\""
-    waitForListDirSpeculation caches.cacheLists
-    waitForReadFileSpeculation caches.cacheReads
-    waitForFilePrefetch caches.cacheFiles
-    resetToolSpeculationRuntime runtime
-
-runBenchmark
+runWithTools
     :: String
-    -> Mode
     -> Int
     -> Int
     -> Int
     -> Fixture
-    -> ToolEnv
-    -> ToolRegistry
-    -> Maybe (ToolCaches, ToolSpeculationRuntime)
+    -> [AppTool]
     -> IO ()
-runBenchmark modeArg mode fileKiB tailMillis sampleCount fixture env registry
-        speculation = do
+runWithTools modeArg fileKiB tailMillis sampleCount fixture tools = do
+    registry <- requireRegistry tools
+    bracket
+        (newToolSpeculationRuntime tools)
+        closeToolSpeculationRuntime
+        \runtime -> do
+            -- Give both modes the same untimed warm-up turn.
+            restoreFixture fixture
+            _ <- runTurn tailMillis fixture registry runtime 0
+            resetToolSpeculationRuntime runtime
+            runBenchmark
+                modeArg
+                fileKiB
+                tailMillis
+                sampleCount
+                fixture
+                registry
+                runtime
+
+runBenchmark
+    :: String
+    -> Int
+    -> Int
+    -> Int
+    -> Fixture
+    -> ToolRegistry
+    -> ToolSpeculationRuntime
+    -> IO ()
+runBenchmark modeArg fileKiB tailMillis sampleCount fixture registry runtime = do
     samples <- forM [1 .. sampleCount] \sampleIndex -> do
+        resetToolSpeculationRuntime runtime
         restoreFixture fixture
-        mapM_ (resetToolSpeculationRuntime . snd) speculation
         measure $
             runTurn
-                mode
                 tailMillis
                 fixture
-                env
                 registry
-                speculation
+                runtime
                 sampleIndex
     let distinctChecksums = uniqueSorted (map (.checksum) samples)
     unless (length distinctChecksums == 1) $
@@ -311,31 +330,23 @@ runBenchmark modeArg mode fileKiB tailMillis sampleCount fixture env registry
         first.checksum
 
 runTurn
-    :: Mode
-    -> Int
+    :: Int
     -> Fixture
-    -> ToolEnv
     -> ToolRegistry
-    -> Maybe (ToolCaches, ToolSpeculationRuntime)
+    -> ToolSpeculationRuntime
     -> Int
     -> IO Int
-runTurn mode tailMillis fixture _env registry speculation sampleIndex = do
+runTurn tailMillis fixture registry runtime sampleIndex = do
     let delay = when (tailMillis > 0) (threadDelay (tailMillis * 1000))
         suffix = Text.pack (show sampleIndex)
         calls = allCalls fixture.readLineCount suffix
-    outputs <- case mode of
-        Baseline -> do
-            delay
-            traverse (dispatchNormally registry) calls
-        Speculative ->
-            withRuntime speculation \runtime -> do
-                streamListDir runtime suffix
-                streamReads fixture.readLineCount runtime suffix
-                streamReplace runtime suffix
-                streamPatch runtime suffix
-                delay
-                finishAll fixture.readLineCount runtime suffix
-                traverse (takeOrDispatch registry runtime) calls
+    streamListDir runtime suffix
+    streamReads fixture.readLineCount runtime suffix
+    streamReplace runtime suffix
+    streamPatch runtime suffix
+    delay
+    finishAll fixture.readLineCount runtime suffix
+    outputs <- traverse (takeOrDispatch registry runtime) calls
     let combined = Text.intercalate "\n---\n" outputs
     case outputs of
         listOut : read1 : _read2 : _read3 : _read4 : replaceOut : patchOut : _ -> do
@@ -349,10 +360,6 @@ runTurn mode tailMillis fixture _env registry speculation sampleIndex = do
                 die ("unexpected apply_patch result: " <> Text.unpack patchOut)
         _ -> die "mixed turn produced too few tool results"
     evaluate (checksumText combined)
-  where
-    withRuntime Nothing _ = die "speculative mode requires a runtime"
-    withRuntime (Just (_, runtime)) action = action runtime
-
 allCalls :: Int -> Text -> [ToolCall]
 allCalls readLimit suffix =
     listCall suffix

@@ -31,6 +31,7 @@ import Agent.Tools.Speculation
     ( ToolSpeculationRuntime
     , closeToolSpeculationRuntime
     , discardToolSpeculation
+    , discardToolSpeculationByCallId
     , newToolSpeculationRuntime
     , observeToolArgumentEvent
     , resetToolSpeculationRuntime
@@ -576,8 +577,19 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                             -- The backend rolled that attempt back,
                                             -- so a later failure no longer interrupts
                                             -- visible output.
-                                            ResponseAttemptDiscarded ->
+                                            ResponseAttemptDiscarded -> do
                                                 writeIORef outputSeen False
+                                                resetToolSpeculationRuntime runtime
+                                            -- Provider-managed retries can reuse
+                                            -- item and call identifiers. Arguments
+                                            -- from the interrupted attempt must not
+                                            -- be aliased into the replacement.
+                                            ResponseRestarted _ ->
+                                                resetToolSpeculationRuntime runtime
+                                            ToolRetracted callId ->
+                                                discardToolSpeculationByCallId
+                                                    runtime
+                                                    callId
                                             _ -> pure ()
                                         case event of
                                             ToolArgumentEvent _ -> pure ()

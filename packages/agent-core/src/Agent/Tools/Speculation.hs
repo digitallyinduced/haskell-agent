@@ -8,6 +8,7 @@ module Agent.Tools.Speculation
     , takeToolSpeculation
     , takeToolSpeculationEmitting
     , discardToolSpeculation
+    , discardToolSpeculationByCallId
     , waitForToolSpeculation
     ) where
 
@@ -391,7 +392,14 @@ discardToolSpeculation
     -> ToolCall
     -> IO ()
 discardToolSpeculation runtime call =
-    removeByCallId runtime call.callId
+    discardToolSpeculationByCallId runtime call.callId
+
+discardToolSpeculationByCallId
+    :: ToolSpeculationRuntime
+    -> Text
+    -> IO ()
+discardToolSpeculationByCallId runtime callId =
+    removeByCallId runtime callId
         >>= mapM_ safeReleaseEntry
 
 -- | Wait until each active interpreter has processed all argument items

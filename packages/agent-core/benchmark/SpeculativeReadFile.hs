@@ -24,11 +24,11 @@ import Agent.Tools.Speculation
     )
 import Agent.Tools.Types
     ( AppTool
-    , ToolEnv
     , ToolRegistry
     , defaultToolEnv
     , dispatchRegisteredToolCall
     , mkToolRegistry
+    , withDefaultArgumentInterpreter
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception (evaluate)
@@ -88,8 +88,16 @@ main = do
     getArgs >>= \case
         [workloadArg, fileMiBArg, tailMillisArg, sampleCountArg] -> do
             workload <- parseWorkload workloadArg
-            fileMiB <- parsePositive "file MiB" fileMiBArg
-            tailMillis <- parseNonNegative "tail milliseconds" tailMillisArg
+            fileMiB <-
+                parsePositiveUpTo
+                    "file MiB"
+                    (maxBound `div` (1024 * 1024))
+                    fileMiBArg
+            tailMillis <-
+                parseNonNegativeUpTo
+                    "tail milliseconds"
+                    (maxBound `div` 1000)
+                    tailMillisArg
             sampleCount <- parsePositive "sample count" sampleCountArg
             withTempDir \dir -> do
                 let path = dir </> Text.unpack benchmarkTarget
@@ -97,39 +105,31 @@ main = do
                 writeSizedTextFile path (fileMiB * 1024 * 1024)
                 initializeGitRepository dir
                 env <- defaultToolEnv (unsafeEncodeUtf dir)
-                baselineRegistry <-
-                    requireRegistry [readFileTool env]
                 case workload of
                     Baseline ->
-                        runBenchmark
+                        runWithTool
                             workloadArg
                             workload
                             fileMiB
                             tailMillis
                             sampleCount
-                            env
-                            baselineRegistry
+                            (withDefaultArgumentInterpreter (readFileTool env))
                             Nothing
                     _ ->
-                        do
-                            cache <- newReadFileSpeculation env
-                            let tool =
-                                    readFileToolWithSpeculation env (Just cache)
-                            bracket
-                                (newToolSpeculationRuntime [tool])
-                                closeToolSpeculationRuntime
-                                \runtime -> do
-                                    warmWorkspaceIndex cache
-                                    registry <- requireRegistry [tool]
-                                    runBenchmark
-                                        workloadArg
-                                        workload
-                                        fileMiB
-                                        tailMillis
-                                        sampleCount
-                                        env
-                                        registry
-                                        (Just (cache, runtime))
+                        bracket
+                            (newReadFileSpeculation env)
+                            closeReadFileSpeculation
+                            \cache -> do
+                                let tool =
+                                        readFileToolWithSpeculation env (Just cache)
+                                runWithTool
+                                    workloadArg
+                                    workload
+                                    fileMiB
+                                    tailMillis
+                                    sampleCount
+                                    tool
+                                    (Just cache)
         _ ->
             die $
                 "usage: speculative-read-file-bench "
@@ -145,18 +145,51 @@ parseWorkload = \case
     other -> die ("unknown mode: " <> other)
 
 parsePositive :: String -> String -> IO Int
-parsePositive label raw =
-    case reads raw of
+parsePositive label =
+    parseBounded label 1 maxBound
+
+parsePositiveUpTo :: String -> Int -> String -> IO Int
+parsePositiveUpTo label upper =
+    parseBounded label 1 upper
+
+parseNonNegativeUpTo :: String -> Int -> String -> IO Int
+parseNonNegativeUpTo label upper =
+    parseBounded label 0 upper
+
+parseBounded :: String -> Int -> Int -> String -> IO Int
+parseBounded label lower upper raw =
+    case reads raw :: [(Integer, String)] of
         [(value, "")]
-            | value > 0 -> pure value
+            | value >= fromIntegral lower
+            , value <= fromIntegral upper ->
+                pure (fromInteger value)
         _ -> die ("invalid " <> label <> ": " <> raw)
 
-parseNonNegative :: String -> String -> IO Int
-parseNonNegative label raw =
-    case reads raw of
-        [(value, "")]
-            | value >= 0 -> pure value
-        _ -> die ("invalid " <> label <> ": " <> raw)
+runWithTool
+    :: String
+    -> Workload
+    -> Int
+    -> Int
+    -> Int
+    -> AppTool
+    -> Maybe ReadFileSpeculation
+    -> IO ()
+runWithTool workloadArg workload fileMiB tailMillis sampleCount tool cache = do
+    registry <- requireRegistry [tool]
+    bracket
+        (newToolSpeculationRuntime [tool])
+        closeToolSpeculationRuntime
+        \runtime -> do
+            mapM_ warmWorkspaceIndex cache
+            runBenchmark
+                workloadArg
+                workload
+                fileMiB
+                tailMillis
+                sampleCount
+                registry
+                cache
+                runtime
 
 runBenchmark
     :: String
@@ -164,22 +197,21 @@ runBenchmark
     -> Int
     -> Int
     -> Int
-    -> ToolEnv
     -> ToolRegistry
-    -> Maybe (ReadFileSpeculation, ToolSpeculationRuntime)
+    -> Maybe ReadFileSpeculation
+    -> ToolSpeculationRuntime
     -> IO ()
-runBenchmark workloadArg workload fileMiB tailMillis sampleCount env registry
-        speculation = do
+runBenchmark workloadArg workload fileMiB tailMillis sampleCount registry cache
+        runtime = do
     samples <- forM [1 .. sampleCount] \sampleIndex -> do
-        mapM_ (resetToolSpeculationRuntime . snd) speculation
+        resetToolSpeculationRuntime runtime
         let callId = "benchmark-" <> Text.pack (show sampleIndex)
         measure $
             runWorkload
                 workload
                 tailMillis
-                env
                 registry
-                speculation
+                runtime
                 callId
     let distinctChecksums = uniqueSorted (map (.checksum) samples)
     unless (length distinctChecksums == 1) $
@@ -187,8 +219,8 @@ runBenchmark workloadArg workload fileMiB tailMillis sampleCount env registry
     let result = median samples
     metrics <-
         traverse
-            (readReadFileSpeculationMetrics . fst)
-            speculation
+            readReadFileSpeculationMetrics
+            cache
     let (started, hits, misses) = case metrics of
             Nothing -> (0, 0, 0)
             Just values ->
@@ -213,53 +245,39 @@ runBenchmark workloadArg workload fileMiB tailMillis sampleCount env registry
 runWorkload
     :: Workload
     -> Int
-    -> ToolEnv
     -> ToolRegistry
-    -> Maybe (ReadFileSpeculation, ToolSpeculationRuntime)
+    -> ToolSpeculationRuntime
     -> Text
     -> IO Int
-runWorkload workload tailMillis _env registry speculation callId = do
+runWorkload workload tailMillis registry runtime callId = do
     let arguments = readArguments benchmarkTarget
         call = functionToolCall callId "read_file" arguments
         delay = when (tailMillis > 0) (threadDelay (tailMillis * 1000))
+    observeToolArgumentEvent runtime $
+        outputItemAdded (Just callId) (Just 0) callId ""
     case workload of
-        Baseline -> delay
+        Baseline ->
+            observeToolArgumentEvent runtime $
+                argumentsDelta (Just callId) (Just 0) arguments
         SpeculativeComplete ->
-            withRuntime speculation \runtime -> do
-                observeToolArgumentEvent runtime $
-                    outputItemAdded (Just callId) (Just 0) callId ""
-                observeToolArgumentEvent runtime $
-                    argumentsDelta
-                        (Just callId)
-                        (Just 0)
-                        arguments
-                delay
-                finishStream runtime (Just callId) call
+            observeToolArgumentEvent runtime $
+                argumentsDelta (Just callId) (Just 0) arguments
         SpeculativePrefix ->
-            withRuntime speculation \runtime -> do
-                observeToolArgumentEvent runtime $
-                    outputItemAdded (Just callId) (Just 0) callId ""
-                observeToolArgumentEvent runtime $
-                    argumentsDelta
-                        (Just callId)
-                        (Just 0)
-                        "{\"target_file\":\"bench/spec"
-                delay
-                finishStream runtime (Just callId) call
+            observeToolArgumentEvent runtime $
+                argumentsDelta
+                    (Just callId)
+                    (Just 0)
+                    "{\"target_file\":\"bench/spec"
+    delay
+    finishStream runtime (Just callId) call
     output <-
-        case speculation of
-            Just (_, runtime) ->
-                takeToolSpeculation runtime call >>= \case
-                    Just result -> pure (formatToolResult result)
-                    Nothing -> dispatchNormally call
+        takeToolSpeculation runtime call >>= \case
+            Just result -> pure (formatToolResult result)
             Nothing -> dispatchNormally call
     unless ("→" `Text.isInfixOf` output) $
         die ("unexpected read_file result: " <> Text.unpack output)
     evaluate (checksumText output)
   where
-    withRuntime Nothing _ = die "speculative mode requires a runtime"
-    withRuntime (Just (_, runtime)) action = action runtime
-
     dispatchNormally call = do
         result <-
             dispatchRegisteredToolCall defaultLoopDispatch registry call

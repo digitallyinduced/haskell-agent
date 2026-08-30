@@ -23,11 +23,13 @@ import Agent.Tools.Types
     , defaultToolEnv
     , dispatchRegisteredToolCall
     , mkToolRegistry
+    , setToolRootAccessRequest
     )
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -293,6 +295,47 @@ spec = describe "read_file speculation" do
             metrics <- readReadFileSpeculationMetrics cache
             metrics.speculativeReadsCancelled `shouldBe` 1
 
+    it "defers external-root access requests until the tool is dispatched" do
+        withTempDir \workspace ->
+            withTempDir \external -> do
+                let target = external </> "external.txt"
+                    callId = "call-external"
+                    arguments = readArguments (Text.pack target)
+                Text.writeFile target "external"
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                requests <- newIORef (0 :: Int)
+                setToolRootAccessRequest env $ Just \_ -> do
+                    modifyIORef' requests (+ 1)
+                    pure True
+                bracket
+                    (newReadFileSpeculation env)
+                    closeReadFileSpeculation
+                    \cache -> do
+                        let tool = readFileToolWithSpeculation env (Just cache)
+                        bracket
+                            (newToolSpeculationRuntime [tool])
+                            closeToolSpeculationRuntime
+                            \runtime -> do
+                                observeToolArgumentEvent runtime $
+                                    outputItemAdded
+                                        (Just "item-external")
+                                        (Just 0)
+                                        callId
+                                        ""
+                                observeToolArgumentEvent runtime $
+                                    argumentsDelta
+                                        (Just "item-external")
+                                        (Just 0)
+                                        arguments
+                                waitForToolSpeculation runtime
+                                waitForReadFileSpeculation cache
+
+                                readIORef requests `shouldReturn` 0
+                                retainRead runtime callId arguments
+                                dispatchRead env cache runtime callId arguments
+                                    `shouldReturn` "1→external"
+                                readIORef requests `shouldReturn` 1
+
     it "caps concurrent speculative reads" do
         withSpeculation \dir _ cache runtime -> do
             forM_ [1 :: Int .. 5] \index -> do
@@ -355,6 +398,45 @@ spec = describe "read_file speculation" do
             metrics <- readReadFileSpeculationMetrics cache
             metrics.speculativeReadsStarted `shouldBe` 5
 
+    it "keeps an injected cache usable across speculation runtimes" do
+        withTempDir \dir -> do
+            Text.writeFile (dir </> "shared.txt") "shared"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newReadFileSpeculation env)
+                closeReadFileSpeculation
+                \cache -> do
+                    let tool = readFileToolWithSpeculation env (Just cache)
+                        runOnce callId =
+                            bracket
+                                (newToolSpeculationRuntime [tool])
+                                closeToolSpeculationRuntime
+                                \runtime -> do
+                                    let itemId = Just ("item-" <> callId)
+                                        arguments = readArguments "shared.txt"
+                                    observeToolArgumentEvent runtime $
+                                        outputItemAdded itemId (Just 0) callId ""
+                                    observeToolArgumentEvent runtime $
+                                        argumentsDelta
+                                            itemId
+                                            (Just 0)
+                                            arguments
+                                    waitForToolSpeculation runtime
+                                    waitForReadFileSpeculation cache
+                                    retainRead runtime callId arguments
+                                    dispatchRead env cache runtime callId arguments
+                                        `shouldReturn` "1→shared"
+
+                    runOnce "call-first-runtime"
+                    runOnce "call-second-runtime"
+                    metrics <- readReadFileSpeculationMetrics cache
+                    ( metrics.speculativeReadsStarted
+                        , metrics.speculativeReadHits
+                        , metrics.speculativeReadMisses
+                        , metrics.speculativeReadsCancelled
+                        )
+                        `shouldBe` (2, 2, 0, 0)
+
 withSpeculation
     :: (FilePath
         -> ToolEnv
@@ -377,12 +459,15 @@ withPreparedSpeculation prepare action =
     withTempDir \dir -> do
         prepare dir
         env <- defaultToolEnv (unsafeEncodeUtf dir)
-        cache <- newReadFileSpeculation env
-        let tool = readFileToolWithSpeculation env (Just cache)
         bracket
-            (newToolSpeculationRuntime [tool])
-            closeToolSpeculationRuntime
-            (action dir env cache)
+            (newReadFileSpeculation env)
+            closeReadFileSpeculation
+            \cache -> do
+                let tool = readFileToolWithSpeculation env (Just cache)
+                bracket
+                    (newToolSpeculationRuntime [tool])
+                    closeToolSpeculationRuntime
+                    (action dir env cache)
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do
