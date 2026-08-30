@@ -49,6 +49,8 @@ import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -84,20 +86,54 @@ instance Show FileAttachment where
             <> ", fileByteLength = " <> show (ByteString.length file.fileBytes)
             <> " }"
 
+-- | A provider-neutral user attachment, retained in source order.
+data TurnAttachment
+    = ImageAttachmentItem !ImageAttachment
+    | FileAttachmentItem !FileAttachment
+    deriving (Eq, Show)
+
+-- | One input supplied to the provider-neutral agent loop.
 data TurnInput
     = UserMessage Text
     | AgentMessage InterAgentMessage
-    | UserMultimodal
-        { userText :: !Text
-        , userImages :: ![ImageAttachment]
-        }
-    | UserMultimodalFiles
-        { userText :: !Text
-        , userImages :: ![ImageAttachment]
-        , userFiles :: ![FileAttachment]
-        }
+    | UserMessageWithAttachments !Text !(NonEmpty TurnAttachment)
     | CompletedTool ToolCallResult
     deriving (Eq, Show)
+
+-- | Build a user message, using the text-only representation when the
+-- attachment list is empty.
+userMessageWithAttachments :: Text -> [TurnAttachment] -> TurnInput
+userMessageWithAttachments text =
+    maybe (UserMessage text) (UserMessageWithAttachments text)
+        . NonEmpty.nonEmpty
+
+-- | Images attached to a user input, in source order.
+turnInputImages :: TurnInput -> [ImageAttachment]
+turnInputImages = \case
+    UserMessageWithAttachments _ attachments ->
+        [ image
+        | ImageAttachmentItem image <- NonEmpty.toList attachments
+        ]
+    _ -> []
+
+-- | Files attached to a user input, in source order.
+turnInputFiles :: TurnInput -> [FileAttachment]
+turnInputFiles = \case
+    UserMessageWithAttachments _ attachments ->
+        [ file
+        | FileAttachmentItem file <- NonEmpty.toList attachments
+        ]
+    _ -> []
+
+-- | Transform user-authored text without changing attachments or other input
+-- variants.
+mapTurnInputUserText :: (Text -> Text) -> TurnInput -> TurnInput
+mapTurnInputUserText transform = \case
+    UserMessage text ->
+        UserMessage (transform text)
+    UserMessageWithAttachments text attachments ->
+        UserMessageWithAttachments (transform text) attachments
+    other -> other
 
 -- | Provider-reported token counts for one model response. @inputTokens@
 -- typically includes any cached prefix; @cachedTokens@ is that subset when

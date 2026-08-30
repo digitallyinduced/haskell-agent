@@ -36,6 +36,7 @@ import Agent.Loop
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
+    , TurnAttachment(..)
     , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
@@ -64,6 +65,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.IORef (atomicModifyIORef', newIORef)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
@@ -282,9 +284,8 @@ turnInputToItem :: TurnInput -> ResponseItem
 turnInputToItem = \case
     UserMessage text -> userMessageItem text
     AgentMessage message -> agentMessageItem message
-    UserMultimodal{userText, userImages} -> multimodalUserItem userText userImages
-    UserMultimodalFiles{userText, userImages, userFiles} ->
-        multimodalFilesItem userText userImages userFiles
+    UserMessageWithAttachments text attachments ->
+        userMessageWithAttachmentsItem text attachments
     CompletedTool result -> toolResultToItem result
 
 userMessageItem :: Text -> ResponseItem
@@ -298,13 +299,15 @@ userMessageItem text = MessageItem ResponseMessage
 
     }
 
-multimodalFilesItem :: Text -> [ImageAttachment] -> [FileAttachment] -> ResponseItem
-multimodalFilesItem text images files = MessageItem ResponseMessage
+userMessageWithAttachmentsItem
+    :: Text
+    -> NonEmpty.NonEmpty TurnAttachment
+    -> ResponseItem
+userMessageWithAttachmentsItem text attachments = MessageItem ResponseMessage
     { messageId = Nothing
     , content = MessageContentParts
         ( InputTextPart text Nothing
-        : map imageAttachmentPart images
-        <> map fileAttachmentPart files
+        : map attachmentPart (NonEmpty.toList attachments)
         )
     , role = RoleUser
     , status = Nothing
@@ -333,20 +336,10 @@ agentMessageContent message = case message.messageContent of
             Nothing
         , EncryptedContentPart encrypted
         ]
-
-multimodalUserItem :: Text -> [ImageAttachment] -> ResponseItem
-multimodalUserItem text images = MessageItem ResponseMessage
-    { messageId = Nothing
-    , content = MessageContentParts
-        ( InputTextPart text Nothing
-        : map imageAttachmentPart images
-        )
-    , role = RoleUser
-    , status = Nothing
-    , phase = Nothing
-    , passthrough = Nothing
-
-    }
+attachmentPart :: TurnAttachment -> ResponseContentPart
+attachmentPart = \case
+    ImageAttachmentItem image -> imageAttachmentPart image
+    FileAttachmentItem file -> fileAttachmentPart file
 
 imageAttachmentPart :: ImageAttachment -> ResponseContentPart
 imageAttachmentPart ImageAttachment{imageMime, imageBytes} =

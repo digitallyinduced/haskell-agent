@@ -12,7 +12,8 @@ import Agent.CLI.ManagedTurn
 import Agent.Loop
     ( FileAttachment(..)
     , ImageAttachment(..)
-    , TurnInput(..)
+    , TurnAttachment(..)
+    , userMessageWithAttachments
     )
 import Agent.OsPath (fromText)
 import qualified Data.ByteString.Char8 as ByteString.Char8
@@ -104,31 +105,31 @@ spec = describe "Agent.CLI.ManagedTurn" do
                         }
             managedTurnInputs (fromText (Text.pack dir)) request
                 `shouldReturn`
-                    [ UserMultimodalFiles
-                        { userText = "summarize"
-                        , userImages =
-                            [ ImageAttachment
+                    [ userMessageWithAttachments
+                        "summarize"
+                        [ ImageAttachmentItem
+                            (ImageAttachment
                                 { imageMime = "image/test"
                                 , imageBytes = "image-one"
-                                }
-                            , ImageAttachment
+                                })
+                        , ImageAttachmentItem
+                            (ImageAttachment
                                 { imageMime = "image/test"
                                 , imageBytes = "image-two"
-                                }
-                            ]
-                        , userFiles =
-                            [ FileAttachment
+                                })
+                        , FileAttachmentItem
+                            (FileAttachment
                                 { fileName = Just "one.txt"
                                 , fileMime = "text/plain"
                                 , fileBytes = "file-one"
-                                }
-                            , FileAttachment
+                                })
+                        , FileAttachmentItem
+                            (FileAttachment
                                 { fileName = Just "two.txt"
                                 , fileMime = "text/plain"
                                 , fileBytes = "file-two"
-                                }
-                            ]
-                        }
+                                })
+                        ]
                     ]
 
 withManagedTempDir :: (FilePath -> IO a) -> IO a

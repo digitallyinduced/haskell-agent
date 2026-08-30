@@ -815,10 +815,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 images <- loadImagesFromPastedText text
                 let input = case images of
                         Just attached@(_:_) ->
-                            UserMultimodal
-                                { userText = "Image attached."
-                                , userImages = attached
-                                }
+                            userMessageWithAttachments
+                                "Image attached."
+                                (map ImageAttachmentItem attached)
                         _ -> UserMessage text
                 callbacks.runnerPreparePromptSkillInputs
                     env text [input] >>= \case
