@@ -1550,11 +1550,16 @@ replayUnsafeAuxiliaryFailure failure =
 
 replayUnsafeModelFailure :: ApiError -> ApiError
 replayUnsafeModelFailure failure =
-    ProviderError (UnknownErrorType "replay_unsafe")
+    ProviderError replayUnsafeType
         ( "provider failed after model output; refusing to replay: "
             <> Text.pack (show failure)
         )
         Nothing
+  where
+    replayUnsafeType
+        | isOpenAiWebSocketTransportFailure failure =
+            UnknownErrorType "replay_unsafe_websocket_transport"
+        | otherwise = UnknownErrorType "replay_unsafe"
 
 isInputFile :: ResponseContentPart -> Bool
 isInputFile = \case
