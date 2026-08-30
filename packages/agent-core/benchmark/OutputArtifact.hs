@@ -23,6 +23,7 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Exception (evaluate)
+import Control.Monad (when)
 import qualified Data.ByteString as ByteString
 import Data.List (find, sort)
 import qualified Data.Text as Text
@@ -75,6 +76,12 @@ main = do
     writeOutputArtifactDetailed env payload >>= \case
         Left err -> die (Text.unpack err)
         Right artifact -> do
+            compareOutputs "read" 
+                (legacyRead env artifact.artifactHandle)
+                (streamingRead env artifact.artifactHandle)
+            compareOutputs "search"
+                (legacySearch env artifact.artifactHandle)
+                (streamingSearch env artifact.artifactHandle)
             benchmark "legacy-read" samples $
                 legacyRead env artifact.artifactHandle
             benchmark "streaming-read" samples $
@@ -87,6 +94,14 @@ main = do
                 outputArtifactMetadata env artifact.artifactHandle
                     >>= either (die . Text.unpack) (pure . Text.pack . show)
     removeDirectoryRecursive root
+
+compareOutputs :: String -> IO Text.Text -> IO Text.Text -> IO ()
+compareOutputs label oldAction newAction = do
+    oldOutput <- oldAction
+    newOutput <- newAction
+    let checksumText = Text.foldl' checksum 5381
+    when (checksumText oldOutput /= checksumText newOutput) $
+        die (label <> " baseline and streaming outputs differ")
 
 parseArgs :: [String] -> IO (Int, Int)
 parseArgs args =
