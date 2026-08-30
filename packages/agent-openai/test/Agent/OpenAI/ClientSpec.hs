@@ -538,6 +538,20 @@ spec = do
                         (helloRequest "hi")
                 extractAssistantText response `shouldBe` Just "mislabeled-sse"
 
+        it "sniffs JSON from a proxy that labels it text/event-stream" do
+            recorded <- newIORef []
+            let handler _request =
+                    pure $ jsonCompletedWithContentType
+                        "text/event-stream"
+                        "mislabeled-json"
+            withMockResponses recorded handler \baseUrl -> do
+                response <- expectRight =<<
+                    createCodexMessageWithProviderAt
+                        baseUrl
+                        (staticBearerProvider "router-key")
+                        (helloRequest "hi")
+                extractAssistantText response `shouldBe` Just "mislabeled-json"
+
         it "sniffs mislabeled SSE whose first line is an id field" do
             recorded <- newIORef []
             let handler _request =
@@ -684,6 +698,13 @@ jsonCompleted text = jsonResponse
     []
     [assistantMessage text]
 
+jsonCompletedWithContentType :: BS.ByteString -> Text -> Wai.Response
+jsonCompletedWithContentType contentType text =
+    jsonResponseWithContentType
+        contentType
+        []
+        [assistantMessage text]
+
 jsonFunctionCall :: HTTP.ResponseHeaders -> Text -> Wai.Response
 jsonFunctionCall headers callId = jsonResponse
     headers
@@ -697,8 +718,16 @@ jsonFunctionCall headers callId = jsonResponse
     ]
 
 jsonResponse :: HTTP.ResponseHeaders -> [Aeson.Value] -> Wai.Response
-jsonResponse headers output = Wai.responseLBS HTTP.status200
-    (("Content-Type", "application/json") : headers)
+jsonResponse = jsonResponseWithContentType "application/json"
+
+jsonResponseWithContentType
+    :: BS.ByteString
+    -> HTTP.ResponseHeaders
+    -> [Aeson.Value]
+    -> Wai.Response
+jsonResponseWithContentType contentType headers output =
+    Wai.responseLBS HTTP.status200
+    (("Content-Type", contentType) : headers)
     (Aeson.encode (Aeson.object
         [ "id" .= ("resp-json" :: Text)
         , "created_at" .= (0 :: Int)
