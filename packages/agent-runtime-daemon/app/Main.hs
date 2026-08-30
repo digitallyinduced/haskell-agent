@@ -5,4 +5,5 @@ import Agent.Runtime.Daemon
 main :: IO ()
 main = do
     config <- defaultDaemonConfig
-    runDaemon config unavailableSupervisor
+    runner <- processTaskRunner
+    runTaskDaemon config runner

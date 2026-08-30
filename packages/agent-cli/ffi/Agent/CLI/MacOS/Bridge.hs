@@ -67,7 +67,7 @@ import Agent.CLI.MacOS.EngineMailbox
     , newEngineMailboxIO
     , readEngineCommand
     )
-import Agent.CLI.MacOS.TaskScheduler
+import Agent.Runtime.Daemon.TaskScheduler
     ( TaskIdentity(..)
     , selectRunnableTasks
     )

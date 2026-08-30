@@ -41,6 +41,8 @@ library
                     , Agent.Runtime.Daemon.Socket
                     , Agent.Runtime.Daemon.Supervisor
                     , Agent.Runtime.Daemon.Task
+                    , Agent.Runtime.Daemon.TaskAdapter
+                    , Agent.Runtime.Daemon.TaskScheduler
     build-depends:    aeson >= 2.0
                     , async
                     , base >= 4.17 && < 5
@@ -51,6 +53,7 @@ library
                     , filepath
                     , filelock
                     , network
+                    , process >= 1.6.18
                     , safe-exceptions
                     , stm
                     , text >= 2.0 && < 2.2
