@@ -6,6 +6,7 @@ import Control.Concurrent.STM
     ( TQueue
     , TMVar
     , atomically
+    , flushTQueue
     , newEmptyTMVarIO
     , newTQueueIO
     , readTQueue
@@ -37,6 +38,7 @@ import System.Posix.Files
     ( createSymbolicLink
     , fileMode
     , getFileStatus
+    , setFileMode
     )
 import System.Timeout (timeout)
 import Test.Hspec
@@ -821,13 +823,25 @@ main = hspec $ do
                             (serveConnection serverConfig firstJournal supervisor serverPeer)
                             $ \_ -> do
                                 handshake serverConfig clientPeer Nothing
+                                _ <- sendTaskCommand serverConfig clientPeer "limit" $
+                                    object
+                                        [ "version" .= (1 :: Int)
+                                        , "type" .= ("set_limit" :: Text)
+                                        , "limit" .= (1 :: Int)
+                                        ]
                                 _ <- sendTaskCommand serverConfig clientPeer "submit"
                                     (submitCommand "restart-task" "restart-session")
                                 timeout 1_000_000 (atomically (readTQueue firstStarted))
                                     `shouldReturn` Just (TaskId "restart-task")
+                                _ <- sendTaskCommand serverConfig clientPeer "submit-queued"
+                                    (submitCommand "queued-task" "queued-session")
+                                timeout 100_000 (atomically (readTQueue firstStarted))
+                                    `shouldReturn` Nothing
                 restartedJournal <- openJournal journalConfig
                 recovered <- snapshot restartedJournal
                 (.status) (recovered.tasks Map.! TaskId "restart-task")
+                    `shouldBe` TaskInterrupted
+                (.status) (recovered.tasks Map.! TaskId "queued-task")
                     `shouldBe` TaskInterrupted
                 retryGate <- newEmptyTMVarIO
                 retryStarted <- newTQueueIO
@@ -858,12 +872,91 @@ main = hspec $ do
                                         , "approval_id" .= ("approval-1" :: Text)
                                         , "decision" .= ("approve" :: Text)
                                         ])
-                                    >>= shouldSucceed
+                                    `shouldReturn` Left
+                                        "interactive approval resolution is unsupported by the daemon task adapter"
                                 running <- snapshot restartedJournal
                                 let retried =
                                         running.tasks Map.! TaskId "restart-task"
                                 retried.status `shouldBe` TaskRunning
                                 retried.attempt `shouldBe` 2
+
+        it "uses the actual agent-cli argv shape and bounds process output chunks" $
+            withSystemTempDirectory "daemon-process-runner" $ \directory -> do
+                now <- getCurrentTime
+                let executable = directory </> "agent-cli"
+                    argumentsPath = directory </> "arguments"
+                    task =
+                        DurableTask
+                            { taskId = TaskId "process"
+                            , sessionId = Just "session-id"
+                            , status = TaskRunning
+                            , description = "hello agent"
+                            , workingDirectory = "/tmp/project"
+                            , provider = Just "openai"
+                            , model = Just "gpt-5.6"
+                            , effort = Just "high"
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = []
+                            }
+                    expected =
+                        [ "--prompt"
+                        , "hello agent"
+                        , "--save-session"
+                        , "--resume"
+                        , "session-id"
+                        , "--cwd"
+                        , "/tmp/project"
+                        , "--provider"
+                        , "openai"
+                        , "--model"
+                        , "gpt-5.6"
+                        , "--effort"
+                        , "high"
+                        ]
+                writeFile executable $
+                    "#!/bin/sh\n"
+                        <> "printf '%s\\n' \"$@\" > "
+                        <> show argumentsPath
+                        <> "\n"
+                        <> "dd if=/dev/zero bs=20000 count=1 2>/dev/null | tr '\\\\0' x\n"
+                setFileMode executable 0o700
+                chunks <- newTQueueIO
+                result <-
+                    (processTaskRunnerFor executable).runTask task $
+                        atomically . writeTQueue chunks
+                result `shouldBe` Right ()
+                lines <$> readFile argumentsPath `shouldReturn` expected
+                captured <- atomically (flushTQueue chunks)
+                captured `shouldSatisfy` (not . null)
+                map Text.length captured `shouldSatisfy` all (<= 4_096)
+                sum (map Text.length captured) `shouldBe` 20_000
+
+        it "bounds task-runner output in the durable journal" $
+            withSystemTempDirectory "daemon-runner-log-bound" $ \directory -> do
+                let journalConfig =
+                        (defaultJournalConfig directory)
+                            { maximumTaskLogLines = 3
+                            , maximumTaskLogCharacters = 10
+                            }
+                    runner =
+                        TaskRunner
+                            { runTask = \_ logLine -> do
+                                mapM_ logLine (replicate 8 "12345")
+                                pure (Right ())
+                            }
+                journal <- openJournal journalConfig
+                withTaskAdapter journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit")
+                        (submitCommand "bounded-log" "bounded-session")
+                        >>= shouldSucceed
+                    waitForStatus journal (TaskId "bounded-log") TaskCompleted
+                saved <- snapshot journal
+                let retained = (.logTail) (saved.tasks Map.! TaskId "bounded-log")
+                length retained `shouldSatisfy` (<= 3)
+                sum (map Text.length retained) `shouldSatisfy` (<= 10)
 
 withSocketPair :: ((Socket, Socket) -> IO value) -> IO value
 withSocketPair =
@@ -883,7 +976,6 @@ blockingRunner started gates =
             case Map.lookup task.taskId gates of
                 Nothing -> pure (Left "missing test gate")
                 Just gate -> atomically (takeTMVar gate) >> pure (Right ())
-        , resolveApproval = \_ _ _ -> pure (Right ())
         }
 
 handshake :: ServerConfig -> Socket -> Maybe Sequence -> IO ()
