@@ -571,6 +571,8 @@ isPromotedKnownItem = \case
     ItemCompaction -> True
     ItemCompactionTrigger -> True
     ItemContextCompaction -> True
+    ItemComputerCall -> True
+    ItemComputerCallOutput -> True
     _ -> False
 
 insertOptionalJson

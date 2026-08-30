@@ -9,6 +9,8 @@ module Agent.CLI.ComputerUse
     , pointerScript
     , keyCombinationScript
     , parseDisplaySize
+    , parseSessionLocked
+    , validateComputerCall
     ) where
 
 import Agent.Loop (ImageAttachment(..))
@@ -28,6 +30,7 @@ import Agent.Tools.Types
     , ToolSchema(..)
     )
 import Control.Concurrent (threadDelay)
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally, tryAny)
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
@@ -35,7 +38,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isDigit)
+import Data.Char (isControl, isDigit)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -68,8 +71,7 @@ computerUseTool = AppTool
 
 executeComputerCall :: ComputerCall -> IO (Either Text Text)
 executeComputerCall call
-    | length call.computerActions > 128 =
-        pure (Left "Computer call exceeds the 128-action limit.")
+    | Left err <- validateComputerCall call = pure (Left err)
     | otherwise = do
         unlocked <- ensureUnlockedSession
         case unlocked of
@@ -100,6 +102,63 @@ executeComputerCall call
     run (Left err) _ = pure (Left err)
     run (Right ()) action = executeAction action
 
+validateComputerCall :: ComputerCall -> Either Text ()
+validateComputerCall call
+    | exceedsList 128 call.computerActions =
+        Left "Computer call exceeds the 128-action limit."
+    | exceedsList 64 call.pendingSafetyChecks =
+        Left "Computer call exceeds the 64-safety-check limit."
+    | Just err <- firstJust
+        (map validateSafetyCheck call.pendingSafetyChecks
+            <> map validateAction call.computerActions) =
+        Left err
+    | otherwise = Right ()
+
+validateSafetyCheck :: SafetyCheck -> Maybe Text
+validateSafetyCheck check
+    | exceedsText 256 check.safetyCheckId =
+        Just "Computer safety-check id exceeds 256 characters."
+    | maybe False (exceedsText 128) check.safetyCheckCode =
+        Just "Computer safety-check code exceeds 128 characters."
+    | maybe False (exceedsText 1024) check.safetyCheckMessage =
+        Just "Computer safety-check message exceeds 1024 characters."
+    | otherwise = Nothing
+
+validateAction :: ComputerAction -> Maybe Text
+validateAction = \case
+    ClickAction { clickButton, clickKeys }
+        | exceedsText 32 clickButton ->
+            Just "Computer mouse button exceeds 32 characters."
+        | otherwise -> validateKeys clickKeys
+    DoubleClickAction { doubleClickKeys } -> validateKeys doubleClickKeys
+    ScrollAction { scrollKeys } -> validateKeys scrollKeys
+    MoveAction { moveKeys } -> validateKeys moveKeys
+    DragAction { dragPath, dragKeys }
+        | exceedsList 1024 dragPath ->
+            Just "Computer drag path exceeds 1024 points."
+        | otherwise -> validateKeys dragKeys
+    KeypressAction keys -> validateKeys keys
+    UnknownComputerAction value
+        | exceedsText 128 value.tag ->
+            Just "Computer action type exceeds 128 characters."
+    _ -> Nothing
+
+validateKeys :: [Text] -> Maybe Text
+validateKeys keys
+    | exceedsList 16 keys = Just "Computer action exceeds the 16-key limit."
+    | any (exceedsText 64) keys =
+        Just "Computer key name exceeds 64 characters."
+    | otherwise = Nothing
+
+firstJust :: [Maybe value] -> Maybe value
+firstJust = foldr (<|>) Nothing
+
+exceedsList :: Int -> [value] -> Bool
+exceedsList limit = not . null . drop limit
+
+exceedsText :: Int -> Text -> Bool
+exceedsText limit = not . Text.null . Text.drop limit
+
 executeAction :: ComputerAction -> IO (Either Text ())
 executeAction = \case
     ScreenshotAction -> pure (Right ())
@@ -115,7 +174,7 @@ executeAction = \case
     action@MoveAction{} -> runPointerAction action
     action@DragAction{} -> runPointerAction action
     TypeAction value
-        | Text.length value > 8192 ->
+        | exceedsText 8192 value ->
             pure (Left "Computer text input exceeds the 8192-character limit.")
         | otherwise ->
             runJxa (keyboardPrelude <> typeTextCommand value)
@@ -133,6 +192,7 @@ runPointerAction =
 -- ambiguous mixed-scale/mixed-origin mappings across multiple displays.
 pointerScript :: ComputerAction -> Either Text Text
 pointerScript action = do
+    maybe (Right ()) Left (validateAction action)
     command <- case action of
         ClickAction { clickX, clickY, clickButton, clickKeys } -> do
             button <- buttonNumber clickButton
@@ -211,14 +271,15 @@ keyboardPrelude = Text.unlines
 
 keyCombinationScript :: [Text] -> Either Text Text
 keyCombinationScript [] = Left "Computer key combination is empty."
-keyCombinationScript rawKeys = do
-    let keys = map normalize rawKeys
-    flags <- modifierFlags (init keys)
-    command <- keyCommand flags (last keys)
-    pure (keyboardPrelude <> command)
+keyCombinationScript rawKeys
+    | Just err <- validateKeys rawKeys = Left err
+    | otherwise = do
+        flags <- modifierFlags (init rawKeys)
+        command <- keyCommand flags (Text.strip (last rawKeys))
+        pure (keyboardPrelude <> command)
   where
     keyCommand flags key =
-        case keyCode key of
+        case keyCode (normalize key) of
             Just code ->
                 Right ("key(" <> Text.pack (show code) <> "," <> flags <> ");")
             Nothing
@@ -226,7 +287,7 @@ keyCombinationScript rawKeys = do
                 , flags == "0" ->
                     Right (typeTextCommand key)
                 | Text.length key == 1
-                , Just code <- characterKeyCode key ->
+                , Just code <- characterKeyCode (normalize key) ->
                     Right
                         ("key(" <> Text.pack (show code) <> ","
                             <> flags <> ");")
@@ -383,10 +444,20 @@ ensureUnlockedSession = do
         Left exception -> Left (Text.pack (show exception))
         Right (ExitFailure _, _, stderr) ->
             Left (commandError "GUI session query" stderr)
-        Right (ExitSuccess, stdout, _)
-            | Text.toLower (Text.strip (Text.pack stdout)) == "true" ->
-                Left "Computer use is unavailable while the macOS session is locked."
-            | otherwise -> Right ()
+        Right (ExitSuccess, stdout, _) ->
+            case parseSessionLocked (Text.pack stdout) of
+                Right False -> Right ()
+                Right True ->
+                    Left
+                        "Computer use is unavailable while the macOS session is locked."
+                Left err -> Left err
+
+parseSessionLocked :: Text -> Either Text Bool
+parseSessionLocked value =
+    case Text.toLower (Text.strip value) of
+        "true" -> Right True
+        "false" -> Right False
+        _ -> Left "macOS returned an invalid GUI session lock state."
 
 runJxa :: Text -> IO (Either Text ())
 runJxa = runScript ["-l", "JavaScript"]
@@ -408,20 +479,26 @@ runScript arguments script = do
 summarizeComputerCall :: ComputerCall -> Text
 summarizeComputerCall call =
     Text.intercalate "; " $
-        map summary call.computerActions <> map safety call.pendingSafetyChecks
+        map summary (take 128 call.computerActions)
+            <> map safety (take 64 call.pendingSafetyChecks)
   where
     summary = \case
         ScreenshotAction -> "capture main-display screenshot"
         ClickAction { clickX, clickY, clickButton, clickKeys } ->
             withKeys clickKeys $
-                clickButton <> " click at " <> ints [clickX, clickY]
+                safeQuoted 32 clickButton <> " click at " <> ints [clickX, clickY]
         DoubleClickAction
             { doubleClickX, doubleClickY, doubleClickKeys } ->
             withKeys doubleClickKeys $
                 "double-click at " <> ints [doubleClickX, doubleClickY]
         TypeAction value ->
-            "type " <> Text.pack (show (Text.length value)) <> " characters"
-        KeypressAction keys -> "press " <> Text.intercalate "+" keys
+            let prefix = Text.take 8193 value
+                count = Text.length prefix
+            in if count > 8192
+                then "type more than 8192 characters"
+                else "type " <> Text.pack (show count) <> " characters"
+        KeypressAction keys ->
+            "press " <> Text.intercalate "+" (map (safeQuoted 64) (take 16 keys))
         ScrollAction { scrollDx, scrollDy, scrollKeys } ->
             withKeys scrollKeys $ "scroll by " <> ints [scrollDx, scrollDy]
         MoveAction { moveX, moveY, moveKeys } ->
@@ -430,15 +507,30 @@ summarizeComputerCall call =
         DragAction { dragPath, dragKeys } ->
             withKeys dragKeys $
                 "drag through "
-                    <> Text.pack (show (length dragPath))
-                    <> " points"
-        UnknownComputerAction value -> "unsupported " <> value.tag
+                    <> if exceedsList 1024 dragPath
+                        then "more than 1024 points"
+                        else
+                            Text.pack (show (length (take 1024 dragPath)))
+                                <> " points"
+        UnknownComputerAction value -> "unsupported " <> safeQuoted 128 value.tag
     safety check =
         "safety check "
-            <> maybe check.safetyCheckId id check.safetyCheckMessage
+            <> safeQuoted 1024
+                (maybe check.safetyCheckId id check.safetyCheckMessage)
     withKeys [] description = description
     withKeys keys description =
-        description <> " with " <> Text.intercalate "+" keys
+        description
+            <> " with "
+            <> Text.intercalate "+" (map (safeQuoted 64) (take 16 keys))
+
+safeQuoted :: Int -> Text -> Text
+safeQuoted limit value =
+    TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode $
+        Text.take limit (Text.map replaceControl value)
+  where
+    replaceControl character
+        | isControl character = ' '
+        | otherwise = character
 
 summarizeComputerToolCall :: ToolCall -> Maybe Text
 summarizeComputerToolCall call

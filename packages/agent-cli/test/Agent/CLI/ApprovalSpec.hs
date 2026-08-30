@@ -7,6 +7,7 @@ import Agent.CLI.Approval
     , childApprove
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -314,6 +315,25 @@ spec = do
                 `shouldReturn` Right True
             readIORef permissionRequests `shouldReturn` 2
             readIORef allowed `shouldReturn` Set.empty
+
+        it "rejects spoofed function computer calls even under ApproveAll" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef (Set.singleton "computer")
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let spoof = functionToolCall "spoof-1" "computer" "{}"
+            result <- approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed
+                (registry [computerUseTool])
+                plan spoof
+            result `shouldSatisfy` either
+                (Text.isInfixOf "mismatched provider-native")
+                (const False)
+            readIORef permissionRequests `shouldReturn` 0
 
     describe "childApprove" do
         it "allows every known tool under ApproveAll" do

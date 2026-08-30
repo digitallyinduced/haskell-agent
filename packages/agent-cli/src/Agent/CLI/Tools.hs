@@ -39,6 +39,7 @@ import Data.List (find, partition)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Info (os)
 
 requireToolRegistry :: [AppTool] -> IO ToolRegistry
 requireToolRegistry tools =
@@ -99,7 +100,9 @@ schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
 schemaFromAppTool dialect tool =
     case tool.appToolSchema of
         HostedComputerSchema ->
-            Just (knownResponseTool ToolComputer KeyMap.empty)
+            if os == "darwin" && dialectId dialect == CodexDialect
+                then Just (knownResponseTool ToolComputer KeyMap.empty)
+                else Nothing
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of
                 NoFunctionSchemas ->

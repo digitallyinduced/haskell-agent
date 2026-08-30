@@ -42,6 +42,7 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( ToolRegistry
     , lookupRegisteredTool
+    , toolAcceptsCall
     , toolAllowsWithoutPrompt
     )
 import Data.IORef
@@ -133,8 +134,21 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
     let toolName = canonicalToolName call.name
-    -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
-    case shellCommandBlocked toolName call.arguments of
+    -- A provider-native call kind may only reach its dedicated hosted schema.
+    -- Reject spoofed function/custom calls before yolo or remembered approval.
+    case lookupRegisteredTool call.name tools of
+        Just tool
+            | not (toolAcceptsCall tool call) -> do
+                let msg =
+                        "Rejected mismatched provider-native tool call kind for "
+                            <> call.name <> "."
+                report (ApprovalWarning msg)
+                pure (Left msg)
+        _ -> approveKnownKind policy planActive planPath toolName
+  where
+    approveKnownKind policy planActive planPath toolName = do
+      -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
+      case shellCommandBlocked toolName call.arguments of
         Just msg -> do
             report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)

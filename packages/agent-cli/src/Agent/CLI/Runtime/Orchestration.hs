@@ -401,6 +401,7 @@ import System.IO
     ( hIsTerminalDevice,
       stderr,
       stdin )
+import System.Info (os)
 import System.OsPath
     ( OsPath,
       decodeFS,
@@ -1935,6 +1936,7 @@ runAgentInitializedWithLock
             [ ComputerUse.computerUseTool
             | options.optComputerUse
             , provider == OpenAIProvider
+            , os == "darwin"
             ]
         allTools =
             coding.codingAppTools
