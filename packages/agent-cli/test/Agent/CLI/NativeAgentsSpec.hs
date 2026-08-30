@@ -197,6 +197,121 @@ spec = describe "provider-native agent tracking" do
             `shouldSatisfy` maybe False
                 ((== "done") . (.nativeAgentStatus))
 
+    it "does not let paired non-native outputs hide an older native pair" do
+        let call name identifier = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = identifier
+                , name
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output identifier = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = identifier
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding
+                        (Aeson.toEncoding ("done" :: String))
+                , status = Just ItemCompleted
+                }
+            unrelated =
+                concat
+                    [ [call "Read" identifier, output identifier]
+                | index <- [1 .. nativeAgentMaxEntries + 16]
+                    , let identifier = Text.pack ("other-" <> show index)
+                    ]
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    ([call "Agent" "native", output "native"] <> unrelated)
+                    emptyNativeAgentStore
+        nativeAgentLookup "native" restored
+            `shouldSatisfy` maybe False
+                ((== "done") . (.nativeAgentStatus))
+
+    it "keeps only the newest canonical pair for a reused call id" do
+        let pair index =
+                [ FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "reused"
+                    , name = "Agent"
+                    , namespace = Nothing
+                    , provider = Just "claude-code"
+                    , arguments =
+                        Text.pack
+                            ("{\"description\":\"revision-"
+                                <> show index
+                                <> "\"}")
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    }
+                , FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing
+                    , callId = "reused"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Just "claude-code"
+                    , output =
+                        rawJsonFromEncoding $
+                            Aeson.toEncoding $
+                                Text.pack ("result-" <> show index)
+                    , status = Just ItemCompleted
+                    }
+                ]
+            pairCount = nativeAgentMaxEntries * 4
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    (concatMap pair [1 .. pairCount])
+                    emptyNativeAgentStore
+            view = lookupView "reused" restored
+        nativeAgentStoreSize restored `shouldBe` 1
+        view.nativeAgentLabel
+            `shouldBe` Text.pack ("revision-" <> show pairCount)
+        nativeAgentTranscript view
+            `shouldBe` [Text.pack ("result-" <> show pairCount)]
+
+    it "does not decode oversized canonical call arguments for metadata" do
+        let call = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "oversized-arguments"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments =
+                    "{\"description\":\"untrusted\",\"model\":\"huge\","
+                        <> "\"prompt\":\""
+                        <> Text.replicate (128 * 1024) "x"
+                        <> "\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "oversized-arguments"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding
+                        (Aeson.toEncoding ("done" :: String))
+                , status = Just ItemCompleted
+                }
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    [call, output]
+                    emptyNativeAgentStore
+            view = lookupView "oversized-arguments" restored
+        view.nativeAgentLabel `shouldBe` "Agent"
+        view.nativeAgentModel `shouldBe` Nothing
+        nativeAgentTranscript view `shouldBe` ["done"]
+
     it "bounds terminal rows and retained output" do
         let payload = Text.replicate (nativeAgentPreviewBytes `div` 2) "x"
             tracked =
@@ -230,6 +345,62 @@ spec = describe "provider-native agent tracking" do
             (Text.pack ("running-" <> show (nativeAgentMaxEntries + 16)))
             tracked
             `shouldSatisfy` maybe False (const True)
+
+    it "bounds and accounts provider-controlled lifecycle metadata" do
+        let huge = Text.replicate (2 * 1024 * 1024) "x"
+            tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ NativeAgentStarted
+                        identifier
+                        Nothing
+                        (huge <> Text.pack (show index))
+                        (Just huge)
+                    | index <- [1 .. nativeAgentMaxEntries]
+                    , let identifier = Text.pack ("metadata-" <> show index)
+                    ]
+            views =
+                [ view
+                | identifier <- nativeAgentTargets tracked
+                , AgentNative nativeId <- [identifier]
+                , Just view <- [nativeAgentLookup nativeId tracked]
+                ]
+        nativeAgentStoreSize tracked `shouldBe` nativeAgentMaxEntries
+        nativeAgentStoreBytes tracked `shouldSatisfy` (> 0)
+        nativeAgentStoreBytes tracked
+            `shouldSatisfy` (<= nativeAgentAggregateBytes)
+        views `shouldSatisfy`
+            all
+                (\view ->
+                    Text.length view.nativeAgentLabel
+                        <= nativeAgentPreviewBytes `div` 4
+                        && maybe True
+                            ((<= nativeAgentPreviewBytes `div` 4) . Text.length)
+                            view.nativeAgentModel)
+
+    it "ignores identifiers too large to retain as map keys" do
+        let hugeIdentifier = Text.replicate (2 * 1024 * 1024) "x"
+            tracked =
+                applyNativeAgentEvent
+                    (NativeAgentStarted
+                        hugeIdentifier
+                        Nothing
+                        "untrusted"
+                        Nothing)
+                    emptyNativeAgentStore
+        nativeAgentStoreSize tracked `shouldBe` 0
+        nativeAgentStoreBytes tracked `shouldBe` 0
+
+    it "charges per-delta overhead for fragmented output" do
+        let deltas = replicate 1024 (NativeAgentOutput "fragmented" "x")
+            tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    deltas
+        nativeAgentStoreBytes tracked
+            `shouldSatisfy` (> 1024 * 4)
 
     it "retains only a bounded tail of one oversized native output" do
         let suffix = "newest-tail"

@@ -57,6 +57,21 @@ nativeAgentAggregateBytes = 16 * 1024 * 1024
 nativeAgentSelectedBytes :: Int
 nativeAgentSelectedBytes = 8 * 1024 * 1024
 
+nativeAgentSelectedOutputBytes :: Int
+nativeAgentSelectedOutputBytes =
+    nativeAgentSelectedBytes - 32 * 1024
+
+nativeAgentIdentifierBytes, nativeAgentModelBytes :: Int
+nativeAgentIdentifierBytes = 4 * 1024
+nativeAgentModelBytes = 4 * 1024
+
+nativeAgentArgumentsCodeUnits :: Int
+nativeAgentArgumentsCodeUnits = 64 * 1024
+
+nativeAgentEntryOverheadBytes, nativeOutputChunkOverheadBytes :: Int
+nativeAgentEntryOverheadBytes = 512
+nativeOutputChunkOverheadBytes = 256
+
 data NativeOutput = NativeOutput
     { outputChunks :: !(Seq Text)
     , outputBytes :: !Int
@@ -110,7 +125,9 @@ nativeAgentTargets =
 
 setNativeAgentSelection :: Maybe Text -> NativeAgentStore -> NativeAgentStore
 setNativeAgentSelection selected store =
-    normalizeStore store{storeSelected = selected}
+    normalizeStore store
+        { storeSelected = selected >>= boundedNativeAgentIdentifier
+        }
 
 applyNativeAgentEvent :: LoopEvent -> NativeAgentStore -> NativeAgentStore
 applyNativeAgentEvent event current =
@@ -122,49 +139,74 @@ applyNativeAgentEvent event current =
                 settleRunningNativeAgents NativeAgentCancelled current
             ResponseAttemptDiscarded ->
                 settleRunningNativeAgents NativeAgentCancelled current
-            NativeAgentStarted identifier parent label model ->
-                alterTouched identifier
-                    (\case
-                        Nothing ->
-                            newNativeAgentView
-                                NativeAgentLive identifier parent label model
-                        Just view ->
-                            view
-                                { nativeAgentParent = parent
-                                , nativeAgentLabel = label
-                                , nativeAgentModel = model
-                                , nativeAgentStatus = "running"
-                                , nativeAgentTerminal = Nothing
-                                , nativeAgentOrigin = NativeAgentLive
-                                })
-                    current
-            NativeAgentOutput identifier output ->
-                alterTouched identifier
-                    (\maybeView ->
-                        let view = fromMaybe
-                                (newNativeAgentView NativeAgentLive
-                                    identifier Nothing identifier Nothing)
-                                maybeView
-                        in view
-                            { nativeAgentOutput =
-                                appendOutput nativeAgentSelectedBytes output
-                                    view.nativeAgentOutput
-                            , nativeAgentOrigin = NativeAgentLive
-                            })
-                    current
-            NativeAgentFinished identifier status ->
-                alterTouched identifier
-                    (\maybeView ->
-                        (fromMaybe
-                            (newNativeAgentView NativeAgentLive
-                                identifier Nothing identifier Nothing)
-                            maybeView)
-                            { nativeAgentStatus = nativeAgentStatusText status
-                            , nativeAgentTerminal =
-                                Just (nativeAgentBlockState status)
-                            , nativeAgentOrigin = NativeAgentLive
-                            })
-                    current
+            NativeAgentStarted rawIdentifier rawParent rawLabel rawModel ->
+                case boundedNativeAgentIdentifier rawIdentifier of
+                    Nothing -> current
+                    Just identifier ->
+                        let parent =
+                                rawParent >>= boundedNativeAgentIdentifier
+                            label =
+                                boundedNativeAgentText
+                                    nativeAgentPreviewBytes
+                                    rawLabel
+                            model =
+                                boundedNativeAgentText nativeAgentModelBytes
+                                    <$> rawModel
+                        in alterTouched identifier
+                            (\case
+                                Nothing ->
+                                    newNativeAgentView
+                                        NativeAgentLive
+                                        identifier
+                                        parent
+                                        label
+                                        model
+                                Just view ->
+                                    view
+                                        { nativeAgentParent = parent
+                                        , nativeAgentLabel = label
+                                        , nativeAgentModel = model
+                                        , nativeAgentStatus = "running"
+                                        , nativeAgentTerminal = Nothing
+                                        , nativeAgentOrigin = NativeAgentLive
+                                        })
+                            current
+            NativeAgentOutput rawIdentifier output ->
+                case boundedNativeAgentIdentifier rawIdentifier of
+                    Nothing -> current
+                    Just identifier ->
+                        alterTouched identifier
+                            (\maybeView ->
+                                let view = fromMaybe
+                                        (newNativeAgentView NativeAgentLive
+                                            identifier Nothing identifier Nothing)
+                                        maybeView
+                                in view
+                                    { nativeAgentOutput =
+                                        appendOutput
+                                            nativeAgentSelectedOutputBytes
+                                            output
+                                            view.nativeAgentOutput
+                                    , nativeAgentOrigin = NativeAgentLive
+                                    })
+                            current
+            NativeAgentFinished rawIdentifier status ->
+                case boundedNativeAgentIdentifier rawIdentifier of
+                    Nothing -> current
+                    Just identifier ->
+                        alterTouched identifier
+                            (\maybeView ->
+                                (fromMaybe
+                                    (newNativeAgentView NativeAgentLive
+                                        identifier Nothing identifier Nothing)
+                                    maybeView)
+                                    { nativeAgentStatus =
+                                        nativeAgentStatusText status
+                                    , nativeAgentTerminal =
+                                        Just (nativeAgentBlockState status)
+                                    , nativeAgentOrigin = NativeAgentLive
+                                    })
+                            current
             _ -> current
 
 -- | Materialize presentation state only for the selected row. Other rows get
@@ -195,7 +237,7 @@ restoreNativeAgents selected items current =
         }
   where
     selectedIdentifier = case selected of
-        AgentNative identifier -> Just identifier
+        AgentNative identifier -> boundedNativeAgentIdentifier identifier
         _ -> Nothing
     (canonicalAgents, canonicalOrder) =
         canonicalNativeAgents selectedIdentifier items
@@ -241,8 +283,8 @@ canonicalNativeAgents
     :: Maybe Text
     -> [ResponseItem]
     -> (Map.Map Text NativeAgentView, Seq Text)
-canonicalNativeAgents selected =
-    go Map.empty Map.empty Seq.empty . reverse
+canonicalNativeAgents selected items =
+    go Map.empty Map.empty Seq.empty (reverse items)
   where
     go outputs agents order remaining
         | Map.size agents >= nativeAgentMaxEntries
@@ -254,31 +296,51 @@ canonicalNativeAgents selected =
                 item : rest -> case item of
                     FunctionCallOutputItem output
                         | output.provider == Just "claude-code"
-                        , Map.member output.callId outputs
+                        , Just identifier <-
+                            boundedNativeAgentIdentifier output.callId
+                        , Map.member identifier outputs
                             || Map.size outputs < nativeAgentMaxEntries
-                            || selected == Just output.callId ->
+                            || selected == Just identifier ->
                             go
-                                (Map.insert output.callId output outputs)
+                                (Map.insert identifier output outputs)
                                 agents
                                 order
                                 rest
                     FunctionCallItem call
-                        | isClaudeNativeCall call
-                        , Just output <- Map.lookup call.callId outputs ->
-                            let view = restoredView
-                                    (selected == Just output.callId)
-                                    call
-                                    output
-                                (nextAgents, nextOrder) =
-                                    insertCanonical call.callId view agents order
-                            in go
-                                (Map.delete call.callId outputs)
-                                nextAgents
-                                nextOrder
-                                rest
+                        | Just identifier <-
+                            boundedNativeAgentIdentifier call.callId ->
+                            case
+                                ( isClaudeNativeCall call
+                                , Map.lookup identifier outputs
+                                ) of
+                                (True, Just output) ->
+                                    let view = restoredView
+                                            (selected == Just identifier)
+                                            identifier
+                                            call
+                                            output
+                                        (nextAgents, nextOrder) =
+                                            insertCanonical
+                                                identifier
+                                                view
+                                                agents
+                                                order
+                                    in go
+                                        (Map.delete identifier outputs)
+                                        nextAgents
+                                        nextOrder
+                                        rest
+                                _ ->
+                                    go
+                                        (Map.delete identifier outputs)
+                                        agents
+                                        order
+                                        rest
                     _ -> go outputs agents order rest
 
     insertCanonical identifier view agents order
+        | Map.member identifier agents =
+            (agents, order)
         | Map.size agents < nativeAgentMaxEntries =
             (Map.insert identifier view agents, identifier :<| order)
         | selected == Just identifier =
@@ -298,12 +360,18 @@ canonicalNativeAgents selected =
                     else Just identifier)
             Nothing
 
-restoredView :: Bool -> FunctionCall -> FunctionCallOutput -> NativeAgentView
-restoredView selected call output =
+restoredView
+    :: Bool
+    -> Text
+    -> FunctionCall
+    -> FunctionCallOutput
+    -> NativeAgentView
+restoredView selected identifier call output =
     let outputBody
             | selected =
-                renderOutputBounded nativeAgentSelectedBytes output.output
+                renderOutputBounded nativeAgentSelectedOutputBytes output.output
             | otherwise = renderOutputPreview output.output
+        (description, model) = argumentMetadata call.arguments
         terminal = case output.status of
             Just ItemIncomplete -> BlockFailed
             Just (ItemStatusUnknown status)
@@ -313,16 +381,17 @@ restoredView selected call output =
             _ -> BlockComplete
         started = newNativeAgentView
             NativeAgentCanonical
-            call.callId
+            identifier
             Nothing
-            (fromMaybe call.name
-                (argumentText "description" call.arguments))
-            (argumentText "model" call.arguments)
+            (boundedNativeAgentText nativeAgentPreviewBytes $
+                fromMaybe call.name description)
+            (boundedNativeAgentText nativeAgentModelBytes
+                <$> model)
     in started
         { nativeAgentStatus =
             if terminal == BlockFailed then "error" else "done"
         , nativeAgentOutput =
-            appendOutput nativeAgentSelectedBytes outputBody
+            appendOutput nativeAgentSelectedOutputBytes outputBody
                 started.nativeAgentOutput
         , nativeAgentTerminal = Just terminal
         }
@@ -332,14 +401,22 @@ isClaudeNativeCall call =
     Text.toLower call.name `elem` ["agent", "task"]
         && call.provider == Just "claude-code"
 
-argumentText :: Text -> Text -> Maybe Text
-argumentText key raw = do
-    value <- either (const Nothing) Just $
-        Hermes.decodeEither
-            (Hermes.object (Hermes.atKey key Hermes.text))
-            (TextEncoding.encodeUtf8 raw)
-    let stripped = Text.strip value
-    if Text.null stripped then Nothing else Just stripped
+argumentMetadata :: Text -> (Maybe Text, Maybe Text)
+argumentMetadata raw
+    | Text.length raw > nativeAgentArgumentsCodeUnits = (Nothing, Nothing)
+    | otherwise =
+        either (const (Nothing, Nothing)) normalize $
+            Hermes.decodeEither decoder (TextEncoding.encodeUtf8 raw)
+  where
+    decoder = Hermes.object $
+        (,)
+            <$> Hermes.atKeyOptional "description" Hermes.text
+            <*> Hermes.atKeyOptional "model" Hermes.text
+    normalize (description, model) =
+        (nonEmpty description, nonEmpty model)
+    nonEmpty = (>>= \value ->
+        let stripped = Text.strip value
+        in if Text.null stripped then Nothing else Just stripped)
 
 renderOutput :: RawJson -> Text
 renderOutput value =
@@ -373,8 +450,7 @@ settleRunningNativeAgents
     -> NativeAgentStore
     -> NativeAgentStore
 settleRunningNativeAgents status store =
-    store
-        { storeAgents =
+    let agents =
             Map.map
                 (\view ->
                     if view.nativeAgentStatus /= "running"
@@ -385,6 +461,9 @@ settleRunningNativeAgents status store =
                                 Just (nativeAgentBlockState status)
                             })
                 store.storeAgents
+    in store
+        { storeAgents = agents
+        , storeBytes = retainedBytes agents
         }
 
 nativeAgentBlockState :: NativeAgentStatus -> BlockState
@@ -481,10 +560,10 @@ alterTouched
     -> NativeAgentStore
 alterTouched identifier update store =
     let oldBytes = maybe 0
-            ((.outputBytes) . (.nativeAgentOutput))
+            nativeAgentViewBytes
             (Map.lookup identifier store.storeAgents)
         next = update (Map.lookup identifier store.storeAgents)
-        nextBytes = next.nativeAgentOutput.outputBytes
+        nextBytes = nativeAgentViewBytes next
     in store
         { storeAgents = Map.insert identifier next store.storeAgents
         , storeOrder = touchOrder identifier store.storeOrder
@@ -510,7 +589,7 @@ appendOutput budget chunk output
                 , outputBytes =
                     saturatingNativeAdd
                         output.outputBytes
-                        (textBytes retainedChunk)
+                        (outputChunkBytes retainedChunk)
                 }
         in if chunkTruncated
             then appended { outputOmitted = True }
@@ -519,11 +598,13 @@ appendOutput budget chunk output
     -- Stream decoders may hand us a slice of a much larger event buffer.
     -- Copy only the tail which can survive the budget; copying a giant chunk
     -- in full before immediately trimming it would recreate the memory spike.
-    chunkTruncated = textBytes chunk > max 0 budget
+    chunkTruncated = outputChunkBytes chunk > max 0 budget
     retainedChunk =
         Text.copy $
             if chunkTruncated
-                then Text.takeEnd (max 0 budget `div` 4) chunk
+                then Text.takeEnd
+                    (max 0 (budget - nativeOutputChunkOverheadBytes) `div` 4)
+                    chunk
                 else chunk
 
 trimOutputTo :: Int -> NativeOutput -> NativeOutput
@@ -549,7 +630,7 @@ dropOldestTo budget = go
             case Seq.viewl chunks of
                 Seq.EmptyL -> (Seq.empty, 0)
                 chunk Seq.:< rest ->
-                    let chunkBytes = textBytes chunk
+                    let chunkBytes = outputChunkBytes chunk
                         excess = bytes - budget
                     in if chunkBytes <= excess
                         then go (bytes - chunkBytes) rest
@@ -559,7 +640,7 @@ dropOldestTo budget = go
                                 -- original backing array alive. Copy the
                                 -- retained tail so the cap is a real heap cap.
                                 suffix = Text.copy (Text.drop dropChars chunk)
-                                suffixBytes = textBytes suffix
+                                suffixBytes = outputChunkBytes suffix
                             in ( if Text.null suffix
                                     then rest
                                     else suffix :<| rest
@@ -578,6 +659,37 @@ textBytes :: Text -> Int
 textBytes text =
     let chars = Text.length text
     in if chars > maxBound `div` 4 then maxBound else chars * 4
+
+outputChunkBytes :: Text -> Int
+outputChunkBytes text
+    | Text.null text = 0
+    | otherwise =
+        saturatingNativeAdd nativeOutputChunkOverheadBytes (textBytes text)
+
+boundedNativeAgentIdentifier :: Text -> Maybe Text
+boundedNativeAgentIdentifier identifier
+    | Text.length bounded > codeUnitLimit = Nothing
+    | otherwise = Just (Text.copy identifier)
+  where
+    codeUnitLimit = nativeAgentIdentifierBytes `div` 4
+    bounded = Text.take (codeUnitLimit + 1) identifier
+
+boundedNativeAgentText :: Int -> Text -> Text
+boundedNativeAgentText budget =
+    Text.copy . Text.take (max 0 budget `div` 4)
+
+nativeAgentViewBytes :: NativeAgentView -> Int
+nativeAgentViewBytes view =
+    foldl'
+        saturatingNativeAdd
+        nativeAgentEntryOverheadBytes
+        [ textBytes view.nativeAgentId
+        , maybe 0 textBytes view.nativeAgentParent
+        , textBytes view.nativeAgentLabel
+        , maybe 0 textBytes view.nativeAgentModel
+        , textBytes view.nativeAgentStatus
+        , view.nativeAgentOutput.outputBytes
+        ]
 
 saturatingNativeAdd :: Int -> Int -> Int
 saturatingNativeAdd left right
@@ -599,10 +711,14 @@ pruneEntries store
                     { storeAgents = Map.delete identifier store.storeAgents
                     , storeOrder = Seq.filter (/= identifier) store.storeOrder
                     , storeBytes =
-                        store.storeBytes
-                            - maybe 0
-                                ((.outputBytes) . (.nativeAgentOutput))
-                                (Map.lookup identifier store.storeAgents)
+                        max 0
+                            ( store.storeBytes
+                                - maybe 0
+                                    nativeAgentViewBytes
+                                    (Map.lookup
+                                        identifier
+                                        store.storeAgents)
+                            )
                     }
   where
     protected = protectedAgentIds store
@@ -684,5 +800,5 @@ retainedBytes :: Map.Map Text NativeAgentView -> Int
 retainedBytes =
     Map.foldl'
         (\total view ->
-            saturatingNativeAdd total view.nativeAgentOutput.outputBytes)
+            saturatingNativeAdd total (nativeAgentViewBytes view))
         0
