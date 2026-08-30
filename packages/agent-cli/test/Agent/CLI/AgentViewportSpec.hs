@@ -320,6 +320,24 @@ spec = do
                     ])
                 `shouldBe` ["Edited nix/modules/telegram.nix"]
 
+        it "keeps a hydrated background shell running across reasoning items" do
+            let ui =
+                    responseItemsToUiState False
+                        [ functionCallItem
+                            "shell-1"
+                            "shell_command"
+                            "{\"command\":\"slow\"}"
+                            (Just ItemCompleted)
+                        , functionOutputText
+                            "shell-1"
+                            "Process still running.\nsession_id: 6\nfirst\n"
+                        , reasoningItem "Waiting for the command" "private detail"
+                        ]
+                blocks = toList ui.uiBlocks
+            map (.blockState) blocks
+                `shouldBe` [BlockRunning, BlockComplete]
+            ui.uiShellProcesses `shouldNotBe` mempty
+
     describe "responseItemStepPreviews" do
         it "coalesces tool calls with their outputs and returns newest first" do
             let steps =
@@ -491,6 +509,18 @@ functionOutputItem callId status =
         , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding ("ok" :: Text))
         , status
+        }
+
+functionOutputText :: Text -> Text -> ResponseItem
+functionOutputText callId output =
+    FunctionCallOutputItem FunctionCallOutput
+        { itemId = Nothing
+        , callId
+        , name = Nothing
+        , namespace = Nothing
+        , provider = Nothing
+        , output = rawJsonFromEncoding (Aeson.toEncoding output)
+        , status = Just ItemCompleted
         }
 
 agentMessageItem :: Text -> ResponseItem

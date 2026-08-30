@@ -732,6 +732,8 @@ appendReasoningItem status raw state =
                 previousTurnStart = state.uiTurnStartBlock
                 previousAttemptStart = state.uiAttemptStartBlock
                 previousToolCalls = state.uiToolCalls
+                previousShellProcesses = state.uiShellProcesses
+                previousShellPolls = state.uiShellPolls
                 streamed =
                     reduceUi
                         (UiLoop (ReasoningDelta text))
@@ -745,10 +747,15 @@ appendReasoningItem status raw state =
                         reduceUi
                             (UiTurnEnded (itemTerminalState status))
                             streamed
+                                { uiShellProcesses = Map.empty
+                                , uiShellPolls = Map.empty
+                                }
             in settled
                 { uiTurnStartBlock = previousTurnStart
                 , uiAttemptStartBlock = previousAttemptStart
                 , uiToolCalls = previousToolCalls
+                , uiShellProcesses = previousShellProcesses
+                , uiShellPolls = previousShellPolls
                 }
 
 reasoningStartIndex :: UiState -> Int

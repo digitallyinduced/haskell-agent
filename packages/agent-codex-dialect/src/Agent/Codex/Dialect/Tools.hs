@@ -275,7 +275,15 @@ runWriteStdin
     -> WriteStdinArgs
     -> IO (Either Text Text)
 runWriteStdin session args = do
-    let yieldMs = clampMs (fromMaybe 5000 args.yieldTimeMs)
+    let
+        requestedYield = fromMaybe 5000 args.yieldTimeMs
+        -- An empty interaction is a wait, not a command. Apply a minimum wait
+        -- so a model-supplied tiny value cannot create a hot loop of
+        -- write_stdin polls and tool results.
+        yieldMs
+            | maybe True Text.null args.chars =
+                min 300000 (max 5000 requestedYield)
+            | otherwise = clampMs requestedYield
     fmap renderShellResult <$> continueCodexShellCommand
         session
         args.sessionId
