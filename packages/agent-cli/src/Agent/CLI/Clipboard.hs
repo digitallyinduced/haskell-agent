@@ -34,9 +34,10 @@ import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist, getFileSize)
+import System.Directory (doesFileExist)
 import System.FilePath (takeExtension)
 import System.Info (os)
+import System.IO (IOMode(ReadMode), withBinaryFile)
 
 -- | What we could usefully take from the clipboard for /paste.
 data ClipboardContent
@@ -331,24 +332,24 @@ isImageExtension ext =
 
 readImageFile :: FilePath -> IO (Either Text ImageAttachment)
 readImageFile path = do
-    sizeResult <- tryAny (getFileSize path)
-    case sizeResult of
-        Left ex -> pure (Left (formatException ex))
-        Right size
-            | size > fromIntegral singleImageAttachmentByteLimit ->
-                pure (Left (oversizedImageError (Text.pack path) size))
-            | otherwise -> do
-                result <- tryAny (BS.readFile path)
-                pure $ case result of
-                    Left ex -> Left (formatException ex)
-                    Right bytes
-                        | BS.null bytes ->
-                            Left ("empty image file: " <> Text.pack path)
-                        | otherwise ->
-                            validateImageAttachment ImageAttachment
-                                { imageMime = mimeForPath path
-                                , imageBytes = bytes
-                                }
+    result <- tryAny $
+        withBinaryFile path ReadMode \handle ->
+            BS.hGet handle (singleImageAttachmentByteLimit + 1)
+    pure $ case result of
+        Left ex -> Left (formatException ex)
+        Right bytes
+            | BS.length bytes > singleImageAttachmentByteLimit ->
+                Left
+                    (oversizedImageError
+                        (Text.pack path)
+                        (fromIntegral (BS.length bytes)))
+            | BS.null bytes ->
+                Left ("empty image file: " <> Text.pack path)
+            | otherwise ->
+                validateImageAttachment ImageAttachment
+                    { imageMime = mimeForPath path
+                    , imageBytes = bytes
+                    }
 
 readImageFilesBounded
     :: [FilePath]
