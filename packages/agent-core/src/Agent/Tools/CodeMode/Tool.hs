@@ -225,14 +225,11 @@ buildNestedTools =
                         FreeformApplyPatchSchema -> CustomCallKind
                         FreeformGrammarSchema _ _ -> CustomCallKind
                         JsonFunctionSchema _ -> FunctionCallKind
-                        NonStrictJsonFunctionSchema _ -> FunctionCallKind
                         RawJsonFunctionSchema _ -> FunctionCallKind
                     , nestedDescription = tool.appToolDescription
                     , nestedNamespace = spec.nestedSpecNamespace
                     , nestedParameters = case tool.appToolSchema of
                         JsonFunctionSchema properties ->
-                            Just (parametersObjectLoose properties)
-                        NonStrictJsonFunctionSchema properties ->
                             Just (parametersObjectLoose properties)
                         RawJsonFunctionSchema value -> Just value
                         FreeformApplyPatchSchema -> Nothing

@@ -15,12 +15,13 @@ spec = do
         it "emits a function tool with the given name and description" $ do
             let tool = buildTool "search" "Find things." []
             case tool of
-                FunctionToolValue FunctionTool { name, description } -> do
+                FunctionToolValue FunctionTool { name, description, strict } -> do
                     name        `shouldBe` "search"
                     description `shouldBe` Just "Find things."
+                    strict      `shouldBe` Just False
                 _ -> expectationFailure "expected FunctionToolValue"
 
-        it "lists every property in required and makes application-optional fields nullable" $ do
+        it "keeps application-optional fields optional" $ do
             let tool = buildTool "t" "d"
                     [ PropertySchema { propertyName = "a", propertyType = PropertyString
                                      , required = True,  description = Nothing }
@@ -29,10 +30,9 @@ spec = do
                     , PropertySchema { propertyName = "c", propertyType = PropertyString
                                      , required = True,  description = Nothing }
                     ]
-            required_ tool `shouldBe` Just (Aeson.toJSON (["a", "b", "c"] :: [Text]))
+            required_ tool `shouldBe` Just (Aeson.toJSON (["a", "c"] :: [Text]))
             propertyType "a" tool `shouldBe` Just (Aeson.String "string")
-            propertyType "b" tool `shouldBe`
-                Just (Aeson.toJSON (["integer", "null"] :: [Text]))
+            propertyType "b" tool `shouldBe` Just (Aeson.String "integer")
             additionalProperties_ tool `shouldBe` Just (Aeson.Bool False)
 
         it "merges description into each property's schema object" $ do
@@ -91,7 +91,7 @@ spec = do
                         (Aeson.toJSON (["open", "closed"] :: [Text]))
                 other -> expectationFailure ("unexpected property value: " <> show other)
 
-        it "recursively renders optional object fields as required-but-nullable" $ do
+        it "recursively keeps optional object fields optional" $ do
             let tool = buildTool "t" "d"
                     [ PropertySchema
                         { propertyName = "filter"
@@ -107,14 +107,13 @@ spec = do
                 Just (Aeson.Object o) -> do
                     KeyMap.lookup "type" o `shouldBe` Just (Aeson.String "object")
                     KeyMap.lookup "required" o `shouldBe`
-                        Just (Aeson.toJSON (["key", "value"] :: [Text]))
+                        Just (Aeson.toJSON (["key"] :: [Text]))
                     nestedPropertyType "key" o `shouldBe` Just (Aeson.String "string")
-                    nestedPropertyType "value" o `shouldBe`
-                        Just (Aeson.toJSON (["integer", "null"] :: [Text]))
+                    nestedPropertyType "value" o `shouldBe` Just (Aeson.String "integer")
                     KeyMap.lookup "additionalProperties" o `shouldBe` Just (Aeson.Bool False)
                 other -> expectationFailure ("unexpected filter property: " <> show other)
 
-        it "makes optional arrays and their nested optional object fields nullable" $ do
+        it "keeps optional arrays and their nested object fields optional" $ do
             let tool = buildTool "t" "d"
                     [ PropertySchema
                         { propertyName = "entries"
@@ -128,27 +127,24 @@ spec = do
                     ]
             case propertyField "entries" tool of
                 Just (Aeson.Object entries) -> do
-                    KeyMap.lookup "type" entries `shouldBe`
-                        Just (Aeson.toJSON (["array", "null"] :: [Text]))
+                    KeyMap.lookup "type" entries `shouldBe` Just (Aeson.String "array")
                     case KeyMap.lookup "items" entries of
                         Just (Aeson.Object items) -> do
                             KeyMap.lookup "required" items `shouldBe`
-                                Just (Aeson.toJSON (["id", "note"] :: [Text]))
+                                Just (Aeson.toJSON (["id"] :: [Text]))
                             nestedPropertyType "id" items `shouldBe` Just (Aeson.String "string")
-                            nestedPropertyType "note" items `shouldBe`
-                                Just (Aeson.toJSON (["string", "null"] :: [Text]))
+                            nestedPropertyType "note" items `shouldBe` Just (Aeson.String "string")
                         other -> expectationFailure ("expected object items, got " <> show other)
                 other -> expectationFailure ("expected entries property, got " <> show other)
 
-        it "adds null to optional enum values" $ do
+        it "keeps optional enum values non-nullable" $ do
             let tool = buildTool "t" "d"
                     [ PropertySchema "status" (PropertyEnum ["open", "closed"]) False Nothing ]
             case propertyField "status" tool of
                 Just (Aeson.Object status) -> do
-                    KeyMap.lookup "type" status `shouldBe`
-                        Just (Aeson.toJSON (["string", "null"] :: [Text]))
+                    KeyMap.lookup "type" status `shouldBe` Just (Aeson.String "string")
                     KeyMap.lookup "enum" status `shouldBe`
-                        Just (Aeson.toJSON ([Just "open", Just "closed", Nothing] :: [Maybe Text]))
+                        Just (Aeson.toJSON (["open", "closed"] :: [Text]))
                 other -> expectationFailure ("expected status property, got " <> show other)
 
     describe "buildGrokTool" $ do

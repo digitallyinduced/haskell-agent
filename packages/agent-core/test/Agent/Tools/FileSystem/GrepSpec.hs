@@ -42,7 +42,7 @@ spec = describe "grepTool" do
     it "advertises only the Codex grep contract" do
         env <- defaultToolEnv (unsafeEncodeUtf ".")
         case (grepTool env).appToolSchema of
-            NonStrictJsonFunctionSchema properties ->
+            JsonFunctionSchema properties ->
                 map (.propertyName) properties `shouldBe`
                     [ "pattern", "path", "glob", "-B", "-A", "-C", "-i"
                     , "type", "head_limit", "multiline"

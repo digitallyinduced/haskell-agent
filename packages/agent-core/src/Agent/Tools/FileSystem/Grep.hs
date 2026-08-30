@@ -27,7 +27,7 @@ import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
-    , nonStrictJsonTool
+    , jsonTool
     , withToolResourceClaims
     )
 import Control.Applicative ((<|>))
@@ -98,7 +98,7 @@ grepArgsDecoder = objectArgs \object -> do
 
 grepTool :: ToolEnv -> AppTool
 grepTool env = withToolResourceClaims (grepClaims env) $
-    nonStrictJsonTool "grep" grepDescription
+    jsonTool "grep" grepDescription
     [ PropertySchema "pattern" PropertyString True $ Just
         "The regular expression pattern to search for in file contents (rg --regexp)"
     , PropertySchema "path" PropertyString False $ Just

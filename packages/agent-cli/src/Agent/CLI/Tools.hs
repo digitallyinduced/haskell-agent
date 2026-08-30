@@ -24,12 +24,12 @@ import Agent.Dialect
     , dialectToolLayout
     , grokBuildPublicToolName
     )
-import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.OpenAI.ImageGeneration
     ( imageGenerationNamespace
     , imageGenerationNamespaceDescription
     , imageGenerationToolName
     )
+import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
@@ -135,23 +135,6 @@ schemaFromAppTool dialect tool
                     Just (buildSchema buildTool parameters)
                 LooseFunctionSchemas ->
                     Just (buildSchema buildGrokTool parameters)
-        NonStrictJsonFunctionSchema parameters ->
-            case dialectFunctionSchemaStyle dialect of
-                NoFunctionSchemas ->
-                    Nothing
-                schemaStyle ->
-                    let (name, description, projectedParameters) =
-                            projectFunctionTool dialect tool parameters
-                    in Just (FunctionToolValue FunctionTool
-                        { name
-                        , description = Just description
-                        , parameters =
-                            Just . rawJsonFromEncoding . Aeson.toEncoding $
-                                parametersObjectLoose projectedParameters
-                        , strict = case schemaStyle of
-                            StrictFunctionSchemas -> Just False
-                            LooseFunctionSchemas -> Nothing
-                        })
         RawJsonFunctionSchema parameters ->
             Just (FunctionToolValue FunctionTool
                 { name = tool.appToolName
@@ -259,8 +242,6 @@ namespaceTool namespaceName namespaceDescription tools =
 
     parametersValue tool = case tool.appToolSchema of
         JsonFunctionSchema parameters -> parametersObjectLoose parameters
-        NonStrictJsonFunctionSchema parameters ->
-            parametersObjectLoose parameters
         RawJsonFunctionSchema parameters -> parameters
         FreeformApplyPatchSchema -> Aeson.object []
         FreeformGrammarSchema _ _ -> Aeson.object []
