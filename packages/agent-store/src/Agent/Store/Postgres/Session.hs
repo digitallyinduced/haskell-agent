@@ -2,6 +2,8 @@
 module Agent.Store.Postgres.Session
     ( SessionMetadata(..)
     , SessionLegacyTarget(..)
+    , SessionPromptSnapshot(..)
+    , SessionPromptEpoch(..)
     , TranscriptEffect(..)
     , SessionTurn(..)
     , SessionUsage(..)
@@ -13,9 +15,12 @@ module Agent.Store.Postgres.Session
     , SessionReadImplementation(..)
     , sessionSchemaStatements
     , sessionSearchIndexStatements
+    , sessionPromptEpochSchemaStatements
     , createSession
+    , createSessionWithInitialPromptEpoch
     , createSessionFromSnapshot
     , replaceSessionMetadata
+    , appendSessionPromptEpoch
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurns
@@ -23,6 +28,7 @@ module Agent.Store.Postgres.Session
     , loadSessionWithImplementation
     , loadSessions
     , loadSessionMetadata
+    , loadLatestSessionPromptEpoch
     , loadActiveSession
     , loadActiveSessionWithImplementation
     , SessionTurnPage(..)

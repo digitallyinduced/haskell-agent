@@ -69,6 +69,9 @@ spec = describe "PostgreSQL session schema" do
         ddl `shouldContainBytes` "USING gin (assistant_text gin_trgm_ops)"
         ddl `shouldContainBytes` "session_events_immutable"
         ddl `shouldContainBytes` "session_turns_immutable"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_prompt_epochs"
+        ddl `shouldContainBytes` "session_prompt_epochs_immutable"
 
     it "tracks restart-safe legacy imports" do
         let ddl = ByteString.intercalate "\n" sessionSchemaStatements
@@ -94,6 +97,41 @@ spec = describe "PostgreSQL session schema" do
                                 now = read "2026-08-23 12:00:00 UTC"
                                 metadata = testMetadata now
                                 turn = testTurn now
+                                promptMetadata = metadata
+                                    { sessionMetadataKey = "session-prompt"
+                                    }
+                                promptSnapshot = testPromptSnapshot now
+                            createSessionWithInitialPromptEpoch
+                                pool promptMetadata promptSnapshot
+                                `shouldReturn` Right True
+                            createSessionWithInitialPromptEpoch
+                                pool promptMetadata promptSnapshot
+                                `shouldReturn` Right False
+                            loadLatestSessionPromptEpoch
+                                pool "session-prompt"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionPromptEpoch
+                                            { sessionPromptEpochIndex = 0
+                                            , sessionPromptEpochSnapshot =
+                                                promptSnapshot
+                                            })
+                            let nextPrompt = promptSnapshot
+                                    { sessionPromptInstructions =
+                                        "updated instructions"
+                                    }
+                            appendSessionPromptEpoch
+                                pool "session-prompt" nextPrompt
+                                `shouldReturn` Right (Just 1)
+                            loadLatestSessionPromptEpoch
+                                pool "session-prompt"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionPromptEpoch
+                                            { sessionPromptEpochIndex = 1
+                                            , sessionPromptEpochSnapshot =
+                                                nextPrompt
+                                            })
                             createSession pool metadata
                                 `shouldReturn` Right True
                             appendSessionTurn pool turn metadata
@@ -502,6 +540,22 @@ testMetadata now = SessionMetadata
     , sessionMetadataLastRecap = Nothing
     , sessionMetadataLastTurnSummary = Nothing
     , sessionMetadataLastRecapMainTurns = 0
+    }
+
+testPromptSnapshot :: UTCTime -> SessionPromptSnapshot
+testPromptSnapshot now = SessionPromptSnapshot
+    { sessionPromptVersion = 1
+    , sessionPromptCreatedAt = now
+    , sessionPromptProvider = "openai"
+    , sessionPromptConnection = "openai"
+    , sessionPromptModel = "gpt-test"
+    , sessionPromptDialect = "openai"
+    , sessionPromptCwd = "/tmp/project"
+    , sessionPromptInstructions = "persisted instructions"
+    , sessionPromptTools = "[{\"type\":\"function\",\"name\":\"lookup\"}]"
+    , sessionPromptGeneratedContext = Just "project context"
+    , sessionPromptGrokContext = Nothing
+    , sessionPromptCacheKey = "session-prompt"
     }
 
 testTurn :: UTCTime -> SessionTurn

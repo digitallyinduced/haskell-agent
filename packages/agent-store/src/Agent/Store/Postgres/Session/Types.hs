@@ -3,6 +3,8 @@
 module Agent.Store.Postgres.Session.Types
     ( SessionMetadata(..)
     , SessionLegacyTarget(..)
+    , SessionPromptSnapshot(..)
+    , SessionPromptEpoch(..)
     , TranscriptEffect(..)
     , SessionTurn(..)
     , SessionUsage(..)
@@ -27,6 +29,35 @@ data SessionLegacyTarget = SessionLegacyTarget
     , sessionLegacyConnection :: !Text
     , sessionLegacyEffectiveModel :: !Text
     , sessionLegacyDialect :: !Text
+    }
+    deriving (Eq, Show)
+
+-- | Provider-visible request prefix captured before a turn can be sent.
+--
+-- Tool schemas are stored as canonical JSON text by the caller. Keeping the
+-- store representation opaque avoids coupling persistence to a provider's
+-- evolving tool sum type while preserving schema order exactly.
+data SessionPromptSnapshot = SessionPromptSnapshot
+    { sessionPromptVersion :: !Int32
+    , sessionPromptCreatedAt :: !UTCTime
+    , sessionPromptProvider :: !Text
+    , sessionPromptConnection :: !Text
+    , sessionPromptModel :: !Text
+    , sessionPromptDialect :: !Text
+    , sessionPromptCwd :: !Text
+    , sessionPromptInstructions :: !Text
+    , sessionPromptTools :: !Text
+    , sessionPromptGeneratedContext :: !(Maybe Text)
+    , sessionPromptGrokContext :: !(Maybe Text)
+    , sessionPromptCacheKey :: !Text
+    }
+    deriving (Eq, Show)
+
+-- | One immutable prompt epoch. A session gets a new epoch only when its
+-- provider-visible prefix or pending generated context intentionally changes.
+data SessionPromptEpoch = SessionPromptEpoch
+    { sessionPromptEpochIndex :: !Int64
+    , sessionPromptEpochSnapshot :: !SessionPromptSnapshot
     }
     deriving (Eq, Show)
 

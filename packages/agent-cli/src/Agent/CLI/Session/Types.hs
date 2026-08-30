@@ -2,6 +2,8 @@
 module Agent.CLI.Session.Types
     ( SessionMeta(..)
     , sessionMetaDecoder
+    , SessionPromptSnapshot(..)
+    , sessionPromptSnapshotDecoder
     , SessionTransfer(..)
     , sessionTransferDecoder
     , LegacySubagentTarget(..)
@@ -47,6 +49,7 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Responses.Types.Items (responseItemDecoder)
+import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (TranscriptEffect(..))
 import Control.Monad (unless, when)
@@ -83,7 +86,79 @@ data SessionMeta = SessionMeta
     , metaLastRecap :: !(Maybe Text)
     , metaLastTurnSummary :: !(Maybe Text)
     , metaLastRecapMainTurns :: !Int
+    , metaPromptSnapshot :: !(Maybe SessionPromptSnapshot)
     } deriving (Eq, Show)
+
+-- | Immutable provider-visible prefix for the latest prompt epoch.
+--
+-- Generated context is retained for the crash window before its first
+-- transcript turn becomes durable. It is not blindly re-appended once the
+-- transcript proves that context was consumed.
+data SessionPromptSnapshot = SessionPromptSnapshot
+    { promptSnapshotVersion :: !Int
+    , promptSnapshotCreatedAt :: !UTCTime
+    , promptSnapshotProvider :: !Provider
+    , promptSnapshotConnection :: !Text
+    , promptSnapshotModel :: !Text
+    , promptSnapshotDialect :: !DialectId
+    , promptSnapshotCwd :: !OsPath
+    , promptSnapshotInstructions :: !Text
+    , promptSnapshotTools :: ![ResponseTool]
+    , promptSnapshotGeneratedContext :: !(Maybe Text)
+    , promptSnapshotGrokContext :: !(Maybe Text)
+    , promptSnapshotCacheKey :: !Text
+    } deriving (Eq, Show)
+
+instance ToJSON SessionPromptSnapshot where
+    toJSON snapshot = object
+        [ "version" .= snapshot.promptSnapshotVersion
+        , "createdAt" .= snapshot.promptSnapshotCreatedAt
+        , "provider" .= providerSlug snapshot.promptSnapshotProvider
+        , "connection" .= snapshot.promptSnapshotConnection
+        , "model" .= snapshot.promptSnapshotModel
+        , "dialect" .= dialectSlug snapshot.promptSnapshotDialect
+        , "cwd" .= Text.pack (unsafeToFilePath snapshot.promptSnapshotCwd)
+        , "instructions" .= snapshot.promptSnapshotInstructions
+        , "tools" .= snapshot.promptSnapshotTools
+        , "generatedContext" .= snapshot.promptSnapshotGeneratedContext
+        , "grokContext" .= snapshot.promptSnapshotGrokContext
+        , "promptCacheKey" .= snapshot.promptSnapshotCacheKey
+        ]
+
+sessionPromptSnapshotDecoder :: Hermes.Decoder SessionPromptSnapshot
+sessionPromptSnapshotDecoder = Hermes.object do
+    version <- Hermes.atKey "version" Hermes.int
+    providerText <- Hermes.atKey "provider" Hermes.text
+    provider <- maybe
+        (fail ("unknown prompt snapshot provider: "
+            <> Text.unpack providerText))
+        pure
+        (parseProvider providerText)
+    dialectText <- Hermes.atKey "dialect" Hermes.text
+    dialect <- maybe
+        (fail ("unknown prompt snapshot dialect: "
+            <> Text.unpack dialectText))
+        pure
+        (parseDialect dialectText)
+    unless (providerSupportsDialect provider dialect) $
+        fail
+            ( "prompt snapshot dialect "
+                <> Text.unpack dialectText
+                <> " is incompatible with provider "
+                <> Text.unpack providerText
+            )
+    SessionPromptSnapshot version
+        <$> Hermes.atKey "createdAt" Hermes.utcTime
+        <*> pure provider
+        <*> Hermes.atKey "connection" Hermes.text
+        <*> Hermes.atKey "model" Hermes.text
+        <*> pure dialect
+        <*> (unsafeEncodeUtf . Text.unpack <$> Hermes.atKey "cwd" Hermes.text)
+        <*> Hermes.atKey "instructions" Hermes.text
+        <*> Hermes.atKey "tools" (Hermes.list responseToolDecoder)
+        <*> optionalKey "generatedContext" Hermes.text
+        <*> optionalKey "grokContext" Hermes.text
+        <*> Hermes.atKey "promptCacheKey" Hermes.text
 
 data SessionTransfer = SessionTransfer
     { transferMeta :: !SessionMeta
@@ -177,6 +252,7 @@ instance ToJSON SessionMeta where
         , "lastRecap" .= meta.metaLastRecap
         , "lastTurnSummary" .= meta.metaLastTurnSummary
         , "lastRecapMainTurns" .= meta.metaLastRecapMainTurns
+        , "promptSnapshot" .= meta.metaPromptSnapshot
         ]
 
 sessionMetaDecoder :: Hermes.Decoder SessionMeta
@@ -227,6 +303,7 @@ sessionMetaDecoder = Hermes.object do
             <*> optionalKey "lastRecap" Hermes.text
             <*> optionalKey "lastTurnSummary" Hermes.text
             <*> Hermes.defaultKey 0 "lastRecapMainTurns" Hermes.int
+            <*> optionalKey "promptSnapshot" sessionPromptSnapshotDecoder
 
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime

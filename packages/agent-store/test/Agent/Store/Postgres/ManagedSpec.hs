@@ -280,7 +280,8 @@ legacyTranscriptEffectMigrations =
         { migrationVersion = 1
         , migrationName = "initial harness storage"
         , migrationStatements =
-            [ "CREATE TABLE harness.session_turns (\
+            legacyPromptEpochPrerequisiteStatements
+            <> [ "CREATE TABLE harness.session_turns (\
               \ turn_id uuid PRIMARY KEY,\
               \ session_id uuid NOT NULL,\
               \ turn_index bigint NOT NULL,\
@@ -301,13 +302,6 @@ legacyTranscriptEffectMigrations =
               \ response_item_id uuid NOT NULL,\
               \ text_value text\
               \ )"
-            , "CREATE OR REPLACE FUNCTION\
-              \ harness.reject_session_fact_mutation()\
-              \ RETURNS trigger\
-              \ LANGUAGE plpgsql\
-              \ AS $$ BEGIN\
-              \ RAISE EXCEPTION 'session events and turns are immutable';\
-              \ END $$"
             , "CREATE TRIGGER session_turns_immutable\
               \ BEFORE UPDATE OR DELETE ON harness.session_turns\
               \ FOR EACH ROW EXECUTE FUNCTION\
@@ -341,7 +335,7 @@ legacyTranscriptEffectMigrations =
     , Migration
         { migrationVersion = 2
         , migrationName = "restricted harness runtime role"
-        , migrationStatements = []
+        , migrationStatements = legacyRuntimeRoleStatements
         }
     , Migration
         { migrationVersion = 3
@@ -371,7 +365,8 @@ legacyOpaqueFieldMigrations =
         { migrationVersion = 1
         , migrationName = "initial harness storage"
         , migrationStatements =
-            [ "CREATE TABLE harness.session_messages (\
+            legacyPromptEpochPrerequisiteStatements
+            <> [ "CREATE TABLE harness.session_messages (\
               \ response_item_id uuid PRIMARY KEY,\
               \ extra_fields jsonb NOT NULL DEFAULT '{}'::jsonb\
               \   CONSTRAINT provider_fields_are_objects\
@@ -411,11 +406,7 @@ legacyOpaqueFieldMigrations =
     , Migration
         { migrationVersion = 2
         , migrationName = "restricted harness runtime role"
-        , migrationStatements =
-            [ "CREATE ROLE ha_runtime LOGIN\
-              \ NOSUPERUSER NOCREATEDB NOCREATEROLE\
-              \ NOINHERIT NOREPLICATION NOBYPASSRLS"
-            ]
+        , migrationStatements = legacyRuntimeRoleStatements
         }
     , Migration
         { migrationVersion = 3
@@ -440,7 +431,8 @@ legacyTypedToolOutputMigrations =
         { migrationVersion = 1
         , migrationName = "initial harness storage"
         , migrationStatements =
-            [ "CREATE TABLE harness.session_function_call_outputs (\
+            legacyPromptEpochPrerequisiteStatements
+            <> [ "CREATE TABLE harness.session_function_call_outputs (\
               \ response_item_id uuid PRIMARY KEY,\
               \ output jsonb NOT NULL\
               \ )"
@@ -460,17 +452,34 @@ legacyTypedToolOutputMigrations =
     , Migration
         { migrationVersion = 2
         , migrationName = "restricted harness runtime role"
-        , migrationStatements =
-            [ "CREATE ROLE ha_runtime LOGIN\
-              \ NOSUPERUSER NOCREATEDB NOCREATEROLE\
-              \ NOINHERIT NOREPLICATION NOBYPASSRLS"
-            ]
+        , migrationStatements = legacyRuntimeRoleStatements
         }
     , Migration
         { migrationVersion = 3
         , migrationName = "typed relational session storage"
         , migrationStatements = []
         }
+    ]
+
+legacyPromptEpochPrerequisiteStatements :: [ByteString]
+legacyPromptEpochPrerequisiteStatements =
+    [ "CREATE TABLE harness.sessions (\
+      \ session_id uuid PRIMARY KEY\
+      \ )"
+    , "CREATE OR REPLACE FUNCTION\
+      \ harness.reject_session_fact_mutation()\
+      \ RETURNS trigger\
+      \ LANGUAGE plpgsql\
+      \ AS $$ BEGIN\
+      \ RAISE EXCEPTION 'session events and turns are immutable';\
+      \ END $$"
+    ]
+
+legacyRuntimeRoleStatements :: [ByteString]
+legacyRuntimeRoleStatements =
+    [ "CREATE ROLE ha_runtime LOGIN\
+      \ NOSUPERUSER NOCREATEDB NOCREATEROLE\
+      \ NOINHERIT NOREPLICATION NOBYPASSRLS"
     ]
 
 legacySessionSchemaStatements :: [ByteString]

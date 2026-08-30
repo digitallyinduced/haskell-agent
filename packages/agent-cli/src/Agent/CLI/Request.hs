@@ -1,6 +1,8 @@
 -- | Construction of provider-neutral Responses requests.
 module Agent.CLI.Request
     ( requestParams
+    , requestPromptParts
+    , requestToolIdentities
     , setRequestInstructions
     , setRequestInstructionsAndTools
     , setRequestModel
@@ -9,7 +11,7 @@ module Agent.CLI.Request
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Types
-import Agent.Responses.Types.Tools (ResponseTool(..), responseToolDecoder)
+import Agent.Responses.Types.Tools (responseToolDecoder)
 import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Provider (Provider(..))
@@ -83,6 +85,38 @@ setRequestPromptCacheKey cacheKey ResponseCreateParams{..} =
         { promptCacheKey = Just cacheKey
         , ..
         }
+
+-- | Extract the provider-visible instruction/tool prefix regardless of
+-- whether the request uses conventional Responses fields or Responses Lite's
+-- ordered input template.
+requestPromptParts :: ResponseCreateParams -> (Text, [ResponseTool])
+requestPromptParts params
+    | requestUsesResponsesLite params =
+        let (instructionText, toolSchemas, _) =
+                responsesLiteTemplateParts params.input
+        in (instructionText, toolSchemas)
+    | otherwise =
+        ( fromMaybe "" params.instructions
+        , fromMaybe [] params.tools
+        )
+
+-- | Stable ordered identities used to decide whether persisted tool schemas
+-- are safe to reuse. Descriptions and JSON schemas may evolve between binary
+-- versions without invalidating a resume, while adding, removing, reordering,
+-- or renaming a tool starts a new prompt epoch.
+requestToolIdentities :: [ResponseTool] -> [Text]
+requestToolIdentities = concatMap identity
+  where
+    identity = \case
+        FunctionToolValue tool -> ["function:" <> tool.name]
+        CustomToolValue tool -> ["custom:" <> tool.name]
+        NamespaceToolValue namespace ->
+            ["namespace:" <> namespace.name <> ":begin"]
+                <> concatMap identity namespace.tools
+                <> ["namespace:" <> namespace.name <> ":end"]
+        KnownResponseTool toolType ->
+            ["known:" <> responseToolTypeText toolType]
+        UnknownResponseTool tagged -> ["unknown:" <> tagged.tag]
 
 -- | Change the wire model while keeping the request dialect coherent.
 --

@@ -2,6 +2,7 @@
 module Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
+    , SessionPromptSnapshot(..)
     , sessionMetaDecoder
     , LegacySubagentTarget(..)
     , TranscriptEffect(..)
@@ -72,7 +73,9 @@ module Agent.CLI.Session
     , sessionLegacySubagentTarget
     , sessionTitleTurnCountFromSlot
     , writeSessionMeta
+    , compatibleSessionPromptSnapshot
     , ensureSession
+    , ensureSessionWithPromptSnapshot
     , resumeHint
     , sessionUsageFromTurns
     ) where
@@ -83,9 +86,14 @@ import Agent.CLI.SessionLock
     , releaseSessionLock
     )
 import Agent.CLI.Json (decodeLazy)
+import Agent.CLI.Request
+    ( requestPromptParts
+    , requestToolIdentities
+    )
 import Agent.CLI.Session.Types
     ( SessionHandle(..)
     , SessionMeta(..)
+    , SessionPromptSnapshot(..)
     , sessionMetaDecoder
     , LegacySubagentTarget(..)
     , TranscriptEffect(..)
@@ -108,14 +116,18 @@ import Agent.CLI.Session.Codec
     , fromStoredTurn
     , importLegacySession
     , toStoredMetadata
+    , toStoredPromptSnapshot
     , toStoredTurn
     , validateSessionMeta
     )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.SessionTitle (titleRefreshIndex)
+import Agent.Dialect (DialectId)
 import Agent.Loop (TokenUsage(..))
 import Agent.OpenAI.Compaction (rewindSessionUserText)
 import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.Provider (Provider)
+import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
@@ -130,7 +142,7 @@ import Control.Exception.Safe
     , tryAny
     , tryIO
     )
-import Control.Monad (foldM, unless, when)
+import Control.Monad (foldM, guard, unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -216,6 +228,38 @@ instance Monoid SessionTempCleanupReport where
     mempty = SessionTempCleanupReport [] []
 
 newtype SessionTempLease = SessionTempLease FileLock.FileLock
+
+-- | Reuse an immutable provider prefix only when the runtime target and the
+-- ordered provider-visible tool identities still describe the same session.
+-- Tool documentation/schema bytes may evolve between binaries; the persisted
+-- versions remain authoritative until a tool is added, removed, reordered, or
+-- renamed.
+compatibleSessionPromptSnapshot
+    :: Provider
+    -> Text
+    -> DialectId
+    -> OsPath
+    -> Maybe Text
+    -> ResponseCreateParams
+    -> Maybe SessionPromptSnapshot
+    -> Maybe SessionPromptSnapshot
+compatibleSessionPromptSnapshot
+    provider connection dialect cwd sessionId params maybeSnapshot = do
+        cacheKey <- sessionId
+        snapshot <- maybeSnapshot
+        let currentTools = snd (requestPromptParts params)
+        guard (snapshot.promptSnapshotVersion == 1)
+        guard (snapshot.promptSnapshotProvider == provider)
+        guard (snapshot.promptSnapshotConnection == connection)
+        guard (Just snapshot.promptSnapshotModel == params.model)
+        guard (snapshot.promptSnapshotDialect == dialect)
+        guard (snapshot.promptSnapshotCwd == cwd)
+        guard (snapshot.promptSnapshotCacheKey == cacheKey)
+        guard
+            ( requestToolIdentities snapshot.promptSnapshotTools
+                == requestToolIdentities currentTools
+            )
+        pure snapshot
 
 -- | @~/.haskell-agent/sessions@ given the user's home directory.
 sessionsRoot :: OsPath -> OsPath
@@ -339,7 +383,7 @@ cleanupPendingPersistence = \case
 createSession :: SessionCreate -> IO SessionHandle
 createSession spec = do
     (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
-    createReservedSession spec sessionId tempDir
+    createReservedSession spec sessionId tempDir Nothing
         `onException` removeReservedTemp spec.createRoot sessionId
 
 -- | Clone a persisted session and its durable branch artifacts under a new
@@ -475,6 +519,7 @@ forkedMetadata now sessionId requestedTitle targetCwd source =
             maybe source.metaTitleRefreshIndex
                 (const (max 2 source.metaTitleRefreshIndex))
                 normalizedTitle
+        , metaPromptSnapshot = Nothing
         }
   where
     normalizedTitle =
@@ -586,8 +631,9 @@ createReservedSession
     :: SessionCreate
     -> Text
     -> OsPath
+    -> Maybe SessionPromptSnapshot
     -> IO SessionHandle
-createReservedSession spec sessionId tempDir = do
+createReservedSession spec sessionId tempDir promptSnapshot = do
     let pool = spec.createPool
     ensurePrivateDir spec.createRoot
     dir <- either (fail . Text.unpack) pure
@@ -628,6 +674,7 @@ createReservedSession spec sessionId tempDir = do
             , metaLastRecap = Nothing
             , metaLastTurnSummary = Nothing
             , metaLastRecapMainTurns = 0
+            , metaPromptSnapshot = promptSnapshot
             }
         handle = SessionHandle
             { sessionPool = pool
@@ -637,7 +684,14 @@ createReservedSession spec sessionId tempDir = do
             , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
             , sessionMeta = meta
             }
-    Store.createSession pool (toStoredMetadata meta) >>= \case
+    let createStored = case promptSnapshot of
+            Nothing -> Store.createSession pool (toStoredMetadata meta)
+            Just snapshot ->
+                Store.createSessionWithInitialPromptEpoch
+                    pool
+                    (toStoredMetadata meta)
+                    (toStoredPromptSnapshot snapshot)
+    createStored >>= \case
         Left err -> do
             _ <- tryIO (removePathForcibly dir)
             fail
@@ -655,9 +709,100 @@ ensureSession slotRef = do
     case slot of
         PersistenceActive handle -> pure handle
         PersistencePending spec sessionId tempDir -> do
-            handle <- createReservedSession spec sessionId tempDir
+            handle <- createReservedSession spec sessionId tempDir Nothing
             writeIORef slotRef (PersistenceActive handle)
             pure handle
+
+-- | Ensure the durable session exists and atomically persist the
+-- provider-visible request prefix before it can be sent. Subsequent calls only
+-- append an immutable epoch when the prefix or pending generated context
+-- actually changes.
+ensureSessionWithPromptSnapshot
+    :: IORef PersistenceState
+    -> SessionPromptSnapshot
+    -> IO SessionHandle
+ensureSessionWithPromptSnapshot slotRef candidate = do
+    slot <- readIORef slotRef
+    case slot of
+        PersistencePending spec sessionId tempDir -> do
+            handle <- createReservedSession
+                spec
+                sessionId
+                tempDir
+                (Just candidate)
+            writeIORef slotRef (PersistenceActive handle)
+            pure handle
+        PersistenceActive handle -> do
+            let snapshot =
+                    maybe candidate
+                        (`mergePromptSnapshotContext` candidate)
+                        handle.sessionMeta.metaPromptSnapshot
+            case handle.sessionMeta.metaPromptSnapshot of
+                Just previous
+                    | promptSnapshotsEquivalent previous snapshot ->
+                        pure handle
+                _ -> do
+                    Store.appendSessionPromptEpoch
+                        handle.sessionPool
+                        handle.sessionMeta.metaId
+                        (toStoredPromptSnapshot snapshot) >>= \case
+                            Left err ->
+                                fail
+                                    ("could not persist PostgreSQL prompt epoch: "
+                                        <> Text.unpack (renderStoreError err))
+                            Right Nothing ->
+                                fail
+                                    ("session not found: "
+                                        <> Text.unpack handle.sessionMeta.metaId)
+                            Right (Just _) -> do
+                                let next = handle
+                                        { sessionMeta = handle.sessionMeta
+                                            { metaPromptSnapshot = Just snapshot
+                                            }
+                                        }
+                                writeIORef slotRef (PersistenceActive next)
+                                pure next
+
+mergePromptSnapshotContext
+    :: SessionPromptSnapshot
+    -> SessionPromptSnapshot
+    -> SessionPromptSnapshot
+mergePromptSnapshotContext previous candidate
+    | promptSnapshotsSharePrefix previous candidate =
+        candidate
+            { promptSnapshotGeneratedContext =
+                candidate.promptSnapshotGeneratedContext
+                    <|> previous.promptSnapshotGeneratedContext
+            , promptSnapshotGrokContext =
+                candidate.promptSnapshotGrokContext
+                    <|> previous.promptSnapshotGrokContext
+            }
+    | otherwise = candidate
+
+promptSnapshotsSharePrefix
+    :: SessionPromptSnapshot
+    -> SessionPromptSnapshot
+    -> Bool
+promptSnapshotsSharePrefix left right =
+    left.promptSnapshotVersion == right.promptSnapshotVersion
+        && left.promptSnapshotProvider == right.promptSnapshotProvider
+        && left.promptSnapshotConnection == right.promptSnapshotConnection
+        && left.promptSnapshotModel == right.promptSnapshotModel
+        && left.promptSnapshotDialect == right.promptSnapshotDialect
+        && left.promptSnapshotCwd == right.promptSnapshotCwd
+        && left.promptSnapshotInstructions == right.promptSnapshotInstructions
+        && left.promptSnapshotTools == right.promptSnapshotTools
+        && left.promptSnapshotCacheKey == right.promptSnapshotCacheKey
+
+promptSnapshotsEquivalent
+    :: SessionPromptSnapshot
+    -> SessionPromptSnapshot
+    -> Bool
+promptSnapshotsEquivalent left right =
+    promptSnapshotsSharePrefix left right
+        && left.promptSnapshotGeneratedContext
+            == right.promptSnapshotGeneratedContext
+        && left.promptSnapshotGrokContext == right.promptSnapshotGrokContext
 
 appendTurn :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurn handle turn =
@@ -908,7 +1053,13 @@ loadSession
 loadSession pool root sessionId = runExceptT do
     _ <- except (sessionDirForId root sessionId)
     stored <- loadWithLegacyImport root pool sessionId Store.loadSession
-    decodeStoredSession sessionSchemaVersion isValidSessionId sessionId stored
+    storedPrompt <- loadStoredPromptEpoch pool sessionId
+    decodeStoredSession
+        sessionSchemaVersion
+        isValidSessionId
+        sessionId
+        storedPrompt
+        stored
 
 loadActiveSession
     :: StorePool
@@ -918,7 +1069,21 @@ loadActiveSession
 loadActiveSession pool root sessionId = runExceptT do
     _ <- except (sessionDirForId root sessionId)
     stored <- loadWithLegacyImport root pool sessionId Store.loadActiveSession
-    decodeStoredSession sessionSchemaVersion isValidSessionId sessionId stored
+    storedPrompt <- loadStoredPromptEpoch pool sessionId
+    decodeStoredSession
+        sessionSchemaVersion
+        isValidSessionId
+        sessionId
+        storedPrompt
+        stored
+
+loadStoredPromptEpoch
+    :: StorePool
+    -> Text
+    -> ExceptT Text IO (Maybe Store.SessionPromptEpoch)
+loadStoredPromptEpoch pool sessionId =
+    lift (Store.loadLatestSessionPromptEpoch pool sessionId)
+        >>= either (throwE . renderStoreError) pure
 
 loadSessionMeta
     :: StorePool
@@ -1057,6 +1222,7 @@ loadSessions pool root sessionIds = do
                         sessionSchemaVersion
                         isValidSessionId
                         sessionId
+                        Nothing
                         value)
         (loaded :) <$> restoreResults rest results
     restoreResults _ _ =

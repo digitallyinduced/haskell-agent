@@ -90,7 +90,7 @@ import Agent.CLI.Session
       SessionMeta(metaTitle, metaLastResponseId, metaUpdatedAt,
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
-                  metaTitleUserTurns, metaId, metaCwd),
+                  metaTitleUserTurns, metaPromptSnapshot, metaId, metaCwd),
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
@@ -350,6 +350,7 @@ handleSessionAction
                                 , metaLastRecap = Nothing
                                 , metaLastTurnSummary = Nothing
                                 , metaLastRecapMainTurns = 0
+                                , metaPromptSnapshot = Nothing
                                 }
                         writeSessionMeta
                             handle'.sessionPool

@@ -7,6 +7,7 @@ module Agent.CLI.Turn
     , restorePlanStateAfterIncomplete
     , retryCheckpointedTurn
     , runOneTurn
+    , takeGrokFirstTurnContext
     ) where
 
 import Agent.Cancel (resetCancel)
@@ -18,6 +19,7 @@ import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , TurnResult(..)
     )
+import Agent.CLI.Request (requestPromptParts)
 import Agent.CLI.TUI.App
     ( commitFullscreenHistoryTurn
     , emitUiEvent
@@ -48,6 +50,7 @@ import Agent.CLI.Render
 import Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
+    , SessionPromptSnapshot(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
     , TranscriptEffect(..)
@@ -55,6 +58,7 @@ import Agent.CLI.Session
     , PersistenceState(..)
     , appendTurnWithMetaUpdateIndexed
     , ensureSession
+    , ensureSessionWithPromptSnapshot
     , loadRecentSessionTurns
     , sessionConversationText
     , sessionsRoot
@@ -123,7 +127,11 @@ import Agent.Loop
     , turnInputImages
     )
 import Agent.Provider (Provider(..))
-import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.Types
+    ( ResponseCreateParams(model, promptCacheKey)
+    , ResponseItem
+    )
+import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanCompletion(..)
@@ -141,7 +149,8 @@ import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
 import Control.Exception.Safe (bracket_, finally, onException, tryAny)
 import Data.IORef
-    ( atomicModifyIORef'
+    ( IORef
+    , atomicModifyIORef'
     , readIORef
     , writeIORef
     )
@@ -210,6 +219,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionStartupContext = startupContext
+    , sessionGrokFirstTurnContext = grokFirstTurnContext
     , sessionBackground = background
     , sessionEscPaused = escPaused
     , sessionInterrupt = interrupt
@@ -237,35 +247,6 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     applyPendingSessionTitles env
     initialPlanState <- readIORef planMode.planStateRef
     when (initialPlanState == PlanPending) (activatePlanMode planMode)
-    -- Create the session directory before tools run so first-turn subagents
-    -- can persist under agents/<id>/ as they complete.
-    case persist of
-        PersistenceEnabled slotRef -> do
-            created <- isPendingPersistence <$> readIORef slotRef
-            handle <- ensureSession slotRef
-            onPersisted handle
-            writeIORef planMode.planSessionDir (Just handle.sessionDir)
-            writeIORef storeRoot (Just handle.sessionDir)
-            when
-                ( handle.sessionMeta.metaTitle == "untitled"
-                    && not (Text.null (Text.strip promptText))
-                )
-                (setWindowTitle
-                    (cliWindowTitle handle.sessionMeta.metaCwd
-                        (Just (sessionTitleFromPrompt promptText))))
-            when created do
-                case fullscreen of
-                    Just runtime ->
-                        emitUiEvent runtime
-                            (UiSystemMessage
-                                ("session: " <> handle.sessionMeta.metaId))
-                    Nothing -> do
-                        color <- resolveColor stderrHandle
-                        putTextLn stderrHandle
-                            (roleMuted color
-                                (glyphSession <> "session: "
-                                    <> handle.sessionMeta.metaId))
-        PersistenceDisabled -> pure ()
     prev <- readLivePreviousResponseId conversationRef
     when includeTurnContext $
         env.sessionRecordImageGenerationInputs
@@ -294,20 +275,97 @@ runOneTurnBusy includeTurnContext env@SessionEnv
         turnInputs0 =
             turnInputsWithContext planReminder pendingStartup inputs
     stampedInputs <- stampTurnInputs turnInputs0
-    turnInputs <-
+    sentStartupContext <- case pendingStartup of
+        Nothing -> pure Nothing
+        Just _ ->
+            case drop (if isJust planReminder then 1 else 0) stampedInputs of
+                UserMessage context : _ -> pure (Just context)
+                _ -> fail "startup context did not produce a user message"
+    (turnInputs, pendingGrokContext) <-
         if dialectId env.sessionDialect == GrokBuildDialect
             then do
                 let framed = grokFrameLastUserInput stampedInputs
                     firstTurn = null beforeItems && prev == Nothing
                 if firstTurn
                     then do
-                        prefix <- loadGrokFirstTurnPrefix env.sessionCwd
-                        pure (UserMessage prefix : framed)
-                    else pure framed
-            else pure stampedInputs
+                        prefix <-
+                            takeGrokFirstTurnContext
+                                grokFirstTurnContext
+                                (loadGrokFirstTurnPrefix env.sessionCwd)
+                        pure (UserMessage prefix : framed, Just prefix)
+                    else pure (framed, Nothing)
+            else pure (stampedInputs, Nothing)
+    let restoreConsumedPromptContext = do
+            forM_ sentStartupContext \consumed ->
+                atomicModifyIORef' startupContext \current ->
+                    (restoreStartupContext consumed current, ())
+            forM_ pendingGrokContext \consumed ->
+                atomicModifyIORef' grokFirstTurnContext \current ->
+                    (case current of
+                        Nothing -> Just consumed
+                        Just _ -> current
+                    , ())
+        persistPromptSnapshot = case persist of
+            PersistenceDisabled -> pure ()
+            PersistenceEnabled slotRef -> do
+                created <- isPendingPersistence <$> readIORef slotRef
+                params <- readIORef env.sessionParams
+                modelName <- maybe
+                    (fail "provider request is missing a model")
+                    pure
+                    params.model
+                cacheKey <- maybe
+                    (fail "persistent provider request is missing a cache key")
+                    pure
+                    params.promptCacheKey
+                now <- normalizePostgresTimestamp <$> getCurrentTime
+                let (instructionText, toolSchemas) =
+                        requestPromptParts params
+                    snapshot = SessionPromptSnapshot
+                        { promptSnapshotVersion = 1
+                        , promptSnapshotCreatedAt = now
+                        , promptSnapshotProvider = env.sessionProvider
+                        , promptSnapshotConnection = env.sessionConnection
+                        , promptSnapshotModel = modelName
+                        , promptSnapshotDialect = dialectId env.sessionDialect
+                        , promptSnapshotCwd = env.sessionCwd
+                        , promptSnapshotInstructions = instructionText
+                        , promptSnapshotTools = toolSchemas
+                        , promptSnapshotGeneratedContext = sentStartupContext
+                        , promptSnapshotGrokContext = pendingGrokContext
+                        , promptSnapshotCacheKey = cacheKey
+                        }
+                -- Persist the exact provider-visible prefix before it can be
+                -- sent. Pending sessions create metadata and epoch atomically.
+                handle <-
+                    ensureSessionWithPromptSnapshot slotRef snapshot
+                onPersisted handle
+                writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                writeIORef storeRoot (Just handle.sessionDir)
+                when
+                    ( handle.sessionMeta.metaTitle == "untitled"
+                        && not (Text.null (Text.strip promptText))
+                    )
+                    (setWindowTitle
+                        (cliWindowTitle handle.sessionMeta.metaCwd
+                            (Just (sessionTitleFromPrompt promptText))))
+                when created do
+                    case fullscreen of
+                        Just runtime ->
+                            emitUiEvent runtime
+                                (UiSystemMessage
+                                    ("session: "
+                                        <> handle.sessionMeta.metaId))
+                        Nothing -> do
+                            color <- resolveColor stderrHandle
+                            putTextLn stderrHandle
+                                (roleMuted color
+                                    (glyphSession <> "session: "
+                                        <> handle.sessionMeta.metaId))
+    persistPromptSnapshot `onException` restoreConsumedPromptContext
     let prepared = PreparedTurn
             { preparedBeforeItems = beforeItems
-            , preparedConsumedStartup = pendingStartup
+            , preparedConsumedStartup = sentStartupContext
             , preparedTurnInputs = turnInputs
             }
         commitConversationPatch patch = do
@@ -716,6 +774,15 @@ loadGrokFirstTurnPrefix cwd = do
     today <- localDay . zonedTimeToLocalTime <$> getZonedTime
     status <- loadGitStatus cwd
     pure (grokFirstTurnPrefix osVersion shell cwd today status)
+
+-- | Consume a persisted first-turn prefix before consulting the live
+-- environment. The persisted value keeps a resumed request byte-for-byte
+-- stable across the crash window before its first transcript turn commits.
+takeGrokFirstTurnContext :: IORef (Maybe Text) -> IO Text -> IO Text
+takeGrokFirstTurnContext contextRef loadFresh = do
+    restored <-
+        atomicModifyIORef' contextRef (\pending -> (Nothing, pending))
+    maybe loadFresh pure restored
 
 loadOperatingSystem :: IO Text
 loadOperatingSystem = do

@@ -77,6 +77,7 @@ data SessionEnv = SessionEnv
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
     , sessionStartupContext :: !(IORef (Maybe Text))
+    , sessionGrokFirstTurnContext :: !(IORef (Maybe Text))
     , sessionSkills :: !(IORef SkillCatalog)
     , sessionSkillInvocations :: !(IORef [SkillInvocation])
     , sessionRefreshSkills :: !(Bool -> IO ())
