@@ -37,7 +37,10 @@ import Agent.TUI.Presentation
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Agent.Provider (Provider(XAIProvider))
 import Agent.Subagents (SubagentId(..))
-import Agent.ToolDispatch (functionToolCall)
+import Agent.ToolDispatch
+    ( ToolArgumentStreamEvent(..)
+    , functionToolCall
+    )
 import Agent.TUI.Motion (MotionMode(..))
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (readTVarIO)
@@ -212,6 +215,17 @@ spec = describe "fullscreen TUI bridge" do
             let AppEventMailbox stateRef = runtime.runtimeMailbox
             state <- readTVarIO stateRef
             state.mailboxPendingCount `shouldBe` 1
+
+    it "drops streamed tool arguments before the UI mailbox" do
+        runtime <- newBridgeTestRuntime
+        emitUiEvent runtime $
+            UiLoop $
+                ToolArgumentEvent $
+                    ToolArgumentsDelta [] (Text.replicate (1024 * 1024) "x")
+        let AppEventMailbox stateRef = runtime.runtimeMailbox
+        state <- readTVarIO stateRef
+        state.mailboxPendingCount `shouldBe` 0
+        state.mailboxPendingBytes `shouldBe` 0
 
     it "accounts retained conversation state in agent snapshots" do
         let body = Text.replicate (1024 * 1024) "x"

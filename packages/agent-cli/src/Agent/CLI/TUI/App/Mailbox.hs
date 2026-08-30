@@ -216,6 +216,9 @@ uiFrameBatchLimit = 256
 
 enqueueAppEvent :: FullscreenRuntime -> AppEvent -> IO ()
 enqueueAppEvent runtime = \case
+    -- Consumed internally by the loop; every UI consumer ignores these.
+    AppUi (UiLoop (ToolArgumentEvent _)) ->
+        pure ()
     AppUi (UiLoop (TextDelta text)) ->
         enqueueStreamingText runtime False text
     AppUi (UiLoop (ReasoningDelta text)) ->
@@ -578,6 +581,7 @@ uiEventLogicalBytes = \case
                 logicalTextBytes text
             WarningRaised text -> logicalTextBytes text
             ResponseRestarted text -> logicalTextBytes text
+            ToolArgumentEvent _ -> 0
             TurnStarted -> 128
             TurnFinished output -> turnOutputLogicalBytes output
             ToolStarted call -> toolCallLogicalBytes call

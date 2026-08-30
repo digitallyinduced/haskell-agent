@@ -391,8 +391,6 @@ renderEventUnlocked config = \case
         putTextLn config.renderStderr
             (roleWarn config.renderColor (glyphWarn <> message))
         startThinkingSpinnerUnlocked config
-    ToolArgumentEvent _ ->
-        pure ()
     TurnStarted -> do
         -- A later sample (tool follow-up or empty reasoning continuation)
         -- must commit any buffered thought before resetting render state.

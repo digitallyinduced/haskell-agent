@@ -453,7 +453,6 @@ updateManagedActivity
     -> ManagedActivityAccumulator
 updateManagedActivity event state =
     case event of
-        ToolArgumentEvent _ -> emptyManagedActivityAccumulator
         TurnStarted -> emptyManagedActivityAccumulator
         ReasoningDelta delta ->
             state
