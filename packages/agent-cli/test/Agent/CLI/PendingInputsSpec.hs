@@ -224,7 +224,7 @@ spec = do
         _ <- backend.submitTurn [] Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` [UserMessage "settled"]
 
-    it "emits only one bounded omission summary for rejected notices" do
+    it "reports synthetic overflow once without exceeding the queue bound" do
         pending <- newPendingInputs
         mapM_
             (enqueuePendingInput pending . UserMessage . Text.pack . show)
@@ -233,7 +233,7 @@ spec = do
             (UserMessage "omitted one")
             `shouldReturn`
                 Left
-                    "Root input queue is full; additional background notices will be summarized."
+                    "Root input queue is full; one or more background notices were omitted."
         enqueuePendingNotice pending PendingSubagentNotice
             (UserMessage "omitted two")
             `shouldReturn` Right ()
@@ -247,10 +247,9 @@ spec = do
                         }
         _ <- backend.submitTurn [] Nothing [] (const (pure ()))
         inputs <- readIORef seen
-        length inputs `shouldBe` pendingInputCountLimit + 1
-        last inputs `shouldBe`
-            UserMessage
-                "[Some background notices were omitted because the root input queue was full: 2]"
+        length inputs `shouldBe` pendingInputCountLimit
+        inputs `shouldSatisfy`
+            all (`notElem` [UserMessage "omitted one", UserMessage "omitted two"])
 
   describe "SteeringInputs" do
     it "bounds, commits, and admits steering inputs in order" do

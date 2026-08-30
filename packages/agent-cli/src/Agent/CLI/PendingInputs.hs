@@ -23,7 +23,6 @@ import Data.IORef (IORef, atomicModifyIORef')
 import qualified Data.IORef
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
-import qualified Data.Text as Text
 
 pendingInputCountLimit :: Int
 pendingInputCountLimit = 256
@@ -49,7 +48,7 @@ data PendingState = PendingState
     -- continue to consume the budget until submission succeeds or it requeues.
     , pendingRetainedCount :: !Int
     , pendingRetainedBytes :: !Int
-    , pendingOmittedNotices :: !Word
+    , pendingOmissionReported :: !Bool
     }
 
 data PendingBatch = PendingBatch
@@ -64,7 +63,7 @@ data PendingInputs = PendingInputs
 
 newPendingInputs :: IO PendingInputs
 newPendingInputs = PendingInputs
-    <$> Data.IORef.newIORef (PendingState 0 Seq.empty 0 0 0)
+    <$> Data.IORef.newIORef (PendingState 0 Seq.empty 0 0 False)
     <*> newMVar ()
 
 clearPendingInputs :: PendingInputs -> IO ()
@@ -74,7 +73,7 @@ clearPendingInputs (PendingInputs pending _) =
                , pendingQueue = Seq.empty
                , pendingRetainedCount = 0
                , pendingRetainedBytes = 0
-               , pendingOmittedNotices = 0
+               , pendingOmissionReported = False
                }, ())
 
 enqueuePendingInput
@@ -104,10 +103,9 @@ enqueuePendingNotice (PendingInputs pending _) kind input =
             Right () -> (next, Right ())
             Left _ ->
                 ( withoutPrevious
-                    { pendingOmittedNotices =
-                        saturatingSucc withoutPrevious.pendingOmittedNotices
+                    { pendingOmissionReported = True
                     }
-                , if withoutPrevious.pendingOmittedNotices == 0
+                , if not withoutPrevious.pendingOmissionReported
                     then Left pendingNoticeOmittedMessage
                     else Right ()
                 )
@@ -165,26 +163,11 @@ removeNotice kind state =
 drainPendingInputs :: IORef PendingState -> IO PendingBatch
 drainPendingInputs pending =
     atomicModifyIORef' pending \state ->
-        let candidate =
-                omissionEntry state.pendingOmittedNotices
-            omittedEntry =
-                if state.pendingOmittedNotices == 0
-                    then Seq.empty
-                    else Seq.singleton candidate
-            drained = queueOf state <> omittedEntry
-            omittedCount = Seq.length omittedEntry
-            omittedBytes = foldr
-                (\entry total -> entry.entryBytes `saturatingAdd` total)
-                0
-                omittedEntry
+        let drained = queueOf state
         in
         (state
             { pendingQueue = Seq.empty
-            , pendingRetainedCount =
-                state.pendingRetainedCount + omittedCount
-            , pendingRetainedBytes =
-                state.pendingRetainedBytes `saturatingAdd` omittedBytes
-            , pendingOmittedNotices = 0
+            , pendingOmissionReported = False
             }
         , PendingBatch
             (epochOf state)
@@ -195,22 +178,9 @@ drainPendingInputs pending =
                 0
                 drained))
 
-omissionEntry :: Word -> PendingEntry
-omissionEntry count =
-    let input = UserMessage
-            ("[Some background notices were omitted because the root input queue was full: "
-                <> Text.pack (show count)
-                <> "]")
-    in PendingEntry input (logicalTurnInputBytes input) Nothing
-
 pendingNoticeOmittedMessage :: Text
 pendingNoticeOmittedMessage =
-    "Root input queue is full; additional background notices will be summarized."
-
-saturatingSucc :: Word -> Word
-saturatingSucc value
-    | value == maxBound = maxBound
-    | otherwise = value + 1
+    "Root input queue is full; one or more background notices were omitted."
 
 requeuePendingInputs :: IORef PendingState -> PendingBatch -> IO ()
 requeuePendingInputs pending (PendingBatch epoch queued _ _) =
