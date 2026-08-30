@@ -15,6 +15,7 @@ module Agent.CLI.RepositoryDelivery
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
+import Control.Applicative ((<|>))
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
@@ -42,6 +43,7 @@ import Data.IORef
     )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -57,6 +59,7 @@ import System.IO
     , openBinaryFile
     )
 import System.IO.Unsafe (unsafePerformIO)
+import System.FilePath (isAbsolute)
 import System.Posix.Signals
     ( Signal
     , sigKILL
@@ -118,14 +121,28 @@ data DeliveryError
     deriving (Eq, Show)
 
 data Confirmation
-    = PushConfirmation !DeliveryStatus
+    = PushConfirmation !DeliveryStatus !ValidatedRemote
     | PullRequestConfirmation
         !DeliveryStatus
+        !ValidatedRemote
         !Text -- repository
         !Text -- base
         !Text -- title
         !Text -- body
-    deriving (Eq)
+
+data ValidatedRemote = ValidatedRemote
+    { validatedRemoteUrl :: !BS.ByteString
+    , validatedRemoteFingerprint :: !Text
+    , validatedGitHubRepository :: !(Maybe Text)
+    }
+
+instance Eq ValidatedRemote where
+    left == right =
+        left.validatedRemoteUrl == right.validatedRemoteUrl
+            && left.validatedRemoteFingerprint
+                == right.validatedRemoteFingerprint
+            && left.validatedGitHubRepository
+                == right.validatedGitHubRepository
 
 data StoredConfirmation = StoredConfirmation
     { storedRoot :: !FilePath
@@ -177,53 +194,60 @@ previewRepositoryPush
 previewRepositoryPush requested expected =
     repositoryDeliveryStatus requested expected >>= \case
         Left err -> pure (Left err)
-        Right status -> do
-            remoteHead <- queryRemoteHead status
-            case remoteHead of
+        Right status ->
+            validatedRemoteForStatus status >>= \case
                 Left err -> pure (Left err)
-                Right oid
-                    | oid /= status.deliveryUpstreamOid ->
-                        pure
-                            (Left
-                                (DeliveryStale
-                                    "the remote branch changed; fetch before previewing a push"))
-                    | status.deliveryAhead <= 0 ->
-                        pure
-                            (Left
-                                (DeliveryInvalidRequest
-                                    "the branch has no commits to push"))
-                    | status.deliveryBehind /= 0 ->
-                        pure
-                            (Left
-                                (DeliveryInvalidRequest
-                                    "the branch is behind its upstream"))
-                    | otherwise -> do
-                        dryRun <- runGit
-                            status.deliveryRoot
-                            [ "push"
-                            , "--porcelain"
-                            , "--dry-run"
-                            , "--no-verify"
-                            , "--"
-                            , Text.unpack status.deliveryRemote
-                            , pushRefspec status
-                            ]
-                            BS.empty
-                            networkTimeoutMicros
-                        case dryRun of
-                            Left err -> pure (Left err)
-                            Right _ -> do
-                                (token, expiresAt) <-
-                                    storeConfirmation
-                                        status.deliveryRoot
-                                        (PushConfirmation status)
+                Right remote ->
+                    queryRemoteHead status remote >>= \case
+                        Left err -> pure (Left err)
+                        Right oid
+                            | not (remoteMatchesExpected status oid) ->
                                 pure
-                                    (Right
-                                        PushPreview
-                                            { pushPreviewStatus = status
-                                            , pushPreviewConfirmation = token
-                                            , pushPreviewExpiresAt = expiresAt
-                                            })
+                                    (Left
+                                        (DeliveryStale
+                                            "the remote branch changed; fetch before previewing a push"))
+                            | status.deliveryAhead <= 0 ->
+                                pure
+                                    (Left
+                                        (DeliveryInvalidRequest
+                                            "the branch has no commits to push"))
+                            | status.deliveryBehind /= 0 ->
+                                pure
+                                    (Left
+                                        (DeliveryInvalidRequest
+                                            "the branch is behind its upstream"))
+                            | otherwise ->
+                                proveFastForward status >>= \case
+                                    Left err -> pure (Left err)
+                                    Right () -> do
+                                        dryRun <- runGit
+                                            status.deliveryRoot
+                                            (remoteCommandPrefix remote
+                                            <> [ "push"
+                                            , "--porcelain"
+                                            , "--dry-run"
+                                            , "--no-verify"
+                                            , leaseArgument status
+                                            , "--"
+                                            , BS8.unpack remote.validatedRemoteUrl
+                                            , pushRefspec status
+                                            ])
+                                            BS.empty
+                                            networkTimeoutMicros
+                                        case dryRun of
+                                            Left err -> pure (Left err)
+                                            Right _ -> do
+                                                (token, expiresAt) <-
+                                                    storeConfirmation
+                                                        status.deliveryRoot
+                                                        (PushConfirmation status remote)
+                                                pure
+                                                    (Right
+                                                        PushPreview
+                                                            { pushPreviewStatus = status
+                                                            , pushPreviewConfirmation = token
+                                                            , pushPreviewExpiresAt = expiresAt
+                                                            })
 
 confirmRepositoryPush
     :: FilePath
@@ -232,7 +256,7 @@ confirmRepositoryPush
 confirmRepositoryPush requested token =
     consumeConfirmation requested token >>= \case
         Left err -> pure (Left err)
-        Right (PushConfirmation previewed) ->
+        Right (PushConfirmation previewed previewedRemote) ->
             repositoryDeliveryStatus
                 requested
                 previewed.deliverySnapshotId >>= \case
@@ -244,29 +268,45 @@ confirmRepositoryPush requested token =
                                     (DeliveryStale
                                         "branch or upstream state changed after push preview"))
                         | otherwise ->
-                            queryRemoteHead current >>= \case
+                            validatedRemoteForStatus current >>= \case
                                 Left err -> pure (Left err)
-                                Right remoteOid
-                                    | remoteOid /= current.deliveryUpstreamOid ->
+                                Right currentRemote
+                                    | currentRemote /= previewedRemote ->
                                         pure
                                             (Left
                                                 (DeliveryStale
-                                                    "the remote branch changed after push preview"))
+                                                    "the remote destination changed after push preview"))
                                     | otherwise ->
-                                        runGit
-                                            current.deliveryRoot
-                                            [ "push"
-                                            , "--porcelain"
-                                            , "--no-verify"
-                                            , "--"
-                                            , Text.unpack current.deliveryRemote
-                                            , pushRefspec current
-                                            ]
-                                            BS.empty
-                                            networkTimeoutMicros >>= \case
-                                                Left err -> pure (Left err)
-                                                Right _ ->
-                                                    refreshPushedStatus current
+                                        proveFastForward current >>= \case
+                                            Left err -> pure (Left err)
+                                            Right () ->
+                                                queryRemoteHead current previewedRemote >>= \case
+                                                    Left err -> pure (Left err)
+                                                    Right remoteOid
+                                                        | not (remoteMatchesExpected current remoteOid) ->
+                                                            pure
+                                                                (Left
+                                                                    (DeliveryStale
+                                                                        "the remote branch changed after push preview"))
+                                                        | otherwise ->
+                                                            runGit
+                                                                current.deliveryRoot
+                                                                (remoteCommandPrefix previewedRemote
+                                                                <> [ "push"
+                                                                , "--porcelain"
+                                                                , "--no-verify"
+                                                                , leaseArgument current
+                                                                , "--"
+                                                                , BS8.unpack previewedRemote.validatedRemoteUrl
+                                                                , pushRefspec current
+                                                                ])
+                                                                BS.empty
+                                                                networkTimeoutMicros >>= \case
+                                                                    Left err -> pure (Left err)
+                                                                    Right _ ->
+                                                                        refreshPushedStatus
+                                                                            current
+                                                                            previewedRemote
         Right _ ->
             pure
                 (Left
@@ -293,42 +333,54 @@ previewPullRequest requested expected base title body
                             (DeliveryInvalidRequest
                                 "push the exact branch state before previewing a pull request"))
                 | otherwise ->
-                    queryRemoteHead status >>= \case
+                    validatedRemoteForStatus status >>= \case
                         Left err -> pure (Left err)
-                        Right remoteOid
-                            | remoteOid /= status.deliveryHeadOid ->
-                                pure
-                                    (Left
-                                        (DeliveryStale
-                                            "the pushed remote branch does not match HEAD"))
-                            | otherwise ->
-                                requireGitHubCli status.deliveryRoot >>= \case
-                                    Left err -> pure (Left err)
-                                    Right repository ->
-                                        ensureBaseAndNoOpenPullRequest
-                                            status repository base >>= \case
-                                                Left err -> pure (Left err)
-                                                Right () -> do
-                                                    (token, expiresAt) <-
-                                                        storeConfirmation
-                                                            status.deliveryRoot
-                                                            (PullRequestConfirmation
-                                                                status repository
-                                                                base title body)
-                                                    pure
-                                                        (Right
-                                                            PullRequestPreview
-                                                                { pullRequestRepository =
-                                                                    repository
-                                                                , pullRequestBaseRef = base
-                                                                , pullRequestHeadRef =
-                                                                    status.deliveryBranch
-                                                                , pullRequestTitle = title
-                                                                , pullRequestConfirmation =
-                                                                    token
-                                                                , pullRequestExpiresAt =
-                                                                    expiresAt
-                                                                })
+                        Right remote ->
+                            queryRemoteHead status remote >>= \case
+                                Left err -> pure (Left err)
+                                Right remoteOid
+                                    | remoteOid /= Just status.deliveryHeadOid ->
+                                        pure
+                                            (Left
+                                                (DeliveryStale
+                                                    "the pushed remote branch does not match HEAD"))
+                                    | otherwise ->
+                                        case remote.validatedGitHubRepository of
+                                            Nothing ->
+                                                pure
+                                                    (Left
+                                                        (DeliveryInvalidRequest
+                                                            "the delivery remote is not a supported GitHub repository"))
+                                            Just repository ->
+                                                requireGitHubCli
+                                                    status.deliveryRoot
+                                                    repository >>= \case
+                                                        Left err -> pure (Left err)
+                                                        Right () ->
+                                                            ensureBaseAndNoOpenPullRequest
+                                                                status remote repository base >>= \case
+                                                                    Left err -> pure (Left err)
+                                                                    Right () -> do
+                                                                        (token, expiresAt) <-
+                                                                            storeConfirmation
+                                                                                status.deliveryRoot
+                                                                                (PullRequestConfirmation
+                                                                                    status remote repository
+                                                                                    base title body)
+                                                                        pure
+                                                                            (Right
+                                                                                PullRequestPreview
+                                                                                    { pullRequestRepository =
+                                                                                        repository
+                                                                                    , pullRequestBaseRef = base
+                                                                                    , pullRequestHeadRef =
+                                                                                        status.deliveryBranch
+                                                                                    , pullRequestTitle = title
+                                                                                    , pullRequestConfirmation =
+                                                                                        token
+                                                                                    , pullRequestExpiresAt =
+                                                                                        expiresAt
+                                                                                    })
 
 createPullRequest
     :: FilePath
@@ -339,70 +391,80 @@ createPullRequest requested token =
         Left err -> pure (Left err)
         Right
             (PullRequestConfirmation
-                previewed repository base title body) ->
-                    repositoryDeliveryStatus
-                        requested
-                        previewed.deliverySnapshotId >>= \case
-                            Left err -> pure (Left err)
-                            Right current
-                                | current /= previewed ->
-                                    pure
-                                        (Left
-                                            (DeliveryStale
-                                                "branch or upstream state changed after pull-request preview"))
-                                | otherwise ->
-                                    queryRemoteHead current >>= \case
-                                        Left err -> pure (Left err)
-                                        Right remoteOid
-                                            | remoteOid
-                                                /= current.deliveryHeadOid ->
-                                                    pure
-                                                        (Left
-                                                            (DeliveryStale
-                                                                "the pushed remote branch changed after preview"))
-                                            | otherwise ->
-                                                requireGitHubCli
-                                                    current.deliveryRoot >>= \case
-                                                        Left err -> pure (Left err)
-                                                        Right currentRepository
-                                                            | currentRepository
-                                                                /= repository ->
-                                                                    pure
-                                                                        (Left
-                                                                            (DeliveryStale
-                                                                                "the GitHub repository changed after preview"))
-                                                            | otherwise ->
+                previewed previewedRemote repository base title body) ->
+            repositoryDeliveryStatus
+                requested
+                previewed.deliverySnapshotId >>= \case
+                    Left err -> pure (Left err)
+                    Right current
+                        | current /= previewed ->
+                            pure
+                                (Left
+                                    (DeliveryStale
+                                        "branch or upstream state changed after pull-request preview"))
+                        | otherwise ->
+                            validatedRemoteForStatus current >>= \case
+                                Left err -> pure (Left err)
+                                Right currentRemote
+                                    | currentRemote /= previewedRemote ->
+                                        pure
+                                            (Left
+                                                (DeliveryStale
+                                                    "the remote destination changed after preview"))
+                                    | otherwise ->
+                                        queryRemoteHead current previewedRemote >>= \case
+                                            Left err -> pure (Left err)
+                                            Right remoteOid
+                                                | remoteOid
+                                                    /= Just current.deliveryHeadOid ->
+                                                        pure
+                                                            (Left
+                                                                (DeliveryStale
+                                                                    "the pushed remote branch changed after preview"))
+                                                | otherwise ->
+                                                    requireGitHubCli
+                                                        current.deliveryRoot
+                                                        repository >>= \case
+                                                            Left err -> pure (Left err)
+                                                            Right () ->
                                                                 ensureBaseAndNoOpenPullRequest
                                                                     current
+                                                                    previewedRemote
                                                                     repository
                                                                     base >>= \case
                                                                         Left err ->
                                                                             pure (Left err)
                                                                         Right () ->
-                                                                            runGh
-                                                                                current.deliveryRoot
-                                                                                [ "pr"
-                                                                                , "create"
-                                                                                , "--repo"
-                                                                                , Text.unpack repository
-                                                                                , "--base"
-                                                                                , Text.unpack base
-                                                                                , "--head"
-                                                                                , Text.unpack current.deliveryBranch
-                                                                                , "--title"
-                                                                                , Text.unpack title
-                                                                                , "--body-file"
-                                                                                , "-"
-                                                                                ]
-                                                                                (TextEncoding.encodeUtf8 body)
-                                                                                networkTimeoutMicros >>= \case
+                                                                            revalidatePullRequestMutation
+                                                                                current
+                                                                                previewedRemote >>= \case
                                                                                     Left err ->
                                                                                         pure (Left err)
-                                                                                    Right output ->
-                                                                                        pure
-                                                                                            (parsePullRequestUrl
-                                                                                                repository
-                                                                                                output)
+                                                                                    Right () ->
+                                                                                        runGh
+                                                                                            current.deliveryRoot
+                                                                                            [ "pr"
+                                                                                            , "create"
+                                                                                            , "--repo"
+                                                                                            , Text.unpack repository
+                                                                                            , "--base"
+                                                                                            , Text.unpack base
+                                                                                            , "--head"
+                                                                                            , Text.unpack current.deliveryBranch
+                                                                                            , "--title"
+                                                                                            , Text.unpack title
+                                                                                            , "--body-file"
+                                                                                            , "-"
+                                                                                            ]
+                                                                                            (TextEncoding.encodeUtf8 body)
+                                                                                            networkTimeoutMicros >>= \case
+                                                                                                Left err ->
+                                                                                                    pure (Left err)
+                                                                                                Right output ->
+                                                                                                    pure
+                                                                                                        (parsePullRequestUrl
+                                                                                                            repository
+                                                                                                            output)
         Right _ ->
             pure
                 (Left
@@ -453,10 +515,22 @@ statusAtSnapshot snapshot =
         runGit root ["rev-parse", "--verify", "@{upstream}"] BS.empty
             localTimeoutMicros >>= \case
                 Left _ ->
-                    pure
-                        (Left
-                            (DeliveryInvalidRequest
-                                "the branch upstream is unavailable"))
+                    runGit root ["rev-list", "--count", "HEAD"] BS.empty
+                        localTimeoutMicros >>= \case
+                            Left err -> pure (Left err)
+                            Right countBytes ->
+                                case reads (BS8.unpack (stripLineEnding countBytes)) of
+                                    [(ahead, "")]
+                                        | ahead > 0 ->
+                                            finishStatus
+                                                (zeroObjectId headOid)
+                                                ahead
+                                                0
+                                    _ ->
+                                        pure
+                                            (Left
+                                                (DeliveryCommandFailed
+                                                    "Git returned an invalid commit count"))
                 Right upstreamBytes ->
                     let upstreamOid = decodeTrimmed upstreamBytes
                     in runGit
@@ -477,28 +551,27 @@ statusAtSnapshot snapshot =
                                                 (DeliveryCommandFailed
                                                     "Git returned invalid ahead/behind counts"))
                                     Just (ahead, behind) ->
-                                        readRemoteFingerprint
-                                            root remote >>= \case
-                                                Left err -> pure (Left err)
-                                                Right remoteFingerprint ->
-                                                    pure
-                                                        (Right
-                                                            DeliveryStatus
-                                                                { deliverySnapshotId =
-                                                                    snapshot.snapshotId
-                                                                , deliveryRoot = root
-                                                                , deliveryHeadOid = headOid
-                                                                , deliveryBranch = branch
-                                                                , deliveryRemote = remote
-                                                                , deliveryRemoteFingerprint =
-                                                                    remoteFingerprint
-                                                                , deliveryUpstreamRef =
-                                                                    upstreamRef
-                                                                , deliveryUpstreamOid =
-                                                                    upstreamOid
-                                                                , deliveryAhead = ahead
-                                                                , deliveryBehind = behind
-                                                                })
+                                        finishStatus upstreamOid ahead behind
+      where
+        finishStatus upstreamOid ahead behind =
+            readValidatedRemote root remote >>= \case
+                Left err -> pure (Left err)
+                Right validatedRemote ->
+                    pure
+                        (Right
+                            DeliveryStatus
+                                { deliverySnapshotId = snapshot.snapshotId
+                                , deliveryRoot = root
+                                , deliveryHeadOid = headOid
+                                , deliveryBranch = branch
+                                , deliveryRemote = remote
+                                , deliveryRemoteFingerprint =
+                                    validatedRemote.validatedRemoteFingerprint
+                                , deliveryUpstreamRef = upstreamRef
+                                , deliveryUpstreamOid = upstreamOid
+                                , deliveryAhead = ahead
+                                , deliveryBehind = behind
+                                })
 
 readUpstream
     :: FilePath
@@ -534,23 +607,34 @@ readUpstream root fullBranch =
                                 (DeliveryInvalidRequest
                                     "the branch has no configured upstream"))
 
-readRemoteFingerprint
+readValidatedRemote
     :: FilePath
     -> Text
-    -> IO (Either DeliveryError Text)
-readRemoteFingerprint root remote =
+    -> IO (Either DeliveryError ValidatedRemote)
+readValidatedRemote root remote =
     readUrls False >>= \case
         Left _ -> invalid
         Right [fetchUrl] ->
             readUrls True >>= \case
                 Right [pushUrl]
-                    | fetchUrl == pushUrl ->
-                        fmap decodeTrimmed
-                            <$> runGit
+                    | fetchUrl == pushUrl
+                        && validRemoteUrl pushUrl ->
+                            runGit
                                 root
                                 ["hash-object", "--stdin"]
                                 pushUrl
-                                localTimeoutMicros
+                                localTimeoutMicros >>= \case
+                                    Left err -> pure (Left err)
+                                    Right fingerprint ->
+                                        pure
+                                            (Right
+                                                ValidatedRemote
+                                                    { validatedRemoteUrl = pushUrl
+                                                    , validatedRemoteFingerprint =
+                                                        decodeTrimmed fingerprint
+                                                    , validatedGitHubRepository =
+                                                        githubRepositoryFromUrl pushUrl
+                                                    })
                 _ -> invalid
         _ -> invalid
   where
@@ -582,17 +666,39 @@ readRemoteFingerprint root remote =
                 (DeliveryInvalidRequest
                     "delivery requires one identical fetch and push destination"))
 
-queryRemoteHead :: DeliveryStatus -> IO (Either DeliveryError Text)
-queryRemoteHead status =
+validatedRemoteForStatus
+    :: DeliveryStatus
+    -> IO (Either DeliveryError ValidatedRemote)
+validatedRemoteForStatus status =
+    readValidatedRemote status.deliveryRoot status.deliveryRemote >>= \case
+        Left _ ->
+            pure
+                (Left
+                    (DeliveryStale
+                        "the remote destination is no longer valid"))
+        Right remote
+            | remote.validatedRemoteFingerprint
+                /= status.deliveryRemoteFingerprint ->
+                    pure
+                        (Left
+                            (DeliveryStale
+                                "the remote destination changed"))
+            | otherwise -> pure (Right remote)
+
+queryRemoteHead
+    :: DeliveryStatus
+    -> ValidatedRemote
+    -> IO (Either DeliveryError (Maybe Text))
+queryRemoteHead status remote =
     runGit
         status.deliveryRoot
-        [ "ls-remote"
-        , "--exit-code"
+        (remoteCommandPrefix remote
+        <> [ "ls-remote"
         , "--heads"
         , "--"
-        , Text.unpack status.deliveryRemote
+        , BS8.unpack remote.validatedRemoteUrl
         , Text.unpack status.deliveryUpstreamRef
-        ]
+        ])
         BS.empty
         networkTimeoutMicros >>= \case
             Left _ ->
@@ -602,11 +708,12 @@ queryRemoteHead status =
                             "could not verify the exact remote branch"))
             Right output ->
                 case BS8.words output of
+                    [] -> pure (Right Nothing)
                     [oidBytes, refBytes]
                         | decodeTrimmed refBytes
                             == status.deliveryUpstreamRef
                             && validObjectId (decodeTrimmed oidBytes) ->
-                                pure (Right (decodeTrimmed oidBytes))
+                                pure (Right (Just (decodeTrimmed oidBytes)))
                     _ ->
                         pure
                             (Left
@@ -615,44 +722,83 @@ queryRemoteHead status =
 
 refreshPushedStatus
     :: DeliveryStatus
+    -> ValidatedRemote
     -> IO (Either DeliveryError DeliveryStatus)
-refreshPushedStatus pushed = do
+refreshPushedStatus pushed validatedRemote = do
     -- A successful push does not necessarily update the local remote-tracking
     -- ref. Bind the returned result to the immutable pushed OID instead of
     -- pretending the tracking ref was refreshed.
-    remote <- queryRemoteHead
+    remoteResult <- queryRemoteHead
         pushed
             { deliveryUpstreamOid = pushed.deliveryHeadOid }
-    pure case remote of
+        validatedRemote
+    pure case remoteResult of
         Left err -> Left err
         Right oid
-            | oid /= pushed.deliveryHeadOid ->
+            | oid /= Just pushed.deliveryHeadOid ->
                 Left
                     (DeliveryStale
                         "remote verification did not match the pushed commit")
             | otherwise ->
                 Right
                     pushed
-                        { deliveryUpstreamOid = oid
+                        { deliveryUpstreamOid = pushed.deliveryHeadOid
                         , deliveryAhead = 0
                         , deliveryBehind = 0
                         }
 
+revalidatePullRequestMutation
+    :: DeliveryStatus
+    -> ValidatedRemote
+    -> IO (Either DeliveryError ())
+revalidatePullRequestMutation expected expectedRemote =
+    repositoryDeliveryStatus
+        expected.deliveryRoot
+        expected.deliverySnapshotId >>= \case
+            Left err -> pure (Left err)
+            Right current
+                | current /= expected ->
+                    pure
+                        (Left
+                            (DeliveryStale
+                                "branch or upstream state changed before pull-request creation"))
+                | otherwise ->
+                    validatedRemoteForStatus current >>= \case
+                        Left err -> pure (Left err)
+                        Right remote
+                            | remote /= expectedRemote ->
+                                pure
+                                    (Left
+                                        (DeliveryStale
+                                            "the remote destination changed before pull-request creation"))
+                            | otherwise ->
+                                queryRemoteHead current expectedRemote >>= \case
+                                    Left err -> pure (Left err)
+                                    Right oid
+                                        | oid /= Just current.deliveryHeadOid ->
+                                            pure
+                                                (Left
+                                                    (DeliveryStale
+                                                        "the pushed branch changed before pull-request creation"))
+                                        | otherwise -> pure (Right ())
+
 ensureBaseAndNoOpenPullRequest
     :: DeliveryStatus
+    -> ValidatedRemote
     -> Text
     -> Text
     -> IO (Either DeliveryError ())
-ensureBaseAndNoOpenPullRequest status repository base =
+ensureBaseAndNoOpenPullRequest status remote repository base =
     runGit
         status.deliveryRoot
-        [ "ls-remote"
+        (remoteCommandPrefix remote
+        <> [ "ls-remote"
         , "--exit-code"
         , "--heads"
         , "--"
-        , Text.unpack status.deliveryRemote
+        , BS8.unpack remote.validatedRemoteUrl
         , "refs/heads/" <> Text.unpack base
-        ]
+        ])
         BS.empty
         networkTimeoutMicros >>= \case
             Left _ ->
@@ -694,9 +840,13 @@ ensureBaseAndNoOpenPullRequest status repository base =
                                             (DeliveryCommandFailed
                                                 "GitHub CLI returned an invalid pull-request response"))
 
-requireGitHubCli :: FilePath -> IO (Either DeliveryError Text)
-requireGitHubCli root =
-    runGh root ["auth", "status"] BS.empty localTimeoutMicros >>= \case
+requireGitHubCli
+    :: FilePath
+    -> Text
+    -> IO (Either DeliveryError ())
+requireGitHubCli root repository =
+    runGh root ["auth", "status", "--hostname", "github.com"]
+        BS.empty localTimeoutMicros >>= \case
         Left _ ->
             pure
                 (Left
@@ -705,7 +855,13 @@ requireGitHubCli root =
         Right _ ->
             runGh
                 root
-                ["repo", "view", "--json", "nameWithOwner"]
+                [ "repo"
+                , "view"
+                , "--repo"
+                , Text.unpack repository
+                , "--json"
+                , "nameWithOwner"
+                ]
                 BS.empty
                 networkTimeoutMicros >>= \case
                     Left _ ->
@@ -715,9 +871,9 @@ requireGitHubCli root =
                                     "GitHub repository identity is unavailable"))
                     Right output ->
                         case Aeson.decodeStrict' output of
-                            Just (RepositoryIdentity repository)
-                                | validateRepositoryName repository ->
-                                    pure (Right repository)
+                            Just (RepositoryIdentity returnedRepository)
+                                | returnedRepository == repository ->
+                                    pure (Right ())
                             _ ->
                                 pure
                                     (Left
@@ -755,6 +911,100 @@ parsePullRequestUrl repository output =
   where
     isControlOrSpace character = isSpace character
     isDigit character = character >= '0' && character <= '9'
+
+validRemoteUrl :: BS.ByteString -> Bool
+validRemoteUrl url =
+    not (BS.null url)
+        && BS.length url <= 4096
+        && BS.all (\byte -> byte >= 0x20 && byte /= 0x7f) url
+        && BS8.head url /= '-'
+        && (isAbsolute (BS8.unpack url)
+            || any (`BS8.isPrefixOf` url)
+                [ "https://"
+                , "ssh://"
+                , "git://"
+                , "file://"
+                ]
+            || validScpLike url)
+  where
+    validScpLike value =
+        case BS8.break (== ':') value of
+            (host, path) ->
+                not (BS.null host)
+                    && BS8.elem '@' host
+                    && BS.length path > 1
+
+remoteCommandPrefix :: ValidatedRemote -> [String]
+remoteCommandPrefix remote =
+    [ "-c"
+    , "url."
+        <> BS8.unpack remote.validatedRemoteUrl
+        <> ".insteadOf="
+        <> BS8.unpack remote.validatedRemoteUrl
+    ]
+
+githubRepositoryFromUrl :: BS.ByteString -> Maybe Text
+githubRepositoryFromUrl bytes
+    | not (BS.all (< 0x80) bytes) = Nothing
+    | otherwise =
+        let url = Text.pack (BS8.unpack bytes)
+        in parseHttps url
+            <|> parseSsh url
+            <|> parseScp url
+  where
+    parseHttps url =
+        Text.stripPrefix "https://github.com/" url >>= repositoryPath
+    parseSsh url =
+        (Text.stripPrefix "ssh://git@github.com/" url
+            <|> Text.stripPrefix "ssh://github.com/" url)
+            >>= repositoryPath
+    parseScp url =
+        Text.stripPrefix "git@github.com:" url >>= repositoryPath
+    repositoryPath path =
+        let withoutGit = fromMaybe path (Text.stripSuffix ".git" path)
+        in if validateRepositoryName withoutGit
+            then Just withoutGit
+            else Nothing
+
+remoteMatchesExpected :: DeliveryStatus -> Maybe Text -> Bool
+remoteMatchesExpected status =
+    (== expectedRemoteHead status)
+
+expectedRemoteHead :: DeliveryStatus -> Maybe Text
+expectedRemoteHead status
+    | Text.all (== '0') status.deliveryUpstreamOid = Nothing
+    | otherwise = Just status.deliveryUpstreamOid
+
+proveFastForward :: DeliveryStatus -> IO (Either DeliveryError ())
+proveFastForward status =
+    case expectedRemoteHead status of
+        Nothing -> pure (Right ())
+        Just expected ->
+            runGit
+                status.deliveryRoot
+                [ "merge-base"
+                , "--is-ancestor"
+                , Text.unpack expected
+                , Text.unpack status.deliveryHeadOid
+                ]
+                BS.empty
+                localTimeoutMicros >>= \case
+                    Right _ -> pure (Right ())
+                    Left _ ->
+                        pure
+                            (Left
+                                (DeliveryInvalidRequest
+                                    "the push is not an exact fast-forward"))
+
+leaseArgument :: DeliveryStatus -> String
+leaseArgument status =
+    "--force-with-lease="
+        <> Text.unpack status.deliveryUpstreamRef
+        <> ":"
+        <> maybe
+            (Text.unpack (zeroObjectId status.deliveryHeadOid))
+            Text.unpack
+            (expectedRemoteHead status)
 
 validatePullRequestInput
     :: Text
@@ -837,6 +1087,9 @@ validateRepositoryName name =
 validObjectId :: Text -> Bool
 validObjectId oid =
     Text.length oid `elem` [40, 64] && Text.all isHexDigit oid
+
+zeroObjectId :: Text -> Text
+zeroObjectId oid = Text.replicate (Text.length oid) "0"
 
 parseAheadBehind :: BS.ByteString -> Maybe (Int, Int)
 parseAheadBehind bytes =

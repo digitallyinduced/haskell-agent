@@ -259,10 +259,12 @@ typedef void (*ha_repository_result_callback)(
  * output, or authenticated remote URLs. Preview confirmations are random,
  * one-shot, in-memory tokens bound to the canonical repository, exact
  * snapshot/HEAD, upstream configuration, and remote OID. They expire after
- * ten minutes. Confirm rechecks that state immediately before mutation and
- * never force-pushes or deletes a ref. Push targets the reviewed commit OID,
- * and Git's ordinary fast-forward rule remains authoritative. Repository
- * hooks are disabled for preview and confirmation.
+ * ten minutes. Confirm rechecks that state immediately before mutation.
+ * Push targets the reviewed commit OID and uses an exact
+ * --force-with-lease=<destination>:<expected> server-side CAS only after
+ * proving expected is an ancestor of that OID. This cannot approve a history
+ * rewrite and never deletes a ref. Repository hooks are disabled for preview
+ * and confirmation.
  *
  * Status is 0 for success, -1 for failure, -2 for stale state, -3 for
  * cancellation, and -4 for an invalid/expired/already-used confirmation.

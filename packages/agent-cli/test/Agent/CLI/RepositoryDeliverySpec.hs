@@ -10,6 +10,7 @@ import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
     , doesFileExist
+    , findExecutable
     , getTemporaryDirectory
     , removePathForcibly
     )
@@ -44,7 +45,7 @@ spec = describe "repository delivery service" do
         validateRemoteName "-origin" `shouldBe` False
         validateRemoteName "origin\n--upload-pack=evil" `shouldBe` False
 
-    it "previews and confirms one exact non-force push once" $
+    it "previews and confirms one exact fast-forward lease push once" $
         withDeliveryRepository \root remote -> do
             appendFile (root <> "/tracked.txt") "second\n"
             _ <- git root ["add", "tracked.txt"]
@@ -85,6 +86,30 @@ spec = describe "repository delivery service" do
 
             confirmRepositoryPush root preview.pushPreviewConfirmation
                 `shouldReturnSatisfying` isConfirmationRejection
+
+    it "creates an unborn configured upstream using an exact nonexistence lease" $
+        withDeliveryRepository \root remote -> do
+            _ <- git root ["switch", "-q", "-c", "new-branch"]
+            _ <- git root ["config", "branch.new-branch.remote", "origin"]
+            _ <- git root
+                [ "config"
+                , "branch.new-branch.merge"
+                , "refs/heads/new-branch"
+                ]
+            snapshot <- expectRight =<< repositorySnapshot root
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+            pushed <- expectRight
+                =<< confirmRepositoryPush
+                    root preview.pushPreviewConfirmation
+            remoteHead <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/new-branch"
+                    ]
+            remoteHead `shouldBe` pushed.deliveryHeadOid
 
     it "consumes a preview without pushing when the local snapshot changes" $
         withDeliveryRepository \root remote -> do
@@ -195,10 +220,37 @@ spec = describe "repository delivery service" do
                 =<< previewRepositoryPush root snapshot.snapshotId
             let redirected = remote <> "-redirected"
             _ <- git root ["init", "-q", "--bare", redirected]
-            _ <- git root ["remote", "set-url", "--push", "origin", redirected]
+            _ <- git root ["remote", "set-url", "origin", redirected]
 
             confirmRepositoryPush root preview.pushPreviewConfirmation
-                `shouldReturnSatisfying` isInvalid
+                `shouldReturnSatisfying` isStale
+            originalHead <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/main"
+                    ]
+            originalHead `shouldBe` preview.pushPreviewStatus.deliveryUpstreamOid
+
+    it "rejects an insteadOf config retarget after preview" $
+        withDeliveryRepository \root remote -> do
+            appendFile (root <> "/tracked.txt") "second\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            snapshot <- expectRight =<< repositorySnapshot root
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+            let redirected = remote <> "-config-redirected"
+            _ <- git root ["init", "-q", "--bare", redirected]
+            _ <- git root
+                [ "config"
+                , "url." <> redirected <> ".insteadOf"
+                , remote
+                ]
+
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isStale
             originalHead <- Text.strip
                 <$> git root
                     [ "--git-dir"
@@ -259,6 +311,15 @@ spec = describe "repository delivery service" do
                 createPullRequest root preview.pullRequestConfirmation
                     `shouldReturnSatisfying` isCommandFailure
 
+    it "rejects gh repository identity that differs from the bound remote" $
+        withDeliveryRepository \root _ ->
+            withFakeGh root \_ _ -> do
+                setEnv "GH_FAKE_REPOSITORY" "attacker/repository"
+                snapshot <- expectRight =<< repositorySnapshot root
+                previewPullRequest
+                    root snapshot.snapshotId "main" "Title" "Body"
+                    `shouldReturnSatisfying` isUnavailable
+
 withDeliveryRepository :: (FilePath -> FilePath -> IO value) -> IO value
 withDeliveryRepository action =
     withTempDirectory "repository-delivery" \container -> do
@@ -297,16 +358,40 @@ withFakeGh root action = do
     originalPath <- getEnv "PATH"
     originalCapture <- lookupEnv "GH_BODY_CAPTURE"
     originalFakeUrl <- lookupEnv "GH_FAKE_PR_URL"
+    originalFakeRepository <- lookupEnv "GH_FAKE_REPOSITORY"
     withTempDirectory "repository-delivery-gh" \bin -> do
-        let executable = bin <> "/gh"
+        realGit <- maybe (fail "git not found") pure =<< findExecutable "git"
+        localRemote <- Text.unpack . Text.strip
+            <$> git root ["remote", "get-url", "origin"]
+        let githubRemote = "https://github.com/owner/repository.git"
+            executable = bin <> "/gh"
+            gitExecutable = bin <> "/git"
             bodyCapture = bin <> "/body.txt"
             injectionMarker = root <> "/shell-injection"
+        _ <- git root ["remote", "set-url", "origin", githubRemote]
+        writeFile gitExecutable $ unlines
+            [ "#!/bin/bash"
+            , "set -eu"
+            , "args=()"
+            , "for arg in \"$@\"; do"
+            , "  if [[ \"$arg\" == " <> shellQuote githubRemote <> " ]]; then"
+            , "    args+=(" <> shellQuote localRemote <> ")"
+            , "  else"
+            , "    args+=(\"$arg\")"
+            , "  fi"
+            , "done"
+            , "exec " <> shellQuote realGit <> " \"${args[@]}\""
+            ]
+        setFileMode gitExecutable
+            (ownerReadMode
+                `unionFileModes` ownerWriteMode
+                `unionFileModes` ownerExecuteMode)
         writeFile executable $ unlines
             [ "#!/bin/sh"
             , "set -eu"
             , "case \"$1 $2\" in"
             , "  'auth status') exit 0 ;;"
-            , "  'repo view') printf '%s\\n' '{\"nameWithOwner\":\"owner/repository\"}' ;;"
+            , "  'repo view') printf '{\"nameWithOwner\":\"%s\"}\\n' \"${GH_FAKE_REPOSITORY:-owner/repository}\" ;;"
             , "  'pr list') printf '%s\\n' '[]' ;;"
             , "  'pr create')"
             , "    cat > \"$GH_BODY_CAPTURE\""
@@ -330,7 +415,10 @@ withFakeGh root action = do
                     Just value -> setEnv "GH_BODY_CAPTURE" value
                 case originalFakeUrl of
                     Nothing -> unsetEnv "GH_FAKE_PR_URL"
-                    Just value -> setEnv "GH_FAKE_PR_URL" value)
+                    Just value -> setEnv "GH_FAKE_PR_URL" value
+                case originalFakeRepository of
+                    Nothing -> unsetEnv "GH_FAKE_REPOSITORY"
+                    Just value -> setEnv "GH_FAKE_REPOSITORY" value)
             (\_ -> action bodyCapture injectionMarker)
 
 git :: FilePath -> [String] -> IO Text.Text
@@ -354,6 +442,11 @@ expectRight = \case
 isInvalid :: Either DeliveryError value -> Bool
 isInvalid = \case
     Left (DeliveryInvalidRequest _) -> True
+    _ -> False
+
+isUnavailable :: Either DeliveryError value -> Bool
+isUnavailable = \case
+    Left (DeliveryUnavailable _) -> True
     _ -> False
 
 isCommandFailure :: Either DeliveryError value -> Bool
