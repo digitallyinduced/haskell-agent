@@ -152,6 +152,20 @@ benchmark streaming-text-bench
                     , text
                     , text-builder >= 1.0 && < 1.1
 
+benchmark read-file-streaming-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ReadFileStreaming.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , text
+                    , unix
+
 benchmark tool-scheduling-bench
     import:           common-opts
     type:             exitcode-stdio-1.0
