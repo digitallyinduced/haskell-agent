@@ -15,9 +15,15 @@ typedef void (*ha_event_callback)(
      * binary HAEV frame:
      *   magic "HAEV" (4), version (u8), kind (u8), flags (u16 BE),
      *   turn-id and kind-specific fields as u32-BE length-prefixed UTF-8.
-     * Kind 1 is reasoning text, 2 text, 3 status, 4 tool-start, and 5
-     * tool-finish. Tool-start flags use bit 0 for encrypted arguments and
-     * bit 1 for truncation; tool-finish uses bit 1 for truncation.
+     * Kind 1 is reasoning text, 2 text, 3 status, 4 tool-start, 5
+     * tool-finish, 6 one provider response's usage, and 7 aggregate user-turn
+     * usage. Kind 7 is terminal and, when a turn outcome is available,
+     * precedes turn.completed or turn.failed. Usage fields are decimal UTF-8
+     * input, output, and cached token counts followed by optional
+     * provider-reported USD cost; the cost field is absent when unavailable
+     * and is never a local estimate.
+     * Tool-start flags use bit 0 for encrypted arguments and bit 1 for
+     * truncation; tool-finish uses bit 1 for truncation.
      * Turn IDs are stable task IDs for the lifetime of an engine. Events for
      * one task are delivered in order, but callbacks for different tasks may
      * run concurrently on runtime worker threads. The callback must be
@@ -874,6 +880,52 @@ typedef void (*ha_session_export_callback)(
     const uint8_t *error, size_t error_length
 );
 
+enum {
+    HA_INTERACTION_MODE_ASK = 0,
+    HA_INTERACTION_MODE_PLAN = 1,
+    HA_INTERACTION_MODE_YOLO = 2
+};
+
+enum {
+    HA_SHELL_MODE_NONE = 0,
+    HA_SHELL_MODE_BASH = 1,
+    HA_SHELL_MODE_GHCI = 2,
+    HA_SHELL_MODE_BOTH = 3
+};
+
+enum {
+    HA_INTERACTION_PLAN_ENTER = 1,
+    HA_INTERACTION_PLAN_EXIT = 2,
+    HA_INTERACTION_QUESTION = 3
+};
+
+typedef struct ha_interaction_option {
+    const uint8_t *label;
+    size_t label_length;
+} ha_interaction_option;
+
+/*
+ * Interactive callbacks run synchronously on the native turn worker thread.
+ * turn_id, interaction_id, prompt, the options array, and every option label
+ * are borrowed and valid only until the callback returns; copy them before
+ * returning and dispatch UI work to the main thread. options is NULL exactly
+ * when option_count is zero. kind is one of HA_INTERACTION_* above.
+ * PLAN_ENTER's prompt is the reason and its options are enter/stay; PLAN_EXIT's
+ * prompt is the plan markdown and its options are approve/request changes/
+ * cancel; QUESTION's prompt and options come from ask_user_question.
+ *
+ * Returning from this callback does not answer it. The turn remains paused
+ * until ha_engine_resolve_interaction is called or the turn is cancelled.
+ */
+typedef void (*ha_interaction_callback)(
+    void *context,
+    const uint8_t *turn_id, size_t turn_id_length,
+    const uint8_t *interaction_id, size_t interaction_id_length,
+    int32_t kind,
+    const uint8_t *prompt, size_t prompt_length,
+    const ha_interaction_option *options, size_t option_count
+);
+
 /* Runtime calls are process-global and reference counted. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
@@ -889,16 +941,18 @@ void *ha_engine_create(ha_event_callback callback, void *context);
  * Stage an ordered image batch for a turn before its turn.start request.
  * A later call for the same turn replaces the previous batch. turn_id is
  * required, must be non-null even when turn_id_length is zero, and must have
- * a non-zero length; a null or empty turn ID returns 2. Invalid UTF-8 returns
- * 4. images may be null only when image_count is zero. Passing zero images
- * discards that turn's batch, which callers should do if they abandon the
- * request. For every image, mime and bytes are required, non-null, and have
- * non-zero lengths; violating those requirements returns 4. All pointers are
- * borrowed for this call and the runtime copies accepted data before return.
- * Staging is also discarded when a request envelope or turn.start parameters
- * are rejected, and is consumed by the matching valid turn.start. Returns 0
- * when accepted, 1 for a null engine, 2 for a null or empty turn ID, 3 for an
- * internal failure, and 4 for invalid image fields or UTF-8.
+ * a length from 1 through 1024 bytes; violating those requirements returns 2.
+ * Invalid UTF-8 returns 4. images may be null only when image_count is zero.
+ * Passing zero images discards that turn's batch, which callers should do if
+ * they abandon the request. For every image, mime and bytes are required,
+ * non-null, and have non-zero lengths; violating those requirements returns
+ * 4. All pointers are borrowed for this call and the runtime copies accepted
+ * data before return. Both image and execution-option staging are discarded
+ * when a request envelope or turn.start parameters are rejected, or when a
+ * turn.start is rejected while another turn is active, and are consumed by
+ * the matching valid turn.start. Returns 0 when accepted, 1 for a null engine,
+ * 2 for a null, empty, or oversized turn ID, 3 for an internal failure, and 4
+ * for invalid image fields or UTF-8.
  */
 int32_t ha_engine_stage_turn_images(
     void *engine,
@@ -906,6 +960,73 @@ int32_t ha_engine_stage_turn_images(
     size_t turn_id_length,
     const ha_image_attachment *images,
     size_t image_count
+);
+/*
+ * Stage execution and shell modes for one turn. The turn ID is required,
+ * non-empty UTF-8, at most 1024 bytes, and is copied before return. A later
+ * call for the same turn replaces the previous options; the matching valid
+ * turn.start consumes them. Unstaged turns default to ASK + BASH. Returns 0
+ * when accepted, 1 for a null engine, 2 for an invalid turn ID, 3 for an
+ * internal failure, and 4 for an unknown mode code.
+ */
+int32_t ha_engine_stage_turn_options(
+    void *engine,
+    const uint8_t *turn_id,
+    size_t turn_id_length,
+    int32_t interaction_mode,
+    int32_t shell_mode
+);
+/*
+ * Atomically discard both the staged image batch and staged execution options
+ * for one turn. The turn ID pointer must be non-NULL, its length must be
+ * between 1 and 1024 bytes, and its bytes must be valid non-empty UTF-8; the ID
+ * is copied before return. The operation is idempotent and safe while the
+ * engine command worker is running, but must be serialized with
+ * ha_engine_destroy.
+ *
+ * Returns 0 after discarding (including when nothing was staged), 1 for a null
+ * engine, 2 for an invalid turn ID pointer/length/UTF-8, and 3 for an internal
+ * failure.
+ */
+int32_t ha_engine_discard_turn_staging(
+    void *engine,
+    const uint8_t *turn_id,
+    size_t turn_id_length
+);
+/*
+ * Install or replace the engine's interactive callback. Passing NULL clears
+ * it; future interaction requests then use safe decline/cancel defaults.
+ * Replacing or clearing waits for an in-flight callback to return, cancels all
+ * interactions still awaiting answers, and then makes the old callback/context
+ * safe to release. Do not call this function reentrantly from the callback.
+ * Engine destruction must still be serialized with all API calls. Returns 0
+ * on success, 1 for a null engine, and 3 for an internal failure.
+ */
+int32_t ha_engine_set_interaction_callback(
+    void *engine,
+    ha_interaction_callback callback,
+    void *context
+);
+/*
+ * Resolve a currently pending interaction. selected_index is a zero-based
+ * option index, or -1 for custom text/cancel. custom_text may be NULL only
+ * when custom_text_length is zero and is copied before return. For a free-text
+ * question use -1 with non-empty custom text; use -1 with empty text to
+ * cancel. Plan-exit option 1 uses custom text as change-request notes.
+ *
+ * Returns 0 when published, 1 for a null engine, 2 for invalid pointers/UTF-8,
+ * 3 for an internal failure, and 4 when the interaction is absent, already
+ * resolved, or selected_index is out of range.
+ */
+int32_t ha_engine_resolve_interaction(
+    void *engine,
+    const uint8_t *turn_id,
+    size_t turn_id_length,
+    const uint8_t *interaction_id,
+    size_t interaction_id_length,
+    int32_t selected_index,
+    const uint8_t *custom_text,
+    size_t custom_text_length
 );
 int32_t ha_engine_send_json(
     void *engine,
