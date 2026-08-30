@@ -28,6 +28,7 @@ import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , canonicalToolName
     )
 import Agent.Tools.Dangerous (shellCommandBlocked)
@@ -41,6 +42,7 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( ToolRegistry
     , lookupRegisteredTool
+    , toolAcceptsCall
     , toolAllowsWithoutPrompt
     )
 import Data.IORef
@@ -132,8 +134,21 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
     let toolName = canonicalToolName call.name
-    -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
-    case shellCommandBlocked toolName call.arguments of
+    -- A provider-native call kind may only reach its dedicated hosted schema.
+    -- Reject spoofed function/custom calls before yolo or remembered approval.
+    case lookupRegisteredTool call.name tools of
+        Just tool
+            | not (toolAcceptsCall tool call) -> do
+                let msg =
+                        "Rejected mismatched provider-native tool call kind for "
+                            <> call.name <> "."
+                report (ApprovalWarning msg)
+                pure (Left msg)
+        _ -> approveKnownKind policy planActive planPath toolName
+  where
+    approveKnownKind policy planActive planPath toolName = do
+      -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
+      case shellCommandBlocked toolName call.arguments of
         Just msg -> do
             report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)
@@ -155,41 +170,61 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
                     if isPlanFileWrite planActive planPath call
                         then pure (Right True)
                         else do
-                            allowed <- readIORef allowedToolsRef
-                            if Set.member toolName allowed
-                                then pure (Right True)
-                                else case policy of
-                                    ApproveAll -> pure (Right True)
-                                    DenyMutating -> pure (Right readOnly)
-                                    PromptMutating
-                                        | readOnly -> pure (Right True)
-                                        | otherwise -> do
-                                            requestPermission call >>= \case
-                                                Nothing -> pure (Right False)
-                                                Just PermissionAllowOnce ->
+                            if call.callKind == ComputerCallKind
+                                then requestPermission call >>= \case
+                                    Nothing -> pure (Right False)
+                                    Just PermissionDeny -> pure (Right False)
+                                    -- Computer access is deliberately never
+                                    -- cached and bypasses yolo/ApproveAll.
+                                    -- Every provider call must reach the
+                                    -- approval UI, including safety checks.
+                                    Just _ -> pure (Right True)
+                                else do
+                                    allowed <- readIORef allowedToolsRef
+                                    if Set.member toolName allowed
+                                        then pure (Right True)
+                                        else case policy of
+                                            ApproveAll -> pure (Right True)
+                                            DenyMutating ->
+                                                pure (Right readOnly)
+                                            PromptMutating
+                                                | readOnly ->
                                                     pure (Right True)
-                                                Just PermissionAllowAll -> do
-                                                    atomicModifyIORef' policyRef $
-                                                        const (ApproveAll, ())
-                                                    persistAlwaysApprove
-                                                    report $
-                                                        ApprovalSuccess
-                                                            (glyphOk
-                                                                <> "auto-approve on \
-                                                                   \(saved for project)")
-                                                    pure (Right True)
-                                                Just PermissionAllowTool -> do
-                                                    modifyIORef' allowedToolsRef
-                                                        (Set.insert toolName)
-                                                    report $
-                                                        ApprovalSuccess
-                                                            (glyphOk
-                                                                <> "always allow "
-                                                                <> call.name
-                                                                <> " this session")
-                                                    pure (Right True)
-                                                Just PermissionDeny ->
-                                                    pure (Right False)
+                                                | otherwise -> do
+                                                    requestPermission call
+                                                        >>= \case
+                                                            Nothing ->
+                                                                pure (Right False)
+                                                            Just PermissionAllowOnce ->
+                                                                pure (Right True)
+                                                            Just PermissionAllowAll -> do
+                                                                atomicModifyIORef'
+                                                                    policyRef $
+                                                                        const
+                                                                            ( ApproveAll
+                                                                            , ()
+                                                                            )
+                                                                persistAlwaysApprove
+                                                                report $
+                                                                    ApprovalSuccess
+                                                                        (glyphOk
+                                                                            <> "auto-approve on \
+                                                                               \(saved for project)")
+                                                                pure (Right True)
+                                                            Just PermissionAllowTool -> do
+                                                                modifyIORef'
+                                                                    allowedToolsRef
+                                                                    (Set.insert
+                                                                        toolName)
+                                                                report $
+                                                                    ApprovalSuccess
+                                                                        (glyphOk
+                                                                            <> "always allow "
+                                                                            <> call.name
+                                                                            <> " this session")
+                                                                pure (Right True)
+                                                            Just PermissionDeny ->
+                                                                pure (Right False)
 
 planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool
 planModeBlocksCall active planPath readOnly call
@@ -236,6 +271,15 @@ toggleAlwaysApprove policyRef projectRoot = do
         _ -> "auto-approve off (saved for project)")
 
 childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
+childApprove _ tools call
+    | Just tool <- lookupRegisteredTool call.name tools
+    , not (toolAcceptsCall tool call) =
+        pure $ Left
+            "Mismatched provider-native tool call kind requires parent review."
+childApprove _ _ call
+    | call.callKind == ComputerCallKind =
+        pure $ Left
+            "Computer use requires an explicit parent approval for every call."
 childApprove policy tools call = case policy of
     ApproveAll -> pure (Right True)
     DenyMutating -> do

@@ -20,16 +20,23 @@ import Agent.Responses.LoopBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
+    , responseItemToToolCall
+    , toolResultToItem
     , withRequestInput
     )
 import Agent.Responses.Types
     ( MessageContent(..)
+    , ComputerAction(..)
+    , ComputerCall(..)
+    , ComputerCallOutput(..)
     , FunctionCallOutput(..)
     , InternalChatMetadata(..)
+    , ItemStatus(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , SafetyCheck(..)
     , ResponseStreamEvent(..)
     , StreamEventType(..)
     , ResponseInput(..)
@@ -38,14 +45,126 @@ import Agent.Responses.Types
     , defaultResponseCreateParams
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson.Key as Key
 import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..), ToolCallResult(..))
 import Test.Hspec
 
 spec :: Spec
 spec = describe "tokenProviderStatelessResponsesBackend" do
+    it "round-trips native computer calls through structured screenshot output" do
+        let call = ComputerCall
+                { computerCallItemId = Just "item-1"
+                , computerCallId = "call-1"
+                , computerActions =
+                    [ ClickAction 20 30 "left" []
+                    , TypeAction "secret"
+                    ]
+                , pendingSafetyChecks = []
+                , computerCallStatus = Nothing
+                , computerCallExtra = KeyMap.empty
+                }
+        case responseItemToToolCall (ComputerCallItem call) of
+            Just projected -> do
+                projected.callId `shouldBe` "call-1"
+                projected.name `shouldBe` "computer"
+                projected.callKind `shouldBe` ComputerCallKind
+                projected.argumentsEncrypted `shouldBe` True
+            Nothing -> expectationFailure "computer call was not projected"
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/png;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.empty
+                    }
+        case toolResultToItem ToolCallResult
+                { callId = "call-1"
+                , output = encoded
+                , callKind = ComputerCallKind
+                } of
+            ComputerCallOutputItem output -> do
+                output.computerOutputCallId `shouldBe` "call-1"
+                output.screenshotDataUrl `shouldBe` "data:image/png;base64,AA=="
+            other -> expectationFailure ("unexpected output: " <> show other)
+
+    it "marks rejected or failed computer calls incomplete" do
+        case toolResultToItem ToolCallResult
+                { callId = "call-failed"
+                , output = "Tool call rejected by user."
+                , callKind = ComputerCallKind
+                } of
+            ComputerCallOutputItem output -> do
+                output.computerOutputCallId `shouldBe` "call-failed"
+                output.computerOutputStatus `shouldBe` Just ItemIncomplete
+                output.screenshotDataUrl `shouldSatisfy`
+                    ("data:image/png;base64," `Text.isPrefixOf`)
+            other -> expectationFailure ("unexpected output: " <> show other)
+
+    it "uses the durationless computer wait action shape" do
+        Aeson.toJSON WaitAction `shouldBe`
+            Aeson.object ["type" Aeson..= ("wait" :: Text.Text)]
+
+    it "preserves unknown native computer protocol fields" do
+        let safety = SafetyCheck
+                { safetyCheckId = "safe-1"
+                , safetyCheckCode = Just "confirm"
+                , safetyCheckMessage = Just "Confirm account change"
+                , safetyCheckExtra =
+                    KeyMap.singleton "provider_safety"
+                        (Aeson.String "retained")
+                }
+            call = ComputerCall
+                { computerCallItemId = Just "item-1"
+                , computerCallId = "call-1"
+                , computerActions = [ClickAction 20 30 "right" ["shift"]]
+                , pendingSafetyChecks = [safety]
+                , computerCallStatus = Nothing
+                , computerCallExtra =
+                    KeyMap.singleton "provider_call"
+                        (Aeson.String "retained")
+                }
+            output = ComputerCallOutput
+                { computerOutputItemId = Just "output-1"
+                , computerOutputCallId = "call-1"
+                , screenshotDataUrl = "data:image/png;base64,AA=="
+                , acknowledgedChecks = [safety]
+                , computerOutputStatus = Nothing
+                , computerOutputExtra =
+                    KeyMap.singleton "provider_output"
+                        (Aeson.String "retained")
+                }
+        Aeson.eitherDecode (Aeson.encode call) `shouldBe` Right call
+        Aeson.eitherDecode (Aeson.encode output) `shouldBe` Right output
+
+    it "does not text-truncate large computer screenshot continuations" do
+        let screenshot =
+                "data:image/png;base64," <> Text.replicate (2 * 1024 * 1024) "A"
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = screenshot
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.empty
+                    }
+        case toolResultToItem ToolCallResult
+                { callId = "call-large"
+                , output = encoded
+                , callKind = ComputerCallKind
+                } of
+            ComputerCallOutputItem output -> do
+                output.computerOutputCallId `shouldBe` "call-large"
+                output.screenshotDataUrl `shouldBe` screenshot
+            other -> expectationFailure ("unexpected output: " <> show other)
+
     it "encodes file attachments as input_file parts" do
         let image = ImageAttachment "image/png" "png-bytes"
             file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"

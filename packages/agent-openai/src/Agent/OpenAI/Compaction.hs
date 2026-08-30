@@ -216,6 +216,9 @@ dropOldestProtocolUnit = go []
         Just (prefix <> dropMatchingFunctionOutput call.callId rest)
     go prefix (CustomToolCallItem call : rest) =
         Just (prefix <> dropMatchingCustomToolOutput call.callId rest)
+    go prefix (ComputerCallItem call : rest) =
+        Just (prefix <> dropMatchingComputerOutput
+            call.computerCallId rest)
     go prefix (KnownResponseItem itemType tagged : rest)
         | Just outputType <- pairedOutputType itemType =
             Just $
@@ -244,6 +247,16 @@ dropMatchingFunctionOutput callId = go
         | identifiersMatch [callId] [output.callId] = rest
     go (item : rest) = item : go rest
 
+dropMatchingComputerOutput :: Text -> [ResponseItem] -> [ResponseItem]
+dropMatchingComputerOutput callId = go
+  where
+    go [] = []
+    go (ComputerCallOutputItem output : rest)
+        | identifiersMatch
+            [callId]
+            [output.computerOutputCallId] = rest
+    go (item : rest) = item : go rest
+
 dropMatchingCustomToolOutput :: Text -> [ResponseItem] -> [ResponseItem]
 dropMatchingCustomToolOutput callId = go
   where
@@ -262,6 +275,13 @@ pairedOutputType = \case
     ItemMcpApprovalRequest -> Just ItemMcpApprovalResponse
     ItemProgram -> Just ItemProgramOutput
     _ -> Nothing
+
+-- Keep a protocol-valid screenshot while removing the multi-megabyte payload.
+truncatedScreenshotDataUrl :: Text
+truncatedScreenshotDataUrl =
+    "data:image/png;base64,"
+        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
+        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
 
 pairedUnknownOutputTag :: Text -> Maybe Text
 pairedUnknownOutputTag itemType
@@ -343,7 +363,26 @@ sanitizeOversizedToolCall = \case
                 , status = call.status
                 , extraFields = call.extraFields
                 }
+    ComputerCallItem call
+        | any oversizedComputerAction call.computerActions ->
+            ComputerCallItem call
+                { computerActions = map sanitizeComputerAction
+                    call.computerActions
+                }
     item -> item
+
+sanitizeComputerAction :: ComputerAction -> ComputerAction
+sanitizeComputerAction = \case
+    TypeAction value
+        | Text.length value > remoteCompactionMaxStringLength ->
+            TypeAction oversizedToolArgumentsMessage
+    action -> action
+
+oversizedComputerAction :: ComputerAction -> Bool
+oversizedComputerAction = \case
+    TypeAction value ->
+        Text.length value > remoteCompactionMaxStringLength
+    _ -> False
 
 oversizedToolArgumentsMessage :: Text
 oversizedToolArgumentsMessage =
@@ -367,6 +406,9 @@ rewriteOversizedToolOutput = \case
             , status = output.status
             , extraFields = output.extraFields
             }
+    ComputerCallOutputItem output ->
+        Just $ ComputerCallOutputItem output
+            { screenshotDataUrl = truncatedScreenshotDataUrl }
     CustomToolCallOutputItem output ->
         Just $ CustomToolCallOutputItem CustomToolCallOutput
             { itemId = output.itemId

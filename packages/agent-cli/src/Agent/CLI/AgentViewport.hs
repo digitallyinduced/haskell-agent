@@ -602,6 +602,8 @@ responseItemLineList = \case
         ["tool: " <> call.name]
     FunctionCallOutputItem _ -> ["tool: completed"]
     CustomToolCallOutputItem _ -> ["tool: completed"]
+    ComputerCallItem _ -> ["tool: computer"]
+    ComputerCallOutputItem _ -> ["tool: completed"]
     _ -> []
 
 responseRoleLabel :: ResponseRole -> Text
@@ -644,6 +646,10 @@ appendResponseItem showRawReasoning state = \case
         maybe state
             (\call -> reduceUi (UiLoop (ToolStarted call)) state)
             (responseItemToToolCall (CustomToolCallItem item))
+    ComputerCallItem item ->
+        maybe state
+            (\call -> reduceUi (UiLoop (ToolStarted call)) state)
+            (responseItemToToolCall (ComputerCallItem item))
     FunctionCallOutputItem output ->
         reduceUi
             (UiLoop
@@ -660,6 +666,15 @@ appendResponseItem showRawReasoning state = \case
                     { callId = output.callId
                     , output = renderToolOutputValue output.output
                     , callKind = CustomCallKind
+                    }))
+            state
+    ComputerCallOutputItem output ->
+        reduceUi
+            (UiLoop
+                (ToolFinished ToolCallResult
+                    { callId = output.computerOutputCallId
+                    , output = "Screenshot captured"
+                    , callKind = ComputerCallKind
                     }))
             state
     ReasoningItemValue reasoning ->

@@ -91,7 +91,7 @@ storedResponseItemRoundTrip :: StoredRoundTripItem -> Property
 storedResponseItemRoundTrip (StoredRoundTripItem item) =
     checkCoverage $
         foldr
-            (\label -> cover 7 (responseItemKind item == label) label)
+            (\label -> cover 5 (responseItemKind item == label) label)
             (counterexample ("failed to round-trip " <> show item) $
             fromStoredResponseItem (toStoredResponseItem item)
                 === Right item)
@@ -125,6 +125,8 @@ genResponseItem =
         , FunctionCallOutputItem <$> genFunctionCallOutput
         , CustomToolCallItem <$> genCustomToolCall
         , CustomToolCallOutputItem <$> genCustomToolCallOutput
+        , ComputerCallItem <$> genComputerCall
+        , ComputerCallOutputItem <$> genComputerCallOutput
         , ReasoningItemValue <$> genReasoningItem
         , ItemReferenceValue <$> genItemReference
         , AgentMessageItem <$> genResponseAgentMessage
@@ -269,6 +271,67 @@ genCustomToolCallOutput =
         <*> genJsonValue
         <*> genMaybe genItemStatus
         <*> genJsonObject
+
+genComputerCall :: Gen ComputerCall
+genComputerCall =
+    ComputerCall
+        <$> genMaybe genText
+        <*> genText
+        <*> genSmallList genComputerAction
+        <*> genSmallList genSafetyCheck
+        <*> genMaybe genItemStatus
+        <*> fmap
+            (withoutReservedKeys
+                [ "type", "id", "call_id", "actions"
+                , "pending_safety_checks", "status"
+                ])
+            genJsonObject
+
+genComputerCallOutput :: Gen ComputerCallOutput
+genComputerCallOutput =
+    ComputerCallOutput
+        <$> genMaybe genText
+        <*> genText
+        <*> (("data:image/png;base64," <>) <$> genText)
+        <*> genSmallList genSafetyCheck
+        <*> genMaybe genItemStatus
+        <*> fmap
+            (withoutReservedKeys
+                [ "type", "id", "call_id", "output"
+                , "acknowledged_safety_checks", "status"
+                ])
+            genJsonObject
+
+genComputerAction :: Gen ComputerAction
+genComputerAction =
+    oneof
+        [ pure ScreenshotAction
+        , ClickAction <$> smallInt <*> smallInt <*> pure "left"
+            <*> genSmallList genText
+        , DoubleClickAction <$> smallInt <*> smallInt
+            <*> genSmallList genText
+        , TypeAction <$> genText
+        , KeypressAction <$> genSmallList genText
+        , ScrollAction <$> smallInt <*> smallInt <*> smallInt <*> smallInt
+            <*> genSmallList genText
+        , MoveAction <$> smallInt <*> smallInt <*> genSmallList genText
+        , pure WaitAction
+        , DragAction <$> genSmallList
+            (ComputerPoint <$> smallInt <*> smallInt)
+            <*> genSmallList genText
+        ]
+  where
+    smallInt = chooseInt (0, 1000)
+
+genSafetyCheck :: Gen SafetyCheck
+genSafetyCheck =
+    SafetyCheck
+        <$> genText
+        <*> genMaybe genText
+        <*> genMaybe genText
+        <*> fmap
+            (withoutReservedKeys ["id", "code", "message"])
+            genJsonObject
 
 genReasoningItem :: Gen ReasoningItem
 genReasoningItem =
@@ -440,7 +503,8 @@ genSmallList value = do
 responseItemKinds :: [String]
 responseItemKinds =
     [ "message", "function call", "function output"
-    , "custom call", "custom output", "reasoning"
+    , "custom call", "custom output", "computer call", "computer output"
+    , "reasoning"
     , "reference", "agent message", "known tagged", "unknown tagged"
     ]
 
@@ -451,6 +515,8 @@ responseItemKind = \case
     FunctionCallOutputItem{} -> "function output"
     CustomToolCallItem{} -> "custom call"
     CustomToolCallOutputItem{} -> "custom output"
+    ComputerCallItem{} -> "computer call"
+    ComputerCallOutputItem{} -> "computer output"
     ReasoningItemValue{} -> "reasoning"
     ItemReferenceValue{} -> "reference"
     AgentMessageItem{} -> "agent message"

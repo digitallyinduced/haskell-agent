@@ -2,6 +2,7 @@
 module Agent.CLI.Permission
     ( PermissionChoice(..)
     , PermissionState(..)
+    , approvalToolCallPrompt
     , applyPermissionKey
     , initialPermissionState
     , promptPermission
@@ -9,6 +10,7 @@ module Agent.CLI.Permission
     ) where
 
 import Agent.CLI.Input (readApprovalLine)
+import Agent.CLI.ComputerUse (computerApprovalPrompt)
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested)
     , notifyAttention
@@ -102,7 +104,7 @@ renderRow color selected label =
 promptPermission :: Bool -> ToolCall -> IO (Maybe PermissionChoice)
 promptPermission color call = do
     isTty <- hIsTerminalDevice stdin
-    let summary = permissionToolCallPrompt call
+    let summary = approvalToolCallPrompt call
     if not isTty
         then cooked color summary
         else do
@@ -125,3 +127,9 @@ cooked color summary = do
             AllowAlways -> PermissionAllowTool
             AllowAll -> PermissionAllowAll
             Deny -> PermissionDeny
+
+approvalToolCallPrompt :: ToolCall -> Text
+approvalToolCallPrompt call =
+    fromMaybe
+        (permissionToolCallPrompt call)
+        (computerApprovalPrompt call)

@@ -186,7 +186,10 @@ import Agent.Subagents
     , subagentConfig
     )
 import Agent.Subagents.TaskPath (taskPathText)
-import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , canonicalToolName
+    )
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , multiAgentToolNames

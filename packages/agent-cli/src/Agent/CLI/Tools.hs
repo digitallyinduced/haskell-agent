@@ -39,6 +39,7 @@ import Data.List (find, partition)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Info (os)
 
 requireToolRegistry :: [AppTool] -> IO ToolRegistry
 requireToolRegistry tools =
@@ -98,6 +99,10 @@ isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
 schemaFromAppTool dialect tool =
     case tool.appToolSchema of
+        HostedComputerSchema ->
+            if os == "darwin" && dialectId dialect == CodexDialect
+                then Just (knownResponseTool ToolComputer KeyMap.empty)
+                else Nothing
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of
                 NoFunctionSchemas ->
@@ -195,6 +200,7 @@ appToolJsonParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> parameters
     RawJsonFunctionSchema _ -> []
     FreeformApplyPatchSchema -> []
+    HostedComputerSchema -> []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

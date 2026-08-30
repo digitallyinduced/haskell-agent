@@ -51,6 +51,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
+import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -363,6 +364,26 @@ toolResultToItem result = case result.callKind of
         , status = Nothing
         , extraFields = KeyMap.empty
         }
+    ComputerCallKind ->
+        case Aeson.eitherDecodeStrict' (Text.encodeUtf8 result.output) of
+            Right output -> ComputerCallOutputItem output
+                { computerOutputCallId = result.callId }
+            Left _ -> ComputerCallOutputItem ComputerCallOutput
+                { computerOutputItemId = Nothing
+                , computerOutputCallId = result.callId
+                , screenshotDataUrl = transparentPixelDataUrl
+                , acknowledgedChecks = []
+                , computerOutputStatus = Just ItemIncomplete
+                , computerOutputExtra = KeyMap.empty
+                }
+
+-- A rejection or executor failure still has to satisfy the Responses protocol
+-- with a screenshot-shaped output. Successful executors return a fresh image.
+transparentPixelDataUrl :: Text
+transparentPixelDataUrl =
+    "data:image/png;base64,"
+        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
+        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
 
 responseToTurnOutput :: Response -> TurnOutput
 responseToTurnOutput response = TurnOutput
@@ -405,7 +426,21 @@ responseItemToToolCall = \case
         , callKind = CustomCallKind
         , argumentsEncrypted = False
         }
+    ComputerCallItem call -> Just ToolCall
+        { callId = call.computerCallId
+        , name = "computer"
+        , arguments = Text.decodeUtf8 (LBS.toStrict (Aeson.encode call))
+        , callKind = ComputerCallKind
+        , argumentsEncrypted = any isSensitiveComputerAction
+            call.computerActions
+        }
     _ -> Nothing
+
+isSensitiveComputerAction :: ComputerAction -> Bool
+isSensitiveComputerAction = \case
+    TypeAction{} -> True
+    KeypressAction{} -> True
+    _ -> False
 
 data CodexRateLimitsPayload = CodexRateLimitsPayload
     { rateLimits :: !(Maybe CodexRateLimitDetails) }

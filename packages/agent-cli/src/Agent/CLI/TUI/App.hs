@@ -109,7 +109,10 @@ import Agent.CLI.Command
     , SlashCatalog(..)
     , defaultSlashCatalog
     )
-import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Permission
+    ( PermissionChoice(..)
+    , approvalToolCallPrompt
+    )
 import Agent.CLI.Resume
     ( ResumeBrowser(..)
     , ResumeEntry(..)
@@ -225,7 +228,6 @@ import Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     , liveTodoPanelLines
     , parseTodoList
-    , permissionToolCallPrompt
     , todoStatusGlyph
     )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
@@ -820,7 +822,7 @@ requestFullscreenPermission
     -> IO (Maybe PermissionChoice)
 requestFullscreenPermission runtime call = do
     reply <- newEmptyTMVarIO
-    let summary = permissionToolCallPrompt call
+    let summary = approvalToolCallPrompt call
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 

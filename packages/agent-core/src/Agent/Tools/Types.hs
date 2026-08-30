@@ -19,6 +19,7 @@ module Agent.Tools.Types
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
+    , toolAcceptsCall
     , toolExecutionPolicyFor
     , toolSchedulingPlanFor
     , dispatchRegisteredToolCall
@@ -31,6 +32,7 @@ import Agent.Cancel (CancelFlag, newCancelFlag)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult
     , ToolDispatchConfig
     , ToolHandler
@@ -59,6 +61,10 @@ data ToolSchema
     = JsonFunctionSchema ![PropertySchema]
     | RawJsonFunctionSchema !Value
     | FreeformApplyPatchSchema
+    -- | The provider-native computer tool. Keeping this distinct prevents an
+    -- unrelated function or MCP tool named @computer@ from being projected as
+    -- a hosted desktop-control surface.
+    | HostedComputerSchema
     deriving (Eq, Show)
 
 -- | Whether a call may run without generic user approval.
@@ -316,14 +322,30 @@ dispatchRegisteredToolCall
     -> IO ToolCallResult
 dispatchRegisteredToolCall config registry call =
     dispatchToolHandler config
-        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        (lookupRegisteredTool call.name registry >>= \tool ->
+            if toolAcceptsCall tool call
+                then Just tool.appToolHandler
+                else Nothing)
         call
+
+-- | Provider-native call kinds may only reach their matching hosted handler.
+-- This prevents a function/custom tool that happens to share the hosted name
+-- from invoking desktop control, and prevents native calls from reaching an
+-- ordinary function handler.
+toolAcceptsCall :: AppTool -> ToolCall -> Bool
+toolAcceptsCall tool call =
+    case (tool.appToolSchema, call.callKind) of
+        (HostedComputerSchema, ComputerCallKind) -> True
+        (HostedComputerSchema, _) -> False
+        (_, ComputerCallKind) -> False
+        _ -> True
 
 jsonToolParameters :: AppTool -> Maybe [PropertySchema]
 jsonToolParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> Just parameters
     RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
+    HostedComputerSchema -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.

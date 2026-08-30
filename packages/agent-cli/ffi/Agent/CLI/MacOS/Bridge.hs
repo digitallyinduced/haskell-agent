@@ -9,6 +9,8 @@ module Agent.CLI.MacOS.Bridge
     , browserStatusMessage
     , browserToolsWhenEnabled
     , invokeBrowserCommand
+    , TurnStart(..)
+    , nativeTurnArguments
     ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
@@ -130,6 +132,7 @@ import Agent.Store.Postgres
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     )
 import Agent.Tools.Types (AppTool)
 import Control.Concurrent (forkFinally, forkIO)
@@ -372,6 +375,7 @@ data TurnStart = TurnStart
     , turnStartModel :: !(Maybe Text)
     , turnStartEffort :: !(Maybe Text)
     , turnStartWorktree :: !Bool
+    , turnStartComputerUse :: !Bool
     }
 
 instance Aeson.FromJSON TurnStart where
@@ -387,6 +391,8 @@ instance Aeson.FromJSON TurnStart where
             (either fail pure . parseEffort)
             rawEffort
         turnStartWorktree <- object .:? "worktree" Aeson..!= False
+        turnStartComputerUse <-
+            object .:? "computerUse" Aeson..!= False
         let start = TurnStart
                 { turnStartId
                 , turnStartPrompt
@@ -396,6 +402,7 @@ instance Aeson.FromJSON TurnStart where
                 , turnStartModel
                 , turnStartEffort
                 , turnStartWorktree
+                , turnStartComputerUse
                 }
         case
             ( turnStartSessionId
@@ -1595,29 +1602,7 @@ runNativeTurn callback context processRuntime control nativeBrowserTools start i
                 requestApproval callback context control
             , nativeTools = nativeBrowserTools
             }
-        modelArgs = case
-            (start.turnStartProvider, start.turnStartModel) of
-                (Just provider, Just model) ->
-                    [ "--provider", Text.unpack provider
-                    , "--model", Text.unpack model
-                    ]
-                _ -> []
-        args =
-            [ "--minimal"
-            , "--motion", "off"
-            , "--save-session"
-            , "--no-yolo"
-            ]
-                <> maybe
-                    []
-                    (\sessionId -> ["--resume", Text.unpack sessionId])
-                    start.turnStartSessionId
-                <> (if start.turnStartWorktree then ["--worktree"] else [])
-                <> modelArgs
-                <> maybe
-                    []
-                    (\effort -> ["--effort", Text.unpack effort])
-                    start.turnStartEffort
+        args = nativeTurnArguments start
     result <- tryAny $
         withTurnImages start.turnStartPrompt images \managedFile ->
             withFile "/dev/null" WriteMode \output ->
@@ -1643,6 +1628,35 @@ runNativeTurn callback context processRuntime control nativeBrowserTools start i
                         Just
                             "turn ended without a completion event"
         }
+
+nativeTurnArguments :: TurnStart -> [String]
+nativeTurnArguments start =
+    [ "--minimal"
+    , "--motion", "off"
+    , "--save-session"
+    , "--no-yolo"
+    ]
+        <> maybe
+            []
+            (\sessionId -> ["--resume", Text.unpack sessionId])
+            start.turnStartSessionId
+        <> (if start.turnStartWorktree then ["--worktree"] else [])
+        <> (if start.turnStartComputerUse
+            then ["--computer-use"]
+            else ["--no-computer-use"])
+        <> modelArgs
+        <> maybe
+            []
+            (\effort -> ["--effort", Text.unpack effort])
+            start.turnStartEffort
+  where
+    modelArgs = case
+        (start.turnStartProvider, start.turnStartModel) of
+            (Just provider, Just model) ->
+                [ "--provider", Text.unpack provider
+                , "--model", Text.unpack model
+                ]
+            _ -> []
 
 withTurnImages
     :: Text
@@ -1747,7 +1761,7 @@ requestApproval
 requestApproval callback context control call = do
     alreadyAllowed <- Set.member call.name
         <$> readTVarIO control.turnControlAllowedTools
-    if alreadyAllowed
+    if alreadyAllowed && call.callKind /= ComputerCallKind
       then pure (Just PermissionAllowOnce)
       else requestApprovalFromClient callback context control call
 
@@ -1794,7 +1808,8 @@ requestApprovalFromClient callback context control call = do
             control.turnControlApprovals
             (Map.delete approvalId)
     case choice of
-        PermissionAllowTool ->
+        PermissionAllowTool
+            | call.callKind /= ComputerCallKind ->
             atomically $
                 modifyTVar'
                     control.turnControlAllowedTools

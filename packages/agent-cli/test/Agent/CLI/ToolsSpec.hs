@@ -1,12 +1,13 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.Dialect
     ( claudeCodeDialect
     , codexDialect
     , grokBuildDialect
     )
-import Agent.Loop (LoopError(..))
+import Agent.Loop (LoopError(..), defaultLoopDispatch)
 import Agent.Responses.Types
 import Agent.Subagents
     ( closeSubagentRegistry
@@ -14,15 +15,24 @@ import Agent.Subagents
     , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (taskPathRoot)
-import Agent.ToolDispatch (noArgsTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallKind(..)
+    , ToolCallResult(..)
+    , noArgsTool
+    )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
+    , ToolSchema(..)
+    , dispatchRegisteredToolCall
     , freeformApplyPatchAppTool
     , jsonAppTool
+    , mkToolRegistry
     , rawJsonAppTool
     )
 import Control.Exception.Safe (bracket)
@@ -30,6 +40,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -38,6 +49,56 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "advertises only the dedicated computer tool as a built-in" do
+        schemasFromAppTools codexDialect [computerUseTool]
+            `shouldBe`
+                [ webSearchTool
+                , knownResponseTool ToolComputer KeyMap.empty
+                ]
+
+    it "keeps an unrelated function named computer as a function" do
+        let computer = jsonAppTool "computer" "Unrelated MCP function" []
+                AlwaysPrompt
+                (noArgsTool "computer" (pure (Right "ok")))
+        case schemasFromAppTools codexDialect [computer] of
+            [_, FunctionToolValue function] ->
+                function.name `shouldBe` "computer"
+            other -> expectationFailure
+                ("expected ordinary computer function, got " <> show other)
+
+    it "advertises hosted computer only for the Codex dialect" do
+        schemasFromAppTools grokBuildDialect [computerUseTool]
+            `shouldBe` [webSearchTool, xSearchTool]
+        schemasFromAppTools claudeCodeDialect [computerUseTool]
+            `shouldBe` []
+
+    it "does not dispatch spoofed function/custom calls to hosted computer" do
+        runs <- newIORef (0 :: Int)
+        let hosted = AppTool
+                { appToolName = "computer"
+                , appToolDescription = "test"
+                , appToolSchema = HostedComputerSchema
+                , appToolHandler = noArgsTool "computer"
+                    (modifyIORef' runs (+ 1) >> pure (Right "ran"))
+                , appToolApproval = AlwaysPrompt
+                , appToolExecution = TurnSequential
+                , appToolResourceClaims = Nothing
+                }
+            registry = either (error . Text.unpack) id (mkToolRegistry [hosted])
+            call kind = ToolCall
+                { callId = "spoof"
+                , name = "computer"
+                , arguments = "{}"
+                , callKind = kind
+                , argumentsEncrypted = False
+                }
+        functionResult <- dispatchRegisteredToolCall
+            defaultLoopDispatch registry (call FunctionCallKind)
+        customResult <- dispatchRegisteredToolCall
+            defaultLoopDispatch registry (call CustomCallKind)
+        functionResult.output `shouldBe` "Error: Unknown tool: computer"
+        customResult.output `shouldBe` "Error: Unknown tool: computer"
+        readIORef runs `shouldReturn` 0
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do
