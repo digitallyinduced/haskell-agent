@@ -292,8 +292,10 @@ void ha_engine_destroy(void *engine);
 /*
  * Typed session operations copy all inputs before returning and invoke exactly
  * one terminal callback after returning 0. A return of 2 rejects a null/empty
- * required input, invalid index/radius, null callback, or import larger than
- * 512 MiB; no callback follows a rejected call. Radius is clamped to 500.
+ * required input, invalid UTF-8 session id, invalid index/radius, null
+ * callback, or import larger than 512 MiB; no callback follows a rejected
+ * call. Malformed import documents, including invalid UTF-8, report callback
+ * failure after acceptance. Radius is clamped to 500.
  *
  * Fork copies through the inclusive durable turn index into a fresh session;
  * the source is immutable. Import always remaps the source id to a fresh id.

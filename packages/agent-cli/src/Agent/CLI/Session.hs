@@ -954,7 +954,9 @@ loadSessionTurnsBefore
     -> IO (Either Text SessionTurnPage)
 loadSessionTurnsBefore pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
-        (\pool' key -> Store.loadSessionTurnsBefore pool' key cursor limit)
+        (\pool' key ->
+            Store.loadSessionTurnsBefore
+                pool' key cursor (boundedPageLimit limit))
 
 loadSessionHistoryTurnsBefore
     :: StorePool
@@ -966,7 +968,8 @@ loadSessionHistoryTurnsBefore
 loadSessionHistoryTurnsBefore pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
         (\pool' key ->
-            Store.loadSessionHistoryTurnsBefore pool' key cursor limit)
+            Store.loadSessionHistoryTurnsBefore
+                pool' key cursor (boundedPageLimit limit))
 
 loadSessionTurnsAfter
     :: StorePool
@@ -977,7 +980,9 @@ loadSessionTurnsAfter
     -> IO (Either Text SessionTurnPage)
 loadSessionTurnsAfter pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
-        (\pool' key -> Store.loadSessionTurnsAfter pool' key cursor limit)
+        (\pool' key ->
+            Store.loadSessionTurnsAfter
+                pool' key cursor (boundedPageLimit limit))
 
 loadSessionHistoryTurnsRange
     :: StorePool
@@ -989,9 +994,8 @@ loadSessionHistoryTurnsRange
 loadSessionHistoryTurnsRange pool root sessionId start limit =
     loadSessionTurnPage root pool sessionId
         (\pool' key ->
-            Store.loadSessionHistoryTurnsRange pool' key start (boundedLimit limit))
-  where
-    boundedLimit = min 1000 . max 1
+            Store.loadSessionHistoryTurnsRange
+                pool' key start (boundedPageLimit limit))
 
 loadSessionHistoryTurnsRangeBounded
     :: StorePool
@@ -1006,7 +1010,10 @@ loadSessionHistoryTurnsRangeBounded
     loadSessionTurnPage root pool sessionId
         (\pool' key ->
             Store.loadSessionHistoryTurnsRangeBounded
-                pool' key start endExclusive (min 1000 (max 1 limit)))
+                pool' key start endExclusive (boundedPageLimit limit))
+
+boundedPageLimit :: Int -> Int
+boundedPageLimit = min 1000 . max 1
 
 -- | Return a bounded full-history window centered on a durable turn index.
 -- The requested turn is included when it exists. Near either edge the result
