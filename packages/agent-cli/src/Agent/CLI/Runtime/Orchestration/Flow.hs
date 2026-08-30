@@ -72,7 +72,10 @@ import Agent.CLI.Runtime.HistorySource
 import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Initialized
-    ( runAgentInitialized )
+    ( PreparedStartupAuth
+    , prepareStartupAuth
+    , runAgentInitialized
+    )
 import Agent.CLI.Runtime.Orchestration.Restart
     ( RestartCallbacks(..), runFullscreenRestartLoop )
 import Agent.CLI.Runtime.Orchestration.Startup
@@ -186,7 +189,7 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ( defaultToolEnv, ToolEnv(toolCancel) )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
-import Control.Concurrent.Async ()
+import Control.Concurrent.Async ( Async, withAsync )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar
     ( newEmptyMVar, newMVar, readMVar, tryPutMVar )
@@ -199,7 +202,7 @@ import Data.Functor ()
 import Data.IORef
     ( IORef, atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
-import Data.Maybe ( isJust )
+import Data.Maybe ( isJust, isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
 import System.Console.ANSI ()
@@ -709,7 +712,10 @@ prepareAgentIterationTracked
                                     page)
     writeIORef uiRuntimeRef fullscreen
     resumeLock <- readIORef resumeLockRef
-    let action =
+    let runAction
+            :: Maybe (Async PreparedStartupAuth)
+            -> IO RunResult
+        runAction preparedAuth =
             do
                 cwd <- case resumed of
                     Just _ -> pure initialCwd
@@ -814,6 +820,21 @@ prepareAgentIterationTracked
                     resumeLock
                     cwd
                     startup
+                    preparedAuth
+        action
+            | options.optWorktree
+            , isNothing resumed
+            , isNothing transition =
+                let prepareAccountUsage =
+                        isNothing fullscreen
+                            || isJust options.optProvider
+                            || isJust options.optModel
+                in withAsync
+                    (prepareStartupAuth
+                        prepareAccountUsage
+                        options.optProvider) $
+                    runAction . Just
+            | otherwise = runAction Nothing
         cleanup = do
             writeIORef uiRuntimeRef Nothing
             writeIORef cancelToolRef (pure ())
