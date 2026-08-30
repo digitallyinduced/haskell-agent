@@ -572,6 +572,10 @@ uiEventLogicalBytes = \case
             TextDelta text -> logicalTextBytes text
             ReasoningDelta text -> logicalTextBytes text
             ActivityUpdated text -> logicalTextBytes text
+            ProviderLimitUpdated
+                { providerLimitText = text
+                } ->
+                logicalTextBytes text
             WarningRaised text -> logicalTextBytes text
             ResponseRestarted text -> logicalTextBytes text
             TurnStarted -> 128
