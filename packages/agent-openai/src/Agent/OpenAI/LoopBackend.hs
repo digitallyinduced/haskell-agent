@@ -570,6 +570,12 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
 isOpenAiWebSocketTransportFailure :: ApiError -> Bool
 isOpenAiWebSocketTransportFailure err = case err of
     ConnectionError {} -> True
+    -- Rejected WebSocket upgrades reach this exact transport-specific shape
+    -- only after bounded connection retries have been exhausted. A same-status
+    -- logical HTTP error does not match and remains a permission failure.
+    err
+        | Just status <- WebSocket.webSocketHandshakeFailureStatus err ->
+            status /= 401
     ProviderError WebSocketConnectionLimitReached _ _ -> True
     -- A server that does not support the Responses WebSocket protocol
     -- advertises that explicitly with HTTP 426.
