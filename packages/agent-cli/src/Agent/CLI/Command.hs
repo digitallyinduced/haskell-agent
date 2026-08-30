@@ -251,6 +251,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplShowSessionInfo
                     else ReplCommandError "usage: /session-info"
+            "desktop" ->
+                if null args
+                    then ReplDesktop
+                    else ReplCommandError "usage: /desktop"
             "afk" -> case args of
                 [] -> ReplAfk Nothing
                 [target] -> ReplAfk (Just target)

@@ -109,6 +109,12 @@ spec = do
             parseReplLine "/status now"
                 `shouldBe` ReplCommandError "usage: /session-info"
 
+        it "opens the current conversation in the desktop app" do
+            parseReplLine "/desktop" `shouldBe` ReplDesktop
+            parseReplLine "  /Desktop  " `shouldBe` ReplDesktop
+            parseReplLine "/desktop now"
+                `shouldBe` ReplCommandError "usage: /desktop"
+
         it "hands the session to local or remote tmux" do
             parseReplLine "/afk" `shouldBe` ReplAfk Nothing
             parseReplLine "/afk office-builder:~/haskell-agent"
@@ -317,6 +323,7 @@ spec = do
                     , "retry"
                     , "session"
                     , "session-info"
+                    , "desktop"
                     , "afk"
                     , "worktree"
                     , "rename"
@@ -662,10 +669,10 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /skills [reload]"
 
         it "adds skills to completion, the live menu, and help" do
-            slashCompletionCandidatesWithSkills skills "" "/de"
+            slashCompletionCandidatesWithSkills skills "" "/depl"
                 `shouldBe` ["/deploy"]
             fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
-                (slashMenuForWithSkills skills "/dep" 4)
+                (slashMenuForWithSkills skills "/depl" 5)
                 `shouldBe` Just ["/deploy"]
             let help = formatSlashHelpWithSkills False skills (Just "deploy")
             Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)

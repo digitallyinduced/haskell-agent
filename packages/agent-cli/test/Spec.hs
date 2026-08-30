@@ -20,6 +20,7 @@ import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
+import qualified Agent.CLI.DesktopSpec as DesktopSpec
 import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
@@ -99,6 +100,7 @@ main = hspec do
     CredentialStoreSpec.spec
     DialectsSpec.spec
     DatabaseSpec.spec
+    DesktopSpec.spec
     EnvironmentSpec.spec
     ErrorSpec.spec
     FileUriSpec.spec

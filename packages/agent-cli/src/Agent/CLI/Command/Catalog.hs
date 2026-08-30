@@ -18,6 +18,7 @@ slashCommands =
     , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
+    , cmd "desktop" [] "/desktop" "Open this conversation in the Haskell Agent desktop app" False
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
     , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
