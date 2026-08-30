@@ -18,9 +18,11 @@ module Agent.CLI.RepositoryReview
     , repositoryErrorText
     ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
+    , poll
     , wait
     , waitCatch
     , withAsync
@@ -37,10 +39,11 @@ import Control.Exception.Safe
     , onException
     , tryAny
     )
-import Control.Monad (foldM)
+import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (isDigit)
+import Data.List (nub)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -57,11 +60,26 @@ import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose)
 import System.IO.Unsafe (unsafePerformIO)
+import System.FilePath
+    ( isAbsolute
+    , makeRelative
+    , normalise
+    , splitDirectories
+    , (</>)
+    )
+import System.Posix.Signals
+    ( Signal
+    , sigKILL
+    , sigTERM
+    , signalProcessGroup
+    )
+import System.Posix.Types (ProcessID)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
-    , StdStream(CreatePipe, Inherit)
+    , StdStream(CreatePipe)
     , createProcess
+    , getPid
     , proc
     , terminateProcess
     , waitForProcess
@@ -106,9 +124,9 @@ data RepositoryMutation
     = StagePath !FilePath
     | UnstagePath !FilePath
     | RestorePath !FilePath
-    | StagePatch !BS.ByteString
-    | UnstagePatch !BS.ByteString
-    | RestorePatch !BS.ByteString
+    | StagePatch !FilePath !BS.ByteString
+    | UnstagePatch !FilePath !BS.ByteString
+    | RestorePatch !FilePath !BS.ByteString
     deriving (Eq, Show)
 
 data RepositoryCheckStream
@@ -118,6 +136,7 @@ data RepositoryCheckStream
 
 data RepositoryCheck = RepositoryCheck
     { repositoryCheckProcess :: !ProcessHandle
+    , repositoryCheckProcessGroup :: !(Maybe ProcessID)
     , repositoryCheckWorker :: !(Async ())
     , repositoryCheckCancelled :: !(IORef Bool)
     }
@@ -140,68 +159,71 @@ repositoryDiff
     -> IO (Either RepositoryError RepositoryDiff)
 repositoryDiff requested expected kind path =
     runRepositoryRead requested \root -> do
-        current <- snapshotAtRoot root
-        case current of
+        case validateRepositoryPath root path of
             Left err -> pure (Left err)
-            Right snapshot
-                | snapshot.snapshotId /= expected ->
-                    pure
-                        (Left
-                            (StaleRepositorySnapshot
-                                expected
-                                snapshot.snapshotId))
-                | null path || path == "." ->
-                    pure (Left (InvalidRepositoryRequest "invalid file path"))
-                | otherwise -> do
-                    let untracked =
-                            kind == RepositoryWorktreeDiff
-                                && any
-                                    (\file ->
-                                        file.repositoryFilePath == path
-                                            && file.repositoryFileIndexStatus
-                                                == '?')
-                                    snapshot.snapshotFiles
-                        arguments
-                            | untracked =
-                                [ "diff"
-                                , "--no-index"
-                                , "--binary"
-                                , "--no-ext-diff"
-                                , "--no-color"
-                                , "--"
-                                , "/dev/null"
-                                , path
-                                ]
-                            | otherwise =
-                                [ "diff"
-                                , "--binary"
-                                , "--no-ext-diff"
-                                , "--no-color"
-                                ]
-                                    <> case kind of
-                                        RepositoryWorktreeDiff -> []
-                                        RepositoryStagedDiff -> ["--cached"]
-                                    <> ["--", path]
-                    result <- runGitDiff root arguments
-                    after <- snapshotAtRoot root
-                    pure do
-                        patch <- result
-                        latest <- after
-                        if latest.snapshotId /= expected
-                            then
-                                Left
-                                    (StaleRepositorySnapshot
-                                        expected
-                                        latest.snapshotId)
-                            else
-                                Right RepositoryDiff
-                                    { repositoryDiffPatch = patch
-                                    , repositoryDiffBinary =
-                                        "GIT binary patch" `BS8.isInfixOf` patch
-                                            || "Binary files "
+            Right () -> snapshotAtRoot root >>= \case
+                Left err -> pure (Left err)
+                Right snapshot
+                    | snapshot.snapshotId /= expected ->
+                        pure
+                            (Left
+                                (StaleRepositorySnapshot
+                                    expected
+                                    snapshot.snapshotId))
+                    | otherwise -> do
+                        let untracked =
+                                kind == RepositoryWorktreeDiff
+                                    && any
+                                        (\file ->
+                                            file.repositoryFilePath == path
+                                                && file.repositoryFileIndexStatus
+                                                    == '?')
+                                        snapshot.snapshotFiles
+                            arguments
+                                | untracked =
+                                    [ "--literal-pathspecs"
+                                    , "diff"
+                                    , "--no-index"
+                                    , "--binary"
+                                    , "--no-ext-diff"
+                                    , "--no-color"
+                                    , "--"
+                                    , "/dev/null"
+                                    , path
+                                    ]
+                                | otherwise =
+                                    [ "--literal-pathspecs"
+                                    , "diff"
+                                    , "--binary"
+                                    , "--no-ext-diff"
+                                    , "--no-color"
+                                    ]
+                                        <> case kind of
+                                            RepositoryWorktreeDiff -> []
+                                            RepositoryStagedDiff -> ["--cached"]
+                                        <> ["--", path]
+                        result <- runGitDiff root arguments
+                        after <- snapshotAtRoot root
+                        pure do
+                            patch <- result
+                            latest <- after
+                            if latest.snapshotId /= expected
+                                then
+                                    Left
+                                        (StaleRepositorySnapshot
+                                            expected
+                                            latest.snapshotId)
+                                else
+                                    Right RepositoryDiff
+                                        { repositoryDiffPatch = patch
+                                        , repositoryDiffBinary =
+                                            "GIT binary patch"
                                                 `BS8.isInfixOf` patch
-                                    , repositoryDiffHunks = parseDiffHunks patch
-                                    }
+                                                || "Binary files "
+                                                    `BS8.isInfixOf` patch
+                                        , repositoryDiffHunks =
+                                            parseDiffHunks patch
+                                        }
 
 mutateRepository
     :: FilePath
@@ -273,6 +295,7 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                     created <- tryAny do
                         (maybeOutput, maybeError, process) <-
                             createCheckProcess root executable arguments
+                        processGroup <- getPid process
                         cancelled <- newIORef False
                         worker <-
                             asyncWithUnmask
@@ -300,11 +323,13 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                                 `onException` do
                                     closeQuietly maybeOutput
                                     closeQuietly maybeError
-                                    _ <- tryAny (terminateProcess process)
+                                    signalCheckProcessGroup
+                                        sigKILL processGroup process
                                     _ <- tryAny (waitForProcess process)
                                     pure ()
                         pure RepositoryCheck
                             { repositoryCheckProcess = process
+                            , repositoryCheckProcessGroup = processGroup
                             , repositoryCheckWorker = worker
                             , repositoryCheckCancelled = cancelled
                             }
@@ -328,13 +353,38 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
 cancelRepositoryCheck :: RepositoryCheck -> IO ()
 cancelRepositoryCheck check = do
     writeIORef check.repositoryCheckCancelled True
-    _ <- tryAny (terminateProcess check.repositoryCheckProcess)
-    pure ()
+    signalCheckProcessGroup
+        sigTERM
+        check.repositoryCheckProcessGroup
+        check.repositoryCheckProcess
+    threadDelay 250_000
+    poll check.repositoryCheckWorker >>= \case
+        Nothing ->
+            signalCheckProcessGroup
+                sigKILL
+                check.repositoryCheckProcessGroup
+                check.repositoryCheckProcess
+        Just _ -> pure ()
 
 waitRepositoryCheck :: RepositoryCheck -> IO ()
 waitRepositoryCheck check = do
     _ <- waitCatch check.repositoryCheckWorker
     pure ()
+
+signalCheckProcessGroup
+    :: Signal
+    -> Maybe ProcessID
+    -> ProcessHandle
+    -> IO ()
+signalCheckProcessGroup signal processGroup process = do
+    processId <- maybe (getPid process) (pure . Just) processGroup
+    case processId of
+        Nothing -> do
+            _ <- tryAny (terminateProcess process)
+            pure ()
+        Just pid -> do
+            _ <- tryAny (signalProcessGroup signal pid)
+            pure ()
 
 createCheckProcess
     :: FilePath
@@ -346,13 +396,17 @@ createCheckProcess root executable arguments = do
         createProcess
             (proc executable arguments)
                 { cwd = Just root
-                , std_in = Inherit
+                , std_in = CreatePipe
                 , std_out = CreatePipe
                 , std_err = CreatePipe
                 , close_fds = True
+                , create_group = True
                 }
     case (maybeInput, maybeOutput, maybeError) of
-        (Nothing, Just output, Just errors) ->
+        (Just input, Just output, Just errors) -> do
+            -- Checks have no stdin API. Closing immediately prevents an
+            -- inherited terminal or pipe from leaving a check blocked.
+            hClose input
             pure (output, errors, process)
         _ -> do
             _ <- tryAny (terminateProcess process)
@@ -429,17 +483,27 @@ runMutation root snapshot = \case
                             "restore never deletes an untracked file"))
                 else applyPathPatch
                     RepositoryWorktreeDiff ["--reverse"] path
-    StagePatch patch ->
-        applyPatch root ["--cached"] patch
-    UnstagePatch patch ->
-        applyPatch root ["--cached", "--reverse"] patch
-    RestorePatch patch ->
-        applyPatch root ["--reverse"] patch
+    StagePatch path patch ->
+        checkedPath path $
+            applyReviewedPatch RepositoryWorktreeDiff ["--cached"] path patch
+    UnstagePatch path patch ->
+        checkedPath path $
+            applyReviewedPatch
+                RepositoryStagedDiff ["--cached", "--reverse"] path patch
+    RestorePatch path patch ->
+        checkedPath path $
+            if isUntracked path
+                then pure
+                    (Left
+                        (InvalidRepositoryRequest
+                            "restore never deletes an untracked file"))
+                else applyReviewedPatch
+                    RepositoryWorktreeDiff ["--reverse"] path patch
   where
     checkedPath path action
-        | null path || path == "." =
-            pure (Left (InvalidRepositoryRequest "invalid file path"))
-        | otherwise = action
+        = case validateRepositoryPath root path of
+            Left err -> pure (Left err)
+            Right () -> action
     isUntracked path = any
         (\file ->
             file.repositoryFilePath == path
@@ -451,20 +515,32 @@ runMutation root snapshot = \case
             Right diff
                 | BS.null diff.repositoryDiffPatch -> pure (Right ())
                 | otherwise ->
-                    applyPatch root flags diff.repositoryDiffPatch
+                    applyPatch
+                        root snapshot.snapshotId flags diff.repositoryDiffPatch
+    applyReviewedPatch kind flags path patch =
+        repositoryDiff root snapshot.snapshotId kind path >>= \case
+            Left err -> pure (Left err)
+            Right reviewed ->
+                case validateReviewedPatch
+                    reviewed.repositoryDiffPatch patch of
+                    Left err -> pure (Left err)
+                    Right () ->
+                        applyPatch root snapshot.snapshotId flags patch
 
 applyPatch
     :: FilePath
+    -> Text
     -> [String]
     -> BS.ByteString
     -> IO (Either RepositoryError ())
-applyPatch root flags patch
+applyPatch root expected flags patch
     | BS.null patch =
         pure (Left (InvalidRepositoryRequest "patch is empty"))
     | otherwise = do
-        checked <- runGit root
-            (["apply", "--check", "--recount"] <> flags <> ["-"])
-            patch
+        -- The in-process lock serializes bridge mutations. Revalidate as close
+        -- as possible to the single atomic git-apply invocation; an unrelated
+        -- external git writer cannot be locked by this API.
+        checked <- requireSnapshot root expected
         case checked of
             Left err -> pure (Left err)
             Right _ ->
@@ -472,6 +548,85 @@ applyPatch root flags patch
                     <$> runGit root
                         (["apply", "--recount"] <> flags <> ["-"])
                         patch
+
+validateRepositoryPath
+    :: FilePath
+    -> FilePath
+    -> Either RepositoryError ()
+validateRepositoryPath root path
+    | null path
+        || path == "."
+        || isAbsolute path
+        || normalise path /= path
+        || any (`elem` [".", ".."]) (splitDirectories path)
+        || ':' `isPrefixOfPath` path
+        || any (`elem` ("*?[" :: String)) path
+        || '\NUL' `elem` path =
+            Left
+                (InvalidRepositoryRequest
+                    "file path must be a normalized literal repository-relative path")
+    | let relative = makeRelative (normalise root) (normalise (root </> path))
+    , isAbsolute relative
+        || relative == ".."
+        || case splitDirectories relative of
+            "..":_ -> True
+            _ -> False =
+            Left
+                (InvalidRepositoryRequest
+                    "file path escapes the repository root")
+    | otherwise = Right ()
+  where
+    isPrefixOfPath character value =
+        case value of
+            first:_ -> first == character
+            [] -> False
+
+validateReviewedPatch
+    :: BS.ByteString
+    -> BS.ByteString
+    -> Either RepositoryError ()
+validateReviewedPatch reviewed supplied
+    | BS.null supplied =
+        Left (InvalidRepositoryRequest "patch is empty")
+    | supplied == reviewed = Right ()
+    | otherwise =
+        case (textPatchSections reviewed, textPatchSections supplied) of
+            (Just (reviewedHeader, reviewedHunks), Just (header, hunks))
+                | header == reviewedHeader
+                    && not (null hunks)
+                    && length hunks == length (nub hunks)
+                    && all (`elem` reviewedHunks) hunks -> Right ()
+            _ ->
+                Left
+                    (InvalidRepositoryRequest
+                        "patch is not an exact reviewed hunk set for the requested path")
+
+textPatchSections
+    :: BS.ByteString
+    -> Maybe ([BS.ByteString], [[BS.ByteString]])
+textPatchSections patch = do
+    let lines' = BS8.lines patch
+        (header, body) = break isHunkHeader lines'
+    unless (not (null header) && startsDiff header) Nothing
+    hunks <- splitHunks body
+    pure (header, hunks)
+  where
+    isHunkHeader = BS8.isPrefixOf "@@ "
+    startsDiff (first:_) = BS8.isPrefixOf "diff --git " first
+    startsDiff [] = False
+    splitHunks [] = Nothing
+    splitHunks lines' =
+        let collect (current, completed) line
+                | isHunkHeader line =
+                    ( [line]
+                    , if null current then completed else current : completed
+                    )
+                | null current = ([], completed)
+                | otherwise = (current <> [line], completed)
+            (lastHunk, reversed) = foldl' collect ([], []) lines'
+            result = reverse
+                (if null lastHunk then reversed else lastHunk : reversed)
+        in if null result then Nothing else Just result
 
 appendUntrackedHashes
     :: FilePath
@@ -488,7 +643,9 @@ appendUntrackedHashes root statusBytes diffBytes =
         ]
     addHash (Left err) _ = pure (Left err)
     addHash (Right material) path = do
-        result <- runGit root ["hash-object", "--", path] BS.empty
+        result <- runGit root
+            ["--literal-pathspecs", "hash-object", "--", path]
+            BS.empty
         pure ((material <>) <$> result)
 
 hashMaterial :: FilePath -> BS.ByteString -> IO (Either RepositoryError Text)
@@ -669,14 +826,16 @@ runProcessBytes
     -> IO (ExitCode, BS.ByteString, BS.ByteString)
 runProcessBytes workingDirectory executable arguments input =
     bracket start stop \(inputHandle, outputHandle, errorHandle, process) -> do
-        BS.hPut inputHandle input
-        hClose inputHandle
-        withAsync (BS.hGetContents outputHandle) \outputReader ->
-            withAsync (BS.hGetContents errorHandle) \errorReader -> do
-                exitCode <- waitForProcess process
-                output <- wait outputReader
-                errors <- wait errorReader
-                pure (exitCode, output, errors)
+        withAsync
+            (BS.hPut inputHandle input `finally` closeQuietly inputHandle)
+            \inputWriter ->
+                withAsync (BS.hGetContents outputHandle) \outputReader ->
+                    withAsync (BS.hGetContents errorHandle) \errorReader -> do
+                        exitCode <- waitForProcess process
+                        _ <- wait inputWriter
+                        output <- wait outputReader
+                        errors <- wait errorReader
+                        pure (exitCode, output, errors)
   where
     start = do
         (maybeInput, maybeOutput, maybeError, process) <-

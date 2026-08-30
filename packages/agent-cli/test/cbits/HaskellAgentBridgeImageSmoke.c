@@ -237,6 +237,7 @@ int ha_repository_review_abi_smoke(void) {
             value, sizeof(value) - 1,
             value, sizeof(value) - 1,
             HA_REPOSITORY_STAGE,
+            value, sizeof(value) - 1,
             NULL, 0,
             repository_result_callback,
             NULL) != 2) {
@@ -261,6 +262,32 @@ int ha_repository_review_abi_smoke(void) {
             NULL,
             &check) != 1) {
         return 26;
+    }
+    const ha_utf8_string oversized_argument = {
+        value,
+        (size_t)1024 * 1024 + 1
+    };
+    if (ha_repository_check_start(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            &oversized_argument, 1,
+            repository_check_output_callback,
+            repository_check_exit_callback,
+            NULL,
+            &check) != 2) {
+        return 27;
+    }
+    if (ha_repository_check_start(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            &oversized_argument, 4097,
+            repository_check_output_callback,
+            repository_check_exit_callback,
+            NULL,
+            &check) != 2) {
+        return 28;
     }
     ha_repository_check_cancel(NULL);
     ha_repository_check_destroy(NULL);

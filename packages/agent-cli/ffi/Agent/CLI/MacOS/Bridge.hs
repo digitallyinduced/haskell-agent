@@ -630,7 +630,8 @@ foreign export ccall ha_repository_apply_path
 
 foreign export ccall ha_repository_apply_patch
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> FunPtr RepositoryResultCallback
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryResultCallback
     -> Ptr () -> IO CInt
 
 foreign export ccall ha_repository_commit
@@ -801,22 +802,27 @@ ha_repository_apply_path pathBytes pathLength snapshotBytes snapshotLength
 
 ha_repository_apply_patch
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> FunPtr RepositoryResultCallback
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryResultCallback
     -> Ptr () -> IO CInt
 ha_repository_apply_patch pathBytes pathLength snapshotBytes snapshotLength
-    operation patchBytes patchLength callback context
+    operation fileBytes fileLength patchBytes patchLength callback context
     | callback == nullFunPtr = pure 1
     | patchBytes == nullPtr || patchLength == 0 = pure 2
     | toInteger patchLength > toInteger (maxBound :: Int) = pure 2
     | otherwise =
         copyRequiredTexts
-            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)]
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (fileBytes, fileLength)
+            ]
             >>= \case
                 Left _ -> pure 2
-                Right [path, expected] -> do
+                Right [path, expected, file] -> do
                     patch <- BS.packCStringLen
                         (castPtr patchBytes, fromIntegral patchLength)
-                    case repositoryPatchMutation operation patch of
+                    case repositoryPatchMutation
+                        operation (Text.unpack file) patch of
                         Nothing -> pure 2
                         Just mutation -> do
                             started <- startRepositoryMutation
@@ -930,7 +936,7 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
         || exitCallback == nullFunPtr
         || outCheck == nullPtr = pure 1
     | argumentsPointer == nullPtr && argumentCount > 0 = pure 2
-    | toInteger argumentCount > toInteger (maxBound :: Int) = pure 2
+    | argumentCount > fromIntegral maxRepositoryCheckArguments = pure 2
     | otherwise =
         copyRequiredTexts
             [ (pathBytes, pathLength)
@@ -1024,17 +1030,42 @@ ha_repository_check_destroy pointer
 
 copyRepositoryCheckArguments
     :: Ptr () -> CSize -> IO (Either () [Text])
-copyRepositoryCheckArguments pointer count =
-    fmap sequence $ mapM copyAt [0 .. fromIntegral count - 1]
+copyRepositoryCheckArguments pointer count
+    | count > fromIntegral maxRepositoryCheckArguments = pure (Left ())
+    | itemSize <= 0 = pure (Left ())
+    | otherwise = go 0 (0 :: Int) []
   where
     pointerSize = sizeOf (nullPtr :: Ptr ())
     sizeSize = sizeOf (undefined :: CSize)
     itemSize = pointerSize + sizeSize
-    copyAt index = do
-        let base = castPtr pointer `plusPtr` (index * itemSize)
-        bytes <- peekByteOff base 0 :: IO (Ptr Word8)
-        length <- peekByteOff base pointerSize :: IO CSize
-        copyRequiredText bytes length
+    countInt = fromIntegral count
+    go index total acc
+        | index >= countInt = pure (Right (reverse acc))
+        | index > maxBound `div` itemSize = pure (Left ())
+        | otherwise = do
+            let base = castPtr pointer `plusPtr` (index * itemSize)
+            bytes <- peekByteOff base 0 :: IO (Ptr Word8)
+            length <- peekByteOff base pointerSize :: IO CSize
+            if length > fromIntegral maxRepositoryCheckArgumentBytes
+                || toInteger total + toInteger length
+                    > toInteger maxRepositoryCheckTotalArgumentBytes
+                then pure (Left ())
+                else copyRequiredText bytes length >>= \case
+                    Left _ -> pure (Left ())
+                    Right value ->
+                        go
+                            (index + 1)
+                            (total + fromIntegral length)
+                            (value : acc)
+
+maxRepositoryCheckArguments :: Int
+maxRepositoryCheckArguments = 4096
+
+maxRepositoryCheckArgumentBytes :: Int
+maxRepositoryCheckArgumentBytes = 1024 * 1024
+
+maxRepositoryCheckTotalArgumentBytes :: Int
+maxRepositoryCheckTotalArgumentBytes = 8 * 1024 * 1024
 
 repositoryPathMutation
     :: CInt -> FilePath -> Maybe RepositoryReview.RepositoryMutation
@@ -1052,11 +1083,14 @@ repositoryDiffKind kind = case kind of
     _ -> Nothing
 
 repositoryPatchMutation
-    :: CInt -> BS.ByteString -> Maybe RepositoryReview.RepositoryMutation
-repositoryPatchMutation operation patch = case operation of
-    0 -> Just (RepositoryReview.StagePatch patch)
-    1 -> Just (RepositoryReview.UnstagePatch patch)
-    2 -> Just (RepositoryReview.RestorePatch patch)
+    :: CInt
+    -> FilePath
+    -> BS.ByteString
+    -> Maybe RepositoryReview.RepositoryMutation
+repositoryPatchMutation operation path patch = case operation of
+    0 -> Just (RepositoryReview.StagePatch path patch)
+    1 -> Just (RepositoryReview.UnstagePatch path patch)
+    2 -> Just (RepositoryReview.RestorePatch path patch)
     _ -> Nothing
 
 withRepositorySnapshot

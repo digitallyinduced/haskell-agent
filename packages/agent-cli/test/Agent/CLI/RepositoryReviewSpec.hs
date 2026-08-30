@@ -7,10 +7,12 @@ import Control.Concurrent.MVar
     , takeMVar
     )
 import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as BS8
 import Data.Either (isLeft)
 import Data.IORef
-    ( modifyIORef'
+    ( atomicModifyIORef'
+    , modifyIORef'
     , newIORef
     , readIORef
     )
@@ -146,7 +148,7 @@ spec = describe "repository review service" do
                 =<< mutateRepository
                     root
                     before.snapshotId
-                    (StagePatch diff.repositoryDiffPatch)
+                    (StagePatch "tracked.txt" diff.repositoryDiffPatch)
             git root ["diff", "--cached", "--name-only"]
                 `shouldReturn` "tracked.txt\n"
 
@@ -160,7 +162,9 @@ spec = describe "repository review service" do
                 =<< mutateRepository
                     root
                     staged.snapshotId
-                    (UnstagePatch unstageDiff.repositoryDiffPatch)
+                    (UnstagePatch
+                        "tracked.txt"
+                        unstageDiff.repositoryDiffPatch)
             git root ["diff", "--cached", "--name-only"] `shouldReturn` ""
 
             writeFile (root <> "/untracked.txt") "keep\n"
@@ -170,6 +174,93 @@ spec = describe "repository review service" do
                 current.snapshotId
                 (RestorePath "untracked.txt")
             result `shouldSatisfy` isLeft
+            doesFileExist (root <> "/untracked.txt") `shouldReturn` True
+
+    it "accepts an unchanged subset of reviewed hunks" $
+        withRepository \root -> do
+            writeFile
+                (root <> "/tracked.txt")
+                (unlines (map (("line " <>) . show) [1 :: Int .. 12]))
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "lines"]
+            writeFile
+                (root <> "/tracked.txt")
+                (unlines
+                    [ if number `elem` [2, 11]
+                        then "changed " <> show number
+                        else "line " <> show number
+                    | number <- [1 :: Int .. 12]
+                    ])
+            snapshot <- expectRight =<< repositorySnapshot root
+            diff <- expectRight
+                =<< repositoryDiff root snapshot.snapshotId
+                    RepositoryWorktreeDiff "tracked.txt"
+            let selected = firstPatchHunk diff.repositoryDiffPatch
+            selected `shouldSatisfy` (/= diff.repositoryDiffPatch)
+            _ <- expectRight
+                =<< mutateRepository root snapshot.snapshotId
+                    (StagePatch "tracked.txt" selected)
+            stagedPatch <- git root ["diff", "--cached"]
+            stagedPatch `shouldSatisfy` Text.isInfixOf "+changed 2"
+            stagedPatch `shouldNotSatisfy` Text.isInfixOf "+changed 11"
+
+    it "rejects pathspec magic, globs, and traversal without broad mutation" $
+        withRepository \root -> do
+            writeFile (root <> "/second.txt") "second\n"
+            _ <- git root ["add", "second.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            appendFile (root <> "/tracked.txt") "pending\n"
+            appendFile (root <> "/second.txt") "pending\n"
+
+            forM_ ["*", ":!tracked.txt", "../tracked.txt", "a/../tracked.txt"] $
+                \path -> do
+                    snapshot <- expectRight =<< repositorySnapshot root
+                    mutateRepository root snapshot.snapshotId (StagePath path)
+                        `shouldReturnSatisfying` isInvalidRequest
+                    git root ["diff", "--cached", "--name-only"]
+                        `shouldReturn` ""
+
+    it "binds patch mutations to one reviewed path and exact hunk content" $
+        withRepository \root -> do
+            writeFile (root <> "/second.txt") "second\n"
+            _ <- git root ["add", "second.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            appendFile (root <> "/tracked.txt") "tracked change\n"
+            appendFile (root <> "/second.txt") "second change\n"
+            snapshot <- expectRight =<< repositorySnapshot root
+            trackedDiff <- expectRight
+                =<< repositoryDiff root snapshot.snapshotId
+                    RepositoryWorktreeDiff "tracked.txt"
+            secondDiff <- expectRight
+                =<< repositoryDiff root snapshot.snapshotId
+                    RepositoryWorktreeDiff "second.txt"
+
+            mutateRepository root snapshot.snapshotId
+                (StagePatch "tracked.txt" secondDiff.repositoryDiffPatch)
+                `shouldReturnSatisfying` isInvalidRequest
+            mutateRepository root snapshot.snapshotId
+                (StagePatch
+                    "tracked.txt"
+                    (trackedDiff.repositoryDiffPatch
+                        <> secondDiff.repositoryDiffPatch))
+                `shouldReturnSatisfying` isInvalidRequest
+            mutateRepository root snapshot.snapshotId
+                (StagePatch
+                    "tracked.txt"
+                    (trackedDiff.repositoryDiffPatch <> "+injected\n"))
+                `shouldReturnSatisfying` isInvalidRequest
+            git root ["diff", "--cached", "--name-only"] `shouldReturn` ""
+
+            writeFile (root <> "/untracked.txt") "keep\n"
+            untrackedSnapshot <- expectRight =<< repositorySnapshot root
+            untrackedDiff <- expectRight
+                =<< repositoryDiff root untrackedSnapshot.snapshotId
+                    RepositoryWorktreeDiff "untracked.txt"
+            mutateRepository root untrackedSnapshot.snapshotId
+                (RestorePatch
+                    "untracked.txt"
+                    untrackedDiff.repositoryDiffPatch)
+                `shouldReturnSatisfying` isInvalidRequest
             doesFileExist (root <> "/untracked.txt") `shouldReturn` True
 
     it "streams an explicit argv check and reports its exit status" $
@@ -196,6 +287,35 @@ spec = describe "repository review service" do
                 , (RepositoryCheckStderr, "stderr-value")
                 ])
 
+    it "drains large stdout and stderr streams without pipe deadlock" $
+        withRepository \root -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            byteCounts <- newIORef (0, 0)
+            terminal <- newEmptyMVar
+            check <- expectRight
+                =<< startRepositoryCheck
+                    root
+                    snapshot.snapshotId
+                    "/bin/sh"
+                    [ "-c"
+                    , "/usr/bin/yes o | /usr/bin/head -c 1048576; "
+                        <> "/usr/bin/yes e | /usr/bin/head -c 1048576 >&2"
+                    ]
+                    (\stream bytes ->
+                        atomicModifyIORef' byteCounts \(out, err) ->
+                            ( case stream of
+                                RepositoryCheckStdout ->
+                                    (out + BS8.length bytes, err)
+                                RepositoryCheckStderr ->
+                                    (out, err + BS8.length bytes)
+                            , ()
+                            ))
+                    (\cancelled exitCode ->
+                        putMVar terminal (cancelled, exitCode))
+            waitRepositoryCheck check
+            takeMVar terminal `shouldReturn` (False, ExitSuccess)
+            readIORef byteCounts `shouldReturn` (1048576, 1048576)
+
     it "cancels and joins a running check" $
         withRepository \root -> do
             snapshot <- expectRight =<< repositorySnapshot root
@@ -204,8 +324,11 @@ spec = describe "repository review service" do
                 =<< startRepositoryCheck
                     root
                     snapshot.snapshotId
-                    "/bin/sleep"
-                    ["30"]
+                    "/bin/sh"
+                    [ "-c"
+                    , "trap '' TERM; "
+                        <> "(trap '' TERM; exec /bin/sleep 30) & wait"
+                    ]
                     (\_ _ -> pure ())
                     (\cancelled exitCode ->
                         putMVar terminal (cancelled, exitCode))
@@ -256,3 +379,29 @@ expectRight :: (HasCallStack, Show error) => Either error value -> IO value
 expectRight = \case
     Left err -> expectationFailure (show err) >> fail "unreachable"
     Right value -> pure value
+
+isInvalidRequest
+    :: Either RepositoryError RepositorySnapshot
+    -> Bool
+isInvalidRequest = \case
+    Left (InvalidRepositoryRequest _) -> True
+    _ -> False
+
+shouldReturnSatisfying
+    :: (HasCallStack, Show value)
+    => IO value
+    -> (value -> Bool)
+    -> Expectation
+shouldReturnSatisfying action predicate =
+    action >>= (`shouldSatisfy` predicate)
+
+firstPatchHunk :: BS8.ByteString -> BS8.ByteString
+firstPatchHunk patch =
+    let lines' = BS8.lines patch
+        isHunk = BS8.isPrefixOf "@@ "
+        (header, body) = break isHunk lines'
+    in case body of
+        [] -> patch
+        first:rest ->
+            let (hunkBody, _) = break isHunk rest
+            in BS8.unlines (header <> [first] <> hunkBody)

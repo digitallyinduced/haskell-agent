@@ -350,7 +350,13 @@ void ha_engine_destroy(void *engine);
  * invalid pointer/length/UTF-8/operation, and 3 for an internal start failure.
  * All mutations compare the supplied snapshot fingerprint while holding a
  * per-repository mutation lock. Stale operations do not modify the repository.
- * Restore never deletes an untracked file.
+ * File paths must be normalized, literal, repository-relative paths; pathspec
+ * magic, globs, absolute paths, and traversal are rejected. Patch mutations
+ * additionally require file_path and accept only an exact diff or a subset of
+ * the reviewed text hunks for that one file. Restore never deletes an
+ * untracked file. The lock coordinates API callers; unrelated external git
+ * writers cannot acquire it, so the fingerprint is revalidated immediately
+ * before Git's single apply operation and Git still validates patch context.
  *
  * ha_repository_cancel_all cancels and joins accepted snapshot, diff, and
  * mutation operations before returning. Checks are owned and cancelled by
@@ -398,6 +404,8 @@ int32_t ha_repository_apply_patch(
     const uint8_t *snapshot_id,
     size_t snapshot_id_length,
     int32_t operation,
+    const uint8_t *file_path,
+    size_t file_path_length,
     const uint8_t *patch,
     size_t patch_length,
     ha_repository_result_callback result_callback,
@@ -420,13 +428,16 @@ void ha_repository_cancel_all(void);
 /*
  * Start an argv-based repository check without a shell. executable and every
  * argument are required non-empty UTF-8; arguments may be NULL only when
- * argument_count is zero. stream is 1 for stdout and 2 for stderr. Output
+ * argument_count is zero. At most 4096 arguments, 1 MiB per argument, and
+ * 8 MiB total argument bytes are accepted. stream is 1 for stdout and 2 for
+ * stderr. Output
  * buffers are callback-scoped and ordered within each stream; the two streams
  * may interleave. exit_callback is invoked once with the process exit code,
  * or -1 plus an error if launch fails.
  *
  * On status 0, out_check receives an owned opaque handle. Cancel is
- * asynchronous. Destroy waits for readers/process completion, frees the
+ * asynchronous and targets the check's process group (including descendants).
+ * Destroy waits for readers/process completion, frees the
  * handle, and must be called exactly once; no callbacks occur after it
  * returns. Status values match the other repository functions.
  */
