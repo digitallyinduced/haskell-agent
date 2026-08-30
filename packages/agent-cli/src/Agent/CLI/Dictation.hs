@@ -1,9 +1,12 @@
 -- | Terminal microphone recording and provider transcription.
 module Agent.CLI.Dictation
-    ( DictationControl(..)
+    ( DictationBackend(..)
+    , DictationControl(..)
     , DictationResult(..)
     , dictate
+    , dictateForProvider
     , dictateWith
+    , dictationBackendForProvider
     , insertDictation
     , transcribeAudio
     ) where
@@ -17,7 +20,10 @@ import Agent.OpenAI.Transcription
     ( openAITranscriptionSampleRate
     , transcribePcmWithOpenAI
     )
-import Agent.Provider (Provider(XAIProvider))
+import Agent.Provider
+    ( Provider(..)
+    , providerSlug
+    )
 import Agent.XAI.Transcription
     ( transcribeAudioWithXAI
     , transcribePcmWithXAI
@@ -77,13 +83,37 @@ data DictationResult
     | DictationFailed !Text
     deriving (Eq, Show)
 
--- | Stream the default microphone until Enter and return the transcript.
+data DictationBackend
+    = OpenAIDictation
+    | XAIDictation
+    deriving (Eq, Show)
+
+-- | Select dictation from the active model provider. Providers without a
+-- speech-to-text integration fail explicitly rather than spending credentials
+-- from an unrelated provider.
+dictationBackendForProvider :: Provider -> Either Text DictationBackend
+dictationBackendForProvider = \case
+    OpenAIProvider -> Right OpenAIDictation
+    XAIProvider -> Right XAIDictation
+    provider ->
+        Left $
+            "Dictation is not supported for "
+                <> providerSlug provider
+                <> " models"
+
+-- | Legacy standalone entry point. The inline model-aware REPL and fullscreen
+-- composer use 'dictateForProvider'; this preserves the original xAI default
+-- for callers that have no active model context.
 dictate :: IO Text
-dictate = do
+dictate = dictateForProvider XAIProvider
+
+-- | Stream the default microphone using the active model provider.
+dictateForProvider :: Provider -> IO Text
+dictateForProvider provider = do
     Text.hPutStrLn stderr "● Starting dictation…"
     hFlush stderr
     result <-
-        dictateWith
+        dictateWith provider
             DictationControl
                 { dictationWaitForStop = do
                     Text.hPutStr stderr "● Listening… press Enter to stop"
@@ -98,40 +128,47 @@ dictate = do
 
 -- | Record microphone audio until the caller signals stop. Providers that
 -- stream partial transcripts deliver them through the control callback.
-dictateWith :: DictationControl -> IO DictationResult
-dictateWith control =
+dictateWith :: Provider -> DictationControl -> IO DictationResult
+dictateWith provider control =
     try run >>= \case
         Left (err :: SomeException) ->
             pure (DictationFailed (Text.pack (displayException err)))
         Right result ->
             pure result
   where
-    run = do
-        requireExecutable "ffmpeg"
-        loadOpenAiDictationAuth >>= \case
-            Just loaded ->
-                finish =<<
-                    transcribePcmWithOpenAI
-                        loaded.loadedTokenProvider
-                        (streamMicrophone
-                            openAITranscriptionSampleRate
-                            control.dictationWaitForStop)
-                        control.dictationOnTranscript
-            Nothing ->
-                loadAuth (Just XAIProvider) >>= \case
-                    Left err ->
-                        pure $ DictationFailed $
-                            err
-                                <> " Configure ChatGPT/Codex OAuth or an OpenAI \
-                                   \API key to use OpenAI dictation."
-                    Right loaded ->
-                        finish =<<
-                            transcribePcmWithXAI
-                                loaded.loadedTokenProvider
-                                (streamMicrophone
-                                    16_000
-                                    control.dictationWaitForStop)
-                                control.dictationOnTranscript
+    run =
+        case dictationBackendForProvider provider of
+            Left err ->
+                pure (DictationFailed err)
+            Right backend -> do
+                requireExecutable "ffmpeg"
+                runBackend backend
+    runBackend = \case
+        OpenAIDictation ->
+            loadOpenAiDictationAuth >>= \case
+                Nothing ->
+                    pure $ DictationFailed
+                        "No OpenAI credential found for OpenAI dictation"
+                Just loaded ->
+                    finish =<<
+                        transcribePcmWithOpenAI
+                            loaded.loadedTokenProvider
+                            (streamMicrophone
+                                openAITranscriptionSampleRate
+                                control.dictationWaitForStop)
+                            control.dictationOnTranscript
+        XAIDictation ->
+            loadAuth (Just XAIProvider) >>= \case
+                Left err ->
+                    pure (DictationFailed err)
+                Right loaded ->
+                    finish =<<
+                        transcribePcmWithXAI
+                            loaded.loadedTokenProvider
+                            (streamMicrophone
+                                16_000
+                                control.dictationWaitForStop)
+                            control.dictationOnTranscript
     finish = \case
         Left err ->
             pure (DictationFailed (Text.pack (show err)))
