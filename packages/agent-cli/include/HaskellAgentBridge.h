@@ -470,6 +470,48 @@ typedef struct ha_image_attachment {
     size_t bytes_length;
 } ha_image_attachment;
 
+/*
+ * Session-page callbacks use status 0 for a turn, 1 for terminal success, and
+ * -1 for terminal failure. has_older/has_newer are meaningful only on terminal
+ * success. Missing optional strings have length zero. Usage values are all -1
+ * when a turn has no provider usage. response_items_json is the JSON array
+ * from version 1 of the full-fidelity session-transfer format; it remains JSON
+ * because provider response items are deliberately extensible. Every buffer is
+ * callback-scoped and must be copied before returning. Callbacks run serially
+ * on a background worker, never the caller or main thread.
+ */
+typedef void (*ha_session_turn_callback)(
+    void *context, int32_t status, int64_t turn_index,
+    const uint8_t *occurred_at, size_t occurred_at_length,
+    const uint8_t *user_text, size_t user_text_length,
+    const uint8_t *assistant_text, size_t assistant_text_length,
+    const uint8_t *turn_error, size_t turn_error_length,
+    const uint8_t *response_id, size_t response_id_length,
+    const uint8_t *transcript_effect, size_t transcript_effect_length,
+    const uint8_t *response_items_json, size_t response_items_json_length,
+    int64_t input_tokens, int64_t output_tokens, int64_t cached_tokens,
+    int32_t has_older, int32_t has_newer,
+    const uint8_t *error, size_t error_length
+);
+
+/* Session transfer results use status 0 for success and -1 for failure. */
+typedef void (*ha_session_transfer_result_callback)(
+    void *context, int32_t status,
+    const uint8_t *session_id, size_t session_id_length,
+    const uint8_t *error, size_t error_length
+);
+
+/*
+ * Export callbacks use status 0 for a document chunk, 1 for terminal success,
+ * and -1 for terminal failure. Chunks concatenate to one version 1
+ * haskell-agent.session-transfer JSON document. Buffers are callback-scoped.
+ */
+typedef void (*ha_session_export_callback)(
+    void *context, int32_t status,
+    const uint8_t *bytes, size_t length,
+    const uint8_t *error, size_t error_length
+);
+
 /* Runtime calls are process-global and reference counted. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
@@ -552,6 +594,36 @@ int32_t ha_engine_session_archive(
     void *context
 );
 void ha_engine_destroy(void *engine);
+
+/*
+ * Typed session operations copy all inputs before returning and invoke exactly
+ * one terminal callback after returning 0. A return of 2 rejects a null/empty
+ * required input, invalid UTF-8 session id, invalid index/radius, null
+ * callback, or import larger than 512 MiB; no callback follows a rejected
+ * call. Malformed import documents, including invalid UTF-8, report callback
+ * failure after acceptance. Radius is clamped to 500.
+ *
+ * Fork copies through the inclusive durable turn index into a fresh session;
+ * the source is immutable. Import always remaps the source id to a fresh id.
+ */
+int32_t ha_session_load_around(
+    const uint8_t *session_id, size_t session_id_length,
+    int64_t center_turn_index, int32_t radius,
+    ha_session_turn_callback callback, void *context
+);
+int32_t ha_session_fork(
+    const uint8_t *session_id, size_t session_id_length,
+    int64_t through_turn_index,
+    ha_session_transfer_result_callback callback, void *context
+);
+int32_t ha_session_export(
+    const uint8_t *session_id, size_t session_id_length,
+    ha_session_export_callback callback, void *context
+);
+int32_t ha_session_import(
+    const uint8_t *bytes, size_t length,
+    ha_session_transfer_result_callback callback, void *context
+);
 
 /*
  * Account operations use typed callbacks. Callback buffers are valid only
