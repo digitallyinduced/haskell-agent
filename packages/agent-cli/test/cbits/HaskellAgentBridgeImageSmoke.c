@@ -233,7 +233,7 @@ int ha_repository_review_abi_smoke(void) {
             NULL) != 2) {
         return 23;
     }
-    if (ha_repository_apply_patch(
+    if (ha_repository_apply_hunks(
             value, sizeof(value) - 1,
             value, sizeof(value) - 1,
             HA_REPOSITORY_STAGE,

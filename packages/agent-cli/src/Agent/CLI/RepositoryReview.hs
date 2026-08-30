@@ -43,10 +43,10 @@ import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (isDigit)
-import Data.List (nub)
+import Data.List (find, nub, sort)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.IORef
     ( IORef
     , newIORef
@@ -60,6 +60,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose)
 import System.IO.Unsafe (unsafePerformIO)
+import System.Directory (canonicalizePath)
 import System.FilePath
     ( isAbsolute
     , makeRelative
@@ -124,9 +125,9 @@ data RepositoryMutation
     = StagePath !FilePath
     | UnstagePath !FilePath
     | RestorePath !FilePath
-    | StagePatch !FilePath !BS.ByteString
-    | UnstagePatch !FilePath !BS.ByteString
-    | RestorePatch !FilePath !BS.ByteString
+    | StageHunks !FilePath ![Int]
+    | UnstageHunks !FilePath ![Int]
+    | RestoreHunks !FilePath ![Int]
     deriving (Eq, Show)
 
 data RepositoryCheckStream
@@ -158,7 +159,16 @@ repositoryDiff
     -> FilePath
     -> IO (Either RepositoryError RepositoryDiff)
 repositoryDiff requested expected kind path =
-    runRepositoryRead requested \root -> do
+    withRepositoryMutationLock requested \root ->
+        repositoryDiffAtRoot root expected kind path
+
+repositoryDiffAtRoot
+    :: FilePath
+    -> Text
+    -> RepositoryDiffKind
+    -> FilePath
+    -> IO (Either RepositoryError RepositoryDiff)
+repositoryDiffAtRoot root expected kind path = do
         case validateRepositoryPath root path of
             Left err -> pure (Left err)
             Right () -> snapshotAtRoot root >>= \case
@@ -170,6 +180,11 @@ repositoryDiff requested expected kind path =
                                 (StaleRepositorySnapshot
                                     expected
                                     snapshot.snapshotId))
+                    | not (snapshotContainsPath snapshot path) ->
+                        pure
+                            (Left
+                                (InvalidRepositoryRequest
+                                    "file path is not present in the reviewed snapshot"))
                     | otherwise -> do
                         let untracked =
                                 kind == RepositoryWorktreeDiff
@@ -387,6 +402,9 @@ cancelRepositoryCheck check = do
                 check.repositoryCheckProcessGroup
                 check.repositoryCheckProcess
         Just _ -> pure ()
+    -- Cancellation owns process teardown: do not return while descendants,
+    -- pipe readers, or the terminal callback are still active.
+    waitRepositoryCheck check
 
 waitRepositoryCheck :: RepositoryCheck -> IO ()
 waitRepositoryCheck check = do
@@ -532,48 +550,55 @@ runMutation root snapshot = \case
                             "restore never deletes an untracked file"))
                 else applyPathPatch
                     RepositoryWorktreeDiff ["--reverse"] path
-    StagePatch path patch ->
+    StageHunks path hunks ->
         checkedPath path $
-            applyReviewedPatch RepositoryWorktreeDiff ["--cached"] path patch
-    UnstagePatch path patch ->
+            applyReviewedHunks
+                RepositoryWorktreeDiff ["--cached"] path hunks
+    UnstageHunks path hunks ->
         checkedPath path $
-            applyReviewedPatch
-                RepositoryStagedDiff ["--cached", "--reverse"] path patch
-    RestorePatch path patch ->
+            applyReviewedHunks
+                RepositoryStagedDiff ["--cached", "--reverse"] path hunks
+    RestoreHunks path hunks ->
         checkedPath path $
             if isUntracked path
                 then pure
                     (Left
                         (InvalidRepositoryRequest
                             "restore never deletes an untracked file"))
-                else applyReviewedPatch
-                    RepositoryWorktreeDiff ["--reverse"] path patch
+                else applyReviewedHunks
+                    RepositoryWorktreeDiff ["--reverse"] path hunks
   where
     checkedPath path action
         = case validateRepositoryPath root path of
             Left err -> pure (Left err)
-            Right () -> action
+            Right ()
+                | not (snapshotContainsPath snapshot path) ->
+                    pure
+                        (Left
+                            (InvalidRepositoryRequest
+                                "file path is not present in the reviewed snapshot"))
+                | otherwise -> action
     isUntracked path = any
         (\file ->
             file.repositoryFilePath == path
                 && file.repositoryFileIndexStatus == '?')
         snapshot.snapshotFiles
     applyPathPatch kind flags path =
-        repositoryDiff root snapshot.snapshotId kind path >>= \case
+        repositoryDiffAtRoot root snapshot.snapshotId kind path >>= \case
             Left err -> pure (Left err)
             Right diff
                 | BS.null diff.repositoryDiffPatch -> pure (Right ())
                 | otherwise ->
                     applyPatch
                         root snapshot.snapshotId flags diff.repositoryDiffPatch
-    applyReviewedPatch kind flags path patch =
-        repositoryDiff root snapshot.snapshotId kind path >>= \case
+    applyReviewedHunks kind flags path indices =
+        repositoryDiffAtRoot root snapshot.snapshotId kind path >>= \case
             Left err -> pure (Left err)
             Right reviewed ->
-                case validateReviewedPatch
-                    reviewed.repositoryDiffPatch patch of
+                case selectReviewedHunks
+                    snapshot path reviewed.repositoryDiffPatch indices of
                     Left err -> pure (Left err)
-                    Right () ->
+                    Right patch ->
                         applyPatch root snapshot.snapshotId flags patch
 
 applyPatch
@@ -630,25 +655,46 @@ validateRepositoryPath root path
             first:_ -> first == character
             [] -> False
 
-validateReviewedPatch
-    :: BS.ByteString
+selectReviewedHunks
+    :: RepositorySnapshot
+    -> FilePath
     -> BS.ByteString
-    -> Either RepositoryError ()
-validateReviewedPatch reviewed supplied
-    | BS.null supplied =
-        Left (InvalidRepositoryRequest "patch is empty")
-    | supplied == reviewed = Right ()
-    | otherwise =
-        case (textPatchSections reviewed, textPatchSections supplied) of
-            (Just (reviewedHeader, reviewedHunks), Just (header, hunks))
-                | header == reviewedHeader
-                    && not (null hunks)
-                    && length hunks == length (nub hunks)
-                    && all (`elem` reviewedHunks) hunks -> Right ()
-            _ ->
-                Left
-                    (InvalidRepositoryRequest
-                        "patch is not an exact reviewed hunk set for the requested path")
+    -> [Int]
+    -> Either RepositoryError BS.ByteString
+selectReviewedHunks snapshot path reviewed indices
+    | null indices || length indices /= length (nub indices) =
+        Left (InvalidRepositoryRequest "hunk selection is empty or duplicated")
+    | isDestructivePatch =
+        Left
+            (InvalidRepositoryRequest
+                "selected-hunk mutation does not allow deletion or rename patches")
+    | otherwise = case textPatchSections reviewed of
+        Nothing ->
+            Left
+                (InvalidRepositoryRequest
+                    "selected hunks require a non-binary text diff")
+        Just (header, hunks)
+            | any (\index -> index < 0 || index >= length hunks) indices ->
+                Left (InvalidRepositoryRequest "hunk index is out of range")
+            | otherwise ->
+                Right
+                    (BS8.unlines
+                        (header <> concatMap (hunks !!) (sort indices)))
+  where
+    file = find
+        (\entry -> entry.repositoryFilePath == path)
+        snapshot.snapshotFiles
+    isDestructivePatch =
+        maybe False
+            (\entry -> isJust entry.repositoryFileOriginalPath)
+            file
+            || any
+                (`BS8.isInfixOf` reviewed)
+                [ "deleted file mode "
+                , "rename from "
+                , "rename to "
+                , "+++ /dev/null"
+                ]
 
 textPatchSections
     :: BS.ByteString
@@ -813,7 +859,20 @@ repositoryRoot requested
     | otherwise =
         runGit requested ["rev-parse", "--show-toplevel"] BS.empty >>= \case
             Left err -> pure (Left (NotARepository (repositoryErrorText err)))
-            Right rootBytes -> pure (Right (Text.unpack (decodeTrimmed rootBytes)))
+            Right rootBytes ->
+                tryAny
+                    (canonicalizePath
+                        (Text.unpack (decodeTrimmed rootBytes))) >>= \case
+                            Left exception ->
+                                pure
+                                    (Left
+                                        (NotARepository
+                                            (Text.pack (show exception))))
+                            Right canonical -> pure (Right canonical)
+
+snapshotContainsPath :: RepositorySnapshot -> FilePath -> Bool
+snapshotContainsPath snapshot path =
+    any (\file -> file.repositoryFilePath == path) snapshot.snapshotFiles
 
 {-# NOINLINE repositoryLocks #-}
 repositoryLocks :: MVar (Map FilePath (MVar ()))

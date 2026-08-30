@@ -21,6 +21,7 @@ import System.Directory
     ( createDirectory
     , doesFileExist
     , getTemporaryDirectory
+    , removeFile
     , removePathForcibly
     )
 import System.Exit (ExitCode(..))
@@ -31,6 +32,7 @@ import System.Process
     , readCreateProcessWithExitCode
     )
 import System.Timeout (timeout)
+import System.Posix.Files (createSymbolicLink)
 import Test.Hspec
 
 spec :: Spec
@@ -45,6 +47,16 @@ spec = describe "repository review service" do
             repositorySnapshot root `shouldReturnSatisfying` \case
                 Left _ -> True
                 Right _ -> False
+
+    it "canonicalizes symlink aliases to one repository identity" $
+        withRepository \root ->
+            withTempDirectory "repository-review-alias" \container -> do
+                let alias = container <> "/alias"
+                createSymbolicLink root alias
+                direct <- expectRight =<< repositorySnapshot root
+                linked <- expectRight =<< repositorySnapshot alias
+                linked.snapshotRoot `shouldBe` direct.snapshotRoot
+                linked.snapshotId `shouldBe` direct.snapshotId
 
     it "snapshots unusual paths and parses diff hunk coordinates" $
         withRepository \root -> do
@@ -166,33 +178,19 @@ spec = describe "repository review service" do
         withRepository \root -> do
             appendFile (root <> "/tracked.txt") "patch\n"
             before <- expectRight =<< repositorySnapshot root
-            diff <- expectRight
-                =<< repositoryDiff
-                    root
-                    before.snapshotId
-                    RepositoryWorktreeDiff
-                    "tracked.txt"
             staged <- expectRight
                 =<< mutateRepository
                     root
                     before.snapshotId
-                    (StagePatch "tracked.txt" diff.repositoryDiffPatch)
+                    (StageHunks "tracked.txt" [0])
             git root ["diff", "--cached", "--name-only"]
                 `shouldReturn` "tracked.txt\n"
 
-            unstageDiff <- expectRight
-                =<< repositoryDiff
-                    root
-                    staged.snapshotId
-                    RepositoryStagedDiff
-                    "tracked.txt"
             _unstagedAfterPatch <- expectRight
                 =<< mutateRepository
                     root
                     staged.snapshotId
-                    (UnstagePatch
-                        "tracked.txt"
-                        unstageDiff.repositoryDiffPatch)
+                    (UnstageHunks "tracked.txt" [0])
             git root ["diff", "--cached", "--name-only"] `shouldReturn` ""
 
             writeFile (root <> "/untracked.txt") "keep\n"
@@ -220,14 +218,9 @@ spec = describe "repository review service" do
                     | number <- [1 :: Int .. 12]
                     ])
             snapshot <- expectRight =<< repositorySnapshot root
-            diff <- expectRight
-                =<< repositoryDiff root snapshot.snapshotId
-                    RepositoryWorktreeDiff "tracked.txt"
-            let selected = firstPatchHunk diff.repositoryDiffPatch
-            selected `shouldSatisfy` (/= diff.repositoryDiffPatch)
             _ <- expectRight
                 =<< mutateRepository root snapshot.snapshotId
-                    (StagePatch "tracked.txt" selected)
+                    (StageHunks "tracked.txt" [0])
             stagedPatch <- git root ["diff", "--cached"]
             stagedPatch `shouldSatisfy` Text.isInfixOf "+changed 2"
             stagedPatch `shouldNotSatisfy` Text.isInfixOf "+changed 11"
@@ -240,7 +233,14 @@ spec = describe "repository review service" do
             appendFile (root <> "/tracked.txt") "pending\n"
             appendFile (root <> "/second.txt") "pending\n"
 
-            forM_ ["*", ":!tracked.txt", "../tracked.txt", "a/../tracked.txt"] $
+            forM_
+                [ "*"
+                , ":!tracked.txt"
+                , ":(glob)**"
+                , ":(top)tracked.txt"
+                , "../tracked.txt"
+                , "a/../tracked.txt"
+                ] $
                 \path -> do
                     snapshot <- expectRight =<< repositorySnapshot root
                     mutateRepository root snapshot.snapshotId (StagePath path)
@@ -248,7 +248,7 @@ spec = describe "repository review service" do
                     git root ["diff", "--cached", "--name-only"]
                         `shouldReturn` ""
 
-    it "binds patch mutations to one reviewed path and exact hunk content" $
+    it "rejects invalid hunk selections and destructive selected patches" $
         withRepository \root -> do
             writeFile (root <> "/second.txt") "second\n"
             _ <- git root ["add", "second.txt"]
@@ -256,40 +256,29 @@ spec = describe "repository review service" do
             appendFile (root <> "/tracked.txt") "tracked change\n"
             appendFile (root <> "/second.txt") "second change\n"
             snapshot <- expectRight =<< repositorySnapshot root
-            trackedDiff <- expectRight
-                =<< repositoryDiff root snapshot.snapshotId
-                    RepositoryWorktreeDiff "tracked.txt"
-            secondDiff <- expectRight
-                =<< repositoryDiff root snapshot.snapshotId
-                    RepositoryWorktreeDiff "second.txt"
-
             mutateRepository root snapshot.snapshotId
-                (StagePatch "tracked.txt" secondDiff.repositoryDiffPatch)
+                (StageHunks "tracked.txt" [99])
                 `shouldReturnSatisfying` isInvalidRequest
             mutateRepository root snapshot.snapshotId
-                (StagePatch
-                    "tracked.txt"
-                    (trackedDiff.repositoryDiffPatch
-                        <> secondDiff.repositoryDiffPatch))
+                (StageHunks "not-in-snapshot.txt" [0])
                 `shouldReturnSatisfying` isInvalidRequest
             mutateRepository root snapshot.snapshotId
-                (StagePatch
-                    "tracked.txt"
-                    (trackedDiff.repositoryDiffPatch <> "+injected\n"))
+                (StageHunks "tracked.txt" [0, 0])
                 `shouldReturnSatisfying` isInvalidRequest
             git root ["diff", "--cached", "--name-only"] `shouldReturn` ""
 
             writeFile (root <> "/untracked.txt") "keep\n"
             untrackedSnapshot <- expectRight =<< repositorySnapshot root
-            untrackedDiff <- expectRight
-                =<< repositoryDiff root untrackedSnapshot.snapshotId
-                    RepositoryWorktreeDiff "untracked.txt"
             mutateRepository root untrackedSnapshot.snapshotId
-                (RestorePatch
-                    "untracked.txt"
-                    untrackedDiff.repositoryDiffPatch)
+                (RestoreHunks "untracked.txt" [0])
                 `shouldReturnSatisfying` isInvalidRequest
             doesFileExist (root <> "/untracked.txt") `shouldReturn` True
+
+            removeFile (root <> "/tracked.txt")
+            deletedSnapshot <- expectRight =<< repositorySnapshot root
+            mutateRepository root deletedSnapshot.snapshotId
+                (StageHunks "tracked.txt" [0])
+                `shouldReturnSatisfying` isInvalidRequest
 
     it "streams an explicit argv check and reports its exit status" $
         withRepository \root -> do
@@ -444,14 +433,3 @@ shouldReturnSatisfying
     -> Expectation
 shouldReturnSatisfying action predicate =
     action >>= (`shouldSatisfy` predicate)
-
-firstPatchHunk :: BS8.ByteString -> BS8.ByteString
-firstPatchHunk patch =
-    let lines' = BS8.lines patch
-        isHunk = BS8.isPrefixOf "@@ "
-        (header, body) = break isHunk lines'
-    in case body of
-        [] -> patch
-        first:rest ->
-            let (hunkBody, _) = break isHunk rest
-            in BS8.unlines (header <> [first] <> hunkBody)

@@ -159,8 +159,10 @@ import Control.Concurrent.STM
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
-    ( SomeException
+    ( SomeAsyncException
+    , SomeException
     , bracket
+    , catchAsync
     , finally
     , mask
     , tryAny
@@ -631,9 +633,9 @@ foreign export ccall ha_repository_apply_path
     -> Ptr Word8 -> CSize -> FunPtr RepositoryResultCallback
     -> Ptr () -> IO CInt
 
-foreign export ccall ha_repository_apply_patch
+foreign export ccall ha_repository_apply_hunks
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr CSize -> CSize
     -> FunPtr RepositoryResultCallback
     -> Ptr () -> IO CInt
 
@@ -669,7 +671,8 @@ ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
         copyRequiredText pathBytes pathLength >>= \case
             Left _ -> pure 2
             Right path -> do
-                started <- startRepositoryWorker $
+                started <- startRepositoryWorker
+                    (emitRepositoryCancelled resultCallback context) $
                     tryAny
                         (RepositoryReview.repositorySnapshot (Text.unpack path))
                         >>= \case
@@ -740,7 +743,8 @@ ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
                     case repositoryDiffKind diffKind of
                         Nothing -> pure 2
                         Just kind -> do
-                            started <- startRepositoryWorker $
+                            started <- startRepositoryWorker
+                                (emitRepositoryCancelled resultCallback context) $
                                 tryAny
                                     (RepositoryReview.repositoryDiff
                                         (Text.unpack path)
@@ -828,16 +832,16 @@ ha_repository_apply_path pathBytes pathLength snapshotBytes snapshotLength
                             pure (if started then 0 else 3)
                 Right _ -> pure 3
 
-ha_repository_apply_patch
+ha_repository_apply_hunks
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr CSize -> CSize
     -> FunPtr RepositoryResultCallback
     -> Ptr () -> IO CInt
-ha_repository_apply_patch pathBytes pathLength snapshotBytes snapshotLength
-    operation fileBytes fileLength patchBytes patchLength callback context
+ha_repository_apply_hunks pathBytes pathLength snapshotBytes snapshotLength
+    operation fileBytes fileLength hunkIndices hunkCount callback context
     | callback == nullFunPtr = pure 1
-    | patchBytes == nullPtr || patchLength == 0 = pure 2
-    | toInteger patchLength > toInteger (maxBound :: Int) = pure 2
+    | hunkIndices == nullPtr || hunkCount == 0 = pure 2
+    | hunkCount > 4096 = pure 2
     | otherwise =
         copyRequiredTexts
             [ (pathBytes, pathLength)
@@ -847,10 +851,16 @@ ha_repository_apply_patch pathBytes pathLength snapshotBytes snapshotLength
             >>= \case
                 Left _ -> pure 2
                 Right [path, expected, file] -> do
-                    patch <- BS.packCStringLen
-                        (castPtr patchBytes, fromIntegral patchLength)
-                    case repositoryPatchMutation
-                        operation (Text.unpack file) patch of
+                    indices <- mapM
+                        (\index ->
+                            fromIntegral
+                                <$> (peekByteOff
+                                    hunkIndices
+                                    (index * sizeOf (undefined :: CSize))
+                                    :: IO CSize))
+                        [0 .. fromIntegral hunkCount - 1]
+                    case repositoryHunkMutation
+                        operation (Text.unpack file) indices of
                         Nothing -> pure 2
                         Just mutation -> do
                             started <- startRepositoryMutation
@@ -872,7 +882,8 @@ ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
             ] >>= \case
                 Left _ -> pure 2
                 Right [path, expected, message] -> do
-                    started <- startRepositoryWorker $
+                    started <- startRepositoryWorker
+                        (emitRepositoryCancelled callback context) $
                         tryAny
                             (RepositoryReview.commitRepository
                                 (Text.unpack path)
@@ -898,7 +909,7 @@ startRepositoryMutation
     -> RepositoryReview.RepositoryMutation
     -> IO Bool
 startRepositoryMutation callback context path expected mutation =
-    startRepositoryWorker $
+    startRepositoryWorker (emitRepositoryCancelled callback context) $
         tryAny (RepositoryReview.mutateRepository path expected mutation)
             >>= \case
                 Left exception ->
@@ -909,8 +920,8 @@ startRepositoryMutation callback context path expected mutation =
                 Right (Right snapshot) ->
                     emitRepositorySuccess callback context snapshot.snapshotId
 
-startRepositoryWorker :: IO () -> IO Bool
-startRepositoryWorker action =
+startRepositoryWorker :: IO () -> IO () -> IO Bool
+startRepositoryWorker onCancelled action =
     tryAny
         (mask \_ -> do
             gate <- newEmptyMVar
@@ -920,8 +931,10 @@ startRepositoryWorker action =
                     Nothing -> do
                         let workerId = state.repositoryWorkerNextId
                         worker <- asyncWithUnmask \unmask -> do
-                            readMVar gate
-                            unmask action `finally`
+                            ((readMVar gate >> unmask action)
+                                `catchAsync`
+                                    \(_ :: SomeAsyncException) -> onCancelled)
+                                `finally`
                                 unregisterRepositoryWorker workerId
                         pure
                             ( state
@@ -989,7 +1002,8 @@ ha_repository_cancel_all =
 repositoryCancelAllAdmissionSmoke :: IO Bool
 repositoryCancelAllAdmissionSmoke = do
     entered <- newEmptyMVar
-    firstAccepted <- startRepositoryWorker do
+    cancelled <- newEmptyMVar
+    firstAccepted <- startRepositoryWorker (putMVar cancelled ()) do
         putMVar entered ()
         uninterruptibleMask_ (threadDelay 250_000)
     if not firstAccepted
@@ -999,17 +1013,24 @@ repositoryCancelAllAdmissionSmoke = do
             withAsync ha_repository_cancel_all \canceller -> do
                 rejectedDuringBarrier <- awaitRejection 1000
                 _ <- waitCatch canceller
+                cancellationDelivered <- readMVar cancelled >> pure True
                 completed <- newEmptyMVar
-                acceptedAfter <- startRepositoryWorker (putMVar completed ())
+                acceptedAfter <- startRepositoryWorker
+                    (pure ())
+                    (putMVar completed ())
                 finishedAfter <- if acceptedAfter
                     then readMVar completed >> pure True
                     else pure False
-                pure (rejectedDuringBarrier && finishedAfter)
+                pure
+                    ( rejectedDuringBarrier
+                        && cancellationDelivered
+                        && finishedAfter
+                    )
   where
     awaitRejection attempts
         | attempts <= (0 :: Int) = pure False
         | otherwise =
-            startRepositoryWorker (pure ()) >>= \case
+            startRepositoryWorker (pure ()) (pure ()) >>= \case
                 False -> pure True
                 True -> threadDelay 1000 >> awaitRejection (attempts - 1)
 
@@ -1205,15 +1226,15 @@ repositoryDiffKind kind = case kind of
     1 -> Just RepositoryReview.RepositoryStagedDiff
     _ -> Nothing
 
-repositoryPatchMutation
+repositoryHunkMutation
     :: CInt
     -> FilePath
-    -> BS.ByteString
+    -> [Int]
     -> Maybe RepositoryReview.RepositoryMutation
-repositoryPatchMutation operation path patch = case operation of
-    0 -> Just (RepositoryReview.StagePatch path patch)
-    1 -> Just (RepositoryReview.UnstagePatch path patch)
-    2 -> Just (RepositoryReview.RestorePatch path patch)
+repositoryHunkMutation operation path hunks = case operation of
+    0 -> Just (RepositoryReview.StageHunks path hunks)
+    1 -> Just (RepositoryReview.UnstageHunks path hunks)
+    2 -> Just (RepositoryReview.RestoreHunks path hunks)
     _ -> Nothing
 
 withRepositorySnapshot
@@ -1244,6 +1265,13 @@ emitRepositoryFailure
 emitRepositoryFailure callback context message =
     withText message \errorPtr errorLength ->
         invokeRepositoryResultCallback callback context (-1)
+            nullPtr 0 errorPtr errorLength
+
+emitRepositoryCancelled
+    :: FunPtr RepositoryResultCallback -> Ptr () -> IO ()
+emitRepositoryCancelled callback context =
+    withText "cancelled" \errorPtr errorLength ->
+        invokeRepositoryResultCallback callback context (-3)
             nullPtr 0 errorPtr errorLength
 
 emitRepositoryError

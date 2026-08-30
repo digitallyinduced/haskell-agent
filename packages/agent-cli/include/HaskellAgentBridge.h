@@ -205,8 +205,9 @@ typedef struct ha_utf8_string {
  * most 64 KiB, then hunk_callback for each parsed hunk, then result_callback.
  * is_binary applies to the complete file diff. An empty patch emits no chunks.
  *
- * result_callback status is 0 for success, -1 for failure, and -2 when the
- * supplied snapshot is stale. Success and stale results populate snapshot_id;
+ * result_callback status is 0 for success, -1 for failure, -2 when the
+ * supplied snapshot is stale, and -3 when cancel_all cancels an accepted
+ * operation. Success and stale results populate snapshot_id;
  * failures populate error. Callbacks for one operation are serialized.
  */
 typedef void (*ha_repository_snapshot_callback)(
@@ -342,8 +343,9 @@ void ha_engine_destroy(void *engine);
 
 /*
  * Repository input text is required, non-null, non-empty UTF-8 and is copied
- * before these functions return. Patch bytes are required, non-null,
- * non-empty binary data and are also copied. Callers must keep callback
+ * before these functions return. Hunk indices identify the immutable hunk
+ * ordering returned by ha_repository_diff for the supplied snapshot and file;
+ * arbitrary patch bytes never cross the ABI. Callers must keep callback
  * context valid until its terminal result callback.
  *
  * Return values are 0 when accepted, 1 for a null required callback, 2 for an
@@ -351,18 +353,19 @@ void ha_engine_destroy(void *engine);
  * All mutations compare the supplied snapshot fingerprint while holding a
  * per-repository mutation lock. Stale operations do not modify the repository.
  * File paths must be normalized, literal, repository-relative paths; pathspec
- * magic, globs, absolute paths, and traversal are rejected. Patch mutations
- * additionally require file_path and accept only an exact diff or a subset of
- * the reviewed text hunks for that one file. Restore never deletes an
- * untracked file. The lock coordinates API callers; unrelated external git
+ * magic, globs, absolute paths, and traversal are rejected, and the path must
+ * exactly match a changed-file path in that snapshot. Hunk mutations rebuild
+ * the patch server-side and reject binary, deletion, and rename diffs.
+ * Restore never deletes an untracked file. The lock coordinates API callers;
+ * unrelated external git
  * writers cannot acquire it, so the fingerprint is revalidated immediately
  * before Git's single apply or commit operation and Git still validates patch
- * context. Restore by path or patch never deletes an untracked file.
+ * context.
  *
  * ha_repository_cancel_all cancels and joins accepted snapshot, diff, and
  * mutation operations before returning. Checks are owned and cancelled by
- * their explicit handles. Cancellation does not synthesize a terminal result;
- * an operation may already have completed one before cancellation wins. No
+ * their explicit handles. Cancellation delivers exactly one -3 terminal
+ * result unless the operation's terminal callback already completed. No
  * callback starts after cancel_all returns, so contexts may then be released.
  * New repository operations are rejected while cancel_all owns its admission
  * barrier and may be retried after it returns.
@@ -408,7 +411,7 @@ int32_t ha_repository_apply_path(
     void *context
 );
 
-int32_t ha_repository_apply_patch(
+int32_t ha_repository_apply_hunks(
     const uint8_t *path,
     size_t path_length,
     const uint8_t *snapshot_id,
@@ -416,8 +419,8 @@ int32_t ha_repository_apply_patch(
     int32_t operation,
     const uint8_t *file_path,
     size_t file_path_length,
-    const uint8_t *patch,
-    size_t patch_length,
+    const size_t *hunk_indices,
+    size_t hunk_count,
     ha_repository_result_callback result_callback,
     void *context
 );
@@ -446,8 +449,9 @@ void ha_repository_cancel_all(void);
  * pipe draining. exit_callback is invoked exactly once with the process exit
  * code, or -1 plus an error if launch fails. Its failure is not retried.
  *
- * On status 0, out_check receives an owned opaque handle. Cancel is
- * asynchronous and targets the check's process group (including descendants).
+ * On status 0, out_check receives an owned opaque handle. Cancel targets the
+ * check's process group (including descendants) and joins teardown before
+ * returning.
  * The handle is stored before callbacks can begin; callbacks may begin before
  * ha_repository_check_start itself returns and must return promptly.
  * Destroy waits for readers/process completion, frees the
@@ -455,8 +459,9 @@ void ha_repository_cancel_all(void);
  * returns. Cancel uses a short termination-escalation grace period; destroy
  * also assumes callbacks return promptly. A check callback must not call
  * ha_repository_check_destroy for its own handle; schedule destruction on a
- * different thread after the callback returns. Calling check_cancel is safe.
- * Status values match the other repository functions.
+ * different thread after the callback returns. A callback must likewise not
+ * call check_cancel for its own handle. Status values match the other
+ * repository functions.
  */
 int32_t ha_repository_check_start(
     const uint8_t *path,
