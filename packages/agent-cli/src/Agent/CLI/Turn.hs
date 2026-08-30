@@ -395,6 +395,7 @@ runOneTurnBusy env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
+                    let failureMessage = formatLoopErrorAt finishedAt err
                     restorePlanStateAfterIncomplete planMode initialPlanState
                     finishTerminal (isNothing fullscreen)
                         stdoutHandle terminal wallStarted finishedAt 1
@@ -409,7 +410,7 @@ runOneTurnBusy env@SessionEnv
                                     (UiTurnEnded BlockFailed)
                                 emitUiEvent runtime
                                     (UiErrorMessage
-                                        (formatLoopErrorAt finishedAt err
+                                        (failureMessage
                                             <> "\n"
                                             <> elapsedDetail model))
                         Nothing -> do
@@ -420,7 +421,7 @@ runOneTurnBusy env@SessionEnv
                                 (formatTurnStatus color "error" (elapsedDetail model))
                     persistIncomplete (inputOnlyTurnItems prepared)
                         (formatLoopErrorPersistedAt finishedAt err)
-                    pure TurnFailed
+                    pure (TurnFailed failureMessage)
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
                 stdoutHandle terminal wallStarted finishedAt 0

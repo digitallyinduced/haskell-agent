@@ -376,6 +376,29 @@ toolResultToItem result = case result.callKind of
                 , computerOutputStatus = Just ItemIncomplete
                 , computerOutputExtra = KeyMap.empty
                 }
+    ComputerFunctionCallKind ->
+        FunctionCallOutputItem FunctionCallOutput
+            { itemId = Nothing
+            , callId = result.callId
+            , name = Nothing
+            , namespace = Nothing
+            , output = computerFunctionOutput result.output
+            , status = Nothing
+            , extraFields = KeyMap.empty
+            }
+
+computerFunctionOutput :: Text -> Aeson.Value
+computerFunctionOutput rawOutput =
+    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 rawOutput) of
+        Right ComputerCallOutput{screenshotDataUrl} ->
+            Aeson.toJSON
+                [ Aeson.object
+                    [ "type" Aeson..= ("input_image" :: Text)
+                    , "image_url" Aeson..= screenshotDataUrl
+                    , "detail" Aeson..= ("original" :: Text)
+                    ]
+                ]
+        Left _ -> Aeson.String rawOutput
 
 -- A rejection or executor failure still has to satisfy the Responses protocol
 -- with a screenshot-shaped output. Successful executors return a fresh image.
@@ -407,6 +430,17 @@ tokenUsageFromResponse = maybe emptyTokenUsage \usage ->
 
 responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
+    FunctionCallItem call
+        | call.namespace == Just computerFunctionNamespace
+        , call.name == computerFunctionName ->
+            Just ToolCall
+                { callId = call.callId
+                , name = "computer"
+                , arguments = call.arguments
+                , callKind = ComputerFunctionCallKind
+                , argumentsEncrypted =
+                    computerFunctionArgumentsSensitive call.arguments
+                }
     FunctionCallItem call ->
         let toolName = namespacedToolName call.namespace call.name
         in Just ToolCall
@@ -435,6 +469,20 @@ responseItemToToolCall = \case
             call.computerActions
         }
     _ -> Nothing
+
+computerFunctionArgumentsSensitive :: Text -> Bool
+computerFunctionArgumentsSensitive rawArguments =
+    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 rawArguments) of
+        Right (Aeson.Object object) ->
+            case KeyMap.lookup "actions" object of
+                Just value ->
+                    case (Aeson.fromJSON value
+                            :: Aeson.Result [ComputerAction]) of
+                        Aeson.Success actions ->
+                            any isSensitiveComputerAction actions
+                        Aeson.Error _ -> True
+                Nothing -> True
+        _ -> True
 
 isSensitiveComputerAction :: ComputerAction -> Bool
 isSensitiveComputerAction = \case

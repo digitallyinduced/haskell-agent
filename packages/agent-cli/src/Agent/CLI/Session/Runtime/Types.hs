@@ -70,7 +70,7 @@ import Agent.Tools.Types
     , ToolEnv
     )
 import Control.Concurrent.STM (STM)
-import Control.Exception.Safe (Exception)
+import Control.Exception.Safe (Exception(..))
 import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
@@ -173,7 +173,8 @@ data StartupRuntime = StartupRuntime
 newtype StartupFailure = StartupFailure String
     deriving (Show)
 
-instance Exception StartupFailure
+instance Exception StartupFailure where
+    displayException (StartupFailure message) = message
 
 data StartupCancelled = StartupCancelled
     deriving (Show)
