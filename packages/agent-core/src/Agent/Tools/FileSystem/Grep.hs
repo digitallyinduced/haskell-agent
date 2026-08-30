@@ -24,14 +24,19 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Control.Applicative ((<|>))
-import Control.Concurrent.Async (withAsync, wait)
-import Control.Exception.Safe (finally, tryIO)
-import Control.Monad (forM_)
+import Control.Concurrent.Async (concurrently)
+import Control.Exception.Safe
+    ( mask
+    , onException
+    , tryAny
+    )
+import Control.Monad (void)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BSC
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory (canonicalizePath, findExecutable)
 import System.Exit (ExitCode(..))
 import System.FilePath
@@ -51,13 +56,8 @@ import System.Process
     )
 import System.OsPath (OsPath)
 import System.IO
-    ( BufferMode(NoBuffering)
-    , Handle
+    ( Handle
     , hClose
-    , hGetLine
-    , hSetBuffering
-    , hSetEncoding
-    , utf8
     )
 
 data GrepOutputMode = GrepContent | GrepFilesWithMatches | GrepCount
@@ -167,21 +167,36 @@ runGrep env args = do
                 canonicalCwd <- canonicalizePath (unsafeToFilePath env.toolCwd)
                 runRipgrep rgPath canonicalCwd path args >>= \case
                     Left err -> pure (Left err)
-                    Right raw -> pure $ Right
-                        (formatGrepCard env.toolCwd raw limit)
+                    Right (raw, truncation) -> pure $ Right
+                        (formatGrepCard
+                            env.toolCwd
+                            raw
+                            limit
+                            truncation)
 
 effectiveHeadLimit :: GrepArgs -> Int
 effectiveHeadLimit args = case args.outputMode of
-    GrepContent -> min 2000 (fromMaybe 200 args.headLimit)
-    _ -> min 10000 (fromMaybe 500 args.headLimit)
+    GrepContent -> max 1 (min 2000 (fromMaybe 200 args.headLimit))
+    _ -> max 1 (min 10000 (fromMaybe 500 args.headLimit))
+
+data GrepTruncation
+    = GrepComplete
+    | GrepLineTruncated
+    | GrepByteTruncated
+    deriving (Eq)
+
+data GrepCapture = GrepCapture
+    { captureBytes :: !BS.ByteString
+    , captureTruncation :: !GrepTruncation
+    }
 
 runRipgrep
     :: FilePath
     -> FilePath
     -> OsPath
     -> GrepArgs
-    -> IO (Either Text Text)
-runRipgrep rgPath workspace path args = do
+    -> IO (Either Text (Text, GrepTruncation))
+runRipgrep rgPath workspace path args = mask \restore -> do
     let absoluteSearchPath = unsafeToFilePath path
         workspaceRelativePath = makeRelative workspace absoluteSearchPath
         searchWithinWorkspace =
@@ -210,88 +225,185 @@ runRipgrep rgPath workspace path args = do
             , if args.multiline then ["-U", "--multiline-dotall"] else []
             , ["--regexp", Text.unpack args.pattern, "--", searchPath]
             ]
-        process = (proc rgPath rgArgs) { cwd = processCwd }
+        process = (proc rgPath rgArgs)
+            { cwd = processCwd
+            , std_in = CreatePipe
+            , std_out = CreatePipe
+            , std_err = CreatePipe
+            }
     (mIn, mOut, mErr, ph) <- createProcess process
-        { std_in = CreatePipe
-        , std_out = CreatePipe
-        , std_err = CreatePipe
-        }
-    forM_ mIn hClose
-    stdoutHandle <- maybe (ioError (userError "rg stdout pipe unavailable")) pure mOut
-    stderrHandle <- maybe (ioError (userError "rg stderr pipe unavailable")) pure mErr
-    hSetEncoding stdoutHandle utf8
-    hSetEncoding stderrHandle utf8
-    hSetBuffering stdoutHandle NoBuffering
-    hSetBuffering stderrHandle NoBuffering
-    -- Keep only one line beyond the requested limit.  The producer is
-    -- terminated as soon as that line arrives, rather than allowing a slow
-    -- renderer to retain the complete ripgrep output in a String.
-    ((stdout, truncated), stderr) <-
-        withAsync (readLimitedLines ph stdoutHandle (effectiveHeadLimit args + 1)) \out ->
-            withAsync (readLimitedBytes stderrHandle diagnosticLimit) \err -> do
-                output <- wait out
-                diagnostics <- wait err
-                pure (output, diagnostics)
-    code <- waitForProcess ph
-    hClose stdoutHandle `finally` hClose stderrHandle
-    let raw = Text.pack stdout
-    case code of
-        ExitSuccess -> pure $ Right raw
-        -- terminateProcess is deliberate once the output limit is known.
-        -- ripgrep may report a signal exit on that path; preserve the
-        -- bounded, truncated result as a successful search.
-        ExitFailure _ | truncated -> pure $ Right raw
-        ExitFailure 1 | null stdout ->
-            if null stderr
-                then pure (Right "")
-                else pure (Left (Text.pack stderr))
-        ExitFailure _ ->
-            pure $ Left $ Text.pack (if null stderr then stdout else stderr)
+    let closeHandle handle = void (tryAny (hClose handle))
+        cleanup handles = do
+            void (tryAny (terminateProcess ph))
+            mapM_ closeHandle handles
+            void (tryAny (waitForProcess ph))
+        requiredPipe label = maybe
+            (ioError (userError ("rg " <> label <> " pipe unavailable")))
+            pure
+    restore (do
+        stdinHandle <- requiredPipe "stdin" mIn
+        stdoutHandle <- requiredPipe "stdout" mOut
+        stderrHandle <- requiredPipe "stderr" mErr
+        hClose stdinHandle
+        (stdoutCapture, stderrCapture) <- concurrently
+            (readBoundedStdout
+                ph
+                stdoutHandle
+                (effectiveHeadLimit args + 1)
+                grepOutputByteLimit)
+            (readBoundedDrain stderrHandle grepDiagnosticByteLimit)
+        code <- waitForProcess ph
+        closeHandle stdoutHandle
+        closeHandle stderrHandle
+        let raw = decodeCapture stdoutCapture
+            stderr = decodeDiagnostic stderrCapture
+        case code of
+            ExitSuccess ->
+                pure $ Right (raw, stdoutCapture.captureTruncation)
+            -- terminateProcess is deliberate once an output cap is known.
+            -- A signal exit on that path still represents a successful,
+            -- bounded search.
+            ExitFailure _
+                | stdoutCapture.captureTruncation /= GrepComplete ->
+                    pure $ Right (raw, stdoutCapture.captureTruncation)
+            ExitFailure 1
+                | Text.null raw ->
+                    if Text.null stderr
+                        then pure (Right ("", GrepComplete))
+                        else pure (Left stderr)
+            ExitFailure _ ->
+                pure $ Left $
+                    if Text.null stderr then raw else stderr)
+        `onException`
+            cleanup [handle | Just handle <- [mIn, mOut, mErr]]
 
-diagnosticLimit :: Int
-diagnosticLimit = 1024 * 1024
+grepOutputByteLimit :: Int
+grepOutputByteLimit = 16 * 1024 * 1024
 
-readLimitedLines :: ProcessHandle -> Handle -> Int -> IO (String, Bool)
-readLimitedLines ph handle maxLines = go [] 0
+grepDiagnosticByteLimit :: Int
+grepDiagnosticByteLimit = 1024 * 1024
+
+readBoundedStdout
+    :: ProcessHandle
+    -> Handle
+    -> Int
+    -> Int
+    -> IO GrepCapture
+readBoundedStdout processHandle handle lineLimit byteLimit =
+    go [] 0 0
   where
-    go acc count
-        | count >= maxLines = do
-            terminateProcess ph
-            pure (concat (reverse acc), True)
-        | otherwise = do
-            result <- tryIO (hGetLine handle)
-            case result of
-                Left _ -> pure (concat (reverse acc), False)
-                Right line -> go ((line <> "\n") : acc) (count + 1)
+    go reversed totalBytes totalLines = do
+        chunk <- BS.hGetSome handle 32768
+        if BS.null chunk
+            then pure (finish reversed GrepComplete)
+            else do
+                let remainingBytes = max 0 (byteLimit - totalBytes)
+                    withinBytes = BS.take remainingBytes chunk
+                    neededLines = max 0 (lineLimit - totalLines)
+                    (kept, hitLineLimit) =
+                        takeThroughNewlines neededLines withinBytes
+                    hitByteLimit =
+                        BS.length chunk > remainingBytes
+                            || (remainingBytes == 0
+                                && not (BS.null chunk))
+                    nextReversed =
+                        if BS.null kept then reversed else kept : reversed
+                    nextBytes = totalBytes + BS.length kept
+                    nextLines = totalLines + BS.count 10 kept
+                    truncation
+                        | hitLineLimit = GrepLineTruncated
+                        | hitByteLimit = GrepByteTruncated
+                        | otherwise = GrepComplete
+                if truncation == GrepComplete
+                    then go nextReversed nextBytes nextLines
+                    else do
+                        void (tryAny (terminateProcess processHandle))
+                        drainHandle handle
+                        pure (finish nextReversed truncation)
 
-readLimitedBytes :: Handle -> Int -> IO String
-readLimitedBytes handle limit = go [] 0
+    finish reversed truncation =
+        GrepCapture
+            { captureBytes = BS.concat (reverse reversed)
+            , captureTruncation = truncation
+            }
+
+takeThroughNewlines
+    :: Int
+    -> BS.ByteString
+    -> (BS.ByteString, Bool)
+takeThroughNewlines needed bytes
+    | needed <= 0 = (BS.empty, not (BS.null bytes))
+    | otherwise =
+        case drop (needed - 1) (BS.elemIndices 10 bytes) of
+            index : _ -> (BS.take (index + 1) bytes, True)
+            [] -> (bytes, False)
+
+data DiagnosticCapture = DiagnosticCapture
+    { diagnosticBytes :: !BS.ByteString
+    , diagnosticTruncated :: !Bool
+    }
+
+readBoundedDrain :: Handle -> Int -> IO DiagnosticCapture
+readBoundedDrain handle limit = go [] 0 False
   where
-    go acc total
-        | total >= limit = drain
-        | otherwise = do
-            chunk <- BS.hGetSome handle (min 8192 (limit - total))
-            if BS.null chunk
-                then pure (concat (reverse acc))
-                else go (BSC.unpack chunk : acc) (total + BS.length chunk)
-    -- Keep draining after the diagnostic budget is reached so the child
-    -- cannot block on a full stderr pipe while stdout is still being read.
-    drain = do
-        chunk <- BS.hGetSome handle 8192
-        if BS.null chunk then pure (concat (reverse acc)) else drain
+    go reversed total truncated = do
+        chunk <- BS.hGetSome handle 32768
+        if BS.null chunk
+            then pure DiagnosticCapture
+                { diagnosticBytes = BS.concat (reverse reversed)
+                , diagnosticTruncated = truncated
+                }
+            else do
+                let remaining = max 0 (limit - total)
+                    kept = BS.take remaining chunk
+                go
+                    (if BS.null kept then reversed else kept : reversed)
+                    (total + BS.length kept)
+                    (truncated || BS.length chunk > remaining)
 
-formatGrepCard :: OsPath -> Text -> Int -> Text
-formatGrepCard cwd raw limit
+drainHandle :: Handle -> IO ()
+drainHandle handle = do
+    chunk <- BS.hGetSome handle 32768
+    if BS.null chunk then pure () else drainHandle handle
+
+decodeCapture :: GrepCapture -> Text
+decodeCapture =
+    TextEncoding.decodeUtf8With lenientDecode . (.captureBytes)
+
+decodeDiagnostic :: DiagnosticCapture -> Text
+decodeDiagnostic capture =
+    let decoded =
+            TextEncoding.decodeUtf8With lenientDecode
+                capture.diagnosticBytes
+    in if capture.diagnosticTruncated
+        then decoded
+            <> "\n[rg diagnostic truncated after "
+            <> Text.pack (show grepDiagnosticByteLimit)
+            <> " bytes]"
+        else decoded
+
+formatGrepCard
+    :: OsPath
+    -> Text
+    -> Int
+    -> GrepTruncation
+    -> Text
+formatGrepCard cwd raw limit truncation
     | Text.null (Text.strip raw) = "No matches found."
     | otherwise =
         let ls = map (makeWorkspaceRelative cwd) (Text.lines raw)
-            truncated = length ls > limit
+            lineTruncated =
+                truncation == GrepLineTruncated || length ls > limit
             kept = take limit ls
             body = Text.unlines kept
             footer
-                | truncated =
+                | lineTruncated =
                     "\n[at least " <> Text.pack (show limit)
                         <> " lines; output truncated]"
+                | truncation == GrepByteTruncated =
+                    "\n[output truncated after "
+                        <> Text.pack (show grepOutputByteLimit)
+                        <> " bytes]"
                 | otherwise = ""
         in "<workspace_result>\n"
             <> body
