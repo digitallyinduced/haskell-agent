@@ -14,7 +14,7 @@ The first client message must be `hello`, containing a stable client ID, the
 protocol versions it supports, and optionally the sequence number of the last
 event it durably acknowledged. The daemon replies with `welcome` and the
 negotiated version, or `version_rejected` with its supported versions. Protocol
-version 2 is currently supported.
+version 3 is currently supported.
 
 A connection with no resume cursor receives a full snapshot. A reconnecting
 client receives all retained events after its cursor. If the cursor predates
@@ -26,6 +26,11 @@ Snapshots are sent as bounded `snapshot_chunk` messages. Each chunk contains
 an independently base64-encoded slice of the snapshot JSON, plus a zero-based
 chunk index and total chunk count. Clients decode each slice and concatenate
 them in index order before decoding the snapshot JSON.
+
+Events that fit the negotiated frame bound use `event`. Larger events use the
+same scheme in `event_chunk` messages: clients concatenate decoded slices and
+then decode the resulting event envelope. This keeps persisted events
+deliverable without increasing the transport frame bound.
 
 Commands and command results carry client-generated command IDs. Their JSON
 payload is deliberately opaque to this package so the task supervisor can

@@ -1,9 +1,10 @@
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel, concurrently, waitCatch, withAsync)
 import Control.Concurrent.STM (readTVarIO)
 import Control.Exception.Safe (bracket, isAsyncException)
-import Data.Aeson (Value (..), encode, object, (.=))
+import Data.Aeson (Value (..), encode, object, toJSON, (.=))
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -168,6 +169,28 @@ main = hspec $ do
                         JournalEventGap 2 3 -> True
                         _ -> False
 
+        it "rejects a retained suffix that starts after a snapshot gap" $
+            withSystemTempDirectory "daemon-snapshot-gap" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    event = EventEnvelope {sequenceNumber = 6, eventType = "test", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile (directory </> "events.jsonl") (LBS.toStrict (encode event) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalEventGap 5 6 -> True
+                        _ -> False
+
+        it "rejects a nonempty retained suffix that ends before its snapshot" $
+            withSystemTempDirectory "daemon-stale-suffix" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    event = EventEnvelope {sequenceNumber = 3, eventType = "test", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile (directory </> "events.jsonl") (LBS.toStrict (encode event) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalCorrupt _ _ -> True
+                        _ -> False
+
         it "enforces contiguous startup retention and rejects an oversized newest event" $
             withSystemTempDirectory "daemon-startup-retention" $ \directory -> do
                 original <- openJournal ((defaultJournalConfig directory) {maximumEvents = 10})
@@ -238,6 +261,56 @@ main = hspec $ do
                 _ <- appendEvent journal "b" Null
                 readTVarIO overflowed `shouldReturn` True
                 unsubscribe
+
+        it "applies task bounds while recovering task_changed events" $
+            withSystemTempDirectory "daemon-recovered-task-bounds" $ \directory -> do
+                now <- getCurrentTime
+                let task =
+                        DurableTask
+                            { taskId = TaskId "recovered"
+                            , status = TaskCompleted
+                            , description = "password=private"
+                            , updatedAt = now
+                            , logTail = ["token=private"]
+                            }
+                    event =
+                        EventEnvelope
+                            { sequenceNumber = 1
+                            , eventType = "task_changed"
+                            , payload = toJSON task
+                            }
+                    config =
+                        (defaultJournalConfig directory)
+                            { maximumTaskDescriptionCharacters = 64
+                            , maximumTaskLogLines = 0
+                            }
+                BS.writeFile (directory </> "events.jsonl") (LBS.toStrict (encode event) <> "\n")
+                recovered <- openJournal config >>= snapshot
+                let bounded = recovered.tasks Map.! TaskId "recovered"
+                bounded.description `shouldBe` "[REDACTED]"
+                bounded.logTail `shouldBe` []
+
+        it "retains no events when maximumEvents is zero and preserves the sequence" $
+            withSystemTempDirectory "daemon-zero-retention" $ \directory -> do
+                let config = (defaultJournalConfig directory) {maximumEvents = 0}
+                journal <- openJournal config
+                _ <- appendEvent journal "discarded" Null
+                BS.readFile (directory </> "events.jsonl") `shouldReturn` BS.empty
+                reopened <- openJournal config
+                recovered <- snapshot reopened
+                recovered.lastSequence `shouldBe` 1
+                replayAfter reopened 0 `shouldReturn` ReplaySnapshot recovered
+
+        it "refuses to wrap an exhausted sequence number" $
+            withSystemTempDirectory "daemon-sequence-overflow" $ \directory -> do
+                let exhausted = JournalSnapshot {lastSequence = Sequence maxBound, tasks = Map.empty}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode exhausted))
+                journal <- openJournal (defaultJournalConfig directory)
+                appendEvent journal "wrapped" Null
+                    `shouldThrow` \case
+                        JournalSequenceExhausted sequenceNumber ->
+                            sequenceNumber == Sequence maxBound
+                        _ -> False
 
         it "rejects symlinked journal directories and files" $
             withSystemTempDirectory "daemon-symlink" $ \directory -> do
@@ -362,6 +435,36 @@ main = hspec $ do
                                     Just (Left exception) -> isAsyncException exception
                                     _ -> False
 
+        it "closes an accepted peer when cancellation interrupts full-queue admission" $
+            withSystemTempDirectory "daemon-admission-cancel" $ \directory ->
+                withTempDirectory "/tmp" "daemon-admission" $ \socketDirectory -> do
+                    journal <- openJournal (defaultJournalConfig directory)
+                    let socketConfig =
+                            SocketConfig
+                                { path = socketDirectory </> "daemon.sock"
+                                , backlog = 8
+                                }
+                        config =
+                            defaultServerConfig
+                                { workerCount = 1
+                                , ioTimeoutSeconds = 30
+                                }
+                    withUnixListener socketConfig $ \listener ->
+                        withAsync (runServerOnListener listener config journal unavailableSupervisor) $ \server ->
+                            bracket
+                                (traverse (const (socket AF_UNIX Stream defaultProtocol)) [1 :: Int .. 3])
+                                (mapM_ close)
+                                $ \clients -> do
+                                    mapM_ (`connect` SockAddrUnix socketConfig.path) clients
+                                    threadDelay 200_000
+                                    cancel server
+                                    _ <- waitCatch server
+                                    results <-
+                                        traverse
+                                            (\client -> timeout 1_000_000 (Socket.recv client 1))
+                                            clients
+                                    results `shouldBe` replicate 3 (Just BS.empty)
+
         it "chunks large snapshots below the configured frame bound" $
             withSystemTempDirectory "daemon-snapshot-chunks" $ \directory -> do
                 journal <- openJournal (defaultJournalConfig directory)
@@ -406,6 +509,46 @@ main = hspec $ do
                                 )
                                 [1 .. chunkCount - 1]
                         sequenceNumbers `shouldBe` [1 .. chunkCount - 1]
+
+        it "chunks events that exceed the transport frame bound" $
+            withSystemTempDirectory "daemon-event-chunks" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                event <- appendEvent journal "large" (String (Text.replicate 2_000 "x"))
+                let config =
+                        defaultServerConfig
+                            { maximumFrameBytes = 512
+                            , heartbeatSeconds = 60
+                            }
+                withSocketPair $ \(serverPeer, clientPeer) ->
+                    withAsync (serveConnection config journal unavailableSupervisor serverPeer) $ \_ -> do
+                        sendJSONFrame config.maximumFrameBytes clientPeer $
+                            ClientHello
+                                Hello
+                                    { clientId = ClientId "event-client"
+                                    , versions = [currentProtocolVersion]
+                                    , resumeAfter = Just 0
+                                    }
+                        _ <- receiveJSONFrame config.maximumFrameBytes clientPeer :: IO ServerMessage
+                        first <- receiveJSONFrame config.maximumFrameBytes clientPeer
+                        chunkCount <- case first of
+                            ServerEventChunk sequenceNumber 0 count _ ->
+                                if sequenceNumber == event.sequenceNumber && count > 1
+                                    then pure count
+                                    else expectationFailure ("unexpected event chunk: " <> show first) >> pure 0
+                            _ -> expectationFailure ("unexpected event message: " <> show first) >> pure 0
+                        indices <-
+                            traverse
+                                ( \_ ->
+                                    receiveJSONFrame config.maximumFrameBytes clientPeer >>= \case
+                                        ServerEventChunk sequenceNumber index count _
+                                            | sequenceNumber == event.sequenceNumber
+                                            , count == chunkCount ->
+                                                pure index
+                                        other ->
+                                            expectationFailure ("unexpected event chunk: " <> show other) >> pure (-1)
+                                )
+                                [1 .. chunkCount - 1]
+                        indices `shouldBe` [1 .. chunkCount - 1]
 
 withSocketPair :: ((Socket, Socket) -> IO value) -> IO value
 withSocketPair =

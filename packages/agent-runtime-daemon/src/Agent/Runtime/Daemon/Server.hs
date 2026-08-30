@@ -13,6 +13,7 @@ import Control.Exception.Safe
     ( Exception
     , SomeException
     , bracket
+    , bracketOnError
     , catchAny
     , finally
     , isAsyncException
@@ -73,7 +74,10 @@ runServerOnListener listener serverConfig journal supervisor = do
     accepted <- newTBQueueIO (fromIntegral (max 1 serverConfig.workerCount))
     let acceptLoop =
             forever $
-                (acceptOwnedPeer listener >>= atomically . writeTBQueue accepted)
+                bracketOnError
+                    (acceptOwnedPeer listener)
+                    close
+                    (atomically . writeTBQueue accepted)
                     `catchSync` const (threadDelay 100_000)
         worker =
             forever $
@@ -130,7 +134,7 @@ serveNegotiated config journal supervisor peer hello version = do
                 ReplaySnapshot saved ->
                     sendSnapshot config peer saved
                 ReplayEvents events ->
-                    for_ events (send config peer . ServerEvent)
+                    for_ events (sendEvent config peer)
             outbound <- newTBQueueIO (fromIntegral (max 1 config.outboundQueueSize))
             acknowledged <- newTVarIO cursor
             latestSequence <- newTVarIO currentSnapshot.lastSequence
@@ -170,7 +174,7 @@ serveNegotiated config journal supervisor peer hello version = do
                                     pure (Just (ServerHeartbeat sequenceNumber))
                     case next of
                         Nothing -> throwIO ServerSubscriberOverflow
-                        Just message -> send config peer message
+                        Just message -> sendMessage config peer message
             race_ receiver sender
   where
     acknowledge variable latest sequenceNumber =
@@ -190,6 +194,27 @@ sendSnapshot config peer saved = do
                 index
                 count
                 (Text.decodeUtf8 (Base64.encode bytes))
+
+sendEvent :: ServerConfig -> Socket -> EventEnvelope -> IO ()
+sendEvent config peer event
+    | LBS.length (encode (ServerEvent event)) <= fromIntegral config.maximumFrameBytes =
+        send config peer (ServerEvent event)
+    | otherwise = do
+        let rawChunkBytes = max 1 ((config.maximumFrameBytes - 256) * 3 `div` 4)
+            chunks = chunkBytes rawChunkBytes (LBS.toStrict (encode event))
+            count = length chunks
+        for_ (zip [0 ..] chunks) $ \(index, bytes) ->
+            send config peer $
+                ServerEventChunk
+                    event.sequenceNumber
+                    index
+                    count
+                    (Text.decodeUtf8 (Base64.encode bytes))
+
+sendMessage :: ServerConfig -> Socket -> ServerMessage -> IO ()
+sendMessage config peer = \case
+    ServerEvent event -> sendEvent config peer event
+    message -> send config peer message
 
 chunkBytes :: Int -> ByteString -> [ByteString]
 chunkBytes size bytes
