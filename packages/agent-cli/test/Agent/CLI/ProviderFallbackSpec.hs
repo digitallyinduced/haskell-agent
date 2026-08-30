@@ -68,7 +68,8 @@ spec = do
                     ( model.modelTarget.targetProvider
                     , model.modelTarget.targetModelId
                     ))
-                (fallbackCandidates catalog Set.empty XAIProvider exhausted)
+                (fallbackCandidates catalog Set.empty XAIProvider
+                    "grok-4.6" exhausted)
                 `shouldBe`
                     [ (OpenAIProvider, "gpt-5.6-sol")
                     , (GeminiProvider, "gemini-3.7-flash")
@@ -81,7 +82,8 @@ spec = do
                     ( model.modelTarget.targetProvider
                     , model.modelTarget.targetModelId
                     ))
-                (fallbackCandidates catalog Set.empty OpenAIProvider exhausted)
+                (fallbackCandidates catalog Set.empty OpenAIProvider
+                    "gpt-5.6-sol" exhausted)
                 `shouldBe`
                     [ (XAIProvider, "grok-4.6")
                     , (GeminiProvider, "gemini-3.7-flash")
@@ -89,28 +91,34 @@ spec = do
                     ]
 
         it "never automatically enters or leaves the Claude Code provider" do
-            fallbackCandidates catalog Set.empty ClaudeCodeProvider exhausted
+            fallbackCandidates catalog Set.empty ClaudeCodeProvider
+                "sonnet" exhausted
                 `shouldBe` []
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog Set.empty OpenAIProvider exhausted)
+                (fallbackCandidates catalog Set.empty OpenAIProvider
+                    "gpt-5.6-sol" exhausted)
                 `shouldSatisfy` (ClaudeCodeProvider `notElem`)
 
         it "skips providers already found unavailable" do
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog (Set.singleton OpenAIProvider) XAIProvider exhausted)
+                (fallbackCandidates catalog (Set.singleton OpenAIProvider)
+                    XAIProvider "grok-4.6" exhausted)
                 `shouldBe` [GeminiProvider, OpenRouterProvider]
 
         it "accepts direct usage-limit errors from every provider" do
             fallbackCandidates catalog Set.empty OpenRouterProvider
+                "stealth/ox-alpha"
                 (ProviderError UsageLimitReached "quota exhausted" (Just 3600))
                 `shouldSatisfy` (not . null)
             fallbackCandidates catalog Set.empty GeminiProvider
+                "gemini-3.7-flash"
                 (ProviderError UsageLimitReached "quota exhausted" (Just 3600))
                 `shouldSatisfy` (not . null)
 
         it "accepts other definitive account and billing exhaustion errors" do
             map
-                (not . null . fallbackCandidates catalog Set.empty XAIProvider)
+                (not . null . fallbackCandidates catalog Set.empty XAIProvider
+                    "grok-4.6")
                 [ ProviderError UsageBalanceExhausted "balance exhausted" Nothing
                 , ProviderError QuotaExceeded "quota exhausted" Nothing
                 , ProviderError UsageNotIncluded "not included" Nothing
@@ -119,19 +127,51 @@ spec = do
                 `shouldBe` replicate 4 True
 
         it "does not switch for transient capacity failures" do
-            fallbackCandidates catalog Set.empty XAIProvider
+            fallbackCandidates catalog Set.empty XAIProvider "grok-4.6"
                 (ProviderError OverloadedError "busy" (Just 30))
                 `shouldBe` []
 
         it "can continue past a replacement provider with rejected auth" do
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog (Set.singleton XAIProvider) OpenAIProvider
+                (fallbackCandidates catalog (Set.singleton XAIProvider)
+                    OpenAIProvider "gpt-5.6-sol"
                     (ProviderError AuthenticationError "rejected" Nothing))
                 `shouldBe` [GeminiProvider, OpenRouterProvider]
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog (Set.singleton XAIProvider) OpenAIProvider
+                (fallbackCandidates catalog (Set.singleton XAIProvider)
+                    OpenAIProvider "gpt-5.6-sol"
                     (CredentialError "credential file is invalid"))
                 `shouldBe` [GeminiProvider, OpenRouterProvider]
+
+        it "steps down through same-provider models on model access errors" do
+            map (.modelTarget.targetModelId)
+                (fallbackCandidates catalog Set.empty OpenAIProvider
+                    "gpt-5.6-sol"
+                    (ProviderError PermissionError "not available" Nothing))
+                `shouldBe`
+                    [ "gpt-5.6-terra"
+                    , "gpt-5.6-luna"
+                    , "grok-4.6"
+                    , "gemini-3.7-flash"
+                    , "stealth/ox-alpha"
+                    ]
+            map (.modelTarget.targetModelId)
+                (fallbackCandidates catalog Set.empty OpenAIProvider
+                    "gpt-5.6-terra"
+                    (ProviderError UsageNotIncluded "not included" Nothing))
+                `shouldBe`
+                    [ "gpt-5.6-luna"
+                    , "grok-4.6"
+                    , "gemini-3.7-flash"
+                    , "stealth/ox-alpha"
+                    ]
+
+        it "does not retry the same provider for untyped HTTP permission failures" do
+            map (.modelTarget.targetProvider)
+                (fallbackCandidates catalog Set.empty OpenAIProvider
+                    "gpt-5.6-sol" (HttpError 403 "forbidden"))
+                `shouldBe`
+                    [XAIProvider, GeminiProvider, OpenRouterProvider]
 
     describe "automaticCooldownRetryDelay" do
         let now = UTCTime (fromGregorian 2026 8 21) 0

@@ -118,7 +118,7 @@ import Agent.Provider
     , providerSlug
     , tokenProviderBillingMode
     )
-import Agent.Responses.Types (ResponseCreateParams)
+import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.TUI.Model (UiEvent(..))
 import Control.Monad
     ( forM_
@@ -471,6 +471,8 @@ requestAutomaticProviderFallback env apiError pending = do
         emitUiEvent runtime UiTurnRestarted
     sessionId <- ensureTransitionSessionId env.sessionPersist
     unavailable <- readIORef env.sessionUnavailableProviders
+    currentModel <-
+        fromMaybe "" . (.model) <$> readIORef env.sessionParams
     case env.sessionTokenProvider of
         Nothing -> pure Nothing
         Just tokenProvider ->
@@ -481,6 +483,7 @@ requestAutomaticProviderFallback env apiError pending = do
                 env.sessionFullscreen
                 (tokenProviderBillingMode tokenProvider)
                 env.sessionProvider
+                currentModel
                 unavailable
                 sessionId
                 pending
@@ -492,6 +495,8 @@ requestStartupProviderFallback
     -> IO (Maybe ProviderTransition)
 requestStartupProviderFallback env apiError = do
     unavailable <- readIORef env.sessionUnavailableProviders
+    currentModel <-
+        fromMaybe "" . (.model) <$> readIORef env.sessionParams
     case env.sessionTokenProvider of
         Nothing -> pure Nothing
         Just tokenProvider ->
@@ -501,6 +506,7 @@ requestStartupProviderFallback env apiError = do
                 env.sessionFullscreen
                 (tokenProviderBillingMode tokenProvider)
                 env.sessionProvider
+                currentModel
                 unavailable
                 Nothing
                 apiError
@@ -529,6 +535,7 @@ continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
                         fullscreen
                         billing
                         failed.transitionTarget.targetProvider
+                        failed.transitionTarget.targetModelId
                         failed.transitionUnavailableProviders
                         failed.transitionSessionId
                         pending
@@ -542,6 +549,7 @@ chooseAutomaticProviderTransition
     -> Maybe FullscreenRuntime
     -> BillingMode
     -> Provider
+    -> Text
     -> Set Provider
     -> Maybe Text
     -> PendingTurn
@@ -549,11 +557,12 @@ chooseAutomaticProviderTransition
     -> IO (Maybe ProviderTransition)
 chooseAutomaticProviderTransition
     catalog cwd stderrHandle fullscreen
-        sourceBilling current unavailable0 sessionId pending apiError =
-    tryCandidates unavailable candidates
+        sourceBilling current currentModel unavailable0 sessionId pending apiError =
+    tryCandidates unavailable0 candidates
   where
-    unavailable = markUnavailable current unavailable0
-    candidates = fallbackCandidates catalog unavailable0 current apiError
+    candidates =
+        fallbackCandidates
+            catalog unavailable0 current currentModel apiError
 
     tryCandidates unavailable = \case
         [] -> pure Nothing
@@ -561,9 +570,18 @@ chooseAutomaticProviderTransition
             choice <- resolveModelOptionDialect rawChoice
             validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
                 Left err -> do
-                    let message =
+                    let failedProvider =
+                            choice.modelTarget.targetProvider
+                        unavailable' =
+                            markUnavailable failedProvider unavailable
+                        remaining =
+                            filter
+                                ((/= failedProvider)
+                                    . (.modelTarget.targetProvider))
+                                rest
+                        message =
                             "skipping "
-                            <> providerSlug choice.modelTarget.targetProvider
+                            <> providerSlug failedProvider
                             <> ": "
                             <> err
                     case fullscreen of
@@ -572,16 +590,24 @@ chooseAutomaticProviderTransition
                             putTextLn stderrHandle (roleMuted color message)
                         Just runtime ->
                             emitUiEvent runtime (UiSystemMessage message)
-                    tryCandidates
-                        (markUnavailable choice.modelTarget.targetProvider unavailable)
-                        rest
+                    tryCandidates unavailable' remaining
                 Right selected -> do
-                    let message =
-                            providerSlug current
-                            <> " unavailable; trying this turn with "
-                            <> providerSlug choice.modelTarget.targetProvider
-                            <> "/"
-                            <> choice.modelTarget.targetModelId
+                    let nextProvider = choice.modelTarget.targetProvider
+                        unavailable' =
+                            if nextProvider == current
+                                then unavailable
+                                else markUnavailable current unavailable
+                        message
+                            | nextProvider == current =
+                                currentModel
+                                    <> " unavailable; trying this turn with "
+                                    <> choice.modelTarget.targetModelId
+                            | otherwise =
+                                providerSlug current
+                                    <> " unavailable; trying this turn with "
+                                    <> providerSlug nextProvider
+                                    <> "/"
+                                    <> choice.modelTarget.targetModelId
                     case fullscreen of
                         Nothing -> do
                             color <- resolveColor stderrHandle
@@ -597,7 +623,7 @@ chooseAutomaticProviderTransition
                             (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
-                        , transitionUnavailableProviders = unavailable
+                        , transitionUnavailableProviders = unavailable'
                         , transitionCause = AutomaticFallback
                         , transitionAutomaticBilling = Just sourceBilling
                         }
@@ -608,16 +634,19 @@ chooseStartupProviderTransition
     -> Maybe FullscreenRuntime
     -> BillingMode
     -> Provider
+    -> Text
     -> Set Provider
     -> Maybe Text
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseStartupProviderTransition
-    catalog cwd fullscreen sourceBilling current unavailable0 sessionId apiError =
-    tryCandidates unavailable candidates
+    catalog cwd fullscreen sourceBilling current currentModel
+        unavailable0 sessionId apiError =
+    tryCandidates unavailable0 candidates
   where
-    unavailable = markUnavailable current unavailable0
-    candidates = fallbackCandidates catalog unavailable0 current apiError
+    candidates =
+        fallbackCandidates
+            catalog unavailable0 current currentModel apiError
 
     tryCandidates unavailable = \case
         [] -> pure Nothing
@@ -625,23 +654,40 @@ chooseStartupProviderTransition
             choice <- resolveModelOptionDialect rawChoice
             validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
                 Left err -> do
-                    let message =
+                    let failedProvider =
+                            choice.modelTarget.targetProvider
+                        unavailable' =
+                            markUnavailable failedProvider unavailable
+                        remaining =
+                            filter
+                                ((/= failedProvider)
+                                    . (.modelTarget.targetProvider))
+                                rest
+                        message =
                             "skipping "
-                            <> providerSlug choice.modelTarget.targetProvider
+                            <> providerSlug failedProvider
                             <> ": "
                             <> err
                     forM_ fullscreen \runtime ->
                         emitUiEvent runtime (UiSystemMessage message)
-                    tryCandidates
-                        (markUnavailable choice.modelTarget.targetProvider unavailable)
-                        rest
+                    tryCandidates unavailable' remaining
                 Right selected -> do
-                    let message =
-                            providerSlug current
-                            <> " account unavailable; switched to "
-                            <> providerSlug choice.modelTarget.targetProvider
-                            <> "/"
-                            <> choice.modelTarget.targetModelId
+                    let nextProvider = choice.modelTarget.targetProvider
+                        unavailable' =
+                            if nextProvider == current
+                                then unavailable
+                                else markUnavailable current unavailable
+                        message
+                            | nextProvider == current =
+                                currentModel
+                                    <> " unavailable; switched to "
+                                    <> choice.modelTarget.targetModelId
+                            | otherwise =
+                                providerSlug current
+                                    <> " account unavailable; switched to "
+                                    <> providerSlug nextProvider
+                                    <> "/"
+                                    <> choice.modelTarget.targetModelId
                     forM_ fullscreen \runtime ->
                         emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
@@ -652,7 +698,7 @@ chooseStartupProviderTransition
                             (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
-                        , transitionUnavailableProviders = unavailable
+                        , transitionUnavailableProviders = unavailable'
                         , transitionCause = AutomaticFallback
                         , transitionAutomaticBilling = Just sourceBilling
                         }
