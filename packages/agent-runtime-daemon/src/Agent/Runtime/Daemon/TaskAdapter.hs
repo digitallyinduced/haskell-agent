@@ -2,6 +2,7 @@ module Agent.Runtime.Daemon.TaskAdapter
     ( TaskRunner(..)
     , processTaskRunner
     , processTaskRunnerFor
+    , processTaskRunnerForWithTimeout
     , processTaskArguments
     , withTaskAdapter
     ) where
@@ -70,9 +71,16 @@ processTaskRunner = do
 
 processTaskRunnerFor :: FilePath -> TaskRunner
 processTaskRunnerFor executable =
+    processTaskRunnerForWithTimeout defaultTaskRuntimeSeconds executable
+
+processTaskRunnerForWithTimeout :: Int -> FilePath -> TaskRunner
+processTaskRunnerForWithTimeout runtimeSeconds executable =
     TaskRunner
-        { runTask = runProcessTask executable
+        { runTask = runProcessTask runtimeSeconds executable
         }
+
+defaultTaskRuntimeSeconds :: Int
+defaultTaskRuntimeSeconds = 6 * 60 * 60
 
 data TaskCommand
     = Submit SubmitCommand
@@ -318,6 +326,14 @@ executeCommand journal registry state = \case
                     pure (state, Left "active tasks cannot be retried")
                 | task.status == TaskCompleted ->
                     pure (state, Left "completed tasks cannot be retried")
+                | Map.notMember taskId state.adapterInputs ->
+                    pure
+                        ( state
+                        , Left
+                            ( "task input is unavailable after daemon restart; "
+                                <> "submit a new task id"
+                            )
+                        )
                 | otherwise -> do
                     now <- getCurrentTime
                     let updated =
@@ -537,8 +553,8 @@ validDecision raw = do
         fail "decision must be approve, deny, or approve_session"
     pure decision
 
-runProcessTask :: FilePath -> DurableTask -> (Text -> IO ()) -> IO (Either Text ())
-runProcessTask executable task logLine = do
+runProcessTask :: Int -> FilePath -> DurableTask -> (Text -> IO ()) -> IO (Either Text ())
+runProcessTask runtimeSeconds executable task logLine = do
     let arguments = processTaskArguments task
         configuration =
             (proc executable arguments)
@@ -555,13 +571,20 @@ runProcessTask executable task logLine = do
     let terminate = terminateProcessGroup process
         consume = consumeBoundedOutput logLine
         closeHandles = hClose stdoutHandle `finally` hClose stderrHandle
-    ((concurrently_ (consume stdoutHandle) (consume stderrHandle) >> waitForProcess process)
-        `onException` terminate)
-        `finally` closeHandles
-        >>= \case
-            ExitSuccess -> pure (Right ())
-            ExitFailure code ->
-                pure (Left ("agent-cli exited with status " <> Text.pack (show code)))
+    outcome <-
+        timeout
+            (max 1 runtimeSeconds * 1_000_000)
+            ( ((concurrently_ (consume stdoutHandle) (consume stderrHandle) >> waitForProcess process)
+                `onException` terminate)
+                `finally` closeHandles
+            )
+    case outcome of
+        Nothing ->
+            pure
+                (Left ("agent-cli exceeded its " <> Text.pack (show runtimeSeconds) <> " second runtime limit"))
+        Just ExitSuccess -> pure (Right ())
+        Just (ExitFailure code) ->
+            pure (Left ("agent-cli exited with status " <> Text.pack (show code)))
 
 processTaskArguments :: DurableTask -> [String]
 processTaskArguments task =

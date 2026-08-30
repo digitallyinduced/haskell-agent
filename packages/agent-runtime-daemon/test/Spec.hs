@@ -810,7 +810,7 @@ main = hspec $ do
                             replayed `shouldSatisfy`
                                 any (messageHasStatus (TaskId "second") TaskCancelled)
 
-        it "interrupts in-flight work on restart and starts it only after explicit retry" $
+        it "interrupts queued and running work and rejects unsafe retry after restart" $
             withSystemTempDirectory "daemon-task-restart" $ \directory -> do
                 let journalConfig = defaultJournalConfig directory
                     serverConfig =
@@ -840,6 +840,16 @@ main = hspec $ do
                                     (submitCommand "restart-task" "restart-session")
                                 timeout 1_000_000 (atomically (readTQueue firstStarted))
                                     `shouldReturn` Just (TaskId "restart-task")
+                                sendTaskCommand serverConfig clientPeer "approval"
+                                    (object
+                                        [ "version" .= (1 :: Int)
+                                        , "type" .= ("approval" :: Text)
+                                        , "task_id" .= ("restart-task" :: Text)
+                                        , "approval_id" .= ("approval-1" :: Text)
+                                        , "decision" .= ("approve" :: Text)
+                                        ])
+                                    `shouldReturn` Left
+                                        "interactive approval resolution is unsupported by the daemon task adapter"
                                 _ <- sendTaskCommand serverConfig clientPeer "submit-queued"
                                     (submitCommand "queued-task" "queued-session")
                                 timeout 100_000 (atomically (readTQueue firstStarted))
@@ -863,29 +873,21 @@ main = hspec $ do
                                 handshake serverConfig clientPeer Nothing
                                 timeout 100_000 (atomically (readTQueue retryStarted))
                                     `shouldReturn` Nothing
-                                _ <- sendTaskCommand serverConfig clientPeer "retry" $
-                                    object
+                                sendTaskCommand serverConfig clientPeer "retry"
+                                    (object
                                         [ "version" .= (1 :: Int)
                                         , "type" .= ("retry" :: Text)
                                         , "task_id" .= ("restart-task" :: Text)
-                                        ]
-                                timeout 1_000_000 (atomically (readTQueue retryStarted))
-                                    `shouldReturn` Just (TaskId "restart-task")
-                                sendTaskCommand serverConfig clientPeer "approval"
-                                    (object
-                                        [ "version" .= (1 :: Int)
-                                        , "type" .= ("approval" :: Text)
-                                        , "task_id" .= ("restart-task" :: Text)
-                                        , "approval_id" .= ("approval-1" :: Text)
-                                        , "decision" .= ("approve" :: Text)
                                         ])
                                     `shouldReturn` Left
-                                        "interactive approval resolution is unsupported by the daemon task adapter"
-                                running <- snapshot restartedJournal
-                                let retried =
-                                        running.tasks Map.! TaskId "restart-task"
-                                retried.status `shouldBe` TaskRunning
-                                retried.attempt `shouldBe` 2
+                                        "task input is unavailable after daemon restart; submit a new task id"
+                                timeout 100_000 (atomically (readTQueue retryStarted))
+                                    `shouldReturn` Nothing
+                                unchanged <- snapshot restartedJournal
+                                let interrupted =
+                                        unchanged.tasks Map.! TaskId "restart-task"
+                                interrupted.status `shouldBe` TaskInterrupted
+                                interrupted.attempt `shouldBe` 1
 
         it "uses the actual agent-cli argv shape and bounds process output chunks" $
             withSystemTempDirectory "daemon-process-runner" $ \directory -> do
@@ -939,6 +941,11 @@ main = hspec $ do
                 captured `shouldSatisfy` (not . null)
                 map Text.length captured `shouldSatisfy` all (<= 4_096)
                 sum (map Text.length captured) `shouldBe` 20_000
+                writeFile executable "#!/bin/sh\nsleep 30\n"
+                timeout
+                    4_000_000
+                    ((processTaskRunnerForWithTimeout 1 executable).runTask task (const (pure ())))
+                    `shouldReturn` Just (Left "agent-cli exceeded its 1 second runtime limit")
 
         it "bounds task-runner output in the durable journal" $
             withSystemTempDirectory "daemon-runner-log-bound" $ \directory -> do

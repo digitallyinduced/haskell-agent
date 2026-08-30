@@ -65,15 +65,20 @@ Successful results contain `"version": 1`; submit, cancel, and retry results
 also contain the durable task. `list` returns every retained durable task.
 Task transitions are journaled as `task_changed` events before the mutating
 command reports success. A failed, cancelled, or interrupted task is rerun
-only by an explicit `retry` command, which retains its task ID and increments
-its attempt number. A completed or active task cannot be retried.
+only by an explicit `retry` command while the same daemon process still holds
+the original, unredacted input in memory. Raw prompts are deliberately not
+persisted separately from the redacted task description. After daemon restart,
+`retry` therefore fails with `task input is unavailable`; the client must
+submit the input again under a new task ID. A completed or active task cannot
+be retried.
 
 The shipped daemon runner executes `agent-cli` directly without a shell
 (`HASKELL_AGENT_CLI` can override its path), using the real one-shot CLI flags
 for prompt, session resume, cwd, provider/model/effort, session persistence,
 and optional worktree creation. Stdout and stderr are concurrently drained in
-bounded chunks before journal log limits are applied. Embedders can supply a
-typed `TaskRunner` while retaining the same scheduler, persistence, and wire
+bounded chunks before journal log limits are applied, total output is capped,
+and every process task has a six-hour wall-clock deadline. Embedders can supply
+a typed `TaskRunner` while retaining the same scheduler, persistence, and wire
 protocol; the adapter intentionally exposes no approval-resolver hook.
 
 ## Local security
