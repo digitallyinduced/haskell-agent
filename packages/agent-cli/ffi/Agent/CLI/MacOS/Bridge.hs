@@ -69,6 +69,15 @@ import Agent.CLI.Auth
     , openaiAuthStateFromJson
     , xaiOAuthClientId
     )
+import Agent.CLI.GatewayClient
+    ( GatewayCredential(..)
+    , GatewayDeviceAuthorization(..)
+    , GatewayPollResult(..)
+    , loadGatewayCredential
+    , pollGatewayAuthorizationAndSave
+    , removeGatewayCredential
+    , startGatewayAuthorization
+    )
 import qualified Agent.OpenAI.Login as OpenAILogin
 import qualified Agent.OpenAI.Auth as OpenAIAuth
 import qualified Agent.OpenAI.Auth.Types as OpenAIAuthTypes
@@ -78,8 +87,8 @@ import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ModelCatalog
     , catalogModelById
-    , loadModelCatalogAt
     )
+import Agent.CLI.GatewayModels (loadGatewayModelCatalogAt)
 import Agent.CLI.Database.Store
     ( applicableDatabaseScopes
     , deriveDatabaseScopes
@@ -91,6 +100,7 @@ import Agent.CLI.Models
     , defaultModelOptionFor
     , initialPickerStateResolved
     , modelCatalog
+    , resolveConfiguredModel
     , resolveModelOptionDialect
     , selectedOption
     )
@@ -287,6 +297,28 @@ type AccountOAuthStartCallback =
     -> CString -> CSize -> CString -> CSize -> CInt -> CInt
     -> CString -> CSize -> IO ()
 
+type GatewayStatusCallback =
+    Ptr () -> CInt
+    -> CString -> CSize
+    -> CString -> CSize
+    -> IO ()
+
+type GatewayConnectStartCallback =
+    Ptr () -> CInt
+    -> CString -> CSize
+    -> CString -> CSize
+    -> CString -> CSize
+    -> CString -> CSize
+    -> CInt -> CInt
+    -> CString -> CSize
+    -> IO ()
+
+type GatewayPollCallback =
+    Ptr () -> CInt -> CInt -> CString -> CSize -> IO ()
+
+type GatewayResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> IO ()
+
 -- Status is 0 for a result, 1 for completion, and -1 for failure. Every
 -- pointer is callback-scoped UTF-8. A turn index of -1 denotes a metadata hit;
 -- role is 0 (metadata), 1 (user), or 2 (assistant).
@@ -342,6 +374,22 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeAccountOAuthStartCallback
         :: FunPtr AccountOAuthStartCallback -> AccountOAuthStartCallback
+
+foreign import ccall "dynamic"
+    invokeGatewayStatusCallback
+        :: FunPtr GatewayStatusCallback -> GatewayStatusCallback
+
+foreign import ccall "dynamic"
+    invokeGatewayConnectStartCallback
+        :: FunPtr GatewayConnectStartCallback -> GatewayConnectStartCallback
+
+foreign import ccall "dynamic"
+    invokeGatewayPollCallback
+        :: FunPtr GatewayPollCallback -> GatewayPollCallback
+
+foreign import ccall "dynamic"
+    invokeGatewayResultCallback
+        :: FunPtr GatewayResultCallback -> GatewayResultCallback
 
 foreign import ccall "dynamic"
     invokeSearchCallback :: FunPtr SearchCallback -> SearchCallback
@@ -584,6 +632,20 @@ foreign export ccall ha_account_set_enabled
 foreign export ccall ha_account_delete
     :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
 
+foreign export ccall ha_gateway_status
+    :: FunPtr GatewayStatusCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_gateway_connect_start
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr GatewayConnectStartCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_gateway_connect_poll
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr GatewayPollCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_gateway_disconnect
+    :: FunPtr GatewayResultCallback -> Ptr () -> IO CInt
+
 foreign export ccall ha_learned_skills_list
     :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
 
@@ -798,6 +860,167 @@ ha_account_delete idBytes (CSize idLength) callback context
                 Left exception -> invokeExceptionResult callback context exception
                 Right result -> invokeStoreResult callback context result
         pure 0
+
+ha_gateway_status
+    :: FunPtr GatewayStatusCallback -> Ptr () -> IO CInt
+ha_gateway_status callback context
+    | callback == nullFunPtr = pure 1
+    | otherwise = do
+        _ <- forkIO do
+            tryAny loadGatewayCredential >>= \case
+                Left exception ->
+                    invokeGatewayStatusError callback context
+                        (Text.pack (show exception))
+                Right (Left err) ->
+                    invokeGatewayStatusError callback context err
+                Right (Right Nothing) ->
+                    invokeGatewayStatusCallback callback context 1
+                        nullPtr 0 nullPtr 0
+                Right (Right (Just credential)) ->
+                    withText credential.gatewayBaseUrl $ \baseUrl baseUrlLength ->
+                        invokeGatewayStatusCallback callback context 0
+                            baseUrl baseUrlLength nullPtr 0
+        pure 0
+
+ha_gateway_connect_start
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr GatewayConnectStartCallback -> Ptr () -> IO CInt
+ha_gateway_connect_start
+    baseUrlBytes (CSize baseUrlLength)
+    clientNameBytes (CSize clientNameLength)
+    callback context
+    | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull
+        [ (baseUrlBytes, baseUrlLength)
+        , (clientNameBytes, clientNameLength)
+        ] = pure 2
+    | otherwise = do
+        baseUrl <- decodeInput baseUrlBytes baseUrlLength
+        clientName <- decodeInput clientNameBytes clientNameLength
+        _ <- forkIO do
+            tryAny (startGatewayAuthorization baseUrl clientName) >>= \case
+                Left exception ->
+                    invokeGatewayConnectStartError callback context
+                        (Text.pack (show exception))
+                Right (Left err) ->
+                    invokeGatewayConnectStartError callback context err
+                Right (Right device) ->
+                    withGatewayDeviceStrings device $
+                        invokeGatewayConnectStartCallback callback context 0
+        pure 0
+
+ha_gateway_connect_poll
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr GatewayPollCallback -> Ptr () -> IO CInt
+ha_gateway_connect_poll
+    baseUrlBytes (CSize baseUrlLength)
+    deviceCodeBytes (CSize deviceCodeLength)
+    callback context
+    | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull
+        [ (baseUrlBytes, baseUrlLength)
+        , (deviceCodeBytes, deviceCodeLength)
+        ] = pure 2
+    | otherwise = do
+        baseUrl <- decodeInput baseUrlBytes baseUrlLength
+        deviceCode <- decodeInput deviceCodeBytes deviceCodeLength
+        _ <- forkIO do
+            tryAny
+                (pollGatewayAuthorizationAndSave baseUrl deviceCode)
+                >>= \case
+                    Left exception ->
+                        invokeGatewayPollError callback context
+                            (Text.pack (show exception))
+                    Right (Left err) ->
+                        invokeGatewayPollError callback context err
+                    Right (Right result) ->
+                        invokeGatewayPollResult callback context result
+        pure 0
+
+ha_gateway_disconnect
+    :: FunPtr GatewayResultCallback -> Ptr () -> IO CInt
+ha_gateway_disconnect callback context
+    | callback == nullFunPtr = pure 1
+    | otherwise = do
+        _ <- forkIO do
+            tryAny removeGatewayCredential >>= \case
+                Left exception ->
+                    invokeGatewayResultError callback context
+                        (Text.pack (show exception))
+                Right (Left err) ->
+                    invokeGatewayResultError callback context err
+                Right (Right ()) ->
+                    invokeGatewayResultCallback callback context 0 nullPtr 0
+        pure 0
+
+invokeGatewayStatusError
+    :: FunPtr GatewayStatusCallback -> Ptr () -> Text -> IO ()
+invokeGatewayStatusError callback context err =
+    withText err $ \errorPtr errorLength ->
+        invokeGatewayStatusCallback callback context (-1)
+            nullPtr 0 errorPtr errorLength
+
+invokeGatewayConnectStartError
+    :: FunPtr GatewayConnectStartCallback -> Ptr () -> Text -> IO ()
+invokeGatewayConnectStartError callback context err =
+    withText err $ \errorPtr errorLength ->
+        invokeGatewayConnectStartCallback callback context (-1)
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            0 0 errorPtr errorLength
+
+withGatewayDeviceStrings
+    :: GatewayDeviceAuthorization
+    -> (CString -> CSize -> CString -> CSize
+        -> CString -> CSize -> CString -> CSize
+        -> CInt -> CInt -> CString -> CSize -> IO a)
+    -> IO a
+withGatewayDeviceStrings device action =
+    withText device.userCode $ \userCode userCodeLength ->
+    withText device.verificationUri $ \verificationUri verificationUriLength ->
+    withText device.verificationUriComplete $
+        \verificationComplete verificationCompleteLength ->
+    withText device.deviceCode $ \deviceCode deviceCodeLength ->
+        action
+            userCode userCodeLength
+            verificationUri verificationUriLength
+            verificationComplete verificationCompleteLength
+            deviceCode deviceCodeLength
+            (fromIntegral device.pollIntervalSeconds)
+            (fromIntegral device.expiresInSeconds)
+            nullPtr 0
+
+invokeGatewayPollResult
+    :: FunPtr GatewayPollCallback -> Ptr () -> GatewayPollResult -> IO ()
+invokeGatewayPollResult callback context = \case
+    GatewayAuthorized _ _ ->
+        invokeGatewayPollCallback callback context 0 0 nullPtr 0
+    GatewayAuthorizationPending retryInterval ->
+        invokeGatewayPollCallback callback context 1
+            (fromIntegral (fromMaybe 0 retryInterval)) nullPtr 0
+    GatewaySlowDown retryInterval ->
+        invokeGatewayPollCallback callback context 2
+            (fromIntegral (fromMaybe 0 retryInterval)) nullPtr 0
+    GatewayAccessDenied ->
+        invokeGatewayPollError callback context
+            "Gateway authorization was denied."
+    GatewayExpired ->
+        invokeGatewayPollError callback context
+            "Gateway authorization expired."
+    GatewayPollFailed code ->
+        invokeGatewayPollError callback context
+            ("Gateway authorization failed: " <> code)
+
+invokeGatewayPollError
+    :: FunPtr GatewayPollCallback -> Ptr () -> Text -> IO ()
+invokeGatewayPollError callback context err =
+    withText err $ \errorPtr errorLength ->
+        invokeGatewayPollCallback callback context (-1) 0 errorPtr errorLength
+
+invokeGatewayResultError
+    :: FunPtr GatewayResultCallback -> Ptr () -> Text -> IO ()
+invokeGatewayResultError callback context err =
+    withText err $ \errorPtr errorLength ->
+        invokeGatewayResultCallback callback context (-1) errorPtr errorLength
 
 anyNonEmptyNull :: [(Ptr Word8, Word64)] -> Bool
 anyNonEmptyNull = any \(pointer, length) ->
@@ -2003,20 +2226,29 @@ loadNativeModelCatalog store root request = do
     case contextResult of
         Left err -> pure (Left err)
         Right (cwd, maybeTarget) ->
-            loadModelCatalogAt home cwd >>= \case
+            loadGatewayModelCatalogAt home cwd >>= \case
                 Left err -> pure (Left err)
                 Right catalog -> do
-                    selectedTarget <- case maybeTarget of
-                        Just target -> pure (Just target)
-                        Nothing ->
-                            traverse
-                                (fmap (.modelTarget)
-                                    . resolveModelOptionDialect)
-                                ( defaultModelOptionFor
+                    let configuredTarget = do
+                            target <- maybeTarget
+                            option <-
+                                resolveConfiguredModel
+                                    catalog
+                                    target.targetModelId
+                            if option.modelTarget.targetConnectionId
+                                == target.targetConnectionId
+                                then Just option
+                                else Nothing
+                    selectedTarget <-
+                        traverse
+                            (fmap (.modelTarget)
+                                . resolveModelOptionDialect)
+                            ( configuredTarget
+                                <|> defaultModelOptionFor
                                     catalog
                                     OpenAIProvider
-                                    <|> listToMaybe (modelCatalog catalog)
-                                )
+                                <|> listToMaybe (modelCatalog catalog)
+                            )
                     case selectedTarget of
                         Nothing -> pure (Left "model catalog is empty")
                         Just target -> do
