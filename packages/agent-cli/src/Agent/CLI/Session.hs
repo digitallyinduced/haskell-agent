@@ -53,6 +53,12 @@ module Agent.CLI.Session
     , allocateSessionTemp
     , ensureSessionTemp
     , removeSessionTemp
+    , cleanupStaleSessionTemps
+    , defaultSessionTempKeepCount
+    , SessionTempCleanupReport(..)
+    , SessionTempLease
+    , acquireSessionTempLease
+    , releaseSessionTempLease
     , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
@@ -112,13 +118,15 @@ import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (StoreError, renderStoreError)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
-    ( displayException
+    ( SomeException
+    , displayException
     , finally
     , mask
     , onException
+    , tryAny
     , tryIO
     )
-import Control.Monad (unless, when)
+import Control.Monad (foldM, unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -128,15 +136,24 @@ import Control.Monad.Trans.Except
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (isHexDigit)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
+import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
+import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
+import Data.Time.Calendar (Day)
+import Data.Time.Clock
+    ( UTCTime
+    , getCurrentTime
+    , nominalDiffTimeToSeconds
+    , utctDay
+    )
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.Vector as Vector
 import Numeric (showHex)
 import System.Directory.OsPath
@@ -146,10 +163,20 @@ import System.Directory.OsPath
     , doesDirectoryExist
     , doesFileExist
     , listDirectory
+    , pathIsSymbolicLink
     , removePathForcibly
     , removeFile
     )
-import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
+import qualified System.FileLock as FileLock
+import System.OsPath
+    ( OsPath
+    , equalFilePath
+    , normalise
+    , takeDirectory
+    , takeFileName
+    , unsafeEncodeUtf
+    , (</>)
+    )
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files
     ( FileStatus
@@ -162,6 +189,30 @@ import System.Posix.Files
 
 sessionSchemaVersion :: Int
 sessionSchemaVersion = 1
+
+-- | Keep a small recent cache for session artifacts while bounding abandoned
+-- shell environments, tool outputs, and other scratch data.
+defaultSessionTempKeepCount :: Int
+defaultSessionTempKeepCount = 15
+
+data SessionTempCleanupReport = SessionTempCleanupReport
+    { tempCleanupRemoved :: ![OsPath]
+    , tempCleanupFailures :: ![(OsPath, Text)]
+    }
+    deriving (Eq, Show)
+
+instance Semigroup SessionTempCleanupReport where
+    left <> right = SessionTempCleanupReport
+        { tempCleanupRemoved =
+            left.tempCleanupRemoved <> right.tempCleanupRemoved
+        , tempCleanupFailures =
+            left.tempCleanupFailures <> right.tempCleanupFailures
+        }
+
+instance Monoid SessionTempCleanupReport where
+    mempty = SessionTempCleanupReport [] []
+
+newtype SessionTempLease = SessionTempLease FileLock.FileLock
 
 -- | @~/.haskell-agent/sessions@ given the user's home directory.
 sessionsRoot :: OsPath -> OsPath
@@ -1192,6 +1243,212 @@ allocateSessionTemp root = do
                     Right () -> do
                         setFileMode (unsafeToFilePath tempDir) 0o700
                         pure (sessionId, tempDir)
+
+-- | Take a shared lease for a session's scratch directory. Automatic cleanup
+-- requires the matching exclusive lock, so a live process cannot lose its
+-- temporary files even before its durable session lock has been acquired.
+acquireSessionTempLease
+    :: OsPath
+    -> OsPath
+    -> IO (Either Text (Maybe SessionTempLease))
+acquireSessionTempLease root path =
+    case sessionTempId root path of
+        Nothing -> pure (Right Nothing)
+        Just sessionId -> do
+            let lockPath = sessionTempLockPath root sessionId
+            result <- tryAny $
+                ensurePrivateDir (takeDirectory lockPath)
+                    >> FileLock.tryLockFile
+                        (unsafeToFilePath lockPath)
+                        FileLock.Shared
+            pure case result of
+                Left exception ->
+                    Left
+                        ("failed to lease session scratch directory "
+                            <> toText path
+                            <> ": "
+                            <> Text.pack (displayException exception))
+                Right Nothing ->
+                    Left
+                        ("session scratch directory is being cleaned up: "
+                            <> toText path)
+                Right (Just lock) ->
+                    Right (Just (SessionTempLease lock))
+
+releaseSessionTempLease :: SessionTempLease -> IO ()
+releaseSessionTempLease (SessionTempLease lock) = do
+    _ <- tryAny (FileLock.unlockFile lock)
+    pure ()
+
+-- | Remove old session scratch directories after retaining the newest entries.
+-- Only allocator-shaped names are considered, and a directory with a live
+-- shared lease is skipped. Failures are reported per path and never stop the
+-- rest of the best-effort cleanup. Directories allocated on the current UTC
+-- day are always kept, closing the startup interval before a lease is taken.
+cleanupStaleSessionTemps
+    :: OsPath
+    -> Int
+    -> [OsPath]
+    -> IO SessionTempCleanupReport
+cleanupStaleSessionTemps root requestedKeep protected = do
+    let tempRoot = sessionTempsRoot root
+    exists <- doesDirectoryExist tempRoot
+    if not exists
+        then pure mempty
+        else do
+            today <- utctDay <$> getCurrentTime
+            listed <- tryAny (listDirectory tempRoot)
+            case listed of
+                Left exception ->
+                    pure $ tempCleanupFailure tempRoot exception
+                Right entries -> do
+                    directories <- foldM
+                        (collectDirectory tempRoot)
+                        ([], [])
+                        entries
+                    case directories of
+                        (managed, discoveryFailures) -> do
+                            let candidates =
+                                    filter
+                                        (isBefore today . takeFileName)
+                                        (drop (max 1 requestedKeep) $
+                                            sortOn
+                                                (Down
+                                                    . unsafeToFilePath
+                                                    . takeFileName)
+                                                managed)
+                            cleaned <- foldM cleanupOne mempty candidates
+                            pure $
+                                cleaned
+                                    <> mempty
+                                        { tempCleanupFailures =
+                                            discoveryFailures
+                                        }
+  where
+    protectedPaths = map normalise protected
+    isBefore today path =
+        maybe False (< today) (allocatedSessionDay path)
+
+    collectDirectory tempRoot (managed, failures) entry = do
+        let path = tempRoot </> entry
+        checked <- tryAny (doesDirectoryExist path)
+        pure case checked of
+            Left exception ->
+                ( managed
+                , failures
+                    <> [(path, Text.pack (displayException exception))]
+                )
+            Right True
+                | isAllocatedSessionId entry ->
+                    (managed <> [path], failures)
+            Right _ -> (managed, failures)
+
+    cleanupOne report candidate
+        | any
+            (\protectedPath ->
+                equalFilePath protectedPath (normalise candidate))
+            protectedPaths =
+                pure report
+        | otherwise = do
+            result <- tryAny (cleanupStaleSessionTemp root candidate)
+            pure $ report <> case result of
+                Left exception ->
+                    tempCleanupFailure candidate exception
+                Right candidateReport -> candidateReport
+
+cleanupStaleSessionTemp
+    :: OsPath
+    -> OsPath
+    -> IO SessionTempCleanupReport
+cleanupStaleSessionTemp root candidate =
+    case sessionTempId root candidate of
+        Nothing -> pure mempty
+        Just sessionId -> do
+            let durableDir = root </> sessionId
+            durableExists <- doesDirectoryExist durableDir
+            durableLock <-
+                if durableExists
+                    then fmap (fmap Just) $
+                        acquireSessionLock durableDir (toText sessionId)
+                    else pure (Right Nothing)
+            case durableLock of
+                -- A running or otherwise un-lockable durable session owns the
+                -- scratch directory. Treat either case conservatively.
+                Left _ -> pure mempty
+                Right lock ->
+                    cleanupWithSessionLock sessionId
+                        `finally` mapM_ releaseSessionLock lock
+  where
+    cleanupWithSessionLock sessionId = do
+        let lockPath = sessionTempLockPath root sessionId
+        locked <- tryAny $
+            ensurePrivateDir (takeDirectory lockPath)
+                >> FileLock.tryLockFile
+                    (unsafeToFilePath lockPath)
+                    FileLock.Exclusive
+        case locked of
+            Left exception ->
+                pure $ tempCleanupFailure candidate exception
+            Right Nothing ->
+                pure mempty
+            Right (Just lock) -> do
+                removed <- tryAny $
+                    (do
+                        symbolic <- pathIsSymbolicLink candidate
+                        if symbolic
+                            then pure False
+                            else removePathForcibly candidate >> pure True)
+                        `finally` FileLock.unlockFile lock
+                pure case removed of
+                    Left exception ->
+                        tempCleanupFailure candidate exception
+                    Right True ->
+                        mempty { tempCleanupRemoved = [candidate] }
+                    Right False -> mempty
+
+sessionTempId :: OsPath -> OsPath -> Maybe OsPath
+sessionTempId root rawPath =
+    let tempRoot = normalise (sessionTempsRoot root)
+        path = normalise rawPath
+    in if equalFilePath tempRoot (takeDirectory path)
+            && isAllocatedSessionId (takeFileName path)
+        then Just (takeFileName path)
+        else Nothing
+
+sessionTempLockPath :: OsPath -> OsPath -> OsPath
+sessionTempLockPath root sessionId =
+    sessionTempsRoot root
+        </> unsafeEncodeUtf ".locks"
+        </> (sessionId <> unsafeEncodeUtf ".lock")
+
+isAllocatedSessionId :: OsPath -> Bool
+isAllocatedSessionId path = case allocatedSessionDay path of
+    Just _ -> True
+    Nothing -> False
+
+allocatedSessionDay :: OsPath -> Maybe Day
+allocatedSessionDay path =
+    case unsafeToFilePath path of
+        year1 : year2 : year3 : year4 : '-' :
+                month1 : month2 : '-' : day1 : day2 : '-' : suffix ->
+            let date =
+                    [ year1, year2, year3, year4, '-'
+                    , month1, month2, '-', day1, day2
+                    ]
+            in if length suffix == 8 && all isHexDigit suffix
+                then parseTimeM True defaultTimeLocale "%Y-%m-%d" date
+                else Nothing
+        _ -> Nothing
+
+tempCleanupFailure
+    :: OsPath
+    -> SomeException
+    -> SessionTempCleanupReport
+tempCleanupFailure path exception =
+    mempty
+        { tempCleanupFailures =
+            [(path, Text.pack (displayException exception))]
+        }
 
 ensureSessionTemp :: OsPath -> Text -> IO (Either Text OsPath)
 ensureSessionTemp root sessionId =

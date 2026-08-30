@@ -192,6 +192,7 @@ runAgentWithRestarts options =
             home <- getHomeDirectory
             let root = sessionsRoot home
             elicitationRef <- newIORef Nothing
+            cleanupStarted <- newIORef False
             mcpSupervisor <-
                 MCP.newMcpSupervisorWith
                     MCP.defaultMcpHostHooks
@@ -202,6 +203,7 @@ runAgentWithRestarts options =
             let processRuntime = AgentProcessRuntime
                     { processMcpSupervisor = mcpSupervisor
                     , processSessionThreads = sessionThreads
+                    , processCleanupStarted = cleanupStarted
                     , processMcpElicitation = elicitationRef
                     }
             withRestoredCurrentDirectory

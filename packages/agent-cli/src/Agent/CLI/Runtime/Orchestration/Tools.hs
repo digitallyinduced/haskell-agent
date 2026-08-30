@@ -113,14 +113,20 @@ import Agent.CLI.Runtime.Types ()
 import Agent.CLI.Secret ( promptSecretLine )
 import Agent.CLI.Session
     ( allocateSessionTemp,
+      acquireSessionTempLease,
+      cleanupStaleSessionTemps,
       cleanupPendingPersistence,
+      defaultSessionTempKeepCount,
+      listSessions,
       persistenceTempDir,
+      releaseSessionTempLease,
       removeSessionTemp,
       sessionLegacySubagentTarget,
+      SessionTempCleanupReport(..),
       Persistence(PersistenceDisabled),
       SessionHandle(sessionDir, sessionMeta),
       SessionMeta(metaId, metaTransportModel, metaProvider,
-                  metaConnection, metaModel, metaDialect, metaEffort),
+                  metaConnection, metaModel, metaDialect, metaEffort, metaCwd),
       SessionTurn(turnAssistantText) )
 import Agent.CLI.Session.Attachments ( putImagePreview )
 import Agent.CLI.Session.Choices ()
@@ -165,7 +171,14 @@ import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
     ( closeWebFetchRuntime, newWebFetchRuntime, webFetchRuntimeTool )
 import Agent.CLI.Worktree
-    ( createManagedWorktree, removeWorktree )
+    ( acquireWorktreeLease,
+      cleanupStaleWorktrees,
+      createManagedWorktree,
+      defaultWorktreeKeepCount,
+      releaseWorktreeLease,
+      removeWorktree,
+      worktreeRoot,
+      WorktreeCleanupReport(..) )
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect
@@ -233,7 +246,7 @@ import Agent.Tools.ShowImage
 import Agent.Tools.Types ( setToolSessionTmp )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
-import Control.Concurrent.Async ( concurrently_ )
+import Control.Concurrent.Async ( concurrently, concurrently_ )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ()
@@ -254,7 +267,6 @@ import System.Directory.OsPath (getHomeDirectory)
 import System.Environment ()
 import System.Exit ()
 import System.IO ()
-import System.OsPath ()
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
@@ -282,7 +294,7 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
-import qualified Data.Text as Text ( intercalate, unpack )
+import qualified Data.Text as Text ( intercalate, pack, unpack )
 import qualified Data.Text.IO as Text ()
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Client as XAIClient ()
@@ -621,11 +633,32 @@ runAgentTools
             imageGenerationHistory
             (foldSessionItems turns)
     home <- getHomeDirectory
-    let cleanupScratch = do
+    let cleanupAllocatedScratch = do
             cleanupPendingPersistence persist
             forM_ ephemeralSessionId \sessionId -> do
                 _ <- removeSessionTemp root sessionId
                 pure ()
+    worktreeLease <-
+        acquireWorktreeLease (worktreeRoot home) cwd >>= \case
+            Left err -> do
+                cleanupAllocatedScratch
+                startupDie startup (Text.unpack err)
+            Right lease -> pure lease
+    sessionTempLease <-
+        (acquireSessionTempLease root sessionTmp
+            `onException`
+                (mapM_ releaseWorktreeLease worktreeLease
+                    >> cleanupAllocatedScratch)) >>= \case
+                Left err -> do
+                    mapM_ releaseWorktreeLease worktreeLease
+                    cleanupAllocatedScratch
+                    startupDie startup (Text.unpack err)
+                Right lease -> pure lease
+    let cleanupScratch =
+            mapM_ releaseSessionTempLease sessionTempLease
+                `finally`
+                    (mapM_ releaseWorktreeLease worktreeLease
+                        `finally` cleanupAllocatedScratch)
         toolEnv = baseToolEnv
         mcpServerConfigs =
             [ MCP.McpServerConfig
@@ -658,6 +691,55 @@ runAgentTools
             useProgressiveMcp
                 harnessConfig.configMcpInitStrategy
                 (isOneShot options)
+    let AgentProcessRuntime
+            { processCleanupStarted = cleanupStarted
+            } = processRuntime
+    runCleanup <- atomicModifyIORef'
+        cleanupStarted
+        (\started -> (True, not started))
+    when runCleanup do
+        cleanupResult <- try @_ @SomeException do
+            (sessions, sessionWarnings) <-
+                listSessions
+                    (trustedPool startup.startupDatabaseStore)
+                    root
+            let protectedWorktrees =
+                    -- Persisted sessions must remain resumable. A worktree
+                    -- becomes collectible after its session is deleted.
+                    cwd : map (.metaCwd) sessions
+            (worktreeReport, tempReport) <- concurrently
+                (if null sessionWarnings
+                    then cleanupStaleWorktrees
+                        (worktreeRoot home)
+                        defaultWorktreeKeepCount
+                        protectedWorktrees
+                    -- A partial session catalog cannot prove that an old
+                    -- checkout is unreferenced.
+                    else pure mempty)
+                (cleanupStaleSessionTemps
+                    root
+                    defaultSessionTempKeepCount
+                    [sessionTmp])
+            pure (sessionWarnings, worktreeReport, tempReport)
+        case cleanupResult of
+            Left exception ->
+                reportStartupWarning startup
+                    ("stale resource cleanup failed: "
+                        <> formatException exception)
+            Right (sessionWarnings, worktreeReport, tempReport) -> do
+                mapM_ (reportStartupWarning startup) sessionWarnings
+                forM_ worktreeReport.cleanupFailures \(path, err) ->
+                    reportStartupWarning startup
+                        ("could not clean stale worktree "
+                            <> Text.pack (unsafeToFilePath path)
+                            <> ": "
+                            <> err)
+                forM_ tempReport.tempCleanupFailures \(path, err) ->
+                    reportStartupWarning startup
+                        ("could not clean stale session scratch directory "
+                            <> Text.pack (unsafeToFilePath path)
+                            <> ": "
+                            <> err)
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
     mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
     writeIORef processRuntime.processMcpElicitation
@@ -710,7 +792,8 @@ runAgentTools
                                             <> "…"))
                         mcpServerConfigs)
             >>= \case
-            Left exception ->
+            Left exception -> do
+                cleanupScratch
                 startupDie startup
                     ("Failed to initialize MCP tools: " <> show exception)
             Right lease -> pure lease
