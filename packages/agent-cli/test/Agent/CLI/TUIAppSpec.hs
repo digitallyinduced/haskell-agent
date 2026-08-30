@@ -24,6 +24,7 @@ import Agent.CLI.TUI.App
     , choiceClosesOnUiTransition
     , elapsedMillisSince
     , externalUrlCommand
+    , launchExternalUrlCommand
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
@@ -247,6 +248,14 @@ spec = do
             externalUrlCommand
                 ("https://example.com/" <> Text.replicate 4096 "a")
                 `shouldBe` Nothing
+
+        it "does not block on a long-running URL opener" do
+            result <- timeout 1_000_000
+                (launchExternalUrlCommand ("sleep", ["2"]))
+            result `shouldBe` Just True
+
+        it "reports an opener that exits unsuccessfully" do
+            launchExternalUrlCommand ("false", []) `shouldReturn` False
 
     describe "secret text overlay" do
         it "renders only fixed-width masking glyphs" do

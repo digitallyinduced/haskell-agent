@@ -22,6 +22,7 @@ module Agent.CLI.TUI.App
     , emitUiEvent
     , enqueueAppEvent
     , externalUrlCommand
+    , launchExternalUrlCommand
     , hasQueuedFullscreenInput
     , initialFullscreenAppState
     , mergeConversationView
