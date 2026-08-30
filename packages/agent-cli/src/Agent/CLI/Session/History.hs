@@ -16,6 +16,7 @@ module Agent.CLI.Session.History
     , readLiveAttachments
     , readLivePreviousResponseId
     , readLiveTranscript
+    , retargetLiveTranscript
     , modifyLiveAttachments
     , resetLiveConversationState
     , resetLiveConversation
@@ -166,6 +167,16 @@ evictLiveTranscript ref generation checkpoint =
     readIORef ref >>= \store ->
         ConversationStore.evictConversationTranscript
             store generation checkpoint
+
+-- | Retarget an unchanged transcript to an equivalent durable session
+-- snapshot without hydrating it.
+retargetLiveTranscript
+    :: IORef LiveConversation
+    -> TranscriptCheckpoint
+    -> IO ()
+retargetLiveTranscript ref checkpoint =
+    readIORef ref >>= \store ->
+        ConversationStore.retargetConversationCheckpoint store checkpoint
 
 -- | Reconstruct the exact root transcript from durable session turns.
 --

@@ -109,7 +109,7 @@ data SessionRequest = SessionRequest
     , options :: !CliOptions
     , provider :: !Provider
     , dialect :: !Dialect
-    , policy :: !ApprovalPolicy
+    , policyRef :: !(IORef ApprovalPolicy)
     , allTools :: ![AppTool]
     , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , clearImageGenerationHistory :: !(IO ())

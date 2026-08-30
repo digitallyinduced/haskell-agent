@@ -2,6 +2,7 @@
 module Agent.CLI.Input.Approval
     ( readApprovalLine
     , readChoiceSelection
+    , readChoiceSelectionAt
     ) where
 
 import Agent.CLI.Input.Picker
@@ -62,7 +63,15 @@ readChoiceSelection
     :: (Bool -> Text -> Text)
     -> [Text]
     -> IO (Maybe Text)
-readChoiceSelection formatLine options = do
+readChoiceSelection = readChoiceSelectionAt 0
+
+-- | Interactive multiple-choice picker with a caller-selected initial row.
+readChoiceSelectionAt
+    :: Int
+    -> (Bool -> Text -> Text)
+    -> [Text]
+    -> IO (Maybe Text)
+readChoiceSelectionAt initial formatLine options = do
     isTty <- hIsTerminalDevice stdin
     case options of
         [] -> pure Nothing
@@ -75,8 +84,10 @@ readChoiceSelection formatLine options = do
                     \() -> do
                         let len = length options
                             menuLines = len + 1
-                        drawMenu formatLine options 0
-                        pickLoop formatLine options len menuLines 0
+                            selected = max 0 (min (len - 1) initial)
+                        drawMenu formatLine options selected
+                        pickLoop
+                            formatLine options len menuLines selected
 
 pickLoop
     :: (Bool -> Text -> Text)

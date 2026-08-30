@@ -94,7 +94,6 @@ runSession
 runSession callbacks SessionRequest{..} SessionBackend{..} = do
   initialPrevious <- readLivePreviousResponseId conversationRef
   ioLock <- newMVar ()
-  policyRef <- newIORef policy
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
       stdoutHandle = startup.startupStdout

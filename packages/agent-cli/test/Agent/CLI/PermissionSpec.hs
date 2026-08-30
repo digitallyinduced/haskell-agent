@@ -2,6 +2,7 @@ module Agent.CLI.PermissionSpec (spec) where
 
 import Agent.CLI.Permission
 import Agent.CLI.Picker (PickerKey(..))
+import Agent.CLI.Options (ApprovalPolicy(..))
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -61,3 +62,26 @@ spec = do
                 Text.isInfixOf "Always approve all tools for this project"
             frame `shouldSatisfy` Text.isInfixOf "Always allow this tool this session"
             frame `shouldSatisfy` Text.isInfixOf "Deny"
+
+    describe "approval policy picker" do
+        it "selects the current policy" do
+            (initialApprovalPolicyState ApproveAll).approvalPolicyIndex
+                `shouldBe` 2
+            (initialApprovalPolicyState DenyMutating).approvalPolicyIndex
+                `shouldBe` 1
+
+        it "maps shortcuts and confirmation" do
+            let state = initialApprovalPolicyState PromptMutating
+            applyApprovalPolicyKey (PickerKeyChar 'f') state
+                `shouldBe` Left (ApprovalPolicySelected ApproveAll)
+            applyApprovalPolicyKey PickerKeyDown state
+                `shouldBe` Right (ApprovalPolicyState PromptMutating 1)
+            applyApprovalPolicyKey PickerKeyConfirm
+                (ApprovalPolicyState PromptMutating 1)
+                `shouldBe` Left (ApprovalPolicySelected DenyMutating)
+
+
+        it "cancels without changing the current policy" do
+            applyApprovalPolicyKey PickerKeyCancel
+                (initialApprovalPolicyState DenyMutating)
+                `shouldBe` Left ApprovalPolicyCancelled

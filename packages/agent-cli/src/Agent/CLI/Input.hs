@@ -10,8 +10,10 @@ module Agent.CLI.Input
     , readReplLineWithCatalogForProvider
     , readReplLineWithSkills
     , readReplLineWithSkillsAndModels
+    , readModalText
     , readApprovalLine
     , readChoiceSelection
+    , readChoiceSelectionAt
     , approvalKeyText
     , ChoiceKey(..)
     , parseChoiceKey
@@ -206,14 +208,60 @@ readReplLineConfigured
     -> IO ReplLine
 readReplLineConfigured
         dictationProvider catalog slashEnabled interrupt prompt initial = do
+    readLineConfigured
+        True
+        dictationProvider
+        catalog
+        slashEnabled
+        interrupt
+        prompt
+        initial
+
+-- | Read transient modal text without slash-command completion or modifying
+-- normal REPL history. Escape, Ctrl-C, and EOF cancel on the TTY path.
+readModalText :: InterruptState -> Text -> Text -> IO (Maybe Text)
+readModalText interrupt prompt initial =
+    readLineConfigured
+        False
+        Nothing
+        defaultSlashCatalog
+        False
+        interrupt
+        prompt
+        initial
+        >>= \case
+            ReplText text -> pure (Just text)
+            ReplPasted text -> pure (Just text)
+            ReplEof -> pure Nothing
+            ReplQuitInterrupt -> pure Nothing
+            _ -> pure Nothing
+
+readLineConfigured
+    :: Bool
+    -> Maybe Provider
+    -> SlashCatalog
+    -> Bool
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO ReplLine
+readLineConfigured
+        historyEnabled
+        dictationProvider
+        catalog
+        slashEnabled
+        interrupt
+        prompt
+        initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
             home <- getHomeDirectory
             let path = replHistoryPath home
-            ensureHistoryParent path
+            when historyEnabled (ensureHistoryParent path)
             classifyLine <$>
                 readInlineEditor
+                    historyEnabled
                     dictationProvider
                     catalog
                     slashEnabled
@@ -236,7 +284,8 @@ readReplLineConfigured
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
-    :: Maybe Provider
+    :: Bool
+    -> Maybe Provider
     -> SlashCatalog
     -> Bool
     -> InterruptState
@@ -245,6 +294,7 @@ readInlineEditor
     -> Text
     -> IO ReplLine
 readInlineEditor
+        historyEnabled
         dictationProvider
         catalog
         slashEnabled
@@ -259,7 +309,12 @@ readInlineEditor
                     (hHideCursor stdout)
                     (\_ -> hShowCursor stdout >> hFlush stdout)
                     \() -> do
-                        history <- readHistory historyPath `catchIO` \_ -> pure emptyHistory
+                        history <-
+                            if historyEnabled
+                                then
+                                    readHistory historyPath
+                                        `catchIO` \_ -> pure emptyHistory
+                                else pure emptyHistory
                         let entries = map Text.pack (historyLines history)
                             state =
                                 initialEditorState catalog slashEnabled initial
@@ -268,11 +323,22 @@ readInlineEditor
   where
     editorLoop history entries state = do
         key <- readEditorKey
-        let EditorStep
-                { editorStepState = next
-                , editorStepEffect = requested
-                } = reduceEditorKey entries state key
-        case requested of
+        case (historyEnabled, key, currentMenu state) of
+            (False, EditorEscape, Nothing) ->
+                cancelModal state
+            (False, EditorEof, _) ->
+                cancelModal state
+            _ -> applyStep key
+      where
+        cancelModal state = do
+            finishEditorLine prompt state
+            pure ReplQuitInterrupt
+        applyStep key = do
+          let EditorStep
+                  { editorStepState = next
+                  , editorStepEffect = requested
+                  } = reduceEditorKey entries state key
+          case requested of
             RedrawEditor -> do
                 redrawEditor prompt next
                 editorLoop history entries next
@@ -282,15 +348,17 @@ readInlineEditor
                 finishEditorLine prompt next
                 pure line
             CheckEditorInterrupt ->
-                noteIdleCtrlC interrupt >>= \case
-                    ContinuePrompt -> do
-                        finishEditorLine prompt next
-                        Text.putStrLn "^C"
-                        redrawEditor prompt next
-                        editorLoop history entries next
-                    QuitProcess -> do
-                        finishEditorLine prompt next
-                        pure ReplQuitInterrupt
+                if not historyEnabled
+                    then cancelModal next
+                    else noteIdleCtrlC interrupt >>= \case
+                        ContinuePrompt -> do
+                            finishEditorLine prompt next
+                            Text.putStrLn "^C"
+                            redrawEditor prompt next
+                            editorLoop history entries next
+                        QuitProcess -> do
+                            finishEditorLine prompt next
+                            pure ReplQuitInterrupt
             ClearEditorScreen -> do
                 Text.hPutStr stdout "\ESC[2J\ESC[H"
                 redrawEditor prompt next
@@ -329,13 +397,15 @@ readInlineEditor
                 editorLoop history entries next
             IgnoreEditorInput ->
                 editorLoop history entries next
-      where
         finish history' state' = do
             finishEditorLine prompt state'
             let text = state'.editorText
-            unless (Text.all (== ' ') text) $
-                writeHistory historyPath (addHistory (Text.unpack text) history')
-                    `catchIO` \_ -> pure ()
+            when historyEnabled $
+                unless (Text.all (== ' ') text) $
+                    writeHistory
+                        historyPath
+                        (addHistory (Text.unpack text) history')
+                        `catchIO` \_ -> pure ()
             pure $
                 if state'.editorPasted
                     then ReplPasted text

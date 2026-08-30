@@ -18,6 +18,7 @@ module Agent.CLI.Session.ConversationStore
     , readConversationAttachments
     , readConversationPreviousResponseId
     , replaceConversationTranscript
+    , retargetConversationCheckpoint
     , resetConversationStore
     , withConversationTranscript
     , withConversationBackendState
@@ -267,6 +268,30 @@ evictConversationTranscript
                         , False
                         )
             _ -> pure (state, False)
+
+-- | Point an unchanged cold or currently hydrated transcript at an equivalent
+-- durable snapshot under a different identity (for example, after /fork).
+-- A committed resident transcript has no checkpoint yet and is left alone.
+retargetConversationCheckpoint
+    :: ConversationStore
+    -> TranscriptCheckpoint
+    -> IO ()
+retargetConversationCheckpoint
+        (ConversationStore stateVar)
+        checkpoint =
+    modifyMVar_ stateVar \state ->
+        pure state
+            { stateTranscript =
+                case state.stateTranscript of
+                    ColdTranscript _ ->
+                        ColdTranscript checkpoint
+                    ResidentTranscript items
+                            (HydratedResident _ readers) ->
+                        ResidentTranscript
+                            items
+                            (HydratedResident checkpoint readers)
+                    resident@ResidentTranscript{} -> resident
+            }
 
 readConversationPreviousResponseId
     :: ConversationStore

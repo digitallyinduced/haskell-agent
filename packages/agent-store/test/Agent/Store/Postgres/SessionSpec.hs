@@ -168,6 +168,49 @@ spec = describe "PostgreSQL session schema" do
                                                       ]
                                                     ))
                                             ]
+                            let snapshotMetadata = metadata
+                                    { sessionMetadataKey = "session-snapshot"
+                                    , sessionMetadataTitle = "forked session"
+                                    , sessionMetadataTitleIsManual = True
+                                    , sessionMetadataLastResponseId =
+                                        Just "response-parent"
+                                    }
+                                snapshotTurns =
+                                    [ turn
+                                        { sessionTurnUserText = "snapshot one"
+                                        }
+                                    , turn
+                                        { sessionTurnUserText = "snapshot two"
+                                        , sessionTurnResponseId =
+                                            Just "response-parent"
+                                        }
+                                    ]
+                            createSessionFromSnapshot
+                                pool snapshotMetadata snapshotTurns
+                                `shouldReturn` Right True
+                            createSessionFromSnapshot
+                                pool snapshotMetadata snapshotTurns
+                                `shouldReturn` Right False
+                            loadSession pool "session-snapshot" >>= \case
+                                Right (Just stored) -> do
+                                    stored.storedMetadata
+                                        `shouldBe` snapshotMetadata
+                                    map (.storedTurn)
+                                        (toList stored.storedTurns)
+                                        `shouldBe` snapshotTurns
+                                other ->
+                                    expectationFailure
+                                        ("unexpected snapshot session: " <> show other)
+                            snapshotEvents <-
+                                loadSessionEvents pool "session-snapshot"
+                            fmap (map (.storedEventKind)) snapshotEvents
+                                `shouldBe`
+                                    Right
+                                        [ "session.created"
+                                        , "turn.appended"
+                                        , "turn.appended"
+                                        , "session.snapshot_created"
+                                        ]
                             let metadata3 = metadata
                                     { sessionMetadataKey = "session-batched"
                                     , sessionMetadataTitle = "batched"

@@ -169,6 +169,25 @@ spec = do
             withConversationTranscript store (`shouldBe` items)
             readIORef newerLoads `shouldReturn` 1
 
+        it "retargets a cold transcript without hydrating the old snapshot" do
+            oldLoads <- newIORef (0 :: Int)
+            newLoads <- newIORef (0 :: Int)
+            let old = TranscriptCheckpoint "source" do
+                    modifyIORef' oldLoads (+ 1)
+                    pure [messageItem "old"]
+                new = TranscriptCheckpoint "fork" do
+                    modifyIORef' newLoads (+ 1)
+                    pure [messageItem "fork"]
+            store <- newColdConversationStore Nothing old []
+
+            retargetConversationCheckpoint store new
+
+            readIORef oldLoads `shouldReturn` 0
+            withConversationTranscript store
+                (`shouldBe` [messageItem "fork"])
+            readIORef oldLoads `shouldReturn` 0
+            readIORef newLoads `shouldReturn` 1
+
         it "keeps response id and attachments independent of hydration" do
             loads <- newIORef (0 :: Int)
             let image = ImageAttachment "image/png" "png"

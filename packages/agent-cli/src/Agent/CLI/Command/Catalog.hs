@@ -8,6 +8,12 @@ import Agent.Dialect (DialectId(..))
 slashCommands :: [SlashCommand]
 slashCommands =
     [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one" True
+    , cmd "init" [] "/init" "Create an AGENTS.md contributor guide" False
+    , cmd "review" [] "/review [INSTRUCTIONS]" "Review current changes and find issues" True
+    , cmd "diff" [] "/diff" "Show Git diff, including untracked files" False
+    , cmd "fork" [] "/fork [NAME]" "Fork the current chat into a new session" True
+    , cmd "export" [] "/export [PATH]" "Export the conversation as Markdown" True
+    , cmd "permissions" [] "/permissions" "Choose the tool approval policy" False
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model" True
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False

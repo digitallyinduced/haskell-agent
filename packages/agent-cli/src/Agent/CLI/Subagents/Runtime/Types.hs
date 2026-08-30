@@ -43,7 +43,7 @@ data SubagentRuntime = SubagentRuntime
     { subagentOptions :: !CliOptions
     , subagentGhciEnabled :: !(IORef Bool)
     , subagentBashEnabled :: !(IORef Bool)
-    , subagentPolicy :: !ApprovalPolicy
+    , subagentPolicy :: !(IORef ApprovalPolicy)
     , subagentPlanHooks :: !PlanModeHooks
     , subagentSkillRoots :: !(IORef [OsPath])
     , subagentAllowedRoots :: !(IORef [OsPath])
