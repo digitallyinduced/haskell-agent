@@ -153,6 +153,7 @@ import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..),
       closeCodexConn,
       codexConnTurnState,
+      isGatewayWebSocketCredential,
       resetCodexTurnState,
       withCodexWsCredential,
       withCodexWsWithProvider )
@@ -479,12 +480,16 @@ runAgentProviders
                                     Just ctx ->
                                         setSubagentRunner ctx.multiRegistry $
                                             runCodexSubagent
+                                                (isGatewayWebSocketCredential
+                                                    credential)
                                                 subagentRuntime
                                                 selectableTokenProvider
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let (compactSender, lockedBackend) =
                                         lockedOpenAiSession
+                                            (isGatewayWebSocketCredential
+                                                credential)
                                             options.optCompactThreshold
                                             options.optShowRawReasoning
                                             wsLock

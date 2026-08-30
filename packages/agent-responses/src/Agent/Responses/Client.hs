@@ -7,6 +7,7 @@ module Agent.Responses.Client
 
 import Agent.Error (ApiError)
 import qualified Agent.Responses.HttpSSE as HttpSSE
+import Agent.Responses.StreamAssembly (StreamAssemblyConfig)
 import Agent.Responses.Types
 import Control.Retry (RetryPolicyM, retrying)
 import qualified Data.Aeson as Aeson
@@ -19,8 +20,7 @@ data ResponsesClientConfig = ResponsesClientConfig
     , clientBaseUrl :: !String
     , clientTimeoutSeconds :: !Int
     , clientClassifyFailure :: !(Int -> Maybe Int -> Text -> ApiError)
-    , clientBuildResponse
-        :: !([ResponseStreamEvent] -> Either ApiError Response)
+    , clientAssemblyConfig :: !StreamAssemblyConfig
     }
 
 -- | Execute one streaming Responses request with provider-specific request
@@ -36,7 +36,8 @@ performResponsesRequest config request configureRequest =
         HttpSSE.HttpSseConfig
             { exceptionPrefix = config.clientExceptionPrefix
             , classifyFailure = config.clientClassifyFailure
-            , buildResponse = config.clientBuildResponse
+            , assemblyConfig = config.clientAssemblyConfig
+            , responseModelHint = request.model
             }
         config.clientBaseUrl
         config.clientTimeoutSeconds

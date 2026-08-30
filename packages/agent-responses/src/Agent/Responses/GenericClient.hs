@@ -11,6 +11,7 @@ module Agent.Responses.GenericClient
     , retryTransientResultWithPolicy
     , classifyFailure
     , classifyStreamError
+    , streamAssemblyConfig
     , buildResponse
     ) where
 
@@ -75,8 +76,7 @@ data ProviderClientConfig = ProviderClientConfig
     , providerConfigureRequest :: !(Request -> Request)
     , providerClassifyFailure
         :: !(Int -> Maybe Int -> Text -> ApiError)
-    , providerBuildResponse
-        :: !([ResponseStreamEvent] -> Either ApiError Response)
+    , providerAssemblyConfig :: !StreamAssemblyConfig
     , providerRetryableFailure :: !(ApiError -> Bool)
     }
 
@@ -144,7 +144,7 @@ createResponseWithProviderPolicy policy config request onEvent =
                 , clientTimeoutSeconds =
                     config.providerRequestTimeoutSeconds
                 , clientClassifyFailure = config.providerClassifyFailure
-                , clientBuildResponse = config.providerBuildResponse
+                , clientAssemblyConfig = config.providerAssemblyConfig
                 }
             (config.providerBuildRequest request)
             config.providerConfigureRequest
@@ -176,7 +176,10 @@ classifyStreamError streamError =
         streamError.retryAfter
 
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response
-buildResponse = buildStreamResponse StreamAssemblyConfig
+buildResponse = buildStreamResponse streamAssemblyConfig
+
+streamAssemblyConfig :: StreamAssemblyConfig
+streamAssemblyConfig = StreamAssemblyConfig
     { missingCompletionMessage =
         "No terminal response event found in Responses SSE stream"
     , classifyStreamError
@@ -204,7 +207,7 @@ genericProviderConfig options = ProviderClientConfig
             (nonEmptyText options.bearerToken)
             . setRequestHeader "User-Agent" ["haskell-agent"]
     , providerClassifyFailure = classifyFailure
-    , providerBuildResponse = buildResponse
+    , providerAssemblyConfig = streamAssemblyConfig
     , providerRetryableFailure = isInlineRetryableProviderError
     }
 

@@ -130,7 +130,9 @@ codingToolsForWithTypes
                                 <> instruction
                                 <> " Cite exact artifact line ranges in the report."
                             )
-                            (Just "gpt-5.6-luna")
+                            -- Artifact analysis has no model selector, so inherit
+                            -- rather than silently downgrading the root model.
+                            Nothing
                             Nothing
                             (Just "none")
                 _ -> Nothing

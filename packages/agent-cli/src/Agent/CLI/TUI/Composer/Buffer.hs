@@ -1,6 +1,8 @@
 -- | Buffered input submitted through the fullscreen composer.
 module Agent.CLI.TUI.Composer.Buffer
     ( appendFullscreenInput
+    , fullscreenInputByteLimit
+    , fullscreenInputCountLimit
     , newFullscreenInputBuffer
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
@@ -10,6 +12,11 @@ module Agent.CLI.TUI.Composer.Buffer
     ) where
 
 import Agent.CLI.Input (ReplLine(..))
+import Agent.CLI.InputBudget
+    ( logicalReplLineBytes
+    , logicalTextBytes
+    , saturatingAdd
+    )
 import Agent.CLI.TUI.Types
     ( FullscreenInput(..)
     , FullscreenInputBuffer(..)
@@ -27,9 +34,16 @@ import Data.Sequence (Seq, ViewL(..), ViewR(..))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 
+fullscreenInputCountLimit :: Int
+fullscreenInputCountLimit = 128
+
+fullscreenInputByteLimit :: Int
+fullscreenInputByteLimit = 64 * 1024 * 1024
+
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
-newFullscreenInputBuffer =
-    FullscreenInputBuffer <$> newTVarIO Seq.empty
+newFullscreenInputBuffer = FullscreenInputBuffer
+    <$> newTVarIO Seq.empty
+    <*> newTVarIO 0
 
 queuedFullscreenInputDisplays
     :: FullscreenInputBuffer
@@ -47,16 +61,25 @@ queuedFullscreenInputDisplays inputBuffer =
 readFullscreenInputs
     :: FullscreenInputBuffer
     -> STM (Seq FullscreenInput)
-readFullscreenInputs (FullscreenInputBuffer inputs) =
+readFullscreenInputs (FullscreenInputBuffer inputs _) =
     readTVar inputs
 
 appendFullscreenInput
     :: FullscreenInputBuffer
     -> FullscreenInput
-    -> STM ()
-appendFullscreenInput (FullscreenInputBuffer inputs) input = do
+    -> STM (Either Text ())
+appendFullscreenInput (FullscreenInputBuffer inputs retainedBytes) input = do
     queued <- readTVar inputs
-    writeTVar inputs (queued Seq.|> input)
+    bytes <- readTVar retainedBytes
+    let inputBytes = fullscreenInputBytes input
+        nextBytes = bytes `saturatingAdd` inputBytes
+    if Seq.length queued >= fullscreenInputCountLimit
+            || nextBytes > fullscreenInputByteLimit
+        then pure (Left fullscreenQueueFullMessage)
+        else do
+            writeTVar inputs (queued Seq.|> input)
+            writeTVar retainedBytes nextBytes
+            pure (Right ())
 
 -- | Put an interruptive prompt ahead of already queued prompts. Clipboard
 -- actions entered after the last submitted prompt belong to the current draft,
@@ -64,12 +87,21 @@ appendFullscreenInput (FullscreenInputBuffer inputs) input = do
 promoteFullscreenInput
     :: FullscreenInputBuffer
     -> FullscreenInput
-    -> STM ()
-promoteFullscreenInput (FullscreenInputBuffer inputs) input = do
+    -> STM (Either Text ())
+promoteFullscreenInput (FullscreenInputBuffer inputs retainedBytes) input = do
     queued <- readTVar inputs
-    let (remaining, prelude) = splitTrailingPromptPrelude queued
-    writeTVar inputs $
-        prelude Seq.>< Seq.singleton input Seq.>< remaining
+    bytes <- readTVar retainedBytes
+    let inputBytes = fullscreenInputBytes input
+        nextBytes = bytes `saturatingAdd` inputBytes
+    if Seq.length queued >= fullscreenInputCountLimit
+            || nextBytes > fullscreenInputByteLimit
+        then pure (Left fullscreenQueueFullMessage)
+        else do
+            let (remaining, prelude) = splitTrailingPromptPrelude queued
+            writeTVar inputs $
+                prelude Seq.>< Seq.singleton input Seq.>< remaining
+            writeTVar retainedBytes nextBytes
+            pure (Right ())
 
 splitTrailingPromptPrelude
     :: Seq FullscreenInput
@@ -93,12 +125,15 @@ isPromptPrelude input =
 takeFullscreenInput
     :: FullscreenInputBuffer
     -> STM FullscreenInput
-takeFullscreenInput (FullscreenInputBuffer inputs) = do
+takeFullscreenInput (FullscreenInputBuffer inputs retainedBytes) = do
     queued <- readTVar inputs
     case Seq.viewl queued of
         EmptyL -> retry
         input :< rest -> do
             writeTVar inputs rest
+            bytes <- readTVar retainedBytes
+            writeTVar retainedBytes
+                (max 0 (bytes - fullscreenInputBytes input))
             pure input
 
 -- | Prefer a prompt that has already been queued over a simultaneous
@@ -110,3 +145,15 @@ takeFullscreenInputOr
 takeFullscreenInputOr inputBuffer wake =
     (Right <$> takeFullscreenInput inputBuffer)
         `orElse` (Left <$> wake)
+
+fullscreenInputBytes :: FullscreenInput -> Int
+fullscreenInputBytes input =
+    logicalReplLineBytes input.fullscreenInputLine
+        `saturatingAdd` maybe
+            0
+            logicalTextBytes
+            input.fullscreenInputDisplay
+
+fullscreenQueueFullMessage :: Text
+fullscreenQueueFullMessage =
+    "Prompt queue is full; wait for a queued prompt to be consumed."

@@ -6,13 +6,15 @@ module Agent.CLI.Clipboard.Linux
 
 import Agent.CLI.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (finally, tryAny)
+import Control.Monad (void)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( findExecutable
+    , getFileSize
     , getTemporaryDirectory
     , removeFile
     )
@@ -107,29 +109,39 @@ runBytesCmd cmd args = do
     result <- tryAny do
         (path, handle) <- openBinaryTempFile tmpDir "agent-clipboard-.bin"
         hClose handle
-        removeFile path
-        (code, _, err) <- readProcessWithExitCode "bash"
-            [ "-c"
-            , shellQuote cmd
-                <> " "
-                <> unwords (map shellQuote args)
-                <> " > "
-                <> shellQuote path
-            ]
-            ""
-        case code of
-            ExitSuccess -> do
-                bytes <- BS.readFile path
-                _ <- tryAny (removeFile path)
-                if BS.null bytes
-                    then pure (Left "no image found on the clipboard")
-                    else pure (Right bytes)
-            ExitFailure _ -> do
-                _ <- tryAny (removeFile path)
-                pure (Left (Text.strip (Text.pack err)))
+        let cleanup = void (tryAny (removeFile path))
+        (do
+            removeFile path
+            (code, _, err) <- readProcessWithExitCode "bash"
+                [ "-c"
+                , shellQuote cmd
+                    <> " "
+                    <> unwords (map shellQuote args)
+                    <> " > "
+                    <> shellQuote path
+                ]
+                ""
+            case code of
+                ExitSuccess -> do
+                    size <- getFileSize path
+                    if size > maxClipboardImageBytes
+                        then pure (Left
+                            "clipboard image exceeds the 20 MB limit")
+                        else do
+                            bytes <- BS.readFile path
+                            if BS.null bytes
+                                then pure (Left
+                                    "no image found on the clipboard")
+                                else pure (Right bytes)
+                ExitFailure _ ->
+                    pure (Left (Text.strip (Text.pack err))))
+            `finally` cleanup
     case result of
         Left ex -> pure (Left (formatException ex))
         Right value -> pure value
+
+maxClipboardImageBytes :: Integer
+maxClipboardImageBytes = 20 * 1024 * 1024
 
 shellQuote :: String -> String
 shellQuote s = '\'' : go s

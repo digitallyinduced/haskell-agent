@@ -48,7 +48,7 @@ data Sample = Sample
 
 -- | The production default for 'maxBufferSizeBytes'.
 recordLimit :: Int
-recordLimit = 1_073_741_824
+recordLimit = 128 * 1024 * 1024
 
 main :: IO ()
 main = do

@@ -6,8 +6,10 @@ module Agent.CLI.Session.Attachments
     ) where
 
 import Agent.CLI.Clipboard
-    ( appendUniqueImageAttachments
+    ( appendBoundedImageAttachments
     , formatImageSize
+    , pendingImageAttachmentByteLimit
+    , pendingImageAttachmentCountLimit
     , readClipboardImagesForPaste
     )
 import Agent.CLI.ImagePreview
@@ -49,10 +51,13 @@ queueAttachedImages
     -> [ImageAttachment]
     -> IO Text
 queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
-    (added, pendingCount) <- modifyLiveAttachments attachmentsRef \existing ->
-        let (pending, unique) =
-                appendUniqueImageAttachments existing images
-        in (pending, (unique, length pending))
+    (added, duplicateCount, rejectedCount, pendingCount) <-
+        modifyLiveAttachments attachmentsRef \existing ->
+            let (pending, unique, duplicates, rejected) =
+                    appendBoundedImageAttachments existing images
+            in ( pending
+               , (unique, duplicates, rejected, length pending)
+               )
     let sizes =
             Text.intercalate ", "
                 [ img.imageMime
@@ -61,29 +66,47 @@ queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
                     <> ")"
                 | img <- added
                 ]
-        duplicateCount = length images - length added
         queued = Text.pack (show pendingCount)
+        duplicateSuffix
+            | duplicateCount == 0 = ""
+            | otherwise =
+                "; skipped "
+                    <> Text.pack (show duplicateCount)
+                    <> " duplicate image"
+                    <> if duplicateCount == 1 then "" else "s"
+        rejectedSuffix
+            | rejectedCount == 0 = ""
+            | otherwise =
+                "; skipped "
+                    <> Text.pack (show rejectedCount)
+                    <> " image"
+                    <> (if rejectedCount == 1 then "" else "s")
+                    <> " over the "
+                    <> Text.pack
+                        (show pendingImageAttachmentCountLimit)
+                    <> "-image / "
+                    <> formatImageSize pendingImageAttachmentByteLimit
+                    <> " limit"
     when (showPreview && not (null added)) $
         putImagePreview previewIdRef color added
-    pure $ case (added, duplicateCount) of
-        ([], _) ->
+    pure $ case (added, duplicateCount, rejectedCount) of
+        ([], _, rejected) | rejected > 0 ->
+            "image attachment limit reached"
+                <> duplicateSuffix
+                <> rejectedSuffix
+                <> " ("
+                <> queued
+                <> " queued)"
+        ([], _, _) ->
             "image already attached — not added again ("
                 <> queued
                 <> " queued)"
-        (_, 0) ->
+        (_, _, _) ->
             "attached "
                 <> sizes
+                <> duplicateSuffix
+                <> rejectedSuffix
                 <> " — send with next message ("
-                <> queued
-                <> " queued)"
-        _ ->
-            "attached "
-                <> sizes
-                <> "; skipped "
-                <> Text.pack (show duplicateCount)
-                <> " duplicate image"
-                <> (if duplicateCount == 1 then "" else "s")
-                <> " ("
                 <> queued
                 <> " queued)"
 

@@ -190,6 +190,11 @@ without double-counting earlier fallback usage.
 - prompt-write, startup, inactivity, and whole-turn timeouts;
 - a maximum structured-output record size.
 
+The default structured-output record limit is 128 MiB. This is large enough
+for ordinary image and PDF tool results while bounding memory reserved for a
+single malformed or runaway record. Set `maxBufferSizeBytes` explicitly when a
+larger attachment is required.
+
 `extraArgs` allows new Claude Code flags to be supplied before the typed
 options surface catches up.
 

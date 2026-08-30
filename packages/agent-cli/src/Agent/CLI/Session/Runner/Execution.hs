@@ -36,6 +36,7 @@ import Agent.CLI.LearnedSkills
 import Agent.CLI.LearnedSkills.Store
 import Agent.CLI.Options
 import Agent.CLI.PendingInputs
+import Agent.CLI.SteeringInputs
 import Agent.CLI.Runtime.Types
 import Agent.CLI.Session.Runtime.Types
 import Agent.CLI.Interrupt
@@ -184,7 +185,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       _ -> pure ()
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
-    steeringRef <- newIORef []
+    steeringInputs <- newSteeringInputs
     let previewIdRef = startup.startupSessionState.sessionPreviewId
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
@@ -345,6 +346,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
             clearPendingInputs pendingNotices
+            clearSteeringInputs steeringInputs
             reloadGeneratedContext
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
@@ -544,10 +546,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 <> " is disabled by the current /shell setting."))
                     True -> approveRegisteredTool call
             , loopReadSteering =
-                readIORef steeringRef
+                readSteeringInputs steeringInputs
             , loopCommitSteering = \count ->
-                atomicModifyIORef' steeringRef \pending ->
-                    (drop count pending, ())
+                commitSteeringInputs steeringInputs count
             , loopInterrupt = interruptBackend
             , loopCancel = toolEnv.toolCancel
             }
@@ -841,19 +842,21 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 images <- loadImagesFromPastedText text
                 let input = case images of
                         Just attached@(_:_) ->
-                            UserMultimodal
-                                { userText = "Image attached."
-                                , userImages = attached
-                                }
+                            userMessageWithAttachments
+                                "Image attached."
+                                (map ImageAttachmentItem attached)
                         _ -> UserMessage text
                 callbacks.runnerPreparePromptSkillInputs
                     env text [input] >>= \case
                         Left err ->
                             emitUiEvent runtime (UiErrorMessage err)
-                        Right inputs -> do
-                            atomicModifyIORef' steeringRef \pending ->
-                                (pending <> inputs, ())
-                            emitUiEvent runtime (UiInputSteered text))
+                                >> pure (Left err)
+                        Right inputs ->
+                            enqueueSteeringInputs steeringInputs inputs >>= \case
+                                Left err -> pure (Left err)
+                                Right () -> do
+                                    emitUiEvent runtime (UiInputSteered text)
+                                    pure (Right ()))
             (writeChan btwRequests)
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->

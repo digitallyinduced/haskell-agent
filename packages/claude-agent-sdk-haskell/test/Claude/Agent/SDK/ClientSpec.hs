@@ -42,6 +42,11 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "ClaudeSDKClient subprocess transport" do
+    it "uses a bounded default structured-output record size" do
+        defaultClaudeAgentOptions "claude" "."
+            `shouldSatisfy` \options ->
+                options.maxBufferSizeBytes == 128 * 1024 * 1024
+
     it "passes typed options and SDK environment metadata to Claude Code" do
         withFakeClaude transportProbeScript \directory executable -> do
             let argsPath = directory </> "args"

@@ -202,8 +202,11 @@ import Agent.Claude ()
 import Agent.Dialect ()
 import Agent.Error ()
 import Agent.Loop
-    ( TurnInput(UserMessage, UserMultimodal, userText, userImages),
-      LoopEvent(ActivityUpdated) )
+    ( LoopEvent(ActivityUpdated)
+    , TurnAttachment(ImageAttachmentItem)
+    , TurnInput(UserMessage)
+    , userMessageWithAttachments
+    )
 import Agent.OpenAI.Compaction ( compactSessionUserText )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
@@ -433,14 +436,12 @@ handleReplLine
                                     commitFullscreenImagePreviews runtime pendingImages
                                 resetRenderPrintedText render
                                 let turnInputs =
-                                        if null pendingImages
-                                            then [UserMessage text]
-                                            else
-                                                [ UserMultimodal
-                                                    { userText = text
-                                                    , userImages = pendingImages
-                                                    }
-                                                ]
+                                        [ userMessageWithAttachments
+                                            text
+                                            (map
+                                                ImageAttachmentItem
+                                                pendingImages)
+                                        ]
                                 preparePromptSkillInputs env text turnInputs >>= \case
                                     Left err -> do
                                         displayError err $
@@ -475,12 +476,11 @@ handleReplLine
                                                 <> " skill."
                                             else arguments
                                     userInput =
-                                        if null pendingImages
-                                            then UserMessage userText
-                                            else UserMultimodal
-                                                { userText = userText
-                                                , userImages = pendingImages
-                                                }
+                                        userMessageWithAttachments
+                                            userText
+                                            (map
+                                                ImageAttachmentItem
+                                                pendingImages)
                                     skillInputs =
                                         [ UserMessage
                                             (formatSkillActivation
@@ -922,14 +922,10 @@ handleReplLine
         forM_ fullscreen \runtime ->
             commitFullscreenImagePreviews runtime pendingImages
         let turnInputs =
-                if null pendingImages
-                    then [UserMessage expanded]
-                    else
-                        [ UserMultimodal
-                            { userText = expanded
-                            , userImages = pendingImages
-                            }
-                        ]
+                [ userMessageWithAttachments
+                    expanded
+                    (map ImageAttachmentItem pendingImages)
+                ]
         preparePromptSkillInputs env original turnInputs >>= \case
             Left err -> do
                 displayError err $

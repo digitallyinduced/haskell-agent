@@ -1331,10 +1331,9 @@ spec = do
                         , imageBytes = ByteString.replicate (1024 * 1024) 1
                         }
                 inputs =
-                    [ UserMultimodal
-                        { userText = "what does this screenshot show?"
-                        , userImages = [image]
-                        }
+                    [ userMessageWithAttachments
+                        "what does this screenshot show?"
+                        [ImageAttachmentItem image]
                     ]
                 items = turnInputsToItems inputs
                 naiveTokens =

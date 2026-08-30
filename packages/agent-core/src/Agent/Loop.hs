@@ -18,6 +18,7 @@ module Agent.Loop
     , LoopProgress(..)
     , LoopResult(..)
     , TokenUsage(..)
+    , TurnAttachment(..)
     , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
@@ -36,11 +37,15 @@ module Agent.Loop
     , initialBackendSnapshot
     , liveTokenRateMinMillis
     , liveTokensPerSecond
+    , mapTurnInputUserText
     , runLoop
-    , tokensPerSecond
-    , tokenUsageDecoder
     , runLoopInputs
     , runLoopInputsDetailed
+    , tokensPerSecond
+    , tokenUsageDecoder
+    , turnInputFiles
+    , turnInputImages
+    , userMessageWithAttachments
     ) where
 
 import Agent.Loop.Internal

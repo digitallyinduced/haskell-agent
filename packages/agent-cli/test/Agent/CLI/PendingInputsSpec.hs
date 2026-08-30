@@ -1,18 +1,41 @@
 module Agent.CLI.PendingInputsSpec (spec) where
 
+import Agent.CLI.InputBudget
+    ( logicalTextBytes
+    , logicalTurnInputBytes
+    )
 import Agent.CLI.PendingInputs
-    ( clearPendingInputs
+    ( PendingNoticeKind(..)
+    , clearPendingInputs
     , enqueuePendingInput
+    , enqueuePendingNotice
     , newPendingInputs
+    , pendingInputCountLimit
     , withPendingInputs
+    )
+import Agent.CLI.SteeringInputs
+    ( commitSteeringInputs
+    , enqueueSteeringInputs
+    , newSteeringInputs
+    , readSteeringInputs
+    , steeringInputCountLimit
     )
 import Agent.Error (ApiError(..))
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , FileAttachment(..)
+    , ImageAttachment(..)
+    , TurnAttachment(..)
     , TurnInput(..)
     , emptyBackendSnapshot
     , emptyTurnOutput
+    , userMessageWithAttachments
+    )
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , ToolResultImage(..)
     )
 import Control.Concurrent
     ( forkIO
@@ -23,10 +46,44 @@ import Control.Concurrent
 import Control.Exception.Safe (tryAny)
 import Data.Either (isLeft)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
-spec = describe "withPendingInputs" do
+spec = do
+  describe "logicalTurnInputBytes" do
+    it "counts ordered attachments and rich tool-result images" do
+        let attached =
+                userMessageWithAttachments "é"
+                    [ ImageAttachmentItem
+                        (ImageAttachment "image/png" "abc")
+                    , FileAttachmentItem
+                        (FileAttachment (Just "a") "text/plain" "xy")
+                    ]
+            richResult =
+                CompletedTool
+                    (ToolCallResultWithImages
+                        { callId = "id"
+                        , output = "ok"
+                        , callKind = FunctionCallKind
+                        , toolResultImages =
+                            [ ToolResultImage
+                                "data:image/png;base64,abc"
+                                (Just "high")
+                            ]
+                        })
+        logicalTurnInputBytes attached `shouldBe`
+            logicalTextBytes "é"
+                + logicalTextBytes "image/png" + 3
+                + logicalTextBytes "a"
+                + logicalTextBytes "text/plain" + 2
+        logicalTurnInputBytes richResult `shouldBe`
+            logicalTextBytes "id"
+                + logicalTextBytes "ok"
+                + logicalTextBytes "data:image/png;base64,abc"
+                + logicalTextBytes "high"
+
+  describe "withPendingInputs" do
     it "commits queued inputs after a successful submission" do
         pending <- newPendingInputs
         enqueuePendingInput pending (UserMessage "child result")
@@ -182,3 +239,79 @@ spec = describe "withPendingInputs" do
             [ [UserMessage "first"]
             , [UserMessage "first", UserMessage "second"]
             ]
+
+    it "rejects explicit inputs after the count budget" do
+        pending <- newPendingInputs
+        accepted <- mapM
+            (enqueuePendingInput pending . UserMessage . Text.pack . show)
+            [1 .. pendingInputCountLimit]
+        accepted `shouldSatisfy` all (== Right ())
+        enqueuePendingInput pending (UserMessage "overflow")
+            `shouldReturn`
+                Left
+                    "Root input queue is full; wait for the root agent to consume pending messages."
+
+    it "coalesces queued MCP snapshots to the latest value" do
+        pending <- newPendingInputs
+        enqueuePendingNotice pending PendingMcpNotice
+            (UserMessage "connecting")
+            `shouldReturn` Right ()
+        enqueuePendingNotice pending PendingMcpNotice
+            (UserMessage "settled")
+            `shouldReturn` Right ()
+        seen <- newIORef []
+        let backend = withPendingInputs pending $ Backend
+                \state _ inputs _ -> do
+                    writeIORef seen inputs
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "ok" [] Nothing
+                        , backendState = state
+                        }
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
+        readIORef seen `shouldReturn` [UserMessage "settled"]
+
+    it "reports synthetic overflow once without exceeding the queue bound" do
+        pending <- newPendingInputs
+        mapM_
+            (enqueuePendingInput pending . UserMessage . Text.pack . show)
+            [1 .. pendingInputCountLimit]
+        enqueuePendingNotice pending PendingSubagentNotice
+            (UserMessage "omitted one")
+            `shouldReturn`
+                Left
+                    "Root input queue is full; one or more background notices were omitted."
+        enqueuePendingNotice pending PendingSubagentNotice
+            (UserMessage "omitted two")
+            `shouldReturn` Right ()
+        seen <- newIORef []
+        let backend = withPendingInputs pending $ Backend
+                \state _ inputs _ -> do
+                    writeIORef seen inputs
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "ok" [] Nothing
+                        , backendState = state
+                        }
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
+        inputs <- readIORef seen
+        length inputs `shouldBe` pendingInputCountLimit
+        inputs `shouldSatisfy`
+            all (`notElem` [UserMessage "omitted one", UserMessage "omitted two"])
+
+  describe "SteeringInputs" do
+    it "bounds, commits, and admits steering inputs in order" do
+        steering <- newSteeringInputs
+        let queued =
+                [ UserMessage (Text.pack (show index))
+                | index <- [1 .. steeringInputCountLimit]
+                ]
+        enqueueSteeringInputs steering queued `shouldReturn` Right ()
+        enqueueSteeringInputs steering [UserMessage "overflow"]
+            `shouldReturn`
+                Left
+                    "Steering queue is full; wait for the active turn to consume guidance."
+        commitSteeringInputs steering 2
+        enqueueSteeringInputs steering
+            [UserMessage "new-1", UserMessage "new-2"]
+            `shouldReturn` Right ()
+        readSteeringInputs steering `shouldReturn`
+            drop 2 queued <> [UserMessage "new-1", UserMessage "new-2"]

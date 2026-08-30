@@ -115,12 +115,12 @@ import Agent.Loop
     , LoopError(..)
     , LoopProgress(..)
     , LoopResult(..)
-    , ImageAttachment
     , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
     , runLoopInputsDetailed
+    , turnInputImages
     )
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types (ResponseItem)
@@ -173,12 +173,6 @@ runOneTurn = runOneTurnWithContext True
 -- be generated again.
 retryCheckpointedTurn :: SessionEnv -> IO TurnResult
 retryCheckpointedTurn env = runOneTurnWithContext False env "" []
-
-turnInputImages :: TurnInput -> [ImageAttachment]
-turnInputImages = \case
-    UserMultimodal{userImages} -> userImages
-    UserMultimodalFiles{userImages} -> userImages
-    _ -> []
 
 runOneTurnWithContext
     :: Bool
@@ -672,10 +666,11 @@ grokFrameLastUserInput = reverse . go . reverse
     go [] = []
     go (UserMessage text : rest) =
         UserMessage (grokUserQuery text) : rest
-    go (input@UserMultimodal{userText} : rest) =
-        input { userText = grokUserQuery userText } : rest
-    go (input@UserMultimodalFiles{userText} : rest) =
-        input { userText = grokUserQuery userText } : rest
+    go (UserMessageWithAttachments text attachments : rest) =
+        UserMessageWithAttachments
+            (grokUserQuery text)
+            attachments
+            : rest
     go (input : rest) = input : go rest
 
 grokUserQuery :: Text -> Text

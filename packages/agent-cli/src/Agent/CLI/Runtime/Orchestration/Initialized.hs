@@ -3,7 +3,7 @@ module Agent.CLI.Runtime.Orchestration.Initialized (runAgentInitialized) where
 import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection
     ( SelectedAccount(..),
-      providerSupportsUsageAccountSelection,
+      loadedAuthSupportsUsageAccountSelection,
       selectProviderAccount )
 import Agent.CLI.Afk ()
 import Agent.CLI.AgentSessions ()
@@ -425,9 +425,8 @@ runAgentInitializedWithLock
                         )
                     )
             | not
-                (providerSupportsUsageAccountSelection
-                    initialLoaded.loadedProvider) ->
-                        pure (initialLoaded, Nothing)
+                (loadedAuthSupportsUsageAccountSelection initialLoaded) ->
+                    pure (initialLoaded, Nothing)
             | checkStartupUsageInBackground -> do
                 -- Make the remembered model/account usable immediately. The
                 -- scoped availability worker below checks the account pool

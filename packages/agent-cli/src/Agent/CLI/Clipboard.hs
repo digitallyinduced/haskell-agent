@@ -10,6 +10,9 @@ module Agent.CLI.Clipboard
     , nonEmptyClipboardImages
     , nonEmptyClipboardText
     , appendUniqueImageAttachments
+    , appendBoundedImageAttachments
+    , pendingImageAttachmentCountLimit
+    , pendingImageAttachmentByteLimit
     , loadImagesFromPastedText
     , formatImageSize
     ) where
@@ -31,7 +34,7 @@ import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, getFileSize)
 import System.FilePath (takeExtension)
 import System.Info (os)
 
@@ -68,12 +71,8 @@ readClipboardImages = do
     imagePaths <- filterM isImageFile paths
     case imagePaths of
         [] -> fmap (:[]) <$> readClipboardImageBytes
-        ps -> do
-            loaded <- mapM readImageFile ps
-            case sequence loaded of
-                Right images@(_:_) -> pure (Right images)
-                Right [] -> pure (Left "no image found on the clipboard")
-                Left err -> pure (Left err)
+        ps ->
+            readImageFilesBounded ps
 
 -- | Fast path for a terminal bracketed paste. Screenshots and copied browser
 -- images usually expose bitmap data directly; checking Finder file coercions
@@ -89,9 +88,8 @@ readClipboardImagesImageFirst = do
             imagePaths <- filterM isImageFile paths
             case imagePaths of
                 [] -> pure (Left bitmapError)
-                ps -> do
-                    loaded <- mapM readImageFile ps
-                    case sequence loaded of
+                ps ->
+                    readImageFilesBounded ps >>= \case
                         Right images@(_:_) -> pure (Right images)
                         Right [] -> pure (Left bitmapError)
                         Left err -> pure (Left err)
@@ -106,10 +104,10 @@ readClipboardImagesForPaste = do
             filter (isImageExtension . takeExtension) existingPaths
     case imagePaths of
         _ : _ ->
-            mapM readImageFile imagePaths >>= \loaded ->
-                pure $ case sequence loaded of
-                    Right images@(_ : _) -> Right images
-                    _ -> Left (clipboardPathsError existingPaths)
+            readImageFilesBounded imagePaths >>= \case
+                Right images@(_ : _) -> pure (Right images)
+                Left err -> pure (Left err)
+                Right [] -> pure (Left (clipboardPathsError existingPaths))
         [] ->
             readClipboardImageBytes >>= \case
                 Right image -> pure (Right [image])
@@ -173,6 +171,64 @@ appendUniqueImageAttachments existing incoming =
         | otherwise = (allImages <> [image], added <> [image])
     sameImage left right = left.imageBytes == right.imageBytes
 
+-- Pending attachments are live request state, not durable transcript data.
+-- Bound both dimensions so repeated Finder/clipboard pastes cannot keep an
+-- arbitrary number of encoded images resident until the next turn.
+pendingImageAttachmentCountLimit :: Int
+pendingImageAttachmentCountLimit = 16
+
+pendingImageAttachmentByteLimit :: Int
+pendingImageAttachmentByteLimit = 64 * 1024 * 1024
+
+singleImageAttachmentByteLimit :: Int
+singleImageAttachmentByteLimit = 20 * 1024 * 1024
+
+appendBoundedImageAttachments
+    :: [ImageAttachment]
+    -> [ImageAttachment]
+    -> ([ImageAttachment], [ImageAttachment], Int, Int)
+appendBoundedImageAttachments existing incoming =
+    finish $
+        foldl'
+            appendOne
+            ( existing
+            , []
+            , 0
+            , 0
+            , length existing
+            , attachmentsBytes existing
+            )
+            incoming
+  where
+    appendOne (allImages, added, duplicates, rejected, count, bytes) image
+        | any (sameImage image) allImages =
+            (allImages, added, duplicates + 1, rejected, count, bytes)
+        | imageBytes > singleImageAttachmentByteLimit
+            || count >= pendingImageAttachmentCountLimit
+            || imageBytes > pendingImageAttachmentByteLimit - bytes =
+                (allImages, added, duplicates, rejected + 1, count, bytes)
+        | otherwise =
+            ( allImages <> [image]
+            , image : added
+            , duplicates
+            , rejected
+            , count + 1
+            , bytes + imageBytes
+            )
+      where
+        imageBytes = BS.length image.imageBytes
+    sameImage left right = left.imageBytes == right.imageBytes
+    finish (allImages, added, duplicates, rejected, _, _) =
+        (allImages, reverse added, duplicates, rejected)
+
+attachmentsBytes :: [ImageAttachment] -> Int
+attachmentsBytes =
+    foldl'
+        (\total image ->
+            let size = BS.length image.imageBytes
+            in if size > maxBound - total then maxBound else total + size)
+        0
+
 formatImageSize :: Int -> Text
 formatImageSize n
     | n < 1024 = Text.pack (show n) <> " B"
@@ -201,10 +257,9 @@ loadImagesFromPastedText raw = do
                 if not allImages
                     then pure Nothing
                     else do
-                        loaded <- mapM readImageFile lines_
-                        pure $ case sequence loaded of
-                            Right images@(_:_) -> Just images
-                            _ -> Nothing
+                        readImageFilesBounded lines_ >>= \case
+                            Right images@(_:_) -> pure (Just images)
+                            _ -> pure Nothing
             else pure Nothing
   where
     toMaybe = \case
@@ -240,11 +295,15 @@ normalizePastedPath raw =
 --------------------------------------------------------------------------------
 
 readClipboardImageBytes :: IO (Either Text ImageAttachment)
-readClipboardImageBytes
-    | os == "darwin" = readMacClipboardImage
-    | os == "linux" = readLinuxClipboardImage
-    | otherwise =
-        pure (Left "clipboard images are not supported on this platform yet")
+readClipboardImageBytes =
+    raw >>= \result -> pure (result >>= validateImageAttachment)
+  where
+    raw
+        | os == "darwin" = readMacClipboardImage
+        | os == "linux" = readLinuxClipboardImage
+        | otherwise =
+            pure (Left
+                "clipboard images are not supported on this platform yet")
 
 readClipboardText :: IO (Either Text Text)
 readClipboardText
@@ -272,16 +331,78 @@ isImageExtension ext =
 
 readImageFile :: FilePath -> IO (Either Text ImageAttachment)
 readImageFile path = do
-    result <- tryAny (BS.readFile path)
-    pure $ case result of
-        Left ex -> Left (formatException ex)
-        Right bytes
-            | BS.null bytes -> Left ("empty image file: " <> Text.pack path)
-            | otherwise ->
-                Right ImageAttachment
-                    { imageMime = mimeForPath path
-                    , imageBytes = bytes
-                    }
+    sizeResult <- tryAny (getFileSize path)
+    case sizeResult of
+        Left ex -> pure (Left (formatException ex))
+        Right size
+            | size > fromIntegral singleImageAttachmentByteLimit ->
+                pure (Left (oversizedImageError (Text.pack path) size))
+            | otherwise -> do
+                result <- tryAny (BS.readFile path)
+                pure $ case result of
+                    Left ex -> Left (formatException ex)
+                    Right bytes
+                        | BS.null bytes ->
+                            Left ("empty image file: " <> Text.pack path)
+                        | otherwise ->
+                            validateImageAttachment ImageAttachment
+                                { imageMime = mimeForPath path
+                                , imageBytes = bytes
+                                }
+
+readImageFilesBounded
+    :: [FilePath]
+    -> IO (Either Text [ImageAttachment])
+readImageFilesBounded paths
+    | not (null (drop pendingImageAttachmentCountLimit paths)) =
+        pure (Left
+            ("clipboard contains more than "
+                <> Text.pack (show pendingImageAttachmentCountLimit)
+                <> " images"))
+    | otherwise =
+        go 0 [] paths
+  where
+    go _ reversed [] =
+        pure (Right (reverse reversed))
+    go bytes reversed (path : rest) =
+        readImageFile path >>= \case
+            Left err -> pure (Left err)
+            Right image ->
+                let size = BS.length image.imageBytes
+                in if size > pendingImageAttachmentByteLimit - bytes
+                    then pure (Left
+                        ("clipboard images exceed the "
+                            <> formatImageSize
+                                pendingImageAttachmentByteLimit
+                            <> " attachment limit"))
+                    else
+                        go
+                            (bytes + size)
+                            (image : reversed)
+                            rest
+
+validateImageAttachment
+    :: ImageAttachment
+    -> Either Text ImageAttachment
+validateImageAttachment image
+    | size > singleImageAttachmentByteLimit =
+        Left (oversizedImageError "clipboard image" (fromIntegral size))
+    | otherwise = Right image
+  where
+    size = BS.length image.imageBytes
+
+oversizedImageError :: Text -> Integer -> Text
+oversizedImageError label bytes =
+    label
+        <> " exceeds the "
+        <> formatImageSize singleImageAttachmentByteLimit
+        <> " per-image limit ("
+        <> formatImageSize displayBytes
+        <> ")"
+  where
+    displayBytes
+        | bytes > toInteger (maxBound :: Int) = maxBound
+        | otherwise = fromInteger bytes
 
 mimeForPath :: FilePath -> Text
 mimeForPath path = case map toLower (takeExtension path) of

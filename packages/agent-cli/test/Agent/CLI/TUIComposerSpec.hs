@@ -317,6 +317,26 @@ spec = describe "fullscreen composer" do
                 (pure ("provider unavailable" :: Text))
         fmap (.fullscreenInputLine) result
             `shouldBe` Right (ReplText "submitted")
+
+    it "bounds queued prompts and admits another after consumption" do
+        buffer <- newFullscreenInputBuffer
+        let prompt index = FullscreenInput
+                { fullscreenInputLine =
+                    ReplText (Text.pack (show index))
+                , fullscreenInputQueued = True
+                , fullscreenInputDisplay = Nothing
+                }
+        accepted <- atomically $
+            mapM (appendFullscreenInput buffer . prompt)
+                [1 .. fullscreenInputCountLimit]
+        accepted `shouldSatisfy` all (== Right ())
+        atomically (appendFullscreenInput buffer (prompt 129))
+            `shouldReturn`
+                Left
+                    "Prompt queue is full; wait for a queued prompt to be consumed."
+        _ <- atomically (takeFullscreenInput buffer)
+        atomically (appendFullscreenInput buffer (prompt 129))
+            `shouldReturn` Right ()
   where
     input replLine = FullscreenInput
         { fullscreenInputLine = replLine

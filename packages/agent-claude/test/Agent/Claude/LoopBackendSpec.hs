@@ -26,9 +26,12 @@ import Agent.Loop
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
+    , TurnAttachment(..)
     , TurnInput(..)
     , TurnOutput(..)
     , initialBackendSnapshot
+    , userMessageWithAttachments
+    , userMessageWithAttachments
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Telemetry
@@ -510,15 +513,14 @@ spec = do
                         \backend ->
                             submitBackend backend
                                 Nothing
-                                [ UserMultimodal
-                                    { userText = "describe this image"
-                                    , userImages =
-                                        [ ImageAttachment
+                                [ userMessageWithAttachments
+                                    "describe this image"
+                                    [ ImageAttachmentItem
+                                        (ImageAttachment
                                             { imageMime = "image/png"
                                             , imageBytes = "png-bytes"
-                                            }
-                                        ]
-                                    }
+                                            })
+                                    ]
                                 ]
                                 (\_ -> pure ())
                 result `shouldSatisfy` \case
@@ -568,17 +570,15 @@ spec = do
                         \backend ->
                             submitBackend backend
                                 Nothing
-                                [ UserMultimodalFiles
-                                    { userText = "describe this file"
-                                    , userImages = []
-                                    , userFiles =
-                                        [ FileAttachment
+                                [ userMessageWithAttachments
+                                    "describe this file"
+                                    [ FileAttachmentItem
+                                        (FileAttachment
                                             { fileName = Just "attachment.txt"
                                             , fileMime = "text/plain"
                                             , fileBytes = "file-bytes"
-                                            }
-                                        ]
-                                    }
+                                            })
+                                    ]
                                 ]
                                 (\_ -> pure ())
                 result `shouldSatisfy` \case

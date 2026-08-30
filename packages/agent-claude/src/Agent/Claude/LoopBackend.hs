@@ -51,6 +51,8 @@ import Agent.Loop
     , TurnOutput(..)
     , advanceBackendSnapshot
     , backendContinuationToken
+    , turnInputFiles
+    , turnInputImages
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Telemetry
@@ -535,23 +537,16 @@ collectTurnInputs inputs = do
             [text]
         AgentMessage message ->
             [renderInterAgentMessage message]
-        UserMultimodal{userText} ->
-            [userText]
-        UserMultimodalFiles{userText} ->
-            [userText]
+        UserMessageWithAttachments text _ ->
+            [text]
         CompletedTool result ->
             pure $
                 "Host tool result for "
                     <> result.callId
                     <> ":\n"
                     <> result.output
-    inputImages = \case
-        UserMultimodal{userImages} -> userImages
-        UserMultimodalFiles{userImages} -> userImages
-        _ -> []
-    inputFiles = \case
-        UserMultimodalFiles{userFiles} -> mapM writeFallbackFile userFiles
-        _ -> pure []
+    inputImages = turnInputImages
+    inputFiles = mapM writeFallbackFile . turnInputFiles
 
     writeFallbackFile :: FileAttachment -> IO (Text, FilePath)
     writeFallbackFile FileAttachment{fileName, fileMime, fileBytes} = do

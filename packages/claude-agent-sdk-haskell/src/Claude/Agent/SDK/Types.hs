@@ -114,9 +114,9 @@ data ClaudeAgentOptions = ClaudeAgentOptions
     --
     -- Claude Code runs its own tools and echoes every tool result on stdout
     -- as a single NDJSON record. Reading an image or PDF therefore produces
-    -- a record that embeds the whole file as base64, and multi-megabyte
-    -- records are routine. The limit only guards against a runaway process,
-    -- so it should stay far above any legitimate record.
+    -- a record that embeds the whole file as base64. The default leaves room
+    -- for large legitimate attachments while preventing a runaway process
+    -- from reserving a gigabyte of memory.
     , maxBufferSizeBytes :: !Int
     } deriving (Eq)
 
@@ -161,7 +161,7 @@ defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions
     , streamInactivityTimeoutMicros = 15 * 60 * 1_000_000
     , turnTimeoutMicros = 2 * 60 * 60 * 1_000_000
     , validateCapabilities = False
-    , maxBufferSizeBytes = 1_073_741_824
+    , maxBufferSizeBytes = 128 * 1024 * 1024
     }
 
 data Usage = Usage

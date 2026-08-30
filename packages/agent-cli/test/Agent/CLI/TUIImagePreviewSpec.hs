@@ -5,13 +5,21 @@ import Agent.CLI.TUI.ImagePreview
     , TuiImagePreview(..)
     , imageDimensions
     , nativePreviewPlacements
+    , prepareNativeTuiImagePreview
     , prepareTuiImagePreview
     , previewCountForWidth
     , previewCellSize
     , previewImageAt
     , sameNativePreviewLayout
     )
+import Agent.CLI.TUI.App
+    ( previewLogicalEncodedBytes
+    , retainSubmittedImagePreviewsForBlocks
+    , submittedImagePreviewByteBudget
+    , submittedImagePreviewCountBudget
+    )
 import Agent.Loop (ImageAttachment(..))
+import Agent.TUI.Model (BlockId(..))
 import Codec.Picture
     ( PixelRGB8(..)
     , PixelRGBA8(..)
@@ -22,7 +30,9 @@ import Codec.Picture
     , pixelAt
     )
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
+import Data.Either (isLeft)
 import Test.Hspec
 
 spec :: Spec
@@ -260,7 +270,79 @@ spec = do
                     , imageBytes = "not an image"
                     }
                 `shouldSatisfy` isLeft
-  where
-    isLeft = \case
-        Left _ -> True
-        Right _ -> False
+
+        it "prepares native metadata without retaining a decode thunk" do
+            let headerOnlyPng = BS.pack
+                    [ 137, 80, 78, 71, 13, 10, 26, 10
+                    , 0, 0, 0, 13
+                    , 73, 72, 68, 82
+                    , 0, 0, 6, 64
+                    , 0, 0, 3, 132
+                    ]
+            case prepareNativeTuiImagePreview
+                (ImageAttachment "image/png" headerOnlyPng) of
+                Left err -> expectationFailure (show err)
+                Right preview -> do
+                    preview.previewSourceWidth `shouldBe` 1600
+                    preview.previewSourceHeight `shouldBe` 900
+                    pixelAt preview.previewSample 0 0
+                        `shouldBe` PixelRGB8 0 43 54
+
+    describe "submitted preview retention" do
+        it "evicts the oldest previews above the count budget" do
+            let blockIds =
+                    map BlockId [1 .. submittedImagePreviewCountBudget + 1]
+                previews =
+                    Map.fromList
+                        [ (blockId, [retainedPreview 1])
+                        | blockId <- blockIds
+                        ]
+                retained =
+                    retainSubmittedImagePreviewsForBlocks blockIds previews
+            Map.size retained `shouldBe` submittedImagePreviewCountBudget
+            Map.member (BlockId 1) retained `shouldBe` False
+            Map.member
+                (BlockId (submittedImagePreviewCountBudget + 1))
+                retained
+                `shouldBe` True
+
+        it "evicts oldest encoded payloads above the byte budget" do
+            let oldest = BlockId 1
+                newest = BlockId 2
+                previews = Map.fromList
+                    [ (oldest, [retainedPreview 1])
+                    , (newest, [retainedPreview submittedImagePreviewByteBudget])
+                    ]
+                retained =
+                    retainSubmittedImagePreviewsForBlocks
+                        [oldest, newest]
+                        previews
+            Map.keys retained `shouldBe` [newest]
+
+        it "accounts encoded bytes without forcing the lazy ANSI sample" do
+            let preview =
+                    (retainedPreview 17)
+                        { previewSample =
+                            error "preview retention forced the ANSI sample"
+                        }
+            previewLogicalEncodedBytes preview `shouldBe` 17
+            retainSubmittedImagePreviewsForBlocks
+                [BlockId 1]
+                (Map.singleton (BlockId 1) [preview])
+                `shouldSatisfy` (not . Map.null)
+
+retainedPreview :: Int -> TuiImagePreview
+retainedPreview bytes =
+    TuiImagePreview
+        { previewMime = "image/png"
+        , previewBytes = bytes
+        , previewSourceWidth = 1
+        , previewSourceHeight = 1
+        , previewSample =
+            generateImage (\_ _ -> PixelRGB8 0 0 0) 1 1
+        , previewKittyAttachment =
+            ImageAttachment
+                { imageMime = "image/png"
+                , imageBytes = ""
+                }
+        }
