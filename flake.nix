@@ -456,9 +456,14 @@
                         agent-gemini = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-gemini/package.nix { }) {
                             src = agentGeminiSource;
                         });
-                        claude-agent-sdk-haskell = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
-                            src = claudeAgentSdkHaskellSource;
-                        });
+                        claude-agent-sdk-haskell = localPackage (
+                            pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
+                                    src = claudeAgentSdkHaskellSource;
+                                })
+                                (pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                                    pkgs.util-linux
+                                ]));
                         agent-claude = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude/package.nix { }) {
                             src = agentClaudeSource;
                         });
