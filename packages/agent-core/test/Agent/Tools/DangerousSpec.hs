@@ -181,6 +181,18 @@ spec = do
                 ]
                 `shouldBe` replicate 4 True
 
+        it "blocks local file URLs targeting shared temp" do
+            map commandUsesHardcodedSystemTmp
+                [ "curl file:///tmp/other-session"
+                , "curl file:/tmp/other-session"
+                , "curl FILE:///private/tmp/other-session"
+                , "curl file://localhost/tmp/other-session"
+                , "curl file:///usr/../tmp/other-session"
+                , "curl file:///%74mp/other-session"
+                , "curl file:///%2fprivate%2ftmp/other-session"
+                ]
+                `shouldBe` replicate 7 True
+
         it "allows session temp variables and unrelated tmp path components" do
             commandUsesHardcodedSystemTmp "touch \"$TMPDIR/result.png\""
                 `shouldBe` False
@@ -195,6 +207,13 @@ spec = do
                 `shouldBe` False
             commandUsesHardcodedSystemTmp
                 "curl https://example.test/usr/../tmp/file"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp
+                "curl https://example.test/%74mp/file"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp "curl file:///tmpfile"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp "curl file:///var/tmp/file"
                 `shouldBe` False
             commandUsesHardcodedSystemTmp "cat /usr/../tmpfile"
                 `shouldBe` False

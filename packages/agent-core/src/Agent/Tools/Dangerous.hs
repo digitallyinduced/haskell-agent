@@ -13,7 +13,14 @@ module Agent.Tools.Dangerous
     ) where
 
 import Agent.JsonText (jsonTextField)
-import Data.Char (isAlphaNum, toLower)
+import Data.Char
+    ( chr
+    , digitToInt
+    , isAlphaNum
+    , isHexDigit
+    , isSpace
+    , toLower
+    )
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -55,7 +62,9 @@ forbiddenRmRfReason command =
 -- such as @/tmpfile@.
 commandUsesHardcodedSystemTmp :: Text -> Bool
 commandUsesHardcodedSystemTmp command =
-    go Nothing command || normalizedAbsolutePathTargetsTemp command
+    go Nothing command
+        || normalizedAbsolutePathTargetsTemp command
+        || localFileUrlTargetsTemp command
   where
     go previous remaining
         | Text.null remaining = False
@@ -112,21 +121,57 @@ commandUsesHardcodedSystemTmp command =
             advance text =
                 scan (Just (Text.head text)) (Text.tail text)
 
-        isAbsolutePathChar char =
-            char == '/' || isPathNameChar char
+    localFileUrlTargetsTemp = scan Nothing
+      where
+        scan previous remaining
+            | Text.null remaining = False
+            | pathBoundaryBefore previous
+            , "file:" == Text.toLower (Text.take 5 remaining)
+            , Just path <- fileUrlAbsolutePath (Text.drop 5 remaining) =
+                normalizedPathTargetsTemp
+                    (percentDecodePath
+                        (Text.takeWhile isFileUrlPathChar path))
+                    || advance remaining
+            | otherwise = advance remaining
+          where
+            advance text =
+                scan (Just (Text.head text)) (Text.tail text)
 
-        normalizedPathTargetsTemp path =
-            case reverse (foldl normalizeComponent [] (Text.splitOn "/" path)) of
-                "tmp" : _ -> True
-                "private" : "tmp" : _ -> True
-                _ -> False
+        fileUrlAbsolutePath afterScheme
+            | Just afterAuthority <- Text.stripPrefix "//" afterScheme =
+                let (_, path) = Text.breakOn "/" afterAuthority
+                in if Text.null path then Nothing else Just path
+            | Text.isPrefixOf "/" afterScheme = Just afterScheme
+            | otherwise = Nothing
 
-        -- The accumulator is reversed, so an absolute parent component pops
-        -- the most recent ordinary component and clamps at the root.
-        normalizeComponent components component
-            | Text.null component || component == "." = components
-            | component == ".." = drop 1 components
-            | otherwise = component : components
+        isFileUrlPathChar char =
+            not (isSpace char)
+                && char `notElem` ("'\";|&()?#" :: String)
+
+    isAbsolutePathChar char =
+        char == '/' || isPathNameChar char
+
+    normalizedPathTargetsTemp path =
+        case reverse (foldl normalizeComponent [] (Text.splitOn "/" path)) of
+            "tmp" : _ -> True
+            "private" : "tmp" : _ -> True
+            _ -> False
+
+    -- The accumulator is reversed, so an absolute parent component pops the
+    -- most recent ordinary component and clamps at the root.
+    normalizeComponent components component
+        | Text.null component || component == "." = components
+        | component == ".." = drop 1 components
+        | otherwise = component : components
+
+    percentDecodePath = Text.pack . decode . Text.unpack
+      where
+        decode ('%' : high : low : rest)
+            | isHexDigit high
+            , isHexDigit low =
+                chr (digitToInt high * 16 + digitToInt low) : decode rest
+        decode (char : rest) = char : decode rest
+        decode [] = []
 
     -- A preceding URL/path character means this slash is a path component,
     -- rather than the beginning of an absolute temp path.
