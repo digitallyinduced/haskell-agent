@@ -50,6 +50,7 @@ data TelegramConfig = TelegramConfig
     , telegramEffort :: !(Maybe Text)
     , telegramApprovalMode :: !TelegramApprovalMode
     , telegramAllowedUsers :: !(Set Integer)
+    , telegramContextBotUsers :: !(Set Integer)
     , telegramRespondToAllGroupMessages :: !Bool
     , telegramWorkerCount :: !Int
     } deriving (Eq, Show)
@@ -68,6 +69,7 @@ instance ToJSON TelegramConfig where
         , "effort" .= config.telegramEffort
         , "approvalMode" .= config.telegramApprovalMode
         , "allowedUsers" .= Set.toList config.telegramAllowedUsers
+        , "contextBotUsers" .= Set.toList config.telegramContextBotUsers
         , "respondToAllGroupMessages"
             .= config.telegramRespondToAllGroupMessages
         , "workers" .= config.telegramWorkerCount
@@ -102,6 +104,9 @@ telegramConfigDecoder = Hermes.object do
             <*> pure approvalMode
             <*> (Set.fromList <$> Hermes.atKey "allowedUsers"
                 (Hermes.list integerDecoder))
+            <*> (Set.fromList <$> fromMaybe []
+                <$> Hermes.optionalKey "contextBotUsers"
+                    (Hermes.list integerDecoder))
             <*> (fromMaybe False
                 <$> Hermes.optionalKey "respondToAllGroupMessages" Hermes.bool)
             <*> pure workerCount
@@ -117,6 +122,7 @@ data TelegramSetupOptions = TelegramSetupOptions
     , setupEffort :: !(Maybe Text)
     , setupApprovalMode :: !TelegramApprovalMode
     , setupAllowedUsers :: ![Integer]
+    , setupContextBotUsers :: ![Integer]
     , setupRespondToAllGroupMessages :: !Bool
     , setupWorkerCount :: !Int
     , setupStart :: !Bool
@@ -130,6 +136,7 @@ defaultTelegramSetupOptions = TelegramSetupOptions
     , setupEffort = Nothing
     , setupApprovalMode = TelegramApprovalPrompt
     , setupAllowedUsers = []
+    , setupContextBotUsers = []
     , setupRespondToAllGroupMessages = False
     , setupWorkerCount = defaultTelegramWorkerCount
     , setupStart = False

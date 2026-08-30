@@ -228,6 +228,15 @@ parseSetupOptions = go defaultTelegramSetupOptions
                         }
                         rest
                 _ -> Left ("invalid Telegram user ID: " <> value)
+        "--context-bot-user" : value : rest ->
+            case readMaybe value of
+                Just userId | userId > 0 ->
+                    go options
+                        { setupContextBotUsers =
+                            options.setupContextBotUsers <> [userId]
+                        }
+                        rest
+                _ -> Left ("invalid Telegram bot user ID: " <> value)
         "--yolo" : rest ->
             go options { setupApprovalMode = TelegramApprovalYolo } rest
         "--deny-mutations" : rest ->
@@ -272,6 +281,8 @@ telegramUsage = unlines
     , "  --cwd PATH            agent working directory"
     , "  --effort LEVEL        optional reasoning effort"
     , "  --allowed-user ID     numeric Telegram user ID"
+    , "                          may be repeated"
+    , "  --context-bot-user ID numeric bot ID whose messages are context only"
     , "                          may be repeated"
     , "  --yolo                auto-approve mutating agent tools"
     , "  --deny-mutations       deny mutating agent tools"
@@ -388,6 +399,8 @@ setupTelegram options = do
             , telegramEffort = options.setupEffort
             , telegramApprovalMode = options.setupApprovalMode
             , telegramAllowedUsers = allowedUsers
+            , telegramContextBotUsers =
+                Set.fromList options.setupContextBotUsers
             , telegramRespondToAllGroupMessages =
                 options.setupRespondToAllGroupMessages
             , telegramWorkerCount = options.setupWorkerCount

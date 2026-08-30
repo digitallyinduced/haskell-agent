@@ -178,6 +178,7 @@ import Text.Read (readMaybe)
 data TelegramRuntime = TelegramRuntime
     { runtimeClient :: !TelegramClient
     , runtimeBot :: !TelegramUser
+    , runtimeContextBotUsers :: !(Set Integer)
     , runtimeRespondToAllGroupMessages :: !Bool
     , runtimeWorkerCount :: !Int
     , runtimeGatewayDirectory :: !OsPath

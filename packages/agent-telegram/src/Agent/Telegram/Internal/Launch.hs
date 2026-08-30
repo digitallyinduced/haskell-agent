@@ -250,6 +250,7 @@ runTelegramWithStore store home config token = do
     let runtime = TelegramRuntime
             { runtimeClient = client
             , runtimeBot = bot
+            , runtimeContextBotUsers = config.telegramContextBotUsers
             , runtimeRespondToAllGroupMessages =
                 config.telegramRespondToAllGroupMessages
             , runtimeWorkerCount = config.telegramWorkerCount

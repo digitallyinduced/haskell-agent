@@ -2,6 +2,7 @@
 module Agent.Telegram.Types.State
     ( TelegramChatKey(..)
     , TelegramBinding(..)
+    , TelegramContextBotMessage(..)
     , TelegramState(..)
     , TelegramPendingTurn(..)
     , TelegramPendingReply(..)
@@ -112,6 +113,26 @@ telegramBindingDecoder = Hermes.object $
         <$> Hermes.atKey "chat" telegramChatKeyDecoder
         <*> Hermes.atKey "sessionId" Hermes.text
 
+data TelegramContextBotMessage = TelegramContextBotMessage
+    { contextBotMessageChat :: !TelegramChatKey
+    , contextBotMessageId :: !Integer
+    , contextBotMessageText :: !Text
+    } deriving (Eq, Show)
+
+instance ToJSON TelegramContextBotMessage where
+    toJSON message = object
+        [ "chat" .= message.contextBotMessageChat
+        , "messageId" .= message.contextBotMessageId
+        , "text" .= message.contextBotMessageText
+        ]
+
+telegramContextBotMessageDecoder :: Hermes.Decoder TelegramContextBotMessage
+telegramContextBotMessageDecoder = Hermes.object $
+    TelegramContextBotMessage
+        <$> Hermes.atKey "chat" telegramChatKeyDecoder
+        <*> Hermes.atKey "messageId" integerDecoder
+        <*> Hermes.atKey "text" Hermes.text
+
 data TelegramState = TelegramState
     { telegramStateVersion :: !Int
     , nextUpdateId :: !(Maybe Integer)
@@ -128,6 +149,7 @@ data TelegramState = TelegramState
     , seenTelegramUsers :: !(Map Integer TelegramUser)
     , seenUsersByChat :: !(Map Integer (Set Integer))
     , latestInboundMessageIds :: !(Map TelegramChatKey Integer)
+    , contextBotMessages :: !(Map TelegramChatKey (Map Integer Text))
     } deriving (Eq, Show)
 
 instance ToJSON TelegramState where
@@ -183,6 +205,11 @@ instance ToJSON TelegramState where
             [ TelegramLatestInboundMessage key messageId
             | (key, messageId) <- Map.toAscList state.latestInboundMessageIds
             ]
+        , "contextBotMessages" .=
+            [ TelegramContextBotMessage key messageId text
+            | (key, messages) <- Map.toAscList state.contextBotMessages
+            , (messageId, text) <- Map.toAscList messages
+            ]
         ]
 
 telegramStateDecoder :: Hermes.Decoder TelegramState
@@ -236,6 +263,9 @@ telegramStateDecoder = Hermes.object do
         storedLatestInbound <-
             defaultField "latestInboundMessages" []
                 (Hermes.list telegramLatestInboundMessageDecoder)
+        storedContextBotMessages <-
+            defaultField "contextBotMessages" []
+                (Hermes.list telegramContextBotMessageDecoder)
         let bindings =
                 foldr
                     (\binding ->
@@ -296,6 +326,15 @@ telegramStateDecoder = Hermes.object do
                 Map.fromList
                     [ (latest.latestInboundChat, latest.latestInboundMessageId)
                     | latest <- storedLatestInbound
+                    ]
+            , contextBotMessages =
+                Map.fromListWith Map.union
+                    [ ( message.contextBotMessageChat
+                      , Map.singleton
+                            message.contextBotMessageId
+                            message.contextBotMessageText
+                      )
+                    | message <- storedContextBotMessages
                     ]
             }
 
@@ -669,4 +708,5 @@ emptyTelegramState = TelegramState
     , seenTelegramUsers = Map.empty
     , seenUsersByChat = Map.empty
     , latestInboundMessageIds = Map.empty
+    , contextBotMessages = Map.empty
     }

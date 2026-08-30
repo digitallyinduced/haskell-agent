@@ -24,6 +24,8 @@ module Agent.Telegram
     , emptyTelegramState
     , classifyTelegramUpdate
     , classifyTelegramUpdateWithMode
+    , classifyTelegramUpdateWithContextBots
+    , attachContextBotMessages
     , groupJoinAuthorized
     , isAnonymousAdmin
     , telegramAnonymousAdminUserId

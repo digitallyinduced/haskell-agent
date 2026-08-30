@@ -45,8 +45,10 @@ import Agent.Telegram.Types
 import Agent.Telegram.Classify
     ( TelegramUpdateAction(..)
     , ambientGroupPrompt
+    , attachContextBotMessages
     , checkpointPendingVoiceTranscript
     , classifyTelegramUpdate
+    , classifyTelegramUpdateWithContextBots
     , classifyTelegramUpdateWithMode
     , grantableTelegramUser
     , groupJoinAuthorized
@@ -226,9 +228,10 @@ classifyUpdate
 classifyUpdate runtime update = do
     state <- readMVar runtime.runtimeStateVar
     classified <-
-        case classifyTelegramUpdateWithMode
+        case classifyTelegramUpdateWithContextBots
                 runtime.runtimeBot
                 state.allowedUserIds
+                runtime.runtimeContextBotUsers
                 state.authorizedGroupChatIds
                 runtime.runtimeRespondToAllGroupMessages
                 update of
@@ -236,15 +239,16 @@ classifyUpdate runtime update = do
                 resolveGroupJoin runtime chatId actor
             action ->
                 pure action
-    pure $ case (classified, update.updateMessageReaction) of
-        (LeaveUnauthorizedGroup _, _) ->
-            classified
-        (_, Just reaction)
-            | reaction.messageReactionChat.telegramChatType /= "private"
-            , not (reactionBelongsToBot state reaction) ->
-                IgnoreUpdate
-        _ ->
-            classified
+    pure . attachContextBotMessages state $
+        case (classified, update.updateMessageReaction) of
+            (LeaveUnauthorizedGroup _, _) ->
+                classified
+            (_, Just reaction)
+                | reaction.messageReactionChat.telegramChatType /= "private"
+                , not (reactionBelongsToBot state reaction) ->
+                    IgnoreUpdate
+            _ ->
+                classified
 
 reactionBelongsToBot :: TelegramState -> TelegramMessageReaction -> Bool
 reactionBelongsToBot state reaction =
