@@ -18,10 +18,6 @@ module Agent.Tools.OutputArtifact
     , writeOutputArtifact
     , writeOutputArtifactDetailed
     , readOutputArtifact
-    , ReadArgs(..)
-    , SearchArgs(..)
-    , readToolOutput
-    , searchToolOutput
     ) where
 
 import Agent.Json.Decode (Decoder)

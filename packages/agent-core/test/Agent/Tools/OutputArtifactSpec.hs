@@ -1,16 +1,17 @@
 module Agent.Tools.OutputArtifactSpec (spec) where
 
-import Agent.ToolDispatch (functionToolCall)
+import Agent.ToolDispatch
+    ( ToolCall
+    , ToolDispatchConfig(..)
+    , dispatchToolHandler
+    , functionToolCall
+    )
 import Agent.Tools.OutputArtifact
     ( artifactTools
     , boundedPreview
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
-    , readToolOutput
-    , ReadArgs(..)
-    , searchToolOutput
-    , SearchArgs(..)
     , writeOutputArtifactDetailed
     , readOutputArtifact
     , writeOutputArtifact
@@ -23,7 +24,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.Async (mapConcurrently)
 import qualified Data.ByteString as ByteString
-import Data.List (nub)
+import Data.List (find, nub)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
@@ -111,8 +112,10 @@ spec = describe "Agent.Tools.OutputArtifact" do
             writeOutputArtifactDetailed env bytes >>= \case
                 Left err -> expectationFailure (Text.unpack err)
                 Right artifact -> do
-                    result <- readToolOutput env
-                        (ReadArgs artifact.artifactHandle (Just 2) (Just 1))
+                    result <- runArtifactTool env "read_tool_output" $
+                        functionToolCall "read" "read_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"offset\":2,\"limit\":1}" )
                     result `shouldSatisfy` \case
                         Left _ -> False
                         Right value ->
@@ -129,8 +132,10 @@ spec = describe "Agent.Tools.OutputArtifact" do
             writeOutputArtifactDetailed env bytes >>= \case
                 Left err -> expectationFailure (Text.unpack err)
                 Right artifact -> do
-                    result <- searchToolOutput env
-                        (SearchArgs artifact.artifactHandle "needle" False (Just 5))
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"pattern\":\"needle\",\"head_limit\":5}" )
                     result `shouldSatisfy` \case
                         Left _ -> False
                         Right value ->
@@ -162,6 +167,21 @@ listArtifactHandles rendered =
   where
     validHandleCharacter character =
         character /= ';' && character /= ']' && character /= ','
+
+runArtifactTool :: ToolEnv -> Text.Text -> ToolCall -> IO (Either Text.Text Text)
+runArtifactTool env toolName call = do
+    let tool = find ((== toolName) . (.appToolName)) (artifactTools env Nothing)
+        config = ToolDispatchConfig
+            { toolDispatchUnknownTool = ("unknown tool: " <>)
+            , toolDispatchFormatResult = either id id
+            , toolDispatchFormatException = \_ exception ->
+                Text.pack (show exception)
+            , toolDispatchOnException = \_ _ -> pure ()
+            , toolDispatchOnOutput = \_ _ -> pure ()
+            , toolDispatchFinalizeOutput = \_ output -> pure output
+            }
+    result <- dispatchToolHandler config (appToolHandler <$> tool) call
+    pure (Right result.output)
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action = do
