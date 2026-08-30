@@ -334,9 +334,10 @@ reserveTailPayloadBytes pump allowInitialOversize bytes = do
         newQueuedBytes =
             saturatingPayloadAdd retainedQueuedBytes bytes
         initialOversize =
+            -- A latest-value update replaces the old tail rather than adding
+            -- another payload. Preserve the one-oversized-node progress rule.
             allowInitialOversize
-                && queuedBytes == 0
-                && oldTailBytes == 0
+                && retainedQueuedBytes == 0
     check
         ( newQueuedBytes <= eventTailPayloadBudgetBytes
             || initialOversize
