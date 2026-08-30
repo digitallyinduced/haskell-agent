@@ -40,10 +40,11 @@ poolTokenProviderWithBilling billing pool =
                             then rejectStaticCredential
                                 pool credential.accountId failureReason
                             else do
-                                Auth.recoverAfterAuthFailure
+                                Auth.recoverAfterAuthFailureWithReason
                                     pool
                                     credential.accountId
-                                    credential.accessToken >>= \case
+                                    credential.accessToken
+                                    failureReason >>= \case
                                         Right refreshed ->
                                             pure $ Right $
                                                 credentialFromAuthState refreshed

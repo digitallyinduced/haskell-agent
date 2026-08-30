@@ -577,14 +577,18 @@ tlsExceptionMessage = \case
         "TLS handshake failed: " <> showText tlsException
 
 -- | Extract an authentication status from a rejected WebSocket handshake.
+--
+-- HTTP 403 is a permission or policy rejection, not proof that the bearer
+-- token is invalid. Treating every 403 as authentication failure can rotate
+-- healthy credentials and quarantine an entire account pool.
 wsHandshakeAuthFailureStatus :: Exception.SomeException -> Maybe Int
 wsHandshakeAuthFailureStatus exception = case Exception.fromException exception of
     Just (WS.MalformedResponse responseHead _reason)
-        | WS.responseCode responseHead `elem` [401, 403] ->
+        | WS.responseCode responseHead == 401 ->
             Just (WS.responseCode responseHead)
     _ -> Nothing
 
--- | Convert a raw WebSocket handshake 401/403 into the shared HTTP error
+-- | Convert a raw WebSocket handshake 401 into the shared HTTP error
 -- shape. Headers are intentionally omitted because they may contain cookies.
 wsHandshakeAuthFailure :: Exception.SomeException -> Maybe ApiError
 wsHandshakeAuthFailure exception = do

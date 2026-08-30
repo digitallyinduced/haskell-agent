@@ -24,6 +24,7 @@ module Agent.OpenAI.Auth
     , reportAuthBrokenWithReason
     , refreshAfterAuthFailure
     , recoverAfterAuthFailure
+    , recoverAfterAuthFailureWithReason
     , authFailureRetrySeconds
 
       -- * Inspection and manual refresh
@@ -51,8 +52,8 @@ module Agent.OpenAI.Auth
 import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
+    , CredentialRefreshFailure(..)
     , ErrorType(..)
-    , credentialExhaustionReasonFromApiError
     , credentialsExhaustedWithReasons
     )
 import Agent.OpenAI.Auth.JWT
@@ -160,7 +161,8 @@ data DiscoveryClaim
 rateLimitCooldownSeconds :: Int
 rateLimitCooldownSeconds = 60
 
--- | Retry window when an account returns 401/403 from Agent.OpenAI.
+-- | Retry window when an account returns an authentication rejection from
+-- Agent.OpenAI.
 -- Authentication recovery already forces an immediate refresh; if that still
 -- fails, retry soon instead of black-holing the only configured account.
 authFailureRetrySeconds :: Int
@@ -302,11 +304,11 @@ getAccessTokenWithDiscovery pool allowDiscovery = do
                         Left err
                             | CredentialsExhausted{} <- err ->
                                 go (attemptsLeft - 1)
-                            | isAuthError err -> do
+                            | isAccountScopedRefreshFailure err -> do
                                 reportAuthBrokenWithReason
                                     pool
                                     entry.entryAccountId
-                                    (authReasonFromApiError err)
+                                    (credentialRefreshReasonFromApiError err)
                                 go (attemptsLeft - 1)
                             | otherwise -> pure (Left err)
 
@@ -623,7 +625,7 @@ refreshAfterAuthFailure pool rejectedAccountId =
                             pool
                             rejectedAccountId
                             now
-                            (authReasonFromApiError err)
+                            (credentialRefreshReasonFromApiError err)
                         pure (Left err)
 
 -- | Recover a specifically rejected token. Recovery ownership and throttling
@@ -639,6 +641,23 @@ recoverAfterAuthFailure
     -> Text
     -> IO (Either ApiError AuthState)
 recoverAfterAuthFailure pool rejectedAccountId rejectedAccessToken =
+    recoverAfterAuthFailureWithReason
+        pool
+        rejectedAccountId
+        rejectedAccessToken
+        genericAuthReason
+
+-- | Like 'recoverAfterAuthFailure', but retain the redacted reason reported by
+-- the transport if a freshly rotated token is rejected inside the recovery
+-- window.
+recoverAfterAuthFailureWithReason
+    :: Pool
+    -> Text
+    -> Text
+    -> CredentialExhaustionReason
+    -> IO (Either ApiError AuthState)
+recoverAfterAuthFailureWithReason
+        pool rejectedAccountId rejectedAccessToken rejectionReason =
     findEntry pool rejectedAccountId >>= \case
         Nothing ->
             pure $ Left $ ProviderError AuthenticationError
@@ -655,10 +674,10 @@ recoverAfterAuthFailure pool rejectedAccountId rejectedAccessToken =
                         pure (Right current)
                     AuthRecoveryCoolingDown retryAt -> do
                         setAuthBrokenCooldownAt
-                            pool rejectedAccountId now genericAuthReason
+                            pool rejectedAccountId now rejectionReason
                         pure $ Left $
                             credentialsExhaustedWithReasons
-                                retryAt [genericAuthReason]
+                                retryAt [rejectionReason]
                     AuthRecoveryOwner stale ->
                         refreshEntryAfterAuthFailure
                             pool entry stale >>= \case
@@ -669,7 +688,7 @@ recoverAfterAuthFailure pool rejectedAccountId rejectedAccessToken =
                                     pool
                                     rejectedAccountId
                                     now
-                                    (authReasonFromApiError err)
+                                    (credentialRefreshReasonFromApiError err)
                                 pure (Left err)
 
 data AuthRecoveryDecision
@@ -870,14 +889,48 @@ genericAuthReason = ExhaustedByAuthentication
     , exhaustionStatusCode = Nothing
     }
 
-authReasonFromApiError :: ApiError -> CredentialExhaustionReason
-authReasonFromApiError err =
-    fromMaybe genericAuthReason
-        (credentialExhaustionReasonFromApiError err)
+-- | Failures from the refresh callback that identify an unusable account.
+-- The HTTP cases are deliberately scoped to the OAuth token endpoint; raw
+-- 403 responses from ordinary provider requests are permission failures and
+-- never reach this classifier.
+isAccountScopedRefreshFailure :: ApiError -> Bool
+isAccountScopedRefreshFailure (HttpError status _) =
+    status `elem` [400, 401, 403]
+isAccountScopedRefreshFailure
+    (ProviderError AuthenticationError _ _) = True
+isAccountScopedRefreshFailure CredentialError{} = True
+isAccountScopedRefreshFailure _ = False
 
-isAuthError :: ApiError -> Bool
-isAuthError (HttpError 401 _) = True
-isAuthError (HttpError 403 _) = True
-isAuthError (ProviderError AuthenticationError _ _) = True
-isAuthError CredentialError{} = True
-isAuthError _ = False
+-- | Retain a token-safe description of a failure that happened while rotating
+-- a credential. This is deliberately contextual: a 'CredentialError' returned
+-- by an arbitrary provider action is not itself proof that the checked-out
+-- account was rejected, while the same error from this pool's refresh callback
+-- identifies a failed credential source or persistence step.
+credentialRefreshReasonFromApiError
+    :: ApiError
+    -> CredentialExhaustionReason
+credentialRefreshReasonFromApiError = \case
+    CredentialError{} ->
+        refreshFailureReason RefreshCredentialSourceFailed Nothing Nothing
+    ConnectionError{} ->
+        refreshFailureReason RefreshTransportFailed Nothing Nothing
+    HttpError status _ ->
+        refreshFailureReason RefreshProviderFailed Nothing (Just status)
+    ProviderError errorType _ _ ->
+        refreshFailureReason RefreshProviderFailed (Just errorType) Nothing
+    JsonDecodeError{} ->
+        refreshFailureReason RefreshProviderFailed Nothing Nothing
+    CredentialsExhausted{} ->
+        refreshFailureReason RefreshProviderFailed Nothing Nothing
+
+refreshFailureReason
+    :: CredentialRefreshFailure
+    -> Maybe ErrorType
+    -> Maybe Int
+    -> CredentialExhaustionReason
+refreshFailureReason refreshFailure exhaustionErrorType exhaustionStatusCode =
+    ExhaustedByCredentialRefresh
+        { refreshFailure
+        , exhaustionErrorType
+        , exhaustionStatusCode
+        }

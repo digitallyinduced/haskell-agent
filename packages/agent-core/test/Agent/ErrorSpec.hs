@@ -50,3 +50,11 @@ spec = do
                 { exhaustionErrorType = Nothing
                 , exhaustionStatusCode = Just 401
                 }
+
+    it "does not mislabel permission or local credential failures as authentication" do
+        credentialExhaustionReasonFromApiError
+            (HttpError 403 "sensitive response body")
+            `shouldBe` Nothing
+        credentialExhaustionReasonFromApiError
+            (CredentialError "sensitive local path")
+            `shouldBe` Nothing

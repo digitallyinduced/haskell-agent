@@ -176,10 +176,11 @@ wsPath = "/backend-api/codex/responses"
 -- The provider-neutral WebSocket transport keeps the reusable connection
 -- alive and drains control frames for the lifetime of @action@.
 --
--- A handshake HTTP 401/403 is recovered centrally: the rejected account is
+-- A handshake HTTP 401 is recovered centrally: the rejected account is
 -- force-refreshed even when its JWT has not expired, then the handshake is
 -- retried once with the rotated token. If refresh or the second handshake
 -- fails, the account is cooled down and the next configured account is tried.
+-- HTTP 403 remains a permission/policy failure and does not rotate credentials.
 -- This happens before the callback starts, so retrying cannot duplicate caller
 -- side effects.
 --
@@ -236,7 +237,8 @@ withCodexWsCredentialUsingTurnState =
 
 -- | Run a replay-safe WebSocket action and automatically reacquire a
 -- credential after handshake or in-band account failures. The callback is
--- executed again from the beginning after a 401, 403, or usage-limit error;
+-- executed again from the beginning after a 401, an explicitly typed
+-- authentication error, or a usage-limit error;
 -- callers must therefore keep externally visible side effects idempotent.
 withCodexWsRetrying
     :: TokenProvider

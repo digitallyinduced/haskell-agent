@@ -6,6 +6,7 @@ import Agent.OpenAI.Credential
 import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
+    , CredentialRefreshFailure(..)
     , ErrorType(..)
     )
 import Agent.Provider
@@ -53,12 +54,20 @@ spec = do
                 (ProviderError UsageBalanceExhausted "balance exhausted" (Just 3600))
                 `shouldBe` Just (AccountRateLimited (Just 3600))
 
-        it "classifies authentication failures but not connection errors" do
+        it "classifies explicit authentication failures only" do
             accountFailureFromApiError (HttpError 401 "rejected")
                 `shouldBe` Just AccountAuthenticationRejected
             accountFailureFromApiError
-                (CredentialError "credential file is invalid")
+                (ProviderError AuthenticationError "rejected" Nothing)
                 `shouldBe` Just AccountAuthenticationRejected
+            accountFailureFromApiError (HttpError 403 "model access denied")
+                `shouldBe` Nothing
+            accountFailureFromApiError
+                (ProviderError PermissionError "model access denied" Nothing)
+                `shouldBe` Nothing
+            accountFailureFromApiError
+                (CredentialError "credential file is invalid")
+                `shouldBe` Nothing
             accountFailureFromApiError (ConnectionError "offline")
                 `shouldBe` Nothing
 
@@ -98,6 +107,20 @@ spec = do
                 pure (Left (ConnectionError "offline") :: Either ApiError Text)
 
             result `shouldBe` Left (ConnectionError "offline")
+            readIORef acquisitions `shouldReturn` 1
+
+        it "does not rotate accounts after an untyped HTTP 403" do
+            acquisitions <- newIORef (0 :: Int)
+            let forbidden = HttpError 403 "WebSocket handshake returned HTTP 403"
+                provider = tokenProvider SubscriptionBilled \reported -> do
+                    reported `shouldBe` Nothing
+                    modifyIORef' acquisitions (+ 1)
+                    pure $ Right (credentialFor "acc-a")
+
+            result <- runWithTokenProvider provider \_ ->
+                pure (Left forbidden :: Either ApiError Text)
+
+            result `shouldBe` Left forbidden
             readIORef acquisitions `shouldReturn` 1
 
         it "reports an already-failed connection before choosing a replacement" do
@@ -204,6 +227,36 @@ spec = do
             rotated.accessToken `shouldNotBe` initial.accessToken
             readIORef refreshCalls `shouldReturn` 1
 
+        it "reports refresh-source failures separately from provider rejection" do
+            let refresh _ =
+                    pure $ Left (CredentialError "credential store unavailable")
+                rejectionReason = ExhaustedByAuthentication
+                    { exhaustionErrorType = Nothing
+                    , exhaustionStatusCode = Just 401
+                    }
+            provider <- localProvider ["acc-a", "acc-b"] refresh
+            first <- expectCredential =<< getNextToken provider Nothing
+            second <- expectCredential =<< getNextToken provider
+                (failedWithReason
+                    first AccountAuthenticationRejected rejectionReason)
+
+            exhausted <- getNextToken provider
+                (failedWithReason
+                    second AccountAuthenticationRejected rejectionReason)
+
+            case exhausted of
+                Left CredentialsExhausted{exhaustionReasons} ->
+                    exhaustionReasons `shouldBe`
+                        [ ExhaustedByCredentialRefresh
+                            { refreshFailure =
+                                RefreshCredentialSourceFailed
+                            , exhaustionErrorType = Nothing
+                            , exhaustionStatusCode = Nothing
+                            }
+                        ]
+                other -> expectationFailure
+                    ("expected CredentialsExhausted, got " <> show other)
+
         it "shares auth recovery across token providers for one pool" do
             refreshCalls <- newIORef (0 :: Int)
             refreshStarted <- newEmptyMVar
@@ -250,14 +303,21 @@ spec = do
                         { Auth.accessToken = freshToken ("rotated-" <> showText call) }
             provider <- localProvider ["acc-a"] refresh
             initial <- expectCredential =<< getNextToken provider Nothing
+            let rejectionReason = ExhaustedByAuthentication
+                    { exhaustionErrorType = Nothing
+                    , exhaustionStatusCode = Just 401
+                    }
             rotated <- expectCredential =<< getNextToken provider
-                (failed initial AccountAuthenticationRejected)
+                (failedWithReason
+                    initial AccountAuthenticationRejected rejectionReason)
 
             exhausted <- getNextToken provider
-                (failed rotated AccountAuthenticationRejected)
+                (failedWithReason
+                    rotated AccountAuthenticationRejected rejectionReason)
 
             case exhausted of
-                Left CredentialsExhausted{} -> pure ()
+                Left CredentialsExhausted{exhaustionReasons} ->
+                    exhaustionReasons `shouldBe` [rejectionReason]
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
             readIORef refreshCalls `shouldReturn` 1
 
@@ -403,6 +463,14 @@ failed credential failure = Just FailedCredential
                 , exhaustionStatusCode = Nothing
                 }
     }
+
+failedWithReason
+    :: Credential
+    -> AccountFailure
+    -> CredentialExhaustionReason
+    -> Maybe FailedCredential
+failedWithReason credential failure failureReason =
+    Just FailedCredential { credential, failure, failureReason }
 
 credentialFor :: Text -> Credential
 credentialFor accountId = Credential
