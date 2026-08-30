@@ -4,13 +4,19 @@ module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolResultImage(..)
+    , ToolHandlerResult(..)
+    , toolCallResultImages
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
     , typedToolWithCall
+    , typedRichToolWithCall
     , typedStreamingTool
+    , typedStreamingRichTool
     , textTool
     , streamingTextTool
+    , streamingRichTextTool
     , noArgsTool
     , functionToolCall
     , customToolCall
@@ -70,12 +76,62 @@ instance Show ToolCall where
             | call.argumentsEncrypted = "<redacted>"
             | otherwise = show call.arguments
 
--- | Provider-neutral result ready for a transport adapter to encode.
-data ToolCallResult = ToolCallResult
-    { callId :: !Text
-    , output :: !Text
-    , callKind :: !ToolCallKind
+-- | An image returned alongside a tool's short textual output. Keeping image
+-- data out of 'output' prevents large data URLs from being truncated, logged,
+-- or fed back to the model as ordinary text.
+data ToolResultImage = ToolResultImage
+    { imageUrl :: !Text
+    , imageDetail :: !(Maybe Text)
+    } deriving (Eq)
+
+instance Show ToolResultImage where
+    show image =
+        "ToolResultImage { imageUrl = <redacted>, imageDetail = "
+            <> show image.imageDetail
+            <> " }"
+
+-- | Rich result produced by the small number of tools that return media.
+-- Ordinary tool constructors continue to accept @Either Text Text@.
+data ToolHandlerResult = ToolHandlerResult
+    { resultText :: !Text
+    , resultImages :: ![ToolResultImage]
     } deriving (Eq, Show)
+
+-- | Provider-neutral result ready for a transport adapter to encode.
+--
+-- The original constructor stays unchanged for ordinary text tools. The rich
+-- constructor avoids a source-compatible API break for callers that build or
+-- pattern-match three-field results.
+data ToolCallResult
+    = ToolCallResult
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        }
+    | ToolCallResultWithImages
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        , toolResultImages :: ![ToolResultImage]
+        }
+    deriving (Eq)
+
+instance Show ToolCallResult where
+    show result =
+        "ToolCallResult { callId = " <> show result.callId
+            <> ", output = " <> show result.output
+            <> ", callKind = " <> show result.callKind
+            <> imageSummary
+            <> " }"
+      where
+        imageSummary = case toolCallResultImages result of
+            [] -> ""
+            images -> ", images = <" <> show (length images) <> ">"
+
+toolCallResultImages :: ToolCallResult -> [ToolResultImage]
+toolCallResultImages = \case
+    ToolCallResult{} -> []
+    ToolCallResultWithImages{toolResultImages} -> toolResultImages
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall
@@ -107,9 +163,12 @@ data ToolDispatchConfig = ToolDispatchConfig
 data ToolHandler
     = forall args. TypedTool Text (Decoder args) (args -> IO (Either Text Text))
     | forall args. TypedToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text Text))
+    | forall args. TypedRichToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text ToolHandlerResult))
     | forall args. TypedStreamingTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text Text))
+    | forall args. TypedStreamingRichTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text ToolHandlerResult))
     | TextTool Text (Text -> IO (Either Text Text))
     | StreamingTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text Text))
+    | StreamingRichTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
     | NoArgsTool Text (IO (Either Text Text))
 
 typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
@@ -117,6 +176,13 @@ typedTool = TypedTool
 
 typedToolWithCall :: Text -> Decoder args -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
 typedToolWithCall = TypedToolWithCall
+
+typedRichToolWithCall
+    :: Text
+    -> Decoder args
+    -> (ToolCall -> args -> IO (Either Text ToolHandlerResult))
+    -> ToolHandler
+typedRichToolWithCall = TypedRichToolWithCall
 
 -- | A typed tool that can publish accumulated output snapshots while running.
 -- The final result remains authoritative.
@@ -126,6 +192,13 @@ typedStreamingTool
     -> ((Text -> IO ()) -> args -> IO (Either Text Text))
     -> ToolHandler
 typedStreamingTool = TypedStreamingTool
+
+typedStreamingRichTool
+    :: Text
+    -> Decoder args
+    -> ((Text -> IO ()) -> args -> IO (Either Text ToolHandlerResult))
+    -> ToolHandler
+typedStreamingRichTool = TypedStreamingRichTool
 
 -- | A freeform tool whose input is plain text rather than JSON.
 textTool
@@ -141,6 +214,12 @@ streamingTextTool
     -> ((Text -> IO ()) -> Text -> IO (Either Text Text))
     -> ToolHandler
 streamingTextTool = StreamingTextTool
+
+streamingRichTextTool
+    :: Text
+    -> ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
+    -> ToolHandler
+streamingRichTextTool = StreamingRichTextTool
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
 noArgsTool = NoArgsTool
@@ -168,26 +247,34 @@ dispatchToolHandler config maybeHandler call = do
                     handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     result <- tryAny runTool
-    resultOutput <- case result of
-        Right toolResult ->
-            pure (config.toolDispatchFormatResult toolResult)
+    (resultOutput, resultImages) <- case result of
+        Right (Right toolResult) ->
+            pure
+                ( config.toolDispatchFormatResult (Right toolResult.resultText)
+                , toolResult.resultImages
+                )
+        Right (Left err) ->
+            pure (config.toolDispatchFormatResult (Left err), [])
         Left exception -> do
             -- Diagnostics must not replace the original tool failure with a
             -- second exception. 'tryAny' still lets asynchronous cancellation
             -- propagate.
             _ <- tryAny (config.toolDispatchOnException callName exception)
-            pure (config.toolDispatchFormatException callName exception)
+            pure (config.toolDispatchFormatException callName exception, [])
     finalizedOutput <-
         tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
             Right output -> pure output
             Left exception -> do
                 _ <- tryAny (config.toolDispatchOnException callName exception)
                 pure resultOutput
-    pure ToolCallResult
-        { callId = call.callId
-        , output = finalizedOutput
-        , callKind = call.callKind
-        }
+    pure $
+        if null resultImages
+            then ToolCallResult call.callId finalizedOutput call.callKind
+            else ToolCallResultWithImages
+                call.callId
+                finalizedOutput
+                call.callKind
+                resultImages
 
 toolArgumentsValue :: Text -> Text
 toolArgumentsValue = id
@@ -218,6 +305,9 @@ canonicalToolName :: Text -> Text
 canonicalToolName name
     | grokName /= name = grokName
     | claudeName /= name = claudeName
+    | name == "image_gen__imagegen" = "imagegen"
+    | Just rest <- Text.stripPrefix "image_gen." name
+    , rest == "imagegen" = "imagegen"
     | Just rest <- Text.stripPrefix "collaboration." name =
         canonicalToolName rest
     | Just rest <- Text.stripPrefix "collaboration" name
@@ -257,9 +347,12 @@ handlerName :: ToolHandler -> Text
 handlerName = \case
     TypedTool name _ _ -> name
     TypedToolWithCall name _ _ -> name
+    TypedRichToolWithCall name _ _ -> name
     TypedStreamingTool name _ _ -> name
+    TypedStreamingRichTool name _ _ -> name
     TextTool name _ -> name
     StreamingTextTool name _ -> name
+    StreamingRichTextTool name _ -> name
     NoArgsTool name _ -> name
 
 runHandler
@@ -267,20 +360,30 @@ runHandler
     -> ToolCall
     -> Text
     -> ToolHandler
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolHandlerResult)
 runHandler emitOutput call value = \case
-    TypedTool _ decoder run -> decodeAndRun decoder value run
-    TypedToolWithCall _ decoder run -> decodeAndRun decoder value (run call)
-    TypedStreamingTool _ decoder run -> decodeAndRun decoder value (run emitOutput)
-    TextTool _ run -> run value
-    StreamingTextTool _ run -> run emitOutput value
+    TypedTool _ decoder run ->
+        plainResult <$> decodeAndRun decoder value run
+    TypedToolWithCall _ decoder run ->
+        plainResult <$> decodeAndRun decoder value (run call)
+    TypedRichToolWithCall _ decoder run ->
+        decodeAndRun decoder value (run call)
+    TypedStreamingTool _ decoder run ->
+        plainResult <$> decodeAndRun decoder value (run emitOutput)
+    TypedStreamingRichTool _ decoder run ->
+        decodeAndRun decoder value (run emitOutput)
+    TextTool _ run -> plainResult <$> run value
+    StreamingTextTool _ run -> plainResult <$> run emitOutput value
+    StreamingRichTextTool _ run -> run emitOutput value
     NoArgsTool _ run ->
-        run
+        plainResult <$> run
+  where
+    plainResult = fmap \text -> ToolHandlerResult text []
 
 decodeAndRun
     :: Decoder args
     -> Text
-    -> (args -> IO (Either Text Text))
-    -> IO (Either Text Text)
+    -> (args -> IO (Either Text result))
+    -> IO (Either Text result)
 decodeAndRun decoder value run =
     either (pure . Left) run (decodeToolArguments decoder value)

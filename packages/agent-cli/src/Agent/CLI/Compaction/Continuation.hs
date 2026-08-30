@@ -16,7 +16,10 @@ import Agent.OpenAI.Compaction
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
-import Agent.ToolDispatch (ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCallResult(..)
+    , toolCallResultImages
+    )
 import Control.Applicative ((<|>))
 import Data.IORef (IORef, readIORef)
 import Data.List (partition)
@@ -156,14 +159,24 @@ fitCompletedToolOutputsToLimit limit requestTokens inputs
 capCompletedToolOutputs :: Int -> [TurnInput] -> [TurnInput]
 capCompletedToolOutputs maximumCharacters =
     map \case
-        CompletedTool result ->
-            CompletedTool ToolCallResult
+        CompletedTool result -> CompletedTool (capToolResult result)
+        input -> input
+  where
+    capToolResult result =
+        let cappedOutput =
+                capToolOutput maximumCharacters result.output
+        in case toolCallResultImages result of
+            [] -> ToolCallResult
                 { callId = result.callId
-                , output =
-                    capToolOutput maximumCharacters result.output
+                , output = cappedOutput
                 , callKind = result.callKind
                 }
-        input -> input
+            images -> ToolCallResultWithImages
+                { callId = result.callId
+                , output = cappedOutput
+                , callKind = result.callKind
+                , toolResultImages = images
+                }
 
 capToolOutput :: Int -> Text -> Text
 capToolOutput maximumCharacters text

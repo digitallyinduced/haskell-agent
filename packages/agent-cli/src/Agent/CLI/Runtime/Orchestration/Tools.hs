@@ -119,7 +119,7 @@ import Agent.CLI.Session
       SessionTurn(turnAssistantText) )
 import Agent.CLI.Session.Attachments ( putImagePreview )
 import Agent.CLI.Session.Choices ()
-import Agent.CLI.Session.History ()
+import Agent.CLI.Session.History (foldSessionItems)
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
@@ -163,7 +163,10 @@ import Agent.CLI.Worktree
     ( createManagedWorktree, removeWorktree )
 import Agent.Cancel ()
 import Agent.Claude ()
-import Agent.Dialect ( dialectForId, DialectId(GrokBuildDialect) )
+import Agent.Dialect
+    ( dialectForId
+    , DialectId(CodexDialect, GrokBuildDialect)
+    )
 import Agent.Error ()
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
@@ -173,13 +176,21 @@ import Agent.Loop
     ( TurnInput(UserMessage, AgentMessage),
       LoopError(LoopNoResponseId) )
 import Agent.OpenAI.Compaction ()
+import Agent.OpenAI.ImageGeneration
+    ( clearImageGenerationHistory
+    , imageGenerationTool
+    , newImageGenerationHistory
+    , recordImageGenerationImages
+    , recordImageGenerationResponseItems
+    )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( unsafeToFilePath )
 import Agent.Provider
-    ( Provider(XAIProvider, OpenRouterProvider, OpenAIProvider),
-      tokenProviderBillingMode )
+    ( Provider(XAIProvider, OpenRouterProvider, OpenAIProvider)
+    , tokenProviderBillingMode
+    )
 import Agent.ReasoningEffort
     ( parseReasoningEffort, reasoningEffortText )
 import Agent.Responses.GenericBackend ()
@@ -597,6 +608,11 @@ runAgentTools
                 (sessionId, tempDir) <- allocateSessionTemp root
                 pure (tempDir, Just sessionId)
     setToolSessionTmp baseToolEnv (Just sessionTmp)
+    imageGenerationHistory <- newImageGenerationHistory
+    forM_ resumed \(_, turns) ->
+        recordImageGenerationResponseItems
+            imageGenerationHistory
+            (foldSessionItems turns)
     home <- getHomeDirectory
     let cleanupScratch = do
             cleanupPendingPersistence persist
@@ -846,6 +862,17 @@ runAgentTools
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
         computerTools =
             [ComputerUse.computerUseTool | options.optComputerUse, provider == OpenAIProvider]
+        imageGenerationTools =
+            [ imageGenerationTool
+                tokenProvider
+                toolEnv
+                imageGenerationHistory
+                imageHooks
+            | provider == OpenAIProvider
+            , dialectId == CodexDialect
+            , inferredTarget.targetConnectionId
+                == builtinConnectionId OpenAIProvider
+            ]
         allTools =
             coding.codingAppTools
                 ++ extraTools
@@ -854,7 +881,7 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
-                ++ computerTools
+                ++ imageGenerationTools
                 ++ computerTools
         tools =
             filterGhciTools options.optGhci
@@ -865,6 +892,7 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ imageGenerationTools
         planMode = coding.codingPlanMode
         resumedPlanPending =
             case resumed of
@@ -909,6 +937,8 @@ runAgentTools
         activeSelectionRef
         agentTypesRef
         allTools
+        (recordImageGenerationImages imageGenerationHistory)
+        (clearImageGenerationHistory imageGenerationHistory)
         bashEnabledRef
         catalog
         checkStartupUsageInBackground

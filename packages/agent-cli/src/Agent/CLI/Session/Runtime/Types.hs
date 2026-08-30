@@ -51,6 +51,7 @@ import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
     ( Backend
+    , ImageAttachment
     , TokenUsage
     , TurnInput
     )
@@ -105,6 +106,8 @@ data SessionRequest = SessionRequest
     , dialect :: !Dialect
     , policy :: !ApprovalPolicy
     , allTools :: ![AppTool]
+    , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())
+    , clearImageGenerationHistory :: !(IO ())
     , suspendGhci :: !(IO ())
     , grokRuntime :: !(Maybe GrokRuntimeControl)
     , mcpRegistrations :: ![MCP.McpToolRegistration]
