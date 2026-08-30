@@ -79,6 +79,7 @@ import Agent.Responses.LoopBackend
     , withRequestInput
     )
 import Agent.Responses.Types
+import qualified Agent.Transport.WebSocket as WebSocket
 import Control.Concurrent (threadDelay)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (onException)
@@ -567,13 +568,17 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
 -- | Errors that indicate the Codex Responses WebSocket transport is
 -- unavailable rather than that the logical request itself was rejected.
 isOpenAiWebSocketTransportFailure :: ApiError -> Bool
-isOpenAiWebSocketTransportFailure = \case
+isOpenAiWebSocketTransportFailure err = case err of
     ConnectionError {} -> True
     ProviderError WebSocketConnectionLimitReached _ _ -> True
     -- A server that does not support the Responses WebSocket protocol
     -- advertises that explicitly with HTTP 426.
     HttpError 426 _ -> True
-    _ -> False
+    -- Some direct ChatGPT accounts reject only the WebSocket upgrade while
+    -- accepting the same Responses request over HTTPS. Match the transport's
+    -- exact handshake fingerprint so an application-level 403 remains a
+    -- permission error.
+    _ -> WebSocket.webSocketHandshakeFailureStatus err == Just 403
 
 -- | A WebSocket failure whose request has already produced provider output.
 --

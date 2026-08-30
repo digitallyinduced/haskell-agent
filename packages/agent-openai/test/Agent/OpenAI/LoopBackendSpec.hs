@@ -1406,6 +1406,20 @@ spec = do
             isOpenAiReplayUnsafeWebSocketTransportFailure failure
                 `shouldBe` False
 
+    describe "isOpenAiWebSocketTransportFailure" do
+        it "recognizes an exact WebSocket handshake 403" do
+            isOpenAiWebSocketTransportFailure
+                (HttpError 403 "WebSocket handshake returned HTTP 403")
+                `shouldBe` True
+
+        it "does not hide application permission or authentication errors" do
+            isOpenAiWebSocketTransportFailure
+                (HttpError 403 "model access denied")
+                `shouldBe` False
+            isOpenAiWebSocketTransportFailure
+                (HttpError 401 "WebSocket handshake returned HTTP 401")
+                `shouldBe` False
+
     describe "openAiBackendWithTransportFallback" do
         it "switches permanently to fallback after a pre-output connection error" do
             fallbackActive <- newIORef False
