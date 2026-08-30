@@ -65,6 +65,14 @@ spec = do
                     Nothing)
                 `shouldBe` True
 
+        it "detects lost pending function-call state" do
+            isResponseChainCompatibilityError
+                (ProviderError
+                    InvalidRequestError
+                    "No tool output found for function call call_123."
+                    Nothing)
+                `shouldBe` True
+
         it "does not classify unrelated invalid parameters as chain errors" do
             isResponseChainCompatibilityError
                 (ProviderError
