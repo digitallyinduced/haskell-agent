@@ -64,7 +64,10 @@ import Agent.OpenAI.LoopBackend
     , withCodexTurnStateScope
     )
 import Agent.OpenAI.WebSocketClient
-    ( newCodexTurnState )
+    ( newCodexTurnState
+    , sendWsRequestWithEventsPreservingTurnState
+    , withCodexWsRetryingUsingTurnState
+    )
 import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
 import Agent.ReasoningEffort (reasoningEffortText)
@@ -370,6 +373,7 @@ runXaiParentSubagent runtime dialect sendToRoot mkBackend =
                             <> "."
                 Just openaiToken ->
                     runCodexSubagent
+                        False
                         runtime
                             { subagentConnection =
                                 providerSlug OpenAIProvider
@@ -396,11 +400,13 @@ runXaiParentSubagent runtime dialect sendToRoot mkBackend =
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
 runCodexSubagent
-    :: SubagentRuntime
+    :: Bool
+    -- ^ Gateway mode forbids every direct HTTP provider fallback.
+    -> SubagentRuntime
     -> TokenProvider
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> RunSubagent
-runCodexSubagent runtime tokenProvider sendToRoot =
+runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
     \env previous prompt onEvent -> do
         agentType <-
             fromMaybe defaultSubagentType
@@ -514,16 +520,31 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                         turnState tokenProvider request)
                                 (pure childParams)
                         baseBackend =
-                            openAiBackendWithTransportFallback
-                                httpFallbackActive
-                                websocketBackend
-                                httpBackend
+                            if gatewayOnly
+                                then websocketBackend
+                                else
+                                    openAiBackendWithTransportFallback
+                                        httpFallbackActive
+                                        websocketBackend
+                                        httpBackend
                         compactSender request =
-                            OpenAI.createCodexMessageWithProviderWithOptionsAndTurnState
-                                OpenAI.remoteCompactionV2RequestOptions
-                                turnState
-                                tokenProvider
-                                request
+                            if gatewayOnly
+                                then
+                                    withCodexWsRetryingUsingTurnState
+                                        tokenProvider
+                                        turnState
+                                        \conn _credential ->
+                                            sendWsRequestWithEventsPreservingTurnState
+                                                conn
+                                                request
+                                                Nothing
+                                                (const (pure ()))
+                                else
+                                    OpenAI.createCodexMessageWithProviderWithOptionsAndTurnState
+                                        OpenAI.remoteCompactionV2RequestOptions
+                                        turnState
+                                        tokenProvider
+                                        request
                         compactingBackend =
                             autoCompactOpenAiBackendWithSender
                                 runtime.subagentOptions.optCompactThreshold

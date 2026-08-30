@@ -5,6 +5,11 @@ import Agent.CLI.AccountPicker
     ( AccountPickerOption(..)
     , accountPickerMatchesRequest
     )
+import Agent.CLI.Auth
+    ( LoadedAuth(..)
+    , gatewayAuthSelectionId
+    , staticCredentialProvider
+    )
 import Agent.CLI.CredentialStore (ManagedAuthKind(..))
 import Agent.CLI.Login
     ( AccountBilling(..)
@@ -13,7 +18,11 @@ import Agent.CLI.Login
     , UsageState(..)
     , UsageWindow(..)
     )
-import Agent.Provider (BillingMode(..), Provider(..))
+import Agent.Provider
+    ( BillingMode(..)
+    , Credential(..)
+    , Provider(..)
+    )
 import Data.Text (Text)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Test.Hspec
@@ -120,6 +129,14 @@ spec = describe "account selection" do
         providerSupportsUsageAccountSelection ClaudeCodeProvider
             `shouldBe` False
 
+    it "keeps connected gateway auth instead of selecting a local account" do
+        loadedAuthSupportsUsageAccountSelection
+            (loadedAuth OpenAIProvider (Just gatewayAuthSelectionId))
+            `shouldBe` False
+        loadedAuthSupportsUsageAccountSelection
+            (loadedAuth OpenAIProvider Nothing)
+            `shouldBe` True
+
     it "keeps a verified OpenRouter free-tier key usable at zero credits" do
         accountCapacity freeTierAccount `shouldBe` Just 1
 
@@ -187,4 +204,22 @@ freeTierAccount =
             , creditsRemaining = Just "$0.0"
             , creditsUsed = Just "$0.0"
             }
+        }
+
+loadedAuth :: Provider -> Maybe Text -> LoadedAuth
+loadedAuth provider selectionId =
+    LoadedAuth
+        { loadedProvider = provider
+        , loadedTokenProvider =
+            staticCredentialProvider
+                SubscriptionBilled
+                Credential
+                    { accessToken = "token"
+                    , accountId = "account"
+                    , leaseId = Nothing
+                    , provider = provider
+                    }
+        , loadedAccountLabel = pure . (.accountId)
+        , loadedSelectionId = selectionId
+        , loadedOpenAiPool = Nothing
         }

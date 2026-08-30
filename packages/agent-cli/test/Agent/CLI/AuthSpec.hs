@@ -2,6 +2,10 @@ module Agent.CLI.AuthSpec (spec) where
 
 import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
+import Agent.CLI.GatewayClient
+    ( GatewayCredential(..)
+    , saveGatewayCredentialAt
+    )
 import qualified Agent.CLI.Login as Login
 import Agent.Error
     ( ApiError(..)
@@ -93,6 +97,26 @@ spec = do
                         Left err -> expectationFailure (Text.unpack err)
                         Right loaded ->
                             loaded.loadedProvider `shouldBe` OpenAIProvider
+
+        it "uses a connected gateway for explicit OpenAI auth" $
+            withTempHome \home -> do
+                saveTestGateway home
+                loadAuth (Just OpenAIProvider) >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right loaded -> do
+                        loaded.loadedProvider `shouldBe` OpenAIProvider
+                        loaded.loadedSelectionId
+                            `shouldBe` Just gatewayAuthSelectionId
+
+        it "does not let a gateway override an explicit non-OpenAI provider" $
+            withTempHome \home ->
+                withCleanGrokEnv $
+                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
+                    saveTestGateway home
+                    loadAuth (Just XAIProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded ->
+                            loaded.loadedProvider `shouldBe` XAIProvider
 
     describe "loadOpenAiDictationAuth" do
         it "loads ChatGPT OAuth as subscription-billed OpenAI auth" $
@@ -240,6 +264,20 @@ spec = do
                         `shouldReturn` Right second
 
     describe "loadAuthForAccount" do
+        it "does not let a gateway override a selected non-OpenAI account" $
+            withTempHome \home ->
+                withCleanGrokEnv $
+                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
+                    saveTestGateway home
+                    loadAuthForAccount
+                        XAIProvider
+                        (externalAuthSelectionId XAIProvider "environment")
+                        >>= \case
+                            Left err ->
+                                expectationFailure (Text.unpack err)
+                            Right loaded ->
+                                loaded.loadedProvider `shouldBe` XAIProvider
+
         it "loads the selected managed Grok account" $
             withTempHome \_ ->
                 withEnv "GROK_AUTH_JSON" Nothing $
@@ -1497,3 +1535,14 @@ withTempHome action =
         removeFile path
         createDirectory path
         pure path
+
+saveTestGateway :: OsPath -> IO ()
+saveTestGateway home =
+    saveGatewayCredentialAt
+        home
+        GatewayCredential
+            { gatewayBaseUrl = "https://gateway.example"
+            , gatewayWebSocketUrl = "wss://gateway.example/v1/responses"
+            , gatewayAccessToken = "gateway-token"
+            }
+        `shouldReturn` Right ()
