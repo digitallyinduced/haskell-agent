@@ -18,7 +18,9 @@ module Agent.CLI.TUI.App
     , choiceClosesOnUiTransition
     , drawApp
     , elapsedMillisSince
+    , appEventLogicalBytes
     , emitUiEvent
+    , enqueueAppEvent
     , externalUrlCommand
     , hasQueuedFullscreenInput
     , initialFullscreenAppState

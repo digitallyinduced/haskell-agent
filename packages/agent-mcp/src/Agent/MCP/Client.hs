@@ -2070,7 +2070,7 @@ readSseStream client reader pending request = do
                             -- concatenating.  A peer can otherwise force an
                             -- arbitrarily large retained buffer by omitting
                             -- newlines.
-                            splitSseChunk buffer bytes >>= \case
+                            case splitSseChunk buffer bytes of
                                 Left err -> pure (HttpFailed err)
                                 Right (complete, rest) ->
                                     foldLines dataLines dataBytes complete >>= \case

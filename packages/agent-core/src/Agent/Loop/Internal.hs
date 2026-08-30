@@ -688,6 +688,7 @@ data CoalescedLoopEvent
     = CoalescedTextDelta !(TVar TextBuffer)
     | CoalescedReasoningDelta !(TVar TextBuffer)
     | CoalescedToolOutput !Text !(TVar Text)
+    | CoalescedNativeAgentOutput !Text !(TVar TextBuffer)
 
 data LoopEventFailure
     = LoopEventSyncFailure !SomeException
@@ -777,6 +778,8 @@ emitLoopEvent pump = \case
         enqueueTextDelta pump True text
     ToolOutputUpdated callId output ->
         enqueueToolOutput pump callId output
+    NativeAgentOutput identifier output ->
+        enqueueNativeAgentOutput pump identifier output
     event ->
         enqueueLoopEventCommand pump (DeliverLoopEvent event)
 
@@ -913,6 +916,60 @@ enqueueToolOutput pump callId output =
                     pure (Right ()))
         ) >>= either throwLoopEventFailure pure
 
+-- Provider-managed child output is display-only and can arrive in large
+-- records. Treat adjacent chunks like assistant deltas so a slow renderer
+-- cannot leave hundreds of heavyweight NativeAgentOutput events in the
+-- count-bounded queue.
+enqueueNativeAgentOutput :: LoopEventPump -> Text -> Text -> IO ()
+enqueueNativeAgentOutput pump identifier = go
+  where
+    go text
+        | Text.null text = enqueueChunk text
+        | Text.length text <= loopEventTailPayloadBudgetCodeUnits =
+            enqueueChunk text
+        | otherwise = do
+            let (chunk0, rest) =
+                    Text.splitAt loopEventTailPayloadBudgetCodeUnits text
+            enqueueChunk (Text.copy chunk0)
+            if Text.null rest then pure () else go rest
+
+    enqueueChunk text =
+        atomically
+            ( (Left <$> readTMVar pump.eventPumpFailure)
+                `orElse`
+              (do
+                current <- readTVar pump.eventPumpTail
+                case current of
+                    Just (CoalescedNativeAgentOutput currentId buffer)
+                        | currentId == identifier -> do
+                            appendBuffered buffer text
+                            pure (Right ())
+                    _ -> do
+                        buffer <- newTVar
+                            (appendTextBuffer (Text.copy text) emptyTextBuffer)
+                        let pending =
+                                CoalescedNativeAgentOutput identifier buffer
+                        writeTVar pump.eventPumpTail (Just pending)
+                        reserveTailPayloadBytes
+                            pump
+                            False
+                            (logicalTextBufferBytes
+                                (Text.length text)
+                                (if Text.null text then 0 else 1))
+                        writeTBQueue pump.eventPumpQueue
+                            (DeliverCoalescedLoopEvent pending)
+                        pure (Right ()))
+            ) >>= either throwLoopEventFailure pure
+      where
+        appendBuffered buffer chunk = do
+            buffered <- readTVar buffer
+            let payloadBytes =
+                    logicalTextBufferBytes
+                        (textBufferLength buffered + Text.length chunk)
+                        (textBufferChunkCount buffered + 1)
+            reserveTailPayloadBytes pump False payloadBytes
+            writeTVar buffer (appendTextBuffer chunk buffered)
+
 sameCoalescedEvent
     :: Maybe CoalescedLoopEvent
     -> CoalescedLoopEvent
@@ -927,6 +984,10 @@ sameCoalescedEvent current pending =
           , CoalescedToolOutput rightId right
           ) ->
             leftId == rightId && left == right
+        ( Just (CoalescedNativeAgentOutput leftId left)
+          , CoalescedNativeAgentOutput rightId right
+          ) ->
+            leftId == rightId && left == right
         _ -> False
 
 materializeCoalescedEvent :: CoalescedLoopEvent -> STM LoopEvent
@@ -937,6 +998,8 @@ materializeCoalescedEvent = \case
         ReasoningDelta . textBufferToText <$> readTVar buffer
     CoalescedToolOutput callId snapshot ->
         ToolOutputUpdated callId <$> readTVar snapshot
+    CoalescedNativeAgentOutput identifier buffer ->
+        NativeAgentOutput identifier . textBufferToText <$> readTVar buffer
 
 coalescedPayloadBytes :: CoalescedLoopEvent -> STM Int
 coalescedPayloadBytes = \case
@@ -954,6 +1017,12 @@ coalescedPayloadBytes = \case
                 (textBufferChunkCount buffered))
     CoalescedToolOutput _ snapshot ->
         logicalTextBytes <$> readTVar snapshot
+    CoalescedNativeAgentOutput _ buffer -> do
+        buffered <- readTVar buffer
+        pure
+            (logicalTextBufferBytes
+                (textBufferLength buffered)
+                (textBufferChunkCount buffered))
 
 clearEventPumpTail :: LoopEventPump -> STM ()
 clearEventPumpTail pump =

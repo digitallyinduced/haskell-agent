@@ -5,13 +5,15 @@
 module Main (main) where
 
 import Agent.ToolDispatch
-    ( ToolCall
+    ( ToolCall(..)
+    , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , dispatchToolHandler
     , functionToolCall
     )
 import Agent.Tools.OutputArtifact
-    ( artifactTools
+    ( OutputArtifact(..)
+    , artifactTools
     , outputArtifactMetadata
     , readOutputArtifact
     , writeOutputArtifactDetailed
@@ -28,7 +30,8 @@ import qualified Data.ByteString as ByteString
 import Data.List (find, sort)
 import qualified Data.Text as Text
 import GHC.Stats
-    ( RTSStats(..)
+    ( GCDetails(..)
+    , RTSStats(..)
     , getRTSStats
     , getRTSStatsEnabled
     )
@@ -117,16 +120,16 @@ benchmark label count action = do
     let median field = sort (map field samples) !! (length samples `div` 2)
     printf "%s,elapsed-ms=%.3f,cpu-ms=%.3f,allocated=%d,live-delta-after-gc=%d\n"
         label
-        (median elapsedMillis)
-        (median cpuMillis)
-        (median allocatedBytes)
-        (median liveDeltaBytes)
+        (median (.elapsedMillis))
+        (median (.cpuMillis))
+        (median (.allocatedBytes))
+        (median (.liveDeltaBytes))
 
 measure :: IO Text.Text -> IO Sample
 measure action = do
     performGC
     before <- getRTSStats
-    beforeLive <- pure before.live_bytes
+    let beforeLive = before.gc.gcdetails_live_bytes
     wallStart <- getMonotonicTimeNSec
     cpuStart <- getCPUTime
     result <- action
@@ -142,7 +145,8 @@ measure action = do
         , allocatedBytes =
             fromIntegral (after.allocated_bytes - before.allocated_bytes)
         , liveDeltaBytes =
-            fromIntegral settled.live_bytes - fromIntegral beforeLive
+            fromIntegral settled.gc.gcdetails_live_bytes
+                - fromIntegral beforeLive
         }
 
 checksum :: Int -> Char -> Int
@@ -166,10 +170,10 @@ legacySearch :: ToolEnv -> Text.Text -> IO Text.Text
 legacySearch env handle = do
     content <- readOutputArtifact env handle >>= either (die . Text.unpack) pure
     let matches =
-        [ Text.pack (show n) <> ":" <> line
-        | (n, line) <- zip [1 :: Int ..] (Text.lines content)
-        , "needle" `Text.isInfixOf` line
-        ]
+            [ Text.pack (show n) <> ":" <> line
+            | (n, line) <- zip [1 :: Int ..] (Text.lines content)
+            , "needle" `Text.isInfixOf` line
+            ]
         shown = take 5 matches
         suffix
             | length matches > 5 =
@@ -198,5 +202,5 @@ runArtifactTool env call = do
             , toolDispatchOnOutput = \_ _ -> pure ()
             , toolDispatchFinalizeOutput = \_ output -> pure output
             }
-    result <- dispatchToolHandler config (appToolHandler <$> tool) call
+    result <- dispatchToolHandler config ((.appToolHandler) <$> tool) call
     pure result.output

@@ -346,6 +346,47 @@ spec = describe "runLoop" do
         readIORef deliveredChars
             `shouldReturn` 3 * Text.length chunk
 
+    it "backpressures and coalesces provider-native child output" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        deliveredChars <- newIORef (0 :: Int)
+        let chunk = Text.replicate (1024 * 1024) "x"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                mapM_
+                    (onEvent . NativeAgentOutput "child")
+                    [chunk, chunk, chunk]
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                TurnStarted -> do
+                    putMVar sinkStarted ()
+                    takeMVar releaseSink
+                NativeAgentOutput "child" output ->
+                    modifyIORef' deliveredChars (+ Text.length output)
+                _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            timeout 100000 (takeMVar backendFinished)
+                `shouldReturn` Nothing
+            putMVar releaseSink ()
+            timeout 1000000 (takeMVar backendFinished)
+                `shouldReturn` Just ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef deliveredChars
+            `shouldReturn` 3 * Text.length chunk
+
     it "keeps only the latest adjacent tool-output snapshot per call" do
         sinkStarted <- newEmptyMVar
         releaseSink <- newEmptyMVar

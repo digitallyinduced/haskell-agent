@@ -182,6 +182,44 @@ spec = describe "buildStreamResponse" do
             other -> expectationFailure
                 ("expected one function call, got " <> show other)
 
+    it "keeps argument deltas when output_item.done is sparse" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-sparse-done\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"\"}}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-1\",\"output_index\":0,\"delta\":\"{\\\"target_file\\\":\\\"README.md\\\"}\"}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"\"}}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sparse-done\",\"output\":[]}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [arguments
+            | FunctionCallItem FunctionCall { arguments } <- response.output
+            ] `shouldBe` ["{\"target_file\":\"README.md\"}"]
+
+    it "keeps custom input deltas when output_item.done is sparse" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-custom-sparse\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc-1\",\"call_id\":\"call-1\",\"name\":\"apply_patch\",\"input\":\"\"}}"
+            , sseBlock "response.custom_tool_call_input.delta"
+                "{\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ctc-1\",\"call_id\":\"call-1\",\"output_index\":0,\"delta\":\"*** Begin Patch\"}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc-1\",\"call_id\":\"call-1\",\"name\":\"apply_patch\",\"input\":\"\"}}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-custom-sparse\",\"output\":[]}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [input
+            | CustomToolCallItem CustomToolCall { input } <- response.output
+            ] `shouldBe` ["*** Begin Patch"]
+
     it "assembles many tiny argument deltas without retaining the event list" do
         let deltaCount = 10_000
             events =
@@ -285,6 +323,28 @@ spec = describe "buildStreamResponse" do
                     partText `shouldBe` "Checked the repository."
             other -> expectationFailure
                 ("expected one reasoning summary, got " <> show other)
+
+    it "keeps reasoning deltas when output_item.done is sparse" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-reasoning-sparse\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
+            , sseBlock "response.reasoning_summary_part.added"
+                "{\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs-1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}"
+            , sseBlock "response.reasoning_summary_text.delta"
+                "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"Checked the repository.\"}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-reasoning-sparse\",\"output\":[]}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [partText
+            | ReasoningItemValue ReasoningItem { summary } <- response.output
+            , ReasoningSummaryPart { text = Just partText } <- summary
+            ] `shouldBe` ["Checked the repository."]
 
     it "uses provider classifiers when no terminal response is present" do
         streamEvents <- expectRight $ parseSseEvents $ sseBlock "error"

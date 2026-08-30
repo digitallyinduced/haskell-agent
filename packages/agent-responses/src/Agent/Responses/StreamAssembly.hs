@@ -379,7 +379,8 @@ updateItem explicitIndex done item state =
         IntMap.empty)
     merge (Just old) = Just
         old
-            { itemValue = mergeResponseItem old.itemValue item
+            { itemValue = mergeResponseItem old.itemValue
+                (if done then preserveBufferedProgress old item else item)
             , itemDone = old.itemDone || done
             , functionArgumentChunks =
                 if done then Nothing else old.functionArgumentChunks
@@ -405,6 +406,55 @@ mergeResponseItem old new =
                 , status = next.status <|> previous.status
                 }
         _ -> new
+
+-- A sparse output-item.done is authoritative for normal item fields, but it
+-- must not erase deltas buffered since output-item.added. Only fields with
+-- pending delta buffers receive a fallback, preserving the existing
+-- last-event-wins semantics for every other field.
+preserveBufferedProgress :: ItemProgress -> ResponseItem -> ResponseItem
+preserveBufferedProgress progress = \case
+    FunctionCallItem call
+        | Just _ <- progress.functionArgumentChunks
+        , Text.null call.arguments ->
+            FunctionCallItem call
+                { arguments = materializedFunctionArguments progress }
+    CustomToolCallItem call
+        | Just _ <- progress.customInputChunks
+        , Text.null call.input ->
+            CustomToolCallItem call
+                { input = materializedCustomInput progress }
+    ReasoningItemValue reasoning
+        | not (IntMap.null progress.reasoningTextChunks) ->
+            ReasoningItemValue reasoning
+                { summary = mergeReasoningSummary
+                    (materializedReasoningSummary progress)
+                    reasoning.summary
+                }
+    item -> item
+
+materializedReasoningSummary :: ItemProgress -> [ReasoningSummaryPart]
+materializedReasoningSummary progress =
+    case materializeItemProgress progress of
+        ReasoningItemValue reasoning -> reasoning.summary
+        _ -> []
+
+preferNonEmpty :: Text -> Text -> Text
+preferNonEmpty preferred fallback
+    | Text.null preferred = fallback
+    | otherwise = preferred
+
+mergeReasoningSummary
+    :: [ReasoningSummaryPart]
+    -> [ReasoningSummaryPart]
+    -> [ReasoningSummaryPart]
+mergeReasoningSummary (previous : previousRest) (next : nextRest) =
+    next
+        { partType = preferNonEmpty next.partType previous.partType
+        , text = nonEmpty next.text <|> previous.text
+        }
+        : mergeReasoningSummary previousRest nextRest
+mergeReasoningSummary previous [] = previous
+mergeReasoningSummary [] next = next
 
 findItemIndex :: ResponseItem -> StreamAssemblyState -> Maybe Int
 findItemIndex item =

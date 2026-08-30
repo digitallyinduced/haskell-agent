@@ -3,7 +3,9 @@ module Agent.CLI.TUIBridgeSpec (spec) where
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
-    ( emitUiEvent
+    ( appEventLogicalBytes
+    , emitUiEvent
+    , enqueueAppEvent
     , loadSyntaxHighlighterForRuntime
     , newFullscreenInputBuffer
     , newFullscreenRuntime
@@ -11,6 +13,7 @@ import Agent.CLI.TUI.App
     , setFullscreenSessionActions
     )
 import Agent.CLI.TUI.Bridge
+import Agent.CLI.TUI.ImagePreview (TuiImagePreview(..))
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
     , AppEventMailbox(..)
@@ -21,7 +24,7 @@ import Agent.CLI.TUI.Types
     , SyntaxHighlighterState(..)
     )
 import Agent.TUI.Model
-import Agent.Loop (LoopEvent(..), emptyTurnOutput)
+import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
@@ -29,6 +32,7 @@ import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (readTVarIO)
 import Control.Exception.Safe (throwString)
 import Control.Monad (replicateM_)
+import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Text as Text
@@ -148,7 +152,7 @@ spec = describe "fullscreen TUI bridge" do
         emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "next"))
         emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "newest"))
         let AppEventMailbox stateRef = runtime.runtimeMailbox
-        pending <- mailboxPendingEvents <$> readTVarIO stateRef
+        pending <- (.mailboxPendingEvents) <$> readTVarIO stateRef
         [ output
             | PendingUi
                 (PendingExactUi
@@ -156,11 +160,12 @@ spec = describe "fullscreen TUI bridge" do
                 toList pending
             ]
             `shouldBe` ["latest", "newest"]
-        toList pending `shouldSatisfy` \events ->
-            case dropWhile (not . isTurnStarted) events of
-                PendingUi (PendingExactUi (UiLoop TurnStarted)) : rest ->
-                    any isNewestOutput rest
-                _ -> False
+        let newestFollowsBoundary =
+                case dropWhile (not . isTurnStarted) (toList pending) of
+                    PendingUi (PendingExactUi (UiLoop TurnStarted)) : rest ->
+                        any isNewestOutput rest
+                    _ -> False
+        newestFollowsBoundary `shouldBe` True
 
     it "backpressures a single streaming mailbox node by payload bytes" do
         runtime <- newBridgeTestRuntime
@@ -199,6 +204,37 @@ spec = describe "fullscreen TUI bridge" do
         let AppEventMailbox stateRef = runtime.runtimeMailbox
         state <- readTVarIO stateRef
         state.mailboxPendingCount `shouldBe` 1
+
+    it "accounts and backpressures encoded image events by payload bytes" do
+        runtime <- newBridgeTestRuntime
+        let encoded = BS.replicate (10 * 1024 * 1024) 0
+            attachment = ImageAttachment
+                { imageMime = "image/png"
+                , imageBytes = encoded
+                }
+            preview = TuiImagePreview
+                { previewMime = "image/png"
+                , previewBytes = BS.length encoded
+                , previewSourceWidth = 1
+                , previewSourceHeight = 1
+                , previewSample =
+                    error "mailbox accounting forced the lazy preview sample"
+                , previewKittyAttachment = attachment
+                }
+        appEventLogicalBytes (AppSetImagePreviews [(attachment, preview)])
+            `shouldSatisfy` (> BS.length encoded)
+        appEventLogicalBytes (AppCommitImagePreviews [(attachment, preview)])
+            `shouldSatisfy` (> BS.length encoded)
+        enqueueAppEvent runtime (AppToolImage "first" preview)
+        withAsync
+            (enqueueAppEvent runtime (AppToolImage "second" preview))
+            \publishing -> do
+                timeout 100000 (wait publishing)
+                    `shouldReturn` Nothing
+                let AppEventMailbox stateRef = runtime.runtimeMailbox
+                state <- readTVarIO stateRef
+                state.mailboxPendingBytes
+                    `shouldSatisfy` (>= BS.length encoded)
 
     it "rebinds provider-specific actions without replacing the runtime" do
         calls <- newIORef ([] :: [String])
@@ -330,7 +366,7 @@ spec = describe "fullscreen TUI bridge" do
 hasPendingUnavailableSyntax :: FullscreenRuntime -> IO Bool
 hasPendingUnavailableSyntax runtime = do
     let AppEventMailbox pendingRef = runtime.runtimeMailbox
-    pending <- mailboxPendingEvents <$> readTVarIO pendingRef
+    pending <- (.mailboxPendingEvents) <$> readTVarIO pendingRef
     syntaxState <- readIORef runtime.runtimeSyntaxHighlighter
     pure case (toList pending, syntaxState) of
         ( [PendingEvent AppSyntaxHighlighterChanged]

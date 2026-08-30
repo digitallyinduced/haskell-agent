@@ -143,6 +143,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
+import qualified Data.ByteString as BS
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
@@ -615,8 +616,52 @@ appEventLogicalBytes = \case
     AppDictationPartial text -> logicalTextBytes text
     AppDictationFinished result ->
         either logicalTextBytes logicalTextBytes result
-    AppToolImage callId _ -> logicalTextBytes callId
+    AppSetImagePreviews previews ->
+        imagePreviewPairsLogicalBytes previews
+    AppCommitImagePreviews previews ->
+        imagePreviewPairsLogicalBytes previews
+    AppToolImage callId preview ->
+        saturatingAdd
+            (logicalTextBytes callId)
+            (imagePreviewLogicalBytes preview)
     _ -> 256
+
+imagePreviewPairsLogicalBytes
+    :: [(ImageAttachment, TuiImagePreview)]
+    -> Int
+imagePreviewPairsLogicalBytes =
+    foldl'
+        (\size pair ->
+            saturatingAdd size (imagePreviewPairLogicalBytes pair))
+        0
+
+imagePreviewPairLogicalBytes
+    :: (ImageAttachment, TuiImagePreview)
+    -> Int
+imagePreviewPairLogicalBytes (attachment, preview) =
+    saturatingAdd
+        (imageAttachmentLogicalBytes attachment)
+        (imagePreviewLogicalBytes preview)
+
+imageAttachmentLogicalBytes :: ImageAttachment -> Int
+imageAttachmentLogicalBytes ImageAttachment{imageMime, imageBytes} =
+    saturatingAdd
+        (logicalTextBytes imageMime)
+        (BS.length imageBytes)
+
+-- The sampled ANSI bitmap is capped at 96x64 RGB pixels. Charge a rounded
+-- overhead for it without forcing the lazy sample, plus the larger of the
+-- source-size estimate and the actual Kitty payload retained by the preview.
+imagePreviewLogicalBytes :: TuiImagePreview -> Int
+imagePreviewLogicalBytes preview =
+    saturatingAdd
+        (32 * 1024)
+        (saturatingAdd
+            (logicalTextBytes preview.previewMime)
+            (max
+                (max 0 preview.previewBytes)
+                (BS.length
+                    preview.previewKittyAttachment.imageBytes)))
 
 logicalTextsBytes :: Foldable f => f Text -> Int
 logicalTextsBytes =

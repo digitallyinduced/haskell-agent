@@ -540,7 +540,8 @@ spec = describe "Agent.MCP" do
         it "rejects an HTTP body one byte over the limit" do
             reader <- scriptedBodyReader
                 [BS.replicate (16 * 1024 * 1024) 97, "b"]
-            readBounded reader `shouldSatisfy` isLeft
+            result <- readBounded reader
+            result `shouldSatisfy` isLeft
 
         it "accepts large reader chunks made of bounded SSE lines" do
             let chunk = BS.concat
