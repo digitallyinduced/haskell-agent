@@ -1063,6 +1063,7 @@ spec = do
             reverse <$> readIORef events `shouldReturn`
                 [ WarningRaised
                     "Codex usage is low: primary 8% left. Check /usage for reset details."
+                , ProviderLimitUpdated "5h limit left: 8%" True
                 ]
             readIORef healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1

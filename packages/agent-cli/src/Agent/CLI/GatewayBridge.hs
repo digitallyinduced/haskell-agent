@@ -473,6 +473,8 @@ updateManagedActivity event state =
                 { accumulatorKind = "activity"
                 , accumulatorMessage = nonEmpty "Working…" message
                 }
+        ProviderLimitUpdated _ _ ->
+            state
         WarningRaised message ->
             state
                 { accumulatorKind = "warning"
