@@ -163,7 +163,7 @@ schedulerLoopWithRegistry journal runner commands registry = go
     handleMessage state = \case
         Execute command reply -> do
             (next, result) <-
-                executeCommand journal runner registry state command
+                executeCommand journal registry state command
             atomically (putTMVar reply result)
             pure next
         TaskLogged taskId taskAttempt line ->
@@ -216,12 +216,11 @@ schedulerLoopWithRegistry journal runner commands registry = go
 
 executeCommand
     :: Journal
-    -> TaskRunner
     -> TVar (Map TaskId RunningTask)
     -> AdapterState
     -> TaskCommand
     -> IO (AdapterState, Either Text Value)
-executeCommand journal runner registry state = \case
+executeCommand journal registry state = \case
     Submit submitted
         | Map.member submitted.submittedId state.adapterTasks ->
             pure (state, Left "task id already exists")
