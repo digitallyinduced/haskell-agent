@@ -70,6 +70,44 @@ spec =
                         Right () -> pure ())
                     `finally` cleanup
 
+        it "ignores an unrelated migration 11 from another worktree" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                    migrationsFromArchivedSessionsWorktree =
+                        take 10 coreMigrations
+                            <> [ Migration
+                                    { migrationVersion = 11
+                                    , migrationName = "archived sessions"
+                                    , migrationStatements = []
+                                    }
+                               ]
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open migration pool: " <> show err)
+                        Right ownerPool ->
+                            finally
+                                (do
+                                    runMigrations ownerPool
+                                        migrationsFromArchivedSessionsWorktree
+                                        `shouldReturn` Right ()
+                                    runMigrations ownerPool coreMigrations
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.statement ()
+                                            providerTelemetryColumnStatement)
+                                        `shouldReturn` Right True
+                                )
+                                (closeStorePool ownerPool)
+                    ) `finally` cleanup
+
         it "upgrades an empty normalized session schema in place" $
             withSystemTempDirectory "ha" \stateDirectory -> do
                 let
@@ -473,6 +511,18 @@ serverStatement = Statement.preparable
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))
+
+providerTelemetryColumnStatement :: Statement () Bool
+providerTelemetryColumnStatement = Statement.preparable
+    "SELECT EXISTS (\
+    \ SELECT 1 FROM information_schema.columns\
+    \ WHERE table_schema = 'harness'\
+    \   AND table_name = 'session_turns'\
+    \   AND column_name = 'provider_telemetry_json'\
+    \ )"
+    Encoders.noParams
+    (Decoders.singleRow $
+        Decoders.column (Decoders.nonNullable Decoders.bool))
 
 migratedOpaqueFieldsStatement :: Statement () (Bool, Bool, Bool)
 migratedOpaqueFieldsStatement = Statement.preparable
