@@ -1,12 +1,15 @@
 -- | Usage-aware account selection for automatic startup and provider fallback.
 module Agent.CLI.AccountSelection
     ( AccountCandidate(..)
+    , PreparedProviderAccounts
     , SelectedAccount(..)
     , accountCapacity
     , loadedAuthSupportsUsageAccountSelection
+    , prepareProviderAccounts
     , providerSupportsUsageAccountSelection
     , selectCandidates
     , selectAccount
+    , selectPreparedProviderAccount
     , selectProviderAccount
     ) where
 
@@ -89,7 +92,23 @@ selectProviderAccount
     -> Maybe BillingMode
     -> Maybe (Text, Text)
     -> IO (Either Text SelectedAccount)
-selectProviderAccount provider requiredBilling remembered = do
+selectProviderAccount provider requiredBilling remembered =
+    selectPreparedProviderAccount remembered
+        <$> prepareProviderAccounts provider requiredBilling
+
+-- | Usage results prepared independently of project settings. The freshly
+-- checked-out project can apply its remembered account only after Git setup
+-- completes.
+data PreparedProviderAccounts = PreparedProviderAccounts
+    { preparedProvider :: !Provider
+    , preparedAccounts :: ![LoginAccount]
+    }
+
+prepareProviderAccounts
+    :: Provider
+    -> Maybe BillingMode
+    -> IO PreparedProviderAccounts
+prepareProviderAccounts provider requiredBilling = do
     providerAccounts <-
         filter
             ((== provider) . (.loginProvider))
@@ -106,11 +125,21 @@ selectProviderAccount provider requiredBilling remembered = do
                             providerAccounts
                 in if null subscription then providerAccounts else subscription
     checked <- mapConcurrently refreshSelectableAccount billingAccounts
-    pure $ case selectAccount remembered checked of
+    pure PreparedProviderAccounts
+        { preparedProvider = provider
+        , preparedAccounts = checked
+        }
+
+selectPreparedProviderAccount
+    :: Maybe (Text, Text)
+    -> PreparedProviderAccounts
+    -> Either Text SelectedAccount
+selectPreparedProviderAccount remembered prepared =
+    case selectAccount remembered prepared.preparedAccounts of
         Just selected -> Right selected
         Nothing -> Left $
             "no "
-                <> providerSlug provider
+                <> providerSlug prepared.preparedProvider
                 <> " account has verified available usage"
 
 -- | Prefer the remembered project account when it is usable; otherwise choose

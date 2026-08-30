@@ -1,9 +1,16 @@
-module Agent.CLI.Runtime.Orchestration.Initialized (runAgentInitialized) where
+module Agent.CLI.Runtime.Orchestration.Initialized
+    ( PreparedStartupAuth
+    , prepareStartupAuth
+    , runAgentInitialized
+    ) where
 
 import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection
-    ( SelectedAccount(..),
+    ( PreparedProviderAccounts,
+      SelectedAccount(..),
       loadedAuthSupportsUsageAccountSelection,
+      prepareProviderAccounts,
+      selectPreparedProviderAccount,
       selectProviderAccount )
 import Agent.CLI.Afk ()
 import Agent.CLI.AgentSessions ()
@@ -14,6 +21,7 @@ import Agent.CLI.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       preferredOpenAiTokenProvider,
+      loadAuth,
       loadAuthForAccount,
       probeLoadedAuthCredential,
       staticCredentialProvider )
@@ -118,7 +126,7 @@ import Agent.CLI.SessionState ()
 import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth
-    ( loadStartupAuth, markStartupStage, startupDie )
+    ( loadStartupAuth, loadStartupAuthFromResult, markStartupStage, startupDie )
 import Agent.CLI.StartupContext ()
 import Agent.CLI.Style ( setCliWindowTitle )
 import Agent.CLI.Subagents.Runtime ()
@@ -173,7 +181,7 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
-import Control.Concurrent.Async ( concurrently )
+import Control.Concurrent.Async ( Async, concurrently, wait )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ( modifyMVar_, newMVar, readMVar )
 import Control.Concurrent.STM ()
@@ -212,6 +220,25 @@ import qualified Agent.XAI.Client as XAIClient ()
 import qualified Agent.XAI.Request as XAIRequest ()
 import qualified Agent.XAI.Usage as XAIUsage ()
 
+data PreparedStartupAuth = PreparedStartupAuth
+    { preparedAuthResult :: !(Either Text LoadedAuth)
+    , preparedAccountUsage :: !(Maybe PreparedProviderAccounts)
+    }
+
+prepareStartupAuth :: Bool -> Maybe Provider -> IO PreparedStartupAuth
+prepareStartupAuth prepareAccountUsage requestedProvider = do
+    authResult <- loadAuth requestedProvider
+    accountUsage <- case authResult of
+        Right loaded
+            | prepareAccountUsage
+            , loadedAuthSupportsUsageAccountSelection loaded ->
+                Just <$> prepareProviderAccounts loaded.loadedProvider Nothing
+        _ -> pure Nothing
+    pure PreparedStartupAuth
+        { preparedAuthResult = authResult
+        , preparedAccountUsage = accountUsage
+        }
+
 runAgentInitialized
     :: (AgentRunMode -> CliOptions -> IO DevResult)
     -> AgentProcessRuntime
@@ -223,11 +250,12 @@ runAgentInitialized
     -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
+    -> Maybe (Async PreparedStartupAuth)
     -> IO RunResult
 runAgentInitialized
-        runAgentChild processRuntime options transition home root resumed resumeLock cwd startup =
+        runAgentChild processRuntime options transition home root resumed resumeLock cwd startup preparedAuth =
     runAgentInitializedWithLock
-        runAgentChild processRuntime options transition home root resumed resumeLock cwd startup
+        runAgentChild processRuntime options transition home root resumed resumeLock cwd startup preparedAuth
         `onException` mapM_ releaseSessionLock resumeLock
 
 runAgentInitializedWithLock
@@ -241,10 +269,11 @@ runAgentInitializedWithLock
     -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
+    -> Maybe (Async PreparedStartupAuth)
     -> IO RunResult
 runAgentInitializedWithLock
         runAgentChild processRuntime
-        options transition home root resumed resumeLock cwd startup = do
+        options transition home root resumed resumeLock cwd startup preparedAuth = do
     let baseToolEnv = startup.startupToolEnv
         mcpSupervisor = processRuntime.processMcpSupervisor
         interrupt = startup.startupInterrupt
@@ -366,12 +395,26 @@ runAgentInitializedWithLock
                 && isNothing resumed
                 && isNothing options.optProvider
                 && isNothing options.optModel
-    ((initialLoaded, learnAboutUserRequested), customBearerToken) <-
+    ( ( initialLoaded
+      , learnAboutUserRequested
+      , preparedAccountUsage
+      )
+      , customBearerToken
+      ) <-
         case customResponses of
             Nothing -> do
-                startupAuth <-
-                    loadStartupAuth startup transition requestedProvider
-                pure (startupAuth, Nothing)
+                (startupAuth, accountUsage) <- loadPreparedOrStartupAuth
+                    preparedAuth
+                    startup
+                    transition
+                    requestedProvider
+                pure
+                    ( ( fst startupAuth
+                      , snd startupAuth
+                      , accountUsage
+                      )
+                    , Nothing
+                    )
             Just (connectionId, responses) -> do
                 token <- case responses.responsesApiKeyEnv of
                     Nothing
@@ -409,6 +452,7 @@ runAgentInitializedWithLock
                             , loadedOpenAiPool = Nothing
                             }
                       , False
+                      , Nothing
                       )
                     , if Text.null token then Nothing else Just token
                     )
@@ -457,10 +501,17 @@ runAgentInitializedWithLock
                             , account.projectAccountId
                             ))
                         (projectAccountFor provider projectSettings)
-                selectProviderAccount
-                    provider
-                    Nothing
-                    rememberedIds >>= \case
+                let selectStartupAccount = case preparedAccountUsage of
+                        Just accountUsage ->
+                            pure $ selectPreparedProviderAccount
+                                rememberedIds
+                                accountUsage
+                        Nothing ->
+                            selectProviderAccount
+                                provider
+                                Nothing
+                                rememberedIds
+                selectStartupAccount >>= \case
                         Left err ->
                             startupDie startup (Text.unpack err)
                         Right selected ->
@@ -719,6 +770,32 @@ runAgentInitializedWithLock
         transitionTarget
         uiRuntimeRef
         unavailableProviders
+
+loadPreparedOrStartupAuth
+    :: Maybe (Async PreparedStartupAuth)
+    -> StartupRuntime
+    -> Maybe ProviderTransition
+    -> Maybe Provider
+    -> IO ((LoadedAuth, Bool), Maybe PreparedProviderAccounts)
+loadPreparedOrStartupAuth prepared startup transition requestedProvider =
+    case prepared of
+        Nothing ->
+            (, Nothing)
+                <$> loadStartupAuth startup transition requestedProvider
+        Just worker ->
+            wait worker >>= \case
+                preparedResult
+                    | Right loaded <- preparedResult.preparedAuthResult
+                    , maybe True (== loaded.loadedProvider) requestedProvider ->
+                        (, preparedResult.preparedAccountUsage)
+                            <$> loadStartupAuthFromResult
+                                startup
+                                transition
+                                requestedProvider
+                                preparedResult.preparedAuthResult
+                _ ->
+                    (, Nothing)
+                        <$> loadStartupAuth startup transition requestedProvider
 
 trackCredentialAccount
     :: IORef Text
