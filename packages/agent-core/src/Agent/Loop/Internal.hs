@@ -738,12 +738,18 @@ boundLoopToolOutput output
     | Text.length output <= loopEventTailPayloadBudgetCodeUnits =
         Text.copy output
     | otherwise =
-        Text.copy (Text.take loopEventTailPayloadCodeUnits output)
-            <> "\n[tool output truncated]"
+        toolOutputOmissionMarker
+            <> Text.copy (Text.takeEnd loopEventTailPayloadCodeUnits output)
 
 loopEventTailPayloadCodeUnits :: Int
 loopEventTailPayloadCodeUnits =
-    max 0 (loopEventTailPayloadBudgetCodeUnits - 24)
+    max 0
+        ( loopEventTailPayloadBudgetCodeUnits
+            - Text.length toolOutputOmissionMarker
+        )
+
+toolOutputOmissionMarker :: Text
+toolOutputOmissionMarker = "[earlier tool output truncated]\n"
 
 loopEventTailPayloadBudgetCodeUnits :: Int
 loopEventTailPayloadBudgetCodeUnits =
