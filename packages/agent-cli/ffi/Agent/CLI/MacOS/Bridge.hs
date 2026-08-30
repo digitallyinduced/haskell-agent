@@ -1,8 +1,21 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module Agent.CLI.MacOS.Bridge () where
+module Agent.CLI.MacOS.Bridge
+    ( BrowserCallback
+    , BrowserHost(..)
+    , BrowserRegistration(..)
+    , browserCommandABI
+    , browserOutputCapacity
+    , browserStatusMessage
+    , browserToolsWhenEnabled
+    , invokeBrowserCommand
+    ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
+import Agent.CLI.BrowserTools
+    ( BrowserCommand(..)
+    , browserTools
+    )
 import Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
     , NativeRunHooks(..)
@@ -118,6 +131,7 @@ import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
     )
+import Agent.Tools.Types (AppTool)
 import Control.Concurrent (forkFinally, forkIO)
 import Control.Concurrent.Async
     ( Async
@@ -129,10 +143,12 @@ import Control.Concurrent.Async
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
+    , modifyMVar_
     , newEmptyMVar
     , newMVar
     , putMVar
     , readMVar
+    , withMVar
     )
 import Control.Concurrent.STM
     ( TMVar
@@ -199,12 +215,16 @@ import Foreign
     , newStablePtr
     , nullFunPtr
     , nullPtr
+    , alloca
+    , peek
+    , poke
     , plusPtr
     , peekByteOff
     , sizeOf
     )
 import Foreign.C.String (CString)
 import Foreign.C.Types (CDouble(..), CInt(..), CLLong(..), CSize(..))
+import Foreign.Marshal.Alloc (allocaBytes)
 import System.Directory
     ( getTemporaryDirectory
     , removeFile
@@ -288,6 +308,15 @@ type LearnedSkillsListCallback =
     -> CString -> CSize -> CString -> CSize -> CString -> CSize
     -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
 
+type BrowserCallback =
+    Ptr () -> CInt
+    -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize
+    -> CDouble -> CDouble
+    -> CInt
+    -> Ptr Word8 -> CSize -> Ptr CSize
+    -> IO CInt
+
 foreign import ccall "dynamic"
     invokeEventCallback :: FunPtr EventCallback -> EventCallback
 
@@ -317,6 +346,9 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeLearnedSkillsListCallback
         :: FunPtr LearnedSkillsListCallback -> LearnedSkillsListCallback
+
+foreign import ccall "dynamic"
+    invokeBrowserCallback :: FunPtr BrowserCallback -> BrowserCallback
 
 data BridgeRequest = BridgeRequest
     { requestId :: !Text
@@ -464,6 +496,16 @@ data Engine = Engine
     { engineCommands :: !(TQueue EngineCommand)
     , engineDone :: !(MVar ())
     , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
+    , engineBrowser :: !BrowserHost
+    }
+
+data BrowserRegistration = BrowserRegistration
+    { browserCallback :: !(FunPtr BrowserCallback)
+    , browserContext :: !(Ptr ())
+    }
+
+newtype BrowserHost = BrowserHost
+    { browserRegistration :: MVar (Maybe BrowserRegistration)
     }
 
 data TurnControl = TurnControl
@@ -493,6 +535,9 @@ foreign export ccall ha_engine_send_json
 
 foreign export ccall ha_engine_stage_turn_images
     :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize -> IO CInt
+
+foreign export ccall ha_engine_set_browser_callback
+    :: Ptr () -> FunPtr BrowserCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_engine_destroy
     :: Ptr () -> IO ()
@@ -883,6 +928,7 @@ ha_engine_create callback context
             commands <- newTQueueIO
             done <- newEmptyMVar
             stagedImages <- newTVarIO Map.empty
+            browser <- BrowserHost <$> newMVar Nothing
             _ <- forkFinally
                 (workerLifecycle
                     callback
@@ -890,12 +936,14 @@ ha_engine_create callback context
                     config
                     (sessionsRoot home)
                     commands
-                    stagedImages)
+                    stagedImages
+                    browser)
                 (const (putMVar done ()))
             stable <- newStablePtr Engine
                 { engineCommands = commands
                 , engineDone = done
                 , engineStagedImages = stagedImages
+                , engineBrowser = browser
                 }
             pure (castStablePtrToPtr stable)
         case created of
@@ -930,6 +978,26 @@ ha_engine_send_json pointer bytes (CSize length)
             Left _ -> 3
             Right False -> 4
             Right True -> 0
+
+ha_engine_set_browser_callback
+    :: Ptr () -> FunPtr BrowserCallback -> Ptr () -> IO CInt
+ha_engine_set_browser_callback pointer callback context
+    | pointer == nullPtr = pure 1
+    | otherwise = do
+        updated <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            modifyMVar_ engine.engineBrowser.browserRegistration $ \_ ->
+                pure
+                    if callback == nullFunPtr
+                        then Nothing
+                        else Just BrowserRegistration
+                            { browserCallback = callback
+                            , browserContext = context
+                            }
+        pure $ case updated of
+            Left _ -> 2
+            Right () -> 0
 
 ha_engine_search_conversations
     :: Ptr () -> Ptr Word8 -> CSize -> CSize
@@ -1089,8 +1157,9 @@ workerLifecycle
     -> OsPath
     -> TQueue EngineCommand
     -> TVar (Map Text [ImageAttachment])
+    -> BrowserHost
     -> IO ()
-workerLifecycle callback context config root commands stagedImages = do
+workerLifecycle callback context config root commands stagedImages browser = do
     store <- newMVar Nothing
     processRuntime <- newNativeProcessRuntime root
     let cleanup =
@@ -1105,6 +1174,7 @@ workerLifecycle callback context config root commands stagedImages = do
         processRuntime
         commands
         stagedImages
+        browser
         `finally` cleanup
 
 idleLoop
@@ -1116,8 +1186,9 @@ idleLoop
     -> NativeProcessRuntime
     -> TQueue EngineCommand
     -> TVar (Map Text [ImageAttachment])
+    -> BrowserHost
     -> IO ()
-idleLoop callback context config store root processRuntime commands stagedImages =
+idleLoop callback context config store root processRuntime commands stagedImages browser =
     atomically (readTQueue commands) >>= \case
         EngineStop -> pure ()
         EngineSearch query limit searchCallback searchContext -> do
@@ -1144,6 +1215,7 @@ idleLoop callback context config store root processRuntime commands stagedImages
                             writeTVar stagedImages
                                 (Map.delete start.turnStartId staged)
                             pure (Map.findWithDefault [] start.turnStartId staged)
+                        nativeBrowserTools <- browserToolsWhenEnabled browser
                         control <- newTurnControl start.turnStartId
                         sendEvent callback context $
                             successEvent request.requestId $
@@ -1163,6 +1235,7 @@ idleLoop callback context config store root processRuntime commands stagedImages
                                 context
                                 processRuntime
                                 control
+                                nativeBrowserTools
                                 start
                                 images)
                             \running ->
@@ -1199,6 +1272,7 @@ idleLoop callback context config store root processRuntime commands stagedImages
             processRuntime
             commands
             stagedImages
+            browser
 
 activeLoop
     :: FunPtr EventCallback
@@ -1388,15 +1462,111 @@ searchRoleCode = \case
     Just "assistant" -> 2
     _ -> 0
 
+browserToolsWhenEnabled :: BrowserHost -> IO [AppTool]
+browserToolsWhenEnabled host =
+    withMVar host.browserRegistration \case
+        Nothing -> pure []
+        Just _ -> pure (browserTools (invokeBrowserCommand host))
+
+invokeBrowserCommand
+    :: BrowserHost
+    -> BrowserCommand
+    -> IO (Either Text Text)
+invokeBrowserCommand host command =
+    tryAny (withMVar host.browserRegistration invoke) >>= \case
+        Left exception -> pure (Left (Text.pack (show exception)))
+        Right result -> pure result
+  where
+    invoke Nothing =
+        pure (Left "The browser view is not active.")
+    invoke (Just registration) = do
+        let
+            ( commandCode
+                , argument1
+                , argument2
+                , scrollDeltaX
+                , scrollDeltaY
+                , flags
+                ) =
+                browserCommandABI command
+        withText argument1 \argument1Ptr argument1Length ->
+            withText argument2 \argument2Ptr argument2Length ->
+                allocaBytes browserOutputCapacity \output ->
+                    alloca \outputLength -> do
+                        poke outputLength 0
+                        status <- invokeBrowserCallback
+                            registration.browserCallback
+                            registration.browserContext
+                            commandCode
+                            (castPtr argument1Ptr)
+                            argument1Length
+                            (castPtr argument2Ptr)
+                            argument2Length
+                            scrollDeltaX
+                            scrollDeltaY
+                            flags
+                            output
+                            (fromIntegral browserOutputCapacity)
+                            outputLength
+                        CSize length <- peek outputLength
+                        if length > fromIntegral browserOutputCapacity
+                            then pure (Left
+                                "The browser returned more than the 256 KiB output limit.")
+                            else do
+                                bytes <- BS.packCStringLen
+                                    (castPtr output, fromIntegral length)
+                                pure $ case TextEncoding.decodeUtf8' bytes of
+                                    Left _ ->
+                                        Left "The browser returned invalid UTF-8."
+                                    Right text
+                                        | status == 0 -> Right text
+                                        | Text.null text ->
+                                            Left (browserStatusMessage status)
+                                        | otherwise -> Left text
+
+browserCommandABI
+    :: BrowserCommand
+    -> (CInt, Text, Text, CDouble, CDouble, CInt)
+browserCommandABI = \case
+    BrowserNavigate url -> (1, url, "", 0, 0, 0)
+    BrowserSnapshot -> (2, "", "", 0, 0, 0)
+    BrowserClick selector -> (3, selector, "", 0, 0, 0)
+    BrowserType selector text submit ->
+        (4, selector, text, 0, 0, if submit then 1 else 0)
+    BrowserBack -> (5, "", "", 0, 0, 0)
+    BrowserForward -> (6, "", "", 0, 0, 0)
+    BrowserReload -> (7, "", "", 0, 0, 0)
+    BrowserKey key -> (8, key, "", 0, 0, 0)
+    BrowserScroll deltaX deltaY ->
+        (9, "", "", realToFrac deltaX, realToFrac deltaY, 0)
+
+browserOutputCapacity :: Int
+browserOutputCapacity = 256 * 1024
+
+browserStatusMessage :: CInt -> Text
+browserStatusMessage = \case
+    1 -> "The browser host rejected an invalid argument."
+    2 -> "The native browser bridge is unavailable."
+    3 -> "The browser command timed out."
+    4 -> "The browser host denied website or extension access."
+    5 -> "The browser host does not support this operation."
+    6 -> "The native browser bridge failed internally."
+    7 -> "The browser host returned a result that was too large."
+    status ->
+        "The browser command failed (status "
+            <> Text.pack (show status)
+            <> ")."
+
 runNativeTurn
     :: FunPtr EventCallback
     -> Ptr ()
     -> NativeProcessRuntime
     -> TurnControl
+    -> [AppTool]
     -> TurnStart
     -> [ImageAttachment]
     -> IO TurnOutcome
-runNativeTurn callback context processRuntime control start images = do
+runNativeTurn callback context processRuntime control nativeBrowserTools start images = do
     sessionIdRef <- newIORef start.turnStartSessionId
     completedRef <- newIORef False
     let hooks = NativeRunHooks
@@ -1423,6 +1593,7 @@ runNativeTurn callback context processRuntime control start images = do
                 atomically . writeTVar control.turnControlAgentSnapshot
             , nativeRequestApproval =
                 requestApproval callback context control
+            , nativeTools = nativeBrowserTools
             }
         modelArgs = case
             (start.turnStartProvider, start.turnStartModel) of

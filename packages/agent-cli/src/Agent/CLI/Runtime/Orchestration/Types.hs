@@ -16,6 +16,7 @@ import Agent.Error ( ApiError )
 import Agent.Loop ( LoopEvent )
 import Agent.Provider ( Credential, TokenProvider )
 import Agent.ToolDispatch ( ToolCall )
+import Agent.Tools.Types ( AppTool )
 import Control.Concurrent.MVar ( MVar )
 import Data.Text ( Text )
 import System.IO ( Handle, stderr, stdout )
@@ -44,6 +45,7 @@ data NativeRunHooks = NativeRunHooks
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())
     , nativeRequestApproval :: !(ToolCall -> IO (Maybe PermissionChoice))
+    , nativeTools :: ![AppTool]
     }
 
 data AgentRunMode = AgentRunMode
