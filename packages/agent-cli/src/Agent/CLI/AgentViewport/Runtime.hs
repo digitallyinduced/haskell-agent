@@ -25,10 +25,15 @@ import Agent.CLI.AgentViewport
     , responseItemsToUiStateRelative
     )
 import Agent.CLI.NativeAgents
-    ( NativeAgentView(..)
-    , applyNativeAgentEvent
+    ( applyNativeAgentEvent
+    , emptyNativeAgentStore
     , nativeAgentEntries
+    , nativeAgentConversation
+    , nativeAgentLookup
+    , nativeAgentTargets
+    , nativeAgentTranscript
     , restoreNativeAgents
+    , setNativeAgentSelection
     )
 import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.Concurrent (mapConcurrentlyBounded)
@@ -53,6 +58,7 @@ import Data.IORef
     , writeIORef
     )
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Mem.StableName (StableName, makeStableName)
@@ -106,7 +112,7 @@ newAgentViewportRuntime
     -> IO AgentViewportRuntime
 newAgentViewportRuntime config = do
     selectedAgent <- newIORef AgentRoot
-    nativeAgents <- newIORef (Map.empty :: Map.Map Text NativeAgentView)
+    nativeAgents <- newIORef emptyNativeAgentStore
     stepCache <-
         newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
     let cachedAgentSteps target variant items build = do
@@ -131,9 +137,11 @@ newAgentViewportRuntime config = do
                     pure steps
         loadSnapshot includeSummaries = do
             rootItems <- config.viewportConfigReadRootTranscript
+            currentSelected <- readIORef selectedAgent
             native <-
                 atomicModifyIORef' nativeAgents \current ->
-                    let restored = restoreNativeAgents rootItems current
+                    let restored =
+                            restoreNativeAgents currentSelected rootItems current
                     in (restored, restored)
             children <- config.viewportConfigListChildren
             let availableTargets =
@@ -141,9 +149,7 @@ newAgentViewportRuntime config = do
                         : map
                             (AgentChild . (.childListingId))
                             children
-                        <> map
-                            (AgentNative . (.nativeAgentId))
-                            (Map.elems native)
+                        <> nativeAgentTargets native
             selected <-
                 atomicModifyIORef' selectedAgent \current ->
                     let reconciled =
@@ -151,6 +157,20 @@ newAgentViewportRuntime config = do
                                 availableTargets
                                 current
                     in (reconciled, reconciled)
+            atomicModifyIORef' nativeAgents \current ->
+                ( setNativeAgentSelection
+                    (case selected of
+                        AgentNative identifier -> Just identifier
+                        _ -> Nothing)
+                    current
+                , ()
+                )
+            atomicModifyIORef' stepCache \current ->
+                ( Map.restrictKeys
+                    current
+                    (Set.fromList availableTargets)
+                , ()
+                )
             childSources <- config.viewportConfigReadChildSources
             let transcriptLines target items
                     | null children = []
@@ -163,8 +183,8 @@ newAgentViewportRuntime config = do
                             | otherwise ->
                                 []
                         AgentNative nativeId ->
-                            maybe [] (.nativeAgentTranscript)
-                                (Map.lookup nativeId native)
+                            maybe [] nativeAgentTranscript
+                                (nativeAgentLookup nativeId native)
                     | includeSummaries =
                         responseItemPreviewLines 0 items
                     | otherwise = []
@@ -173,8 +193,8 @@ newAgentViewportRuntime config = do
                     | target /= selected = initialUiState
                     | target == AgentRoot = initialUiState
                     | AgentNative nativeId <- target =
-                        maybe initialUiState (.nativeAgentConversation)
-                            (Map.lookup nativeId native)
+                        maybe initialUiState nativeAgentConversation
+                            (nativeAgentLookup nativeId native)
                     | otherwise =
                         settleConversation items status $
                             responseItemsToUiStateRelative
@@ -211,7 +231,9 @@ newAgentViewportRuntime config = do
                 children
             pure
                 ( selected
-                , rootEntry : childEntries <> nativeAgentEntries native
+                , rootEntry
+                    : childEntries
+                        <> nativeAgentEntries selected native
                 )
         selectAgent target = do
             previous <- readIORef selectedAgent
@@ -223,6 +245,14 @@ newAgentViewportRuntime config = do
                 AgentChild agentId ->
                     config.viewportConfigSelectChild agentId
             writeIORef selectedAgent target
+            atomicModifyIORef' nativeAgents \current ->
+                ( setNativeAgentSelection
+                    (case target of
+                        AgentNative identifier -> Just identifier
+                        _ -> Nothing)
+                    current
+                , ()
+                )
         environment = AgentViewportEnv
             { viewportSelected = selectedAgent
             , viewportSelect = selectAgent
@@ -233,6 +263,7 @@ newAgentViewportRuntime config = do
                 (applyNativeAgentEvent event current, ())
         reset = do
             writeIORef selectedAgent AgentRoot
+            writeIORef nativeAgents emptyNativeAgentStore
             writeIORef stepCache Map.empty
     pure AgentViewportRuntime
         { runtimeEnvironment = environment
@@ -262,8 +293,8 @@ selectAgentViewport runtime =
 
 -- | Reset selection and derived step previews for a fresh conversation.
 --
--- Native-agent views remain event-owned, matching the existing session reset
--- semantics.
+-- Native-agent views are conversation-owned and must not retain completed
+-- output after a session reset.
 resetAgentViewport :: AgentViewportRuntime -> IO ()
 resetAgentViewport = (.runtimeReset)
 

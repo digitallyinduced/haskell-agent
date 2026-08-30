@@ -68,6 +68,7 @@ logicalReplLineBytes :: ReplLine -> Int
 logicalReplLineBytes = \case
     ReplEof -> 0
     ReplText text -> logicalTextBytes text
+    ReplMeta text -> logicalTextBytes text
     ReplPasted text -> logicalTextBytes text
     ReplClipboardPaste draft images ->
         logicalTextBytes draft

@@ -160,6 +160,43 @@ spec = describe "provider-native agent tracking" do
                     emptyNativeAgentStore
         nativeAgentStoreSize restored `shouldBe` 0
 
+    it "restores a selected row beyond the bounded pending-output window" do
+        let selectedId = "selected"
+            selectedCall = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = selectedId
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output identifier = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = identifier
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding
+                        (Aeson.toEncoding ("done" :: String))
+                , status = Just ItemCompleted
+                }
+            newerUnpaired =
+                [ output
+                    (Text.pack ("unpaired-" <> show index))
+                | index <- [1 .. nativeAgentMaxEntries + 16]
+                ]
+            restored =
+                restoreNativeAgents
+                    (AgentNative selectedId)
+                    (selectedCall : output selectedId : newerUnpaired)
+                    emptyNativeAgentStore
+        nativeAgentLookup selectedId restored
+            `shouldSatisfy` maybe False
+                ((== "done") . (.nativeAgentStatus))
+
     it "bounds terminal rows and retained output" do
         let payload = Text.replicate (nativeAgentPreviewBytes `div` 2) "x"
             tracked =
@@ -227,13 +264,15 @@ spec = describe "provider-native agent tracking" do
         (Foldable.toList . (.uiBlocks) . (.agentConversation) <$> two)
             `shouldBe` Just []
 
-    it "drops stale live terminal rows instead of resurrecting them" do
-        let stale =
+    it "retains bounded live terminal rows while persistence catches up" do
+        let pending =
                 applyNativeAgentEvent
                     (NativeAgentFinished "stale" NativeAgentCompleted)
                     emptyNativeAgentStore
-            restored = restoreNativeAgents AgentRoot [] stale
-        nativeAgentLookup "stale" restored `shouldBe` Nothing
+            restored = restoreNativeAgents AgentRoot [] pending
+        nativeAgentLookup "stale" restored
+            `shouldSatisfy` maybe False
+                ((== "done") . (.nativeAgentStatus))
 
 lookupView :: Text.Text -> NativeAgentStore -> NativeAgentView
 lookupView identifier store =

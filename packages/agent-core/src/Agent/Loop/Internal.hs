@@ -668,6 +668,7 @@ data LoopEventCoalescingKey
     = AssistantTextDelta
     | AssistantReasoningDelta
     | ToolOutputSnapshot !Text
+    | NativeAgentOutputDelta !Text
     deriving (Eq)
 
 type LoopEventPump = EventPump LoopEventCoalescingKey LoopEvent
@@ -683,9 +684,34 @@ emitLoopEvent pump = \case
             pump
             (ToolOutputSnapshot callId)
             (ToolOutputUpdated callId)
+            (boundLoopToolOutput output)
+    NativeAgentOutput identifier output ->
+        emitAppendedText
+            pump
+            (NativeAgentOutputDelta identifier)
+            (NativeAgentOutput identifier)
             output
     event ->
         emitEvent pump event
+
+-- Tool output callbacks carry cumulative snapshots. Keep the coalesced value
+-- bounded even when a provider sends one giant snapshot; the complete result
+-- remains available through the normal tool-result or artifact path.
+boundLoopToolOutput :: Text -> Text
+boundLoopToolOutput output
+    | Text.length output <= loopEventTailPayloadBudgetCodeUnits =
+        Text.copy output
+    | otherwise =
+        Text.copy (Text.take loopEventTailPayloadCodeUnits output)
+            <> "\n[tool output truncated]"
+
+loopEventTailPayloadCodeUnits :: Int
+loopEventTailPayloadCodeUnits =
+    max 0 (loopEventTailPayloadBudgetCodeUnits - 24)
+
+loopEventTailPayloadBudgetCodeUnits :: Int
+loopEventTailPayloadBudgetCodeUnits =
+    (8 * 1024 * 1024 - 64) `div` 4
 
 handleLoopEventFailure
     :: ([ResponseItem] -> LoopProgress -> SomeException -> IO LoopExecution)

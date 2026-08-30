@@ -24,7 +24,7 @@ import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenRouter.Error (classifyFailure)
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request (buildRequest)
-import Agent.OpenRouter.Stream (buildResponse)
+import Agent.OpenRouter.Stream (streamAssemblyConfig)
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
@@ -113,7 +113,7 @@ openRouterProviderConfig options credential = ProviderClientConfig
             . optionalHeader "HTTP-Referer" options.httpReferer
             . optionalHeader "X-Title" options.appTitle
     , providerClassifyFailure = classifyFailure
-    , providerBuildResponse = buildResponse
+    , providerAssemblyConfig = streamAssemblyConfig
     , providerRetryableFailure = isInlineRetryableProviderError
     }
 

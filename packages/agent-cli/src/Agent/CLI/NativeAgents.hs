@@ -207,10 +207,7 @@ restoreNativeAgents selected items current =
             Map.filterWithKey
                 (\identifier view ->
                     view.nativeAgentOrigin == NativeAgentLive
-                        && Map.notMember identifier canonicalAgents
-                        && ( view.nativeAgentStatus == "running"
-                            || Just identifier == selectedIdentifier
-                           ))
+                        && Map.notMember identifier canonicalAgents)
                 current.storeAgents
     closeParents ids =
         let withParents =
@@ -257,7 +254,8 @@ canonicalNativeAgents selected =
                 item : rest -> case item of
                     FunctionCallOutputItem output
                         | output.provider == Just "claude-code"
-                        , Map.size agents < nativeAgentMaxEntries
+                        , Map.member output.callId outputs
+                            || Map.size outputs < nativeAgentMaxEntries
                             || selected == Just output.callId ->
                             go
                                 (Map.insert output.callId output outputs)

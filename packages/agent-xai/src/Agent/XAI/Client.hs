@@ -27,7 +27,7 @@ import Agent.XAI.Error
     )
 import Agent.XAI.Options
 import Agent.XAI.Request (buildRequest)
-import Agent.XAI.Stream (buildResponse)
+import Agent.XAI.Stream (streamAssemblyConfig)
 import Control.Retry
     ( RetryPolicyM
     , constantDelay
@@ -147,7 +147,7 @@ xaiProviderConfig options credential = ProviderClientConfig
             . setRequestHeader "User-Agent"
                 [Text.encodeUtf8 (grokUserAgent options.clientVersion)]
     , providerClassifyFailure = classifyFailure
-    , providerBuildResponse = buildResponse
+    , providerAssemblyConfig = streamAssemblyConfig
     , providerRetryableFailure = isCapacityRetryable
     }
 
