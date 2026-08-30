@@ -46,6 +46,8 @@ data ReplAction
     -- ^ Retry the last failed turn with its original attachments.
     | ReplShowSession
     | ReplShowSessionInfo
+    | ReplDesktop
+    -- ^ Open the current persisted conversation in the native macOS app.
     | ReplAfk (Maybe Text)
     -- ^ Hand the active session to tmux, optionally on @host:path@.
     | ReplWorktree

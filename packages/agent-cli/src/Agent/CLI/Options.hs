@@ -614,6 +614,7 @@ usage = unlines
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."
     , "/resume [ID] resumes a persisted session (TTY: two-pane picker)."
+    , "/desktop opens the current persisted conversation in the macOS app."
     , "/paste [TEXT] attaches a clipboard image to the next"
     , "message and draws an in-terminal preview (Kitty/Ghostty/WezTerm/iTerm2);"
     , "/paste --send [TEXT] sends immediately. Cmd+V of a Finder image path also"

@@ -26,6 +26,7 @@ import Agent.CLI.Command
                  ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopyLast,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
+                 ReplDesktop,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
                  ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
                  ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
@@ -54,6 +55,7 @@ import Agent.CLI.Transcript
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
+import Agent.CLI.Desktop ( openDesktopConversation )
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.ExternalProgram
@@ -620,6 +622,32 @@ handleReplLine
                             "session id"
                             "this session has no persisted id yet"
                             sessionId
+                        continue
+                    ReplDesktop -> do
+                        currentSessionId persist >>= \case
+                            Nothing -> do
+                                let err =
+                                        "/desktop requires a persisted \
+                                        \conversation"
+                                color <- resolveColor stderr
+                                displayError err $
+                                    Text.hPutStrLn stderr (roleError color err)
+                            Just sessionId ->
+                                openDesktopConversation sessionId >>= \case
+                                    Left err -> do
+                                        color <- resolveColor stderr
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                    Right () -> do
+                                        let message =
+                                                "opened conversation in \
+                                                \Haskell Agent"
+                                        color <- resolveColor stderr
+                                        displayInfo message $
+                                            Text.hPutStrLn stderr
+                                                (roleSuccess color
+                                                    (glyphOk <> message))
                         continue
                     ReplShowTerminal -> do
                         let message = formatTerminalCapabilities terminal
