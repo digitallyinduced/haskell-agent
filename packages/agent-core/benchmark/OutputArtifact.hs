@@ -5,20 +5,26 @@
 module Main (main) where
 
 import Agent.Tools.OutputArtifact
-    ( ReadArgs(..)
-    , SearchArgs(..)
+    ( artifactTools
     , outputArtifactMetadata
     , readOutputArtifact
-    , readToolOutput
-    , searchToolOutput
     , writeOutputArtifactDetailed
     )
+import Agent.ToolDispatch
+    ( ToolCall
+    , ToolDispatchConfig(..)
+    , dispatchToolHandler
+    , functionToolCall
+    )
 import Agent.Tools.Types
-    ( defaultToolEnv
+    ( AppTool(..)
+    , ToolEnv
+    , defaultToolEnv
     , setToolSessionTmp
     )
 import Control.Exception (evaluate)
 import qualified Data.ByteString as ByteString
+import Data.List (find)
 import qualified Data.Text as Text
 import GHC.Stats
     ( RTSStats(..)
@@ -68,11 +74,15 @@ main = do
         Left err -> die (Text.unpack err)
         Right artifact -> do
             run "bounded-read" $
-                readToolOutput env
-                    (ReadArgs artifact.artifactHandle (Just 1) (Just 1))
+                runArtifactTool env $
+                    functionToolCall "read" "read_tool_output"
+                        ( "{\"handle\":\"" <> artifact.artifactHandle
+                            <> "\",\"offset\":1,\"limit\":1}" )
             run "bounded-search" $
-                searchToolOutput env
-                    (SearchArgs artifact.artifactHandle "needle" False (Just 5))
+                runArtifactTool env $
+                    functionToolCall "search" "search_tool_output"
+                        ( "{\"handle\":\"" <> artifact.artifactHandle
+                            <> "\",\"pattern\":\"needle\",\"head_limit\":5}" )
             run "metadata" $
                 outputArtifactMetadata env artifact.artifactHandle
             run "full-read-baseline" $
@@ -98,3 +108,18 @@ measure action = do
             fromIntegral (after.allocated_bytes - before.allocated_bytes)
         , liveBytes = fromIntegral settled.live_bytes
         }
+
+runArtifactTool :: ToolEnv -> ToolCall -> IO Text.Text
+runArtifactTool env call = do
+    let tool = find ((== call.name) . (.appToolName)) (artifactTools env Nothing)
+        config = ToolDispatchConfig
+            { toolDispatchUnknownTool = ("unknown tool: " <>)
+            , toolDispatchFormatResult = either id id
+            , toolDispatchFormatException = \_ exception ->
+                Text.pack (show exception)
+            , toolDispatchOnException = \_ _ -> pure ()
+            , toolDispatchOnOutput = \_ _ -> pure ()
+            , toolDispatchFinalizeOutput = \_ output -> pure output
+            }
+    result <- dispatchToolHandler config (appToolHandler <$> tool) call
+    pure result.output
