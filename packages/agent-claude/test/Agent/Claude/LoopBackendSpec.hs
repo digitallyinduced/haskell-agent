@@ -18,6 +18,7 @@ import Agent.Json (rawJsonBytes)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , emptyBackendSnapshot
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
@@ -84,7 +85,8 @@ submitBackend
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError TurnOutput)
 submitBackend backend previous inputs onEvent =
-    fmap (.backendOutput) <$> backend.submitTurn [] previous inputs onEvent
+    fmap (.backendOutput) <$>
+        backend.submitTurn emptyBackendSnapshot previous inputs onEvent
 
 spec :: Spec
 spec = do

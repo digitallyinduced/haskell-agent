@@ -39,7 +39,9 @@ import Agent.Error
 import Agent.InterAgentMessage (renderInterAgentMessage)
 import Agent.Loop
     ( Backend(..)
+    , BackendContinuation(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
@@ -47,6 +49,8 @@ import Agent.Loop
     , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , advanceBackendSnapshot
+    , backendContinuationToken
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Telemetry
@@ -92,7 +96,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -101,11 +105,6 @@ import qualified Data.UUID.Types as UUID
 import qualified System.Directory as Directory
 import System.FilePath (takeExtension)
 import System.IO (hClose, openBinaryTempFile)
-import System.Mem.StableName
-    ( StableName
-    , eqStableName
-    , makeStableName
-    )
 import Claude.Agent.SDK.Errors
     ( ClaudeSDKError(..)
     , renderClaudeSDKError
@@ -123,13 +122,12 @@ import Claude.Agent.SDK.Types
     , Usage(..)
     , messageHasParentToolUseId
     )
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (void)
 
-data HostTranscriptCheckpoint = HostTranscriptCheckpoint
-    { checkpointTranscript :: !(StableName [ResponseItem])
-    , checkpointSessionId :: !Text
-    }
+claudeProviderNamespace :: Text
+claudeProviderNamespace = "anthropic.claude-code"
 
 -- | Keep one structured Claude process alive for the callback's complete
 -- lifetime. The initial previous-response ID is consumed only by the first
@@ -147,12 +145,10 @@ withClaudeCodeBackend options initialPrevious getParams transcript callback =
         sdkOptions
             { resume = initialPrevious >>= canonicalClaudeSessionId }
         \session -> do
-        checkpoint <- newIORef Nothing
         callback
             (backendForSession
                 options.transport
                 session
-                checkpoint
                 getParams
                 transcript)
 
@@ -177,13 +173,11 @@ withClaudeCodeBackendWithHost
         sdkOptions
         (toClaudeAgentHandlers host)
         \session -> do
-            checkpoint <- newIORef Nothing
             callback ClaudeCodeBackendHandle
                 { loopBackend =
                     backendForSession
                         options.transport
                         session
-                        checkpoint
                         getParams
                         transcript
                 , interruptActiveTurn = abort session
@@ -197,69 +191,70 @@ claudeCodeOneShotBackend
     -> IORef [ResponseItem]
     -> Backend
 claudeCodeOneShotBackend options getParams transcript =
-    Backend \_state previous inputs onEvent -> do
-        checkpoint <- newIORef Nothing
+    Backend \snapshot previous inputs onEvent -> do
         sdkOptions <-
             toClaudeAgentOptions ClaudeCodeNoTools options
         result <- withClaudeSDKClient sdkOptions \session ->
             submitClaudeCodeTurn
                 options.transport
                 session
-                checkpoint
+                snapshot
                 previous
                 getParams
                 transcript
                 inputs
                 onEvent
-        attachBackendState transcript result
+        attachBackendState snapshot result
 
 backendForSession
     :: ClaudeCodeTransport
     -> ClaudeSDKClient
-    -> IORef (Maybe HostTranscriptCheckpoint)
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-backendForSession transport session checkpoint getParams transcript =
-    Backend \_state previous inputs onEvent -> do
+backendForSession transport session getParams transcript =
+    Backend \snapshot previous inputs onEvent -> do
         result <- submitClaudeCodeTurn
             transport
             session
-            checkpoint
+            snapshot
             previous
             getParams
             transcript
             inputs
             onEvent
-        attachBackendState transcript result
+        attachBackendState snapshot result
 
 attachBackendState
-    :: IORef [ResponseItem]
-    -> Either ApiError TurnOutput
+    :: BackendSnapshot
+    -> Either ApiError (TurnOutput, [ResponseItem])
     -> IO (Either ApiError BackendResult)
 attachBackendState _ (Left err) =
     pure (Left err)
-attachBackendState transcript (Right output) = do
-    state <- readIORef transcript
+attachBackendState snapshot (Right (output, items)) = do
     pure $ Right BackendResult
         { backendOutput = output
-        , backendState = state
+        , backendState = advanceBackendSnapshot snapshot items
+            (Just BackendContinuation
+                { continuationProvider = claudeProviderNamespace
+                , continuationToken = output.responseId
+                })
         }
 
 submitClaudeCodeTurn
     :: ClaudeCodeTransport
     -> ClaudeSDKClient
-    -> IORef (Maybe HostTranscriptCheckpoint)
+    -> BackendSnapshot
     -> Maybe Text
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> [TurnInput]
     -> (LoopEvent -> IO ())
-    -> IO (Either ApiError TurnOutput)
+    -> IO (Either ApiError (TurnOutput, [ResponseItem]))
 submitClaudeCodeTurn
     transport
     session
-    checkpoint
+    snapshot
     previous
     getParams
     transcript
@@ -272,18 +267,19 @@ submitClaudeCodeTurn
             \(inputText, inputImages, _inputFiles) -> do
                 params <- getParams
                 let previousSession =
-                        previous >>= canonicalClaudeSessionId
+                        previous >>= \requested ->
+                            backendContinuationToken
+                                claudeProviderNamespace
+                                snapshot
+                                <|> canonicalClaudeSessionId requested
+                    history = snapshot.backendItems
                 result <- withClaudeSDKTurn
                     session
-                    (hostTranscriptMatches
-                        checkpoint
-                        transcript
-                        previousSession)
+                    (pure (isJust previousSession))
                     previousSession
                     params.model
                     (params.reasoning >>= (.effort))
                     \turn -> do
-                        history <- readIORef transcript
                         messages <- newIORef []
                         eventState <- newIORef emptyClaudeEventState
                         let prompt =
@@ -356,6 +352,7 @@ submitClaudeCodeTurn
                                             completed
                                             result
                                             inputs
+                                            history
                                             finalEventState
                                             onEvent
                 pure (either (Left . sdkErrorToApiError) Right result)
@@ -371,10 +368,11 @@ submitClaudeCodeTurn
         -> CompletedClaudeTurn
         -> ResultMessage
         -> [TurnInput]
+        -> [ResponseItem]
         -> ClaudeEventState
         -> (LoopEvent -> IO ())
-        -> IO (Either ClaudeSDKError (TurnOutput, IO ()))
-    completeTurn turn completed result inputs eventState onEvent = do
+        -> IO (Either ClaudeSDKError ((TurnOutput, [ResponseItem]), IO ()))
+    completeTurn turn completed result inputs history eventState onEvent = do
         usage <- resolveTurnUsage
             turn
             completed.tokenUsage
@@ -391,13 +389,18 @@ submitClaudeCodeTurn
                 }
             commit =
                 commitHostTranscript
-                    checkpoint
                     transcript
                     completed.sessionId
                     inputs
                     completed.turnItems
         mapM_ onEvent (remainingClaudeEvents eventState completed)
-        pure (Right (output, commit))
+        pure
+            (Right
+                ( ( output
+                  , history <> turnInputsToItems inputs <> completed.turnItems
+                  )
+                , commit
+                ))
 
 claudeResultTelemetry :: ResultMessage -> Maybe TurnTelemetry
 claudeResultTelemetry result
@@ -682,71 +685,18 @@ renderRawJson raw =
     bytes = rawJsonBytes raw
     rawText = TextEncoding.decodeUtf8With lenientDecode bytes
 
-hostTranscriptMatches
-    :: IORef (Maybe HostTranscriptCheckpoint)
-    -> IORef [ResponseItem]
-    -> Maybe Text
-    -> IO Bool
-hostTranscriptMatches checkpoint transcript previous = do
-    expected <- readIORef checkpoint
-    case expected of
-        Nothing ->
-            pure True
-        Just expectedCheckpoint -> do
-            case previous of
-                Nothing ->
-                    -- In Agent.Loop, dropping the previous response ID is an
-                    -- explicit conversation reset even if the host transcript
-                    -- object has not changed.
-                    pure False
-                Just _ -> do
-                    current <- readIORef transcript
-                    currentName <- current `seq` makeStableName current
-                    pure $
-                        eqStableName
-                            expectedCheckpoint.checkpointTranscript
-                            currentName
-                            || requestedDifferentSession expectedCheckpoint
-  where
-    requestedDifferentSession :: HostTranscriptCheckpoint -> Bool
-    requestedDifferentSession expectedCheckpoint =
-        case previous >>= canonicalSessionId of
-            Just requested ->
-                requested
-                    /= expectedCheckpoint.checkpointSessionId
-            Nothing ->
-                False
-
-    canonicalSessionId value =
-        UUID.toText <$> UUID.fromText (Text.strip value)
-
 commitHostTranscript
-    :: IORef (Maybe HostTranscriptCheckpoint)
-    -> IORef [ResponseItem]
+    :: IORef [ResponseItem]
     -> Text
     -> [TurnInput]
     -> [ResponseItem]
     -> IO ()
 commitHostTranscript
-    checkpoint
     transcript
-    sessionId
+    _sessionId
     inputs
     turnItems = do
     appendHostTranscriptRef transcript inputs turnItems
-    -- Read and enter the exact object installed in the IORef before taking its
-    -- StableName. Otherwise the lazy append thunk can later be entered by the
-    -- CLI, changing the StableName despite no host-side transcript change.
-    committed <- readIORef transcript
-    committedName <- committed `seq` makeStableName committed
-    writeIORef checkpoint $
-        Just HostTranscriptCheckpoint
-            { checkpointTranscript = committedName
-            , checkpointSessionId =
-                fromMaybe
-                    (Text.strip sessionId)
-                    (canonicalClaudeSessionId sessionId)
-            }
 
 appendHostTranscript
     :: [ResponseItem]
