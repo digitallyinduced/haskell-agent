@@ -18,6 +18,8 @@ module Agent.CLI.TUI.Composer
     , drawComposer
     , drawQueuedInputs
     , drawSlashMenu
+    , fullscreenInputByteLimit
+    , fullscreenInputCountLimit
     , handleComposerKey
     , handleDictationKey
     , handleControlMouseDown
@@ -164,13 +166,19 @@ handlePromptControlClick applyUiEvent choice = do
                 || maybe False (const True) ui.uiPermission
     if ui.uiAwaitingInput && not overlayOpen
         then do
-            liftIO $ atomically $
+            queued <- liftIO $ atomically $
                 appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
                     { fullscreenInputLine = choice ui.uiDraft
                     , fullscreenInputQueued = False
                     , fullscreenInputDisplay = Nothing
                     }
-            applyUiEvent (UiSetAwaitingInput False) id
+            case queued of
+                Left message ->
+                    applyUiEvent
+                        (UiSetNotice (Just (warningNotice message)))
+                        id
+                Right () ->
+                    applyUiEvent (UiSetAwaitingInput False) id
         else
             applyUiEvent
                 (UiSetNotice
@@ -522,7 +530,7 @@ handleComposerKey
 
     submitRaw replLine = do
         state <- get
-        enqueueInput state replLine Nothing False
+        void (enqueueInput state replLine Nothing False)
 
     submitDraft = do
         state <- get
@@ -534,9 +542,8 @@ handleComposerKey
             Just text -> submitText state text state.appPasted
 
     submitText state text pasted = do
-        liftIO (appendReplHistory text)
         let replLine = if pasted then ReplPasted text else ReplText text
-        case immediateBtwQuestion state.appUi replLine of
+        accepted <- case immediateBtwQuestion state.appUi replLine of
             Just question -> do
                 applyUiEvent UiDraftSubmitted \current ->
                     current
@@ -545,26 +552,39 @@ handleComposerKey
                         , appUndo = []
                         }
                 liftIO (state.appRuntime.runtimeBtw question)
+                pure True
             Nothing ->
                 case steeringPrompt state.appUi text of
                     Just prompt -> do
-                        applyUiEvent UiDraftSubmitted \current ->
-                            current
-                                { appSlashIndex = 0
-                                , appSlashDismissed = False
-                                , appUndo = []
-                                }
-                        liftIO (state.appRuntime.runtimeSteer prompt)
+                        result <- liftIO
+                            (state.appRuntime.runtimeSteer prompt)
+                        case result of
+                            Left message -> do
+                                applyUiEvent
+                                    (UiSetNotice
+                                        (Just (warningNotice message)))
+                                    id
+                                pure False
+                            Right () -> do
+                                applyUiEvent UiDraftSubmitted \current ->
+                                    current
+                                        { appSlashIndex = 0
+                                        , appSlashDismissed = False
+                                        , appUndo = []
+                                        }
+                                pure True
                     Nothing ->
                         enqueueInput state replLine (Just text) True
-        modify' \current ->
-            current
-                { appPasted = False
-                , appHistory = Bridge.pushHistory text current.appHistory
-                , appHistoryIndex = Nothing
-                , appHistoryDraft = ""
-                }
-        vScrollToEnd (viewportScroll ConversationViewport)
+        when accepted do
+            liftIO (appendReplHistory text)
+            modify' \current ->
+                current
+                    { appPasted = False
+                    , appHistory = Bridge.pushHistory text current.appHistory
+                    , appHistoryIndex = Nothing
+                    , appHistoryDraft = ""
+                    }
+            vScrollToEnd (viewportScroll ConversationViewport)
 
     steeringPrompt ui text
         | not ui.uiRunning = Nothing
@@ -595,8 +615,7 @@ handleComposerKey
                                             "Cancelling the current turn; sending the queued prompt next…")))
                             liftIO state.appRuntime.runtimeCancel
                 else do
-                    liftIO (appendReplHistory draft)
-                    liftIO $ atomically $
+                    promoted <- liftIO $ atomically $
                         promoteFullscreenInput
                             state.appRuntime.runtimeInput
                             FullscreenInput
@@ -607,21 +626,29 @@ handleComposerKey
                                 , fullscreenInputQueued = True
                                 , fullscreenInputDisplay = Just draft
                                 }
-                    applyUiEvent
-                        (UiInputPromoted draft)
-                        \current ->
-                            current
-                                { appPasted = False
-                                , appHistory =
-                                    Bridge.pushHistory draft current.appHistory
-                                , appHistoryIndex = Nothing
-                                , appHistoryDraft = ""
-                                , appSlashIndex = 0
-                                , appSlashDismissed = False
-                                , appUndo = []
-                                }
-                    liftIO state.appRuntime.runtimeCancel
-                    vScrollToEnd (viewportScroll ConversationViewport)
+                    case promoted of
+                        Left message ->
+                            modifyUi
+                                (UiSetNotice
+                                    (Just (warningNotice message)))
+                        Right () -> do
+                            liftIO (appendReplHistory draft)
+                            applyUiEvent
+                                (UiInputPromoted draft)
+                                \current ->
+                                    current
+                                        { appPasted = False
+                                        , appHistory =
+                                            Bridge.pushHistory draft current.appHistory
+                                        , appHistoryIndex = Nothing
+                                        , appHistoryDraft = ""
+                                        , appSlashIndex = 0
+                                        , appSlashDismissed = False
+                                        , appUndo = []
+                                        }
+                            liftIO state.appRuntime.runtimeCancel
+                            vScrollToEnd
+                                (viewportScroll ConversationViewport)
 
     enqueueInput state replLine display clearDraft = do
         let queued = not state.appUi.uiAwaitingInput
@@ -643,15 +670,23 @@ handleComposerKey
                             then []
                             else current.appUndo
                     }
-        case event of
-            Nothing -> modify' update
-            Just uiEvent -> applyUiEvent uiEvent update
-        liftIO $ atomically $
+        result <- liftIO $ atomically $
             appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
                 { fullscreenInputLine = replLine
                 , fullscreenInputQueued = queued
                 , fullscreenInputDisplay = display
                 }
+        case result of
+            Left message -> do
+                applyUiEvent
+                    (UiSetNotice (Just (warningNotice message)))
+                    id
+                pure False
+            Right () -> do
+                case event of
+                    Nothing -> modify' update
+                    Just uiEvent -> applyUiEvent uiEvent update
+                pure True
 
     cancelOrClear = do
         state <- get

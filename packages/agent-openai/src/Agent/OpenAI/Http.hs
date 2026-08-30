@@ -4,6 +4,8 @@ module Agent.OpenAI.Http
     , decodeCodexHttpBodyWithModel
     , decodeCodexHttpBodyBytes
     , decodeCodexHttpBodyBytesWithModel
+    , stepCodexStreamResponse
+    , finishCodexStreamResponse
     , rejectFailedCodexResponse
     ) where
 
@@ -16,9 +18,13 @@ import Agent.Responses.LoopBackend (hasRecoverableIncompleteOutput)
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , StreamAssemblyConfig(..)
+    , StreamAssemblyState
+    , applyStreamEvent
     , buildStreamResponseWithModel
     , failedResponseMessage
     , failedStreamResponseMessage
+    , finishStreamResponse
+    , responseFailureFromState
     )
 import qualified Agent.Responses.Types as OpenAI
 import Control.Applicative ((<|>))
@@ -161,6 +167,45 @@ rejectFailedCodexResponse response =
             | hasRecoverableIncompleteOutput response -> Right response
             | otherwise -> Left (terminalResponseError response)
         _ -> Right response
+
+-- | Apply one decoded Codex SSE event without retaining the preceding events.
+-- A terminal event returns the assembled response (or its typed provider
+-- error); non-terminal events return the next bounded assembly state.
+stepCodexStreamResponse
+    :: Maybe Text
+    -> StreamAssemblyState
+    -> OpenAI.ResponseStreamEvent
+    -> Either ApiError (StreamAssemblyState, Maybe OpenAI.Response)
+stepCodexStreamResponse modelHint state event =
+    let next = applyStreamEvent state event
+        complete = do
+            response <- finishStreamResponse modelHint next event
+            checked <- rejectFailedCodexResponse response
+            pure (next, Just checked)
+    in case event of
+        OpenAI.ResponseCompletedEvent{} -> complete
+        OpenAI.ResponseDoneEvent{} -> complete
+        OpenAI.ResponseIncompleteEvent{} -> complete
+        OpenAI.ResponseFailedEvent{} ->
+            Left (failedStreamResponseError (responseFailureFromState next))
+        OpenAI.ResponseErrorEvent { streamError } ->
+            Left (streamConfig.classifyStreamError streamError)
+        OpenAI.ResponseNestedErrorEvent { streamError } ->
+            Left (streamConfig.classifyStreamError streamError)
+        _ -> Right (next, Nothing)
+
+-- | Finish a Codex stream that reached EOF before a terminal event. This
+-- mirrors 'buildStreamResponseWithModel': a lifecycle failure remains typed,
+-- while an otherwise unterminated stream reports a missing completion.
+finishCodexStreamResponse
+    :: StreamAssemblyState
+    -> Either ApiError OpenAI.Response
+finishCodexStreamResponse state =
+    let failure = responseFailureFromState state
+    in case failure.failureStatus of
+        Just "failed" -> Left (failedStreamResponseError failure)
+        Just "incomplete" -> Left (failedStreamResponseError failure)
+        _ -> Left $ JsonDecodeError streamConfig.missingCompletionMessage ""
 
 streamConfig :: StreamAssemblyConfig
 streamConfig = StreamAssemblyConfig

@@ -8,7 +8,7 @@
 mkDerivation {
   pname = "agent-core";
   version = "0.1.0.0";
-  src = packages/agent-core;
+  src = ./.;
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
     aeson agent-json agent-process agent-responses-types async base
@@ -24,8 +24,8 @@ mkDerivation {
     yaml
   ];
   benchmarkHaskellDepends = [
-    aeson agent-json base filepath safe-exceptions text text-builder
-    time
+    aeson agent-json async base bytestring directory filepath process
+    safe-exceptions text text-builder time unix
   ];
   description = "Provider-neutral infrastructure for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

@@ -73,7 +73,11 @@ import Agent.CLI.Options
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
                  optGhci, optBash, optComputerUse, optNoYolo) )
 import Agent.CLI.PendingInputs
-    ( enqueuePendingInput, newPendingInputs )
+    ( PendingNoticeKind(..)
+    , enqueuePendingInput
+    , enqueuePendingNotice
+    , newPendingInputs
+    )
 import Agent.CLI.Plan
     ( cliPlanHooks
     , resumedPlanNeedsApproval
@@ -531,8 +535,9 @@ runAgentTools
             _ ->
                 Nothing
         sendToRoot message = do
-            enqueuePendingInput pendingNotices (AgentMessage message)
-            pure (Right "queued")
+            enqueuePendingInput pendingNotices (AgentMessage message) >>= \case
+                Left err -> pure (Left err)
+                Right () -> pure (Right "queued")
         createSubagentWorktree source =
             createManagedWorktree home source >>= \case
                 Left err -> pure (Left err)
@@ -679,10 +684,11 @@ runAgentTools
                 instructions <-
                     readIORef mcpFleetRef
                         >>= maybe (pure []) MCP.mcpFleetInstructions
-                enqueuePendingInput pendingNotices
+                enqueuePendingNotice pendingNotices PendingMcpNotice
                     (UserMessage
                         (formatMcpModelNoticeFor dialectId statuses
                             <> formatMcpInstructionsNotice instructions))
+                    >>= either (reportStartupWarning startup) pure
     mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
@@ -764,8 +770,9 @@ runAgentTools
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
-                enqueuePendingInput pendingNotices
+                enqueuePendingNotice pendingNotices PendingSubagentNotice
                     (UserMessage (formatCompletionNotice agentId status))
+                    >>= either (reportStartupWarning startup) pure
             setSubagentOnSettled ctx.multiRegistry \agentId status -> do
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of

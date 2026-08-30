@@ -29,6 +29,8 @@ spec = describe "TextBuffer" do
                     chunks
         textBufferToText buffered
             `shouldBe` Text.replicate 10000 "x"
+        textBufferLength buffered `shouldBe` 10000
+        textBufferChunkCount buffered `shouldBe` 10000
 
     it "ignores empty chunks and compacts without changing content" do
         let buffered =
@@ -37,6 +39,8 @@ spec = describe "TextBuffer" do
                         textBufferFromText "first "
         textBufferNull buffered `shouldBe` False
         compactTextBuffer buffered `shouldBe` textBufferFromText "first second"
+        textBufferLength buffered `shouldBe` Text.length "first second"
+        textBufferChunkCount (compactTextBuffer buffered) `shouldBe` 1
         textBufferNull (appendTextBuffer "" emptyTextBuffer) `shouldBe` True
 
     modifyMaxSuccess (const 300) $

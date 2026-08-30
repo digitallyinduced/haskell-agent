@@ -1916,26 +1916,36 @@ httpExchange client transport era request pending message = do
                 then pure (HttpUnauthorized status headers)
                 else if status < 200 || status >= 300
                     then do
-                        bytes <- readBounded (responseBody response)
-                        pure . HttpFailed $ fromMaybe
-                            (McpHttpStatus status
-                                (TextEncoding.decodeUtf8With lenientDecode bytes))
-                            (decodeErrorBody bytes)
+                        readBounded (responseBody response) >>= \case
+                            Left _ ->
+                                pure (HttpFailed (McpTransportError
+                                    ("MCP HTTP error response exceeded "
+                                        <> Text.pack (show mcpBodyLimit) <> " bytes")))
+                            Right bytes ->
+                                pure . HttpFailed $ fromMaybe
+                                    (McpHttpStatus status
+                                        (TextEncoding.decodeUtf8With lenientDecode bytes))
+                                    (decodeErrorBody bytes)
                     else if status == 202 || status == 204
                         then pure HttpDelivered
                         else if isEventStream headers
                             then readSseStream client (responseBody response) pending request
                             else do
-                                bytes <- readBounded (responseBody response)
-                                if BS.null (BS8.strip bytes)
-                                    then pure HttpDelivered
-                                    else case Json.decodeEither inboundDecoder bytes of
-                                        Left err ->
-                                            pure (HttpFailed (McpTransportError
-                                                ("Invalid MCP HTTP response: " <> err.jsonErrorMessage)))
-                                        Right inbound -> do
-                                            handleInbound client inbound
-                                            pure HttpDelivered
+                                readBounded (responseBody response) >>= \case
+                                    Left _ ->
+                                        pure (HttpFailed (McpTransportError
+                                            ("MCP HTTP response exceeded "
+                                                <> Text.pack (show mcpBodyLimit) <> " bytes")))
+                                    Right bytes ->
+                                        if BS.null (BS8.strip bytes)
+                                            then pure HttpDelivered
+                                            else case Json.decodeEither inboundDecoder bytes of
+                                                Left err ->
+                                                    pure (HttpFailed (McpTransportError
+                                                        ("Invalid MCP HTTP response: " <> err.jsonErrorMessage)))
+                                                Right inbound -> do
+                                                    handleInbound client inbound
+                                                    pure HttpDelivered
         settle outcome = case outcome of
             Left exception ->
                 pure (Left (McpTransportError
@@ -1963,16 +1973,22 @@ httpExchange client transport era request pending message = do
                                 perform (Just token) >>= settle
                 outcome -> settle outcome
 
--- | Read a whole response body with a size cap.
-readBounded :: HC.BodyReader -> IO BS.ByteString
+-- | Read a whole response body with a size cap.  The over-limit case is
+-- reported before retaining any further bytes, so an unexpectedly large
+-- diagnostic/JSON body cannot become a process-sized allocation.
+readBounded :: HC.BodyReader -> IO (Either Int BS.ByteString)
 readBounded reader = go [] 0
   where
-    limit = 16 * 1024 * 1024 :: Int
     go chunks total = do
         chunk <- brRead reader
-        if BS.null chunk || total > limit
-            then pure (BS.concat (reverse chunks))
-            else go (chunk : chunks) (total + BS.length chunk)
+        if BS.null chunk
+            then pure (Right (BS.concat (reverse chunks)))
+            else if BS.length chunk > mcpBodyLimit - total
+                then pure (Left mcpBodyLimit)
+                else go (chunk : chunks) (total + BS.length chunk)
+
+mcpBodyLimit :: Int
+mcpBodyLimit = 16 * 1024 * 1024
 
 isEventStream :: [Header] -> Bool
 isEventStream headers =
@@ -2025,13 +2041,13 @@ readSseStream
     -> IO HttpOutcome
 readSseStream client reader pending request = do
     start <- getMonotonicTimeNSec
-    go start 0 BS.empty []
+    go start 0 BS.empty [] 0
   where
     slice = request.requestTimeoutMicros
     settled = case pending of
         Nothing -> pure False
         Just (_, entry) -> not <$> atomically (isEmptyTMVar entry.pendingResponse)
-    go start seen buffer dataLines = do
+    go start seen buffer dataLines dataBytes = do
         done <- settled
         if done
             then pure HttpDelivered
@@ -2045,33 +2061,100 @@ readSseStream client reader pending request = do
                         now <- getMonotonicTimeNSec
                         activity <- maybe (pure 0) (readTVarIO . (.pendingActivity) . snd) pending
                         if activity /= seen && not (pastHardDeadline start now slice)
-                            then go start activity buffer dataLines
+                            then go start activity buffer dataLines dataBytes
                             else pure (HttpFailed (timeoutError request.requestMethod slice))
                     Just bytes
                         | BS.null bytes -> do
                             -- End of stream: flush a trailing event without a blank line.
-                            dispatchEvent dataLines
-                            finished <- settled
-                            pure $ if finished || isNothing pending
-                                then HttpDelivered
-                                else HttpFailed (McpTransportError
-                                    "MCP SSE stream closed before the response arrived")
+                            trailing <- if BS.null buffer
+                                then pure (Right (dataLines, dataBytes))
+                                else
+                                    foldLines dataLines dataBytes
+                                        [stripCarriage buffer]
+                            case trailing of
+                                Left err -> pure (HttpFailed err)
+                                Right (remaining, _) -> do
+                                    dispatchEvent remaining
+                                    finished <- settled
+                                    pure $ if finished || isNothing pending
+                                        then HttpDelivered
+                                        else HttpFailed (McpTransportError
+                                            "MCP SSE stream closed before the response arrived")
                         | otherwise -> do
-                            let (complete, rest) = splitLines (buffer <> bytes)
-                            remaining <- foldLines dataLines complete
-                            go start seen rest remaining
-    foldLines dataLines [] = pure dataLines
-    foldLines dataLines (line : rest)
-        | BS.null line = dispatchEvent dataLines >> foldLines [] rest
-        | BS8.isPrefixOf ":" line = foldLines dataLines rest
+                            -- Check the combined partial line before
+                            -- concatenating.  A peer can otherwise force an
+                            -- arbitrarily large retained buffer by omitting
+                            -- newlines.
+                            case splitSseChunk buffer bytes of
+                                Left err -> pure (HttpFailed err)
+                                Right (complete, rest) ->
+                                    foldLines dataLines dataBytes complete >>= \case
+                                        Left err -> pure (HttpFailed err)
+                                        Right (remaining, remainingBytes) ->
+                                            go start seen rest remaining remainingBytes
+    foldLines dataLines dataBytes [] = pure (Right (dataLines, dataBytes))
+    foldLines dataLines dataBytes (line : rest)
+        | BS.null line = do
+            dispatchEvent dataLines
+            foldLines [] 0 rest
+        | BS8.isPrefixOf ":" line = foldLines dataLines dataBytes rest
         | Just payload <- BS.stripPrefix "data:" line =
-            foldLines (dataLines <> [fromMaybe payload (BS.stripPrefix " " payload)]) rest
-        | otherwise = foldLines dataLines rest
+            let value = fromMaybe payload (BS.stripPrefix " " payload)
+                valueBytes = BS.length value + 1
+            in if valueBytes > mcpSseEventLimit - dataBytes
+                then pure (Left (McpTransportError
+                    "MCP SSE event exceeded the size limit"))
+                else
+                    foldLines
+                        (value : dataLines)
+                        (dataBytes + valueBytes)
+                        rest
+        | otherwise = foldLines dataLines dataBytes rest
     dispatchEvent [] = pure ()
     dispatchEvent dataLines =
-        case Json.decodeEither inboundDecoder (BS8.intercalate "\n" dataLines) of
+        case Json.decodeEither inboundDecoder (BS8.intercalate "\n" (reverse dataLines)) of
             Left _ -> pure ()
             Right inbound -> handleInbound client inbound
+
+mcpSseLineLimit :: Int
+mcpSseLineLimit = 16 * 1024 * 1024
+
+mcpSseEventLimit :: Int
+mcpSseEventLimit = 16 * 1024 * 1024
+
+-- Split a reader chunk without concatenating it wholesale with the partial
+-- line.  This permits large transport chunks containing many ordinary lines,
+-- while still bounding an individual unterminated line.
+splitSseChunk
+    :: BS.ByteString
+    -> BS.ByteString
+    -> Either McpError ([BS.ByteString], BS.ByteString)
+splitSseChunk initial chunk = go initial chunk []
+  where
+    go partial rest reversedLines =
+        case BS.elemIndex 10 rest of
+            Nothing
+                | exceedsLineLimit partial rest ->
+                    Left (McpTransportError "MCP SSE line exceeded the size limit")
+                | otherwise ->
+                    Right (reverse reversedLines, partial <> rest)
+            Just index ->
+                let prefix = BS.take index rest
+                    remainder = BS.drop (index + 1) rest
+                in if exceedsLineLimit partial prefix
+                    then Left (McpTransportError "MCP SSE line exceeded the size limit")
+                    else
+                        let combined
+                                | BS.null partial = prefix
+                                | otherwise = partial <> prefix
+                            line = stripCarriage combined
+                        in go BS.empty remainder (line : reversedLines)
+
+    exceedsLineLimit left right =
+        BS.length right > mcpSseLineLimit - BS.length left
+
+stripCarriage :: BS.ByteString -> BS.ByteString
+stripCarriage line = fromMaybe line (BS.stripSuffix "\r" line)
 
 -- | Split a buffer into complete lines (without terminators) and the
 -- trailing partial line.
@@ -2082,8 +2165,6 @@ splitLines buffer =
         [] -> ([], BS.empty)
         partial : completeReversed ->
             (map stripCarriage (reverse completeReversed), partial)
-  where
-    stripCarriage line = fromMaybe line (BS.stripSuffix "\r" line)
 
 configuredAccessToken :: McpClient -> IO (Either Text (Maybe Text))
 configuredAccessToken client =

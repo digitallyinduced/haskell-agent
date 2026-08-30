@@ -199,6 +199,7 @@ library
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
                     , Agent.CLI.PendingInputs
+                    , Agent.CLI.InputBudget
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
                     , Agent.CLI.Progress
@@ -224,6 +225,7 @@ library
                     , Agent.CLI.Secret
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
+                    , Agent.CLI.SteeringInputs
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style

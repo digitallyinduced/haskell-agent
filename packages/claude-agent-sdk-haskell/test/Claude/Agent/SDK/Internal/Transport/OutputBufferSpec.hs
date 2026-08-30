@@ -48,6 +48,11 @@ spec = describe "OutputBuffer" do
         outcomes <- readOutcomes 2 8_192 reader
         outcomes `shouldBe` [Line "abc", End]
 
+    it "rejects an oversized unterminated record at EOF" do
+        reader <- scriptedReader [Deliver "abcde"]
+        outcomes <- readOutcomes 1 4 reader
+        outcomes `shouldBe` [TooLarge]
+
     it "reports other read failures and keeps the buffered record" do
         reader <-
             scriptedReader
@@ -61,6 +66,21 @@ spec = describe "OutputBuffer" do
         outcomes <- readOutcomes 1 4 reader
         outcomes `shouldBe` [TooLarge]
         reader.requestedSizes `shouldReturn` [5]
+
+    it "accepts a fragmented record exactly at the limit" do
+        reader <- scriptedReader [Deliver "ab", Deliver "cd", Deliver "\n"]
+        outcomes <- readOutcomes 1 4 reader
+        outcomes `shouldBe` [Line "abcd"]
+
+    it "accepts a fragmented record below the limit" do
+        reader <- scriptedReader [Deliver "ab", Deliver "\n"]
+        outcomes <- readOutcomes 1 4 reader
+        outcomes `shouldBe` [Line "ab"]
+
+    it "rejects an oversized fragmented record before joining it" do
+        reader <- scriptedReader [Deliver "ab", Deliver "cd", Deliver "e\n"]
+        outcomes <- readOutcomes 1 4 reader
+        outcomes `shouldBe` [TooLarge]
 
     it "bounds every read to the remaining allowance plus one byte" do
         reader <- scriptedReader [Deliver "abcd", Deliver "efghij"]

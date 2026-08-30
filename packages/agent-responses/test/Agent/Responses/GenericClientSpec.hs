@@ -169,7 +169,7 @@ providerHookConfig port = ProviderClientConfig
         setRequestHeader "X-Provider-Hook" ["enabled"]
     , providerClassifyFailure = \_status _retryAfter body ->
         ConnectionError ("provider hook: " <> body)
-    , providerBuildResponse = buildResponse
+    , providerAssemblyConfig = streamAssemblyConfig
     , providerRetryableFailure = \case
         ConnectionError message ->
             "provider hook:" `Text.isPrefixOf` message

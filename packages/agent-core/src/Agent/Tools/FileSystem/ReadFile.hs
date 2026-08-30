@@ -1,11 +1,14 @@
+{-# LANGUAGE BangPatterns #-}
+
 module Agent.Tools.FileSystem.ReadFile
     ( readFileTool
     , ReadFileArgs(..)
     , formatReadFile
+    , streamReadFile
     ) where
 
 import Agent.Json.Decode (Decoder)
-import Agent.OsPath (fromText)
+import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
@@ -14,7 +17,7 @@ import Agent.ToolDispatch
     , toolArgumentsValue
     , typedTool
     )
-import Agent.Tools.IO (displayPathInWorkspace, readTextFile, resolveForRead)
+import Agent.Tools.IO (displayPathInWorkspace, resolveForRead)
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -30,6 +33,13 @@ import Agent.Tools.Types
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.ByteString as BS
+import Data.Text.Encoding (decodeUtf8With)
+import Data.Text.Encoding.Error (lenientDecode)
+import Data.Word (Word8)
+import Control.Exception.Safe (SomeException, try)
+import System.IO (Handle, IOMode(ReadMode), withBinaryFile)
+import System.OsPath (OsPath)
 import System.Directory.OsPath (doesFileExist)
 
 data ReadFileArgs = ReadFileArgs
@@ -104,11 +114,126 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
             False -> do
                 display <- displayPathInWorkspace env path
                 pure $ Left $ "File not found: " <> display
-            True -> readTextFile path >>= \case
+            True -> do
+                _ <- pure (args.pages, args.format)
+                try @_ @SomeException (streamReadFile path args) >>= \case
+                    Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
+                    Right result -> pure result
+
+-- | Bounded, incremental implementation used by the tool.  The first pass
+-- counts lines (needed for negative offsets and stable out-of-range errors);
+-- the second pass retains only the requested window.
+streamReadFile :: OsPath -> ReadFileArgs -> IO (Either Text Text)
+streamReadFile path args =
+    case args.limit of
+        Just n | n <= 0 -> pure (Left "limit must be a positive integer")
+        _ -> do
+            countResult <- countFileLines path
+            case countResult of
                 Left err -> pure (Left err)
-                Right content -> do
-                    _ <- pure (args.pages, args.format)
-                    pure (formatReadFile content args)
+                Right total -> do
+                    let start = resolveReadStartLine total args.offset
+                        takeCount = min maxReadLines (fromMaybe maxReadLines args.limit)
+                        rangeSpecified = args.offset /= Nothing || args.limit /= Nothing
+                    if start > total && total > 0
+                        then pure $ Right $ "Offset " <> Text.pack (show start)
+                            <> " is beyond the end of the file ("
+                            <> Text.pack (show total) <> " lines)."
+                        else withBinaryFile (unsafeToFilePath path) ReadMode $ \h ->
+                            collectWindow h start takeCount rangeSpecified args
+
+countFileLines :: OsPath -> IO (Either Text Int)
+countFileLines path =
+    withBinaryFile (unsafeToFilePath path) ReadMode $ \h ->
+        go h 0 False (0 :: Word8) 0
+  where
+    go h !newlines !seen !lastByte !checked = do
+        chunk <- BS.hGetSome h chunkSize
+        let prefix = BS.take (max 0 (8192 - checked)) chunk
+            checked' = checked + BS.length prefix
+        if BS.elem 0 prefix
+            then pure (Left "Cannot read binary file")
+            else if BS.null chunk
+                then pure $ Right
+                    (if not seen then 1 else if lastByte == 10 then newlines else newlines + 1)
+                else
+                    let n = BS.count 10 chunk
+                        lb = BS.last chunk
+                    in go h (newlines + n) True (fromIntegral lb) checked'
+
+chunkSize :: Int
+chunkSize = 64 * 1024
+
+-- Keep a selected line bounded even when the source contains a pathological
+-- single line.  This is deliberately conservative for UTF-8 (worst case
+-- replacement expansion is still below this bound).
+maxSelectedLineBytes :: Int
+maxSelectedLineBytes = maxReadTokens * 8
+
+collectWindow
+    :: Handle
+    -> Int
+    -> Int
+    -> Bool
+    -> ReadFileArgs
+    -> IO (Either Text Text)
+collectWindow h start takeCount rangeSpecified args =
+    go 1 [] [] 0 False
+  where
+    go !lineNo !currentChunks !selected !outChars !done = do
+        chunk <- BS.hGetSome h chunkSize
+        if BS.null chunk
+            then
+                if null currentChunks
+                    then finish selected outChars
+                    else finishLine lineNo currentChunks selected outChars
+            else consume chunk lineNo currentChunks selected outChars done
+
+    consume bytes lineNo chunks selected outChars done
+        | BS.null bytes = go lineNo chunks selected outChars done
+        | otherwise =
+            let (before, after) = BS.break (== 10) bytes
+                chunks' =
+                    if lineNo < start
+                        then []
+                        else if BS.null before then chunks else before : chunks
+                bytesInLine = sum (map BS.length chunks')
+            in if bytesInLine > maxSelectedLineBytes
+                && lineNo >= start && lineNo < start + takeCount
+                then pure $ Left $ tokenLimitMessage (maxReadTokens + 1) rangeSpecified args
+                else if BS.null after
+                    then go lineNo chunks' selected outChars done
+                    else
+                        let (selected', chars', done') =
+                                addLine lineNo chunks' selected outChars done
+                        in if done'
+                            then finish selected' chars'
+                            else consume (BS.drop 1 after) (lineNo + 1) [] selected' chars' done'
+
+    finishLine lineNo chunks selected outChars =
+        let (selected', chars', _) = addLine lineNo chunks selected outChars False
+        in finish selected' chars'
+
+    addLine lineNo chunks selected outChars done
+        | lineNo < start = (selected, outChars, done)
+        | lineNo >= start + takeCount = (selected, outChars, True)
+        | otherwise =
+            let raw = BS.concat (reverse chunks)
+                txt = decodeUtf8With lenientDecode raw
+                rendered = formatSelectedLine start lineNo txt
+                extra = Text.length rendered + if null selected then 0 else 1
+                chars' = outChars + extra
+            in if chars' `div` 4 > maxReadTokens
+                then (selected, chars', True)
+                else (rendered : selected, chars', length selected + 1 >= takeCount)
+
+    finish selected outChars
+        | outChars `div` 4 > maxReadTokens =
+            pure $ Left $ tokenLimitMessage (max 1 (outChars `div` 4))
+                rangeSpecified args
+        | null selected && outChars == 0 && start == 1 =
+            pure $ Right (formatNumbered 1 [""])
+        | otherwise = pure $ Right $ Text.intercalate "\n" (reverse selected)
 
 formatReadFile :: Text -> ReadFileArgs -> Either Text Text
 formatReadFile content args =
@@ -180,3 +305,9 @@ formatNumbered start lines_ =
         | n == start || n `mod` 10 == 0 =
             Text.pack (show n) <> "\8594" <> line
         | otherwise = line
+
+formatSelectedLine :: Int -> Int -> Text -> Text
+formatSelectedLine start n line
+    | n == start || n `mod` 10 == 0 =
+        Text.pack (show n) <> "\8594" <> line
+    | otherwise = line

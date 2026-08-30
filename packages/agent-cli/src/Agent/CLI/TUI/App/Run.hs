@@ -256,17 +256,22 @@ runFullscreen runtime workerAction = do
                                                         (`Composer.requestDictationStop` True)
                                                         finalState.appDictation
                                                     when (not finalState.appWorkerStopped) $
-                                                        atomically $
-                                                            Composer.appendFullscreenInput
-                                                                runtime.runtimeInput
-                                                                FullscreenInput
-                                                                    { fullscreenInputLine =
-                                                                        ReplEof
-                                                                    , fullscreenInputQueued =
-                                                                        False
-                                                                    , fullscreenInputDisplay =
-                                                                        Nothing
-                                                                    }
+                                                        atomically do
+                                                            queued <-
+                                                                Composer.appendFullscreenInput
+                                                                    runtime.runtimeInput
+                                                                    FullscreenInput
+                                                                        { fullscreenInputLine =
+                                                                            ReplEof
+                                                                        , fullscreenInputQueued =
+                                                                            False
+                                                                        , fullscreenInputDisplay =
+                                                                            Nothing
+                                                                        }
+                                                            either
+                                                                (const retry)
+                                                                pure
+                                                                queued
                                                     wait worker
   where
     recapTicker _runtime = forever do

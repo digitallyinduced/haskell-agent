@@ -1,12 +1,20 @@
 module Agent.Tools.OutputArtifactSpec (spec) where
 
-import Agent.ToolDispatch (functionToolCall)
+import Agent.ToolDispatch
+    ( ToolCall
+    , ToolCallResult(..)
+    , ToolDispatchConfig(..)
+    , dispatchToolHandler
+    , functionToolCall
+    )
 import Agent.Tools.OutputArtifact
-    ( artifactTools
+    ( OutputArtifact(..)
+    , artifactTools
     , boundedPreview
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
+    , writeOutputArtifactDetailed
     , readOutputArtifact
     , writeOutputArtifact
     )
@@ -17,7 +25,8 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent.Async (mapConcurrently)
-import Data.List (nub)
+import qualified Data.ByteString as ByteString
+import Data.List (find, nub)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
@@ -85,6 +94,110 @@ spec = describe "Agent.Tools.OutputArtifact" do
             readOutputArtifact env "../output-secret"
                 `shouldReturn` Left "invalid tool-output artifact handle"
 
+    it "reports on-disk bytes for invalid UTF-8 artifacts" do
+        withTempEnv \env -> do
+            writeOutputArtifactDetailed env "\xc3" >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    outputArtifactMetadata env artifact.artifactHandle
+                        `shouldReturn`
+                        Right (OutputArtifactMetadata artifact.artifactHandle 1 1)
+
+    it "reads bounded ranges without retaining giant lines" do
+        withTempEnv \env -> do
+            let bytes =
+                    ByteString.concat
+                        [ "first\n"
+                        , ByteString.replicate (2 * 1024 * 1024) 120
+                        , "\nlast\n"
+                        ]
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- runArtifactTool env "read_tool_output" $
+                        functionToolCall "read" "read_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"offset\":2,\"limit\":1}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value ->
+                            Text.length value < 50 * 1024
+                                && Text.isInfixOf "line omitted" value
+
+    it "searches giant lines while returning a bounded preview" do
+        withTempEnv \env -> do
+            let bytes =
+                    ByteString.concat
+                        [ "needle"
+                        , ByteString.replicate (2 * 1024 * 1024) 97
+                        , "\n"
+                        ]
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"pattern\":\"needle\",\"head_limit\":5}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value ->
+                            Text.length value < 50 * 1024
+                                && Text.isInfixOf "1:" value
+                                && Text.isInfixOf "needle" value
+
+    it "finds a literal split across streaming input chunks" do
+        withTempEnv \env -> do
+            let bytes =
+                    ByteString.concat
+                        [ ByteString.replicate (32768 - 3) 97
+                        , "nee"
+                        , "dle\n"
+                        ]
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"pattern\":\"needle\"}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value -> Text.isInfixOf "1:" value
+
+    it "stops after proving that the match cap was exceeded" do
+        withTempEnv \env -> do
+            let bytes = ByteString.concat (replicate 100 "needle\n")
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"pattern\":\"needle\","
+                                <> "\"head_limit\":5}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value ->
+                            Text.isInfixOf
+                                "[search truncated after 5 matches]"
+                                value
+                                && not (Text.isInfixOf "6:needle" value)
+
+    it "preserves Unicode case-insensitive artifact search" do
+        withTempEnv \env -> do
+            writeOutputArtifact env "Straße\n" >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right handle -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> handle
+                                <> "\",\"pattern\":\"STRASSE\","
+                                <> "\"case_insensitive\":true}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value -> Text.isInfixOf "1:Straße" value
+
     it "exposes delegated analysis only when a spawner is available" do
         withTempEnv \env -> do
             let names = map (.appToolName)
@@ -110,6 +223,25 @@ listArtifactHandles rendered =
   where
     validHandleCharacter character =
         character /= ';' && character /= ']' && character /= ','
+
+runArtifactTool
+    :: ToolEnv
+    -> Text.Text
+    -> ToolCall
+    -> IO (Either Text.Text Text.Text)
+runArtifactTool env toolName call = do
+    let tool = find ((== toolName) . (.appToolName)) (artifactTools env Nothing)
+        config = ToolDispatchConfig
+            { toolDispatchUnknownTool = ("unknown tool: " <>)
+            , toolDispatchFormatResult = either id id
+            , toolDispatchFormatException = \_ exception ->
+                Text.pack (show exception)
+            , toolDispatchOnException = \_ _ -> pure ()
+            , toolDispatchOnOutput = \_ _ -> pure ()
+            , toolDispatchFinalizeOutput = \_ output -> pure output
+            }
+    result <- dispatchToolHandler config ((.appToolHandler) <$> tool) call
+    pure (Right result.output)
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action = do

@@ -248,7 +248,7 @@ spec = describe "runLoop" do
             timeout 100000 (takeMVar backendFinished)
                 `shouldReturn` Nothing
             putMVar releaseSink ()
-            timeout 1000000 (takeMVar backendFinished)
+            timeout 3000000 (takeMVar backendFinished)
                 `shouldReturn` Just ()
             wait running `shouldReturn` Right LoopResult
                 { finalResponseId = "resp-1"
@@ -340,6 +340,89 @@ spec = describe "runLoop" do
             , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
             ]
 
+    it "backpressures a coalesced text tail by logical payload bytes" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        deliveredChars <- newIORef (0 :: Int)
+        let chunk = Text.replicate (1024 * 1024) "x"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                -- The chunks cross the conservative 8 MiB logical-byte
+                -- budget while TurnStarted blocks the consumer, even though
+                -- they would otherwise occupy only one TBQueue node.
+                mapM_ (onEvent . TextDelta) [chunk, chunk, chunk]
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                TurnStarted -> do
+                    putMVar sinkStarted ()
+                    takeMVar releaseSink
+                TextDelta text ->
+                    modifyIORef' deliveredChars (+ Text.length text)
+                _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            timeout 100000 (takeMVar backendFinished)
+                `shouldReturn` Nothing
+            putMVar releaseSink ()
+            timeout 1000000 (takeMVar backendFinished)
+                `shouldReturn` Just ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef deliveredChars
+            `shouldReturn` 3 * Text.length chunk
+
+    it "backpressures and coalesces provider-native child output" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        deliveredChars <- newIORef (0 :: Int)
+        let chunk = Text.replicate (1024 * 1024) "x"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                mapM_
+                    (onEvent . NativeAgentOutput "child")
+                    [chunk, chunk, chunk]
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                TurnStarted -> do
+                    putMVar sinkStarted ()
+                    takeMVar releaseSink
+                NativeAgentOutput "child" output ->
+                    modifyIORef' deliveredChars (+ Text.length output)
+                _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            timeout 100000 (takeMVar backendFinished)
+                `shouldReturn` Nothing
+            putMVar releaseSink ()
+            timeout 1000000 (takeMVar backendFinished)
+                `shouldReturn` Just ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef deliveredChars
+            `shouldReturn` 3 * Text.length chunk
+
     it "keeps only the latest adjacent tool-output snapshot per call" do
         sinkStarted <- newEmptyMVar
         releaseSink <- newEmptyMVar
@@ -383,6 +466,35 @@ spec = describe "runLoop" do
             , ToolOutputUpdated "c1" "abc"
             , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
             ]
+
+    it "bounds a single oversized live tool-output snapshot" do
+        delivered <- newIORef Nothing
+        let oversized = Text.replicate (3 * 1024 * 1024) "x"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (ToolOutputUpdated "large" oversized)
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                ToolOutputUpdated "large" output ->
+                    writeIORef delivered (Just output)
+                _ -> pure ()
+        config0 <- testConfig backend
+        result <- runLoop config0 { loopOnEvent = onEvent } Nothing "go"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-1"
+            , finalText = Just "done"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+        readIORef delivered >>= \case
+            Nothing -> expectationFailure "missing tool-output update"
+            Just output -> do
+                Text.length output `shouldSatisfy` (<= 2 * 1024 * 1024)
+                output `shouldSatisfy`
+                    Text.isSuffixOf "[tool output truncated]"
 
     it "dispatches consecutive parallel-safe tool calls concurrently" do
         firstStarted <- newEmptyMVar

@@ -7,6 +7,7 @@ module Agent.CLI.TUI.ImagePreview
     , nativePreviewPlacements
     , sameNativePreviewLayout
     , imageDimensions
+    , prepareNativeTuiImagePreview
     , prepareTuiImagePreview
     , previewCountForWidth
     , previewCellSize
@@ -130,6 +131,24 @@ prepareTuiImagePreview ImageAttachment{imageMime, imageBytes} = do
         , previewKittyAttachment =
             kittyCompatibleAttachment
                 (ImageAttachment{imageMime, imageBytes})
+        }
+
+-- | Prepare a native-terminal preview without retaining a delayed full-image
+-- decoder in 'previewSample'. Kitty rendering uses only the source dimensions
+-- and encoded attachment, so a constant bounded sample is sufficient.
+prepareNativeTuiImagePreview
+    :: ImageAttachment
+    -> Either Text TuiImagePreview
+prepareNativeTuiImagePreview attachment@ImageAttachment{imageMime, imageBytes} = do
+    (sourceWidth, sourceHeight) <- imageDimensions imageMime imageBytes
+    pure TuiImagePreview
+        { previewMime = imageMime
+        , previewBytes = BS.length imageBytes
+        , previewSourceWidth = sourceWidth
+        , previewSourceHeight = sourceHeight
+        , previewSample =
+            generateImage (\_ _ -> previewBackground) 1 1
+        , previewKittyAttachment = kittyCompatibleAttachment attachment
         }
 
 -- | Read common image dimensions without inflating the complete compressed
