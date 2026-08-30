@@ -275,6 +275,7 @@ runAgentSession
     learnedSkillAppTools
     legacySubagentTarget
     mcpFleet
+    mcpInstructions
     mcpTools
     model
     multiCtx
@@ -335,7 +336,6 @@ runAgentSession
                         ("Failed to initialize MCP tools: " <> Text.unpack err)
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
-        mcpInstructions <- MCP.mcpFleetInstructions mcpFleet
         -- Catalog models provide the per-model instructions template. Full
         -- code mode remains opt-in, but code_mode_only models still route the
         -- reserved image-generation tool through exec because Responses Lite

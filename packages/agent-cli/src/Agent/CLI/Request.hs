@@ -70,6 +70,10 @@ requestParams provider modelName instructionText toolSchemas effort =
                 , ..
                 }
 
+-- | Route repeated requests for one durable session to the same provider-side
+-- prompt-cache bucket. This is only a routing hint, not a forced cache hit:
+-- the provider still requires an unchanged request prefix. Changed schemas or
+-- instructions naturally miss rather than reusing stale content.
 setRequestPromptCacheKey
     :: Text
     -> ResponseCreateParams
