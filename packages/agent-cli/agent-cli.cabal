@@ -107,6 +107,7 @@ library
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
                     , Agent.CLI.SessionAdmin
+                    , Agent.CLI.SteeringInputs
                     , Agent.CLI.Startup.Auth
                     , Agent.CLI.StartupContext
                     , Agent.CLI.Startup.Format
@@ -191,6 +192,7 @@ library
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
                     , Agent.CLI.PendingInputs
+                    , Agent.CLI.InputBudget
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
                     , Agent.CLI.Progress

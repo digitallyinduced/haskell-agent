@@ -742,7 +742,7 @@ prepareAgentIterationTracked
                     setFullscreenSessionActions
                         runtime
                         (requestCancel toolEnv.toolCancel)
-                        (const (pure ()))
+                        (const (pure (Right ())))
                         (const (pure ()))
                         (pure ())
                         (\level ->
@@ -811,7 +811,7 @@ resetFullscreenSessionActions runtime =
     setFullscreenSessionActions
         runtime
         (pure ())
-        (const (pure ()))
+        (const (pure (Right ())))
         (const (pure ()))
         (pure ())
         (const (pure ()))

@@ -260,7 +260,7 @@ newFullscreenRuntimeWithSyntaxLoader
         windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
-            , sessionSteer = const (pure ())
+            , sessionSteer = const (pure (Right ()))
             , sessionBtw = const (pure ())
             , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
@@ -325,7 +325,7 @@ newFullscreenRuntimeWithSyntaxLoader
 setFullscreenSessionActions
     :: FullscreenRuntime
     -> IO ()
-    -> (Text -> IO ())
+    -> (Text -> IO (Either Text ()))
     -> (Text -> IO ())
     -> IO ()
     -> (Text -> IO ())

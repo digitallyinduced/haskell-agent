@@ -256,7 +256,7 @@ runFullscreen runtime workerAction = do
                                                         (`Composer.requestDictationStop` True)
                                                         finalState.appDictation
                                                     when (not finalState.appWorkerStopped) $
-                                                        atomically $
+                                                        void $ atomically $
                                                             Composer.appendFullscreenInput
                                                                 runtime.runtimeInput
                                                                 FullscreenInput

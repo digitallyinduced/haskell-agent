@@ -202,8 +202,10 @@ data SyntaxHighlighterState
       -- ^ Loading was attempted; 'Nothing' records a failed initializer.
     | SyntaxHighlighterInactive !Word64
 
-newtype FullscreenInputBuffer =
-    FullscreenInputBuffer (TVar (Seq FullscreenInput))
+data FullscreenInputBuffer =
+    FullscreenInputBuffer
+        !(TVar (Seq FullscreenInput))
+        !(TVar Int)
 
 data FullscreenHistorySource = FullscreenHistorySource
     { historySourceKey :: !Text
@@ -222,7 +224,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMailbox :: !AppEventMailbox
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
-    , runtimeSteer :: !(Text -> IO ())
+    , runtimeSteer :: !(Text -> IO (Either Text ()))
     , runtimeBtw :: !(Text -> IO ())
     , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
@@ -274,7 +276,7 @@ data DictationSession = DictationSession
 -- resources belonging to a backend that has already shut down.
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionCancel :: !(IO ())
-    , sessionSteer :: !(Text -> IO ())
+    , sessionSteer :: !(Text -> IO (Either Text ()))
     , sessionBtw :: !(Text -> IO ())
     , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())
