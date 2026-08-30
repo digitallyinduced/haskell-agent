@@ -59,6 +59,14 @@ import Agent.Store.Postgres.Skill
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     )
+import Agent.CLI.MacOS.EngineMailbox
+    ( EngineMailbox
+    , acceptEngineCommand
+    , closeEngineMailbox
+    , drainEngineCommands
+    , newEngineMailboxIO
+    , readEngineCommand
+    )
 import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.CLI.Login
     ( AccountBilling(..)
@@ -180,20 +188,16 @@ import Control.Concurrent.MVar
     )
 import Control.Concurrent.STM
     ( TMVar
-    , TQueue
     , TVar
     , atomically
     , modifyTVar'
     , newEmptyTMVarIO
-    , newTQueueIO
     , newTVarIO
     , orElse
-    , readTQueue
     , readTVar
     , readTVarIO
     , takeTMVar
     , tryPutTMVar
-    , writeTQueue
     , writeTVar
     )
 import Control.Applicative ((<|>))
@@ -590,7 +594,7 @@ data SessionMutation
     | SessionArchive !Text !Bool
 
 data Engine = Engine
-    { engineCommands :: !(TQueue EngineCommand)
+    { engineCommands :: !(EngineMailbox EngineCommand)
     , engineDone :: !(MVar ())
     , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
     , engineBrowser :: !BrowserHost
@@ -764,11 +768,12 @@ ha_engine_mcp_server_restart pointer expected nameBytes (CSize nameLength)
                     let stable =
                             castPtrToStablePtr pointer :: StablePtr Engine
                     engine <- deRefStablePtr stable
-                    atomically $ writeTQueue engine.engineCommands
+                    atomically $ acceptEngineCommand engine.engineCommands
                         (EngineMcpRestart expected name callback context)
                 pure case accepted of
                     Left _ -> 3
-                    Right () -> 0
+                    Right False -> 3
+                    Right True -> 0
 
 ha_mcp_server_status
     :: Ptr Word8 -> CSize -> FunPtr McpServerCallback
@@ -1580,7 +1585,7 @@ ha_engine_create callback context
         created <- tryAny do
             home <- getHomeDirectory
             config <- managedPostgresConfigForHome home
-            commands <- newTQueueIO
+            commands <- newEngineMailboxIO
             done <- newEmptyMVar
             stagedImages <- newTVarIO Map.empty
             browser <- BrowserHost <$> newMVar Nothing
@@ -1622,17 +1627,16 @@ ha_engine_send_json pointer bytes (CSize length)
                 :: Either String BridgeRequest) of
                 Left _ -> do
                     atomically $ writeTVar engine.engineStagedImages Map.empty
-                    pure False
-                Right request -> do
-                    atomically
-                        (writeTQueue
-                            engine.engineCommands
-                            (EngineRequest request))
-                    pure True
+                    pure Nothing
+                Right request -> Just <$> atomically
+                    (acceptEngineCommand
+                        engine.engineCommands
+                        (EngineRequest request))
         pure $ case accepted of
             Left _ -> 3
-            Right False -> 4
-            Right True -> 0
+            Right Nothing -> 4
+            Right (Just False) -> 3
+            Right (Just True) -> 0
 
 ha_engine_set_browser_callback
     :: Ptr () -> FunPtr BrowserCallback -> Ptr () -> IO CInt
@@ -1667,19 +1671,21 @@ ha_engine_search_conversations pointer bytes (CSize length) rawLimit callback co
             engine <- deRefStablePtr stable
             payload <- BS.packCStringLen (castPtr bytes, fromIntegral length)
             case TextEncoding.decodeUtf8' payload of
-                Left _ -> pure False
+                Left _ -> pure Nothing
                 Right query
-                    | Text.null (Text.strip query) -> pure False
+                    | Text.null (Text.strip query) -> pure Nothing
                     | otherwise -> do
                         let requested = fromIntegral rawLimit :: Integer
                             limit = fromInteger (max 1 (min 100 requested))
-                        atomically $ writeTQueue engine.engineCommands
-                            (EngineSearch query limit callback context)
-                        pure True
+                        Just <$> atomically
+                            (acceptEngineCommand engine.engineCommands
+                                (EngineSearch
+                                    query limit callback context))
         pure $ case accepted of
             Left _ -> 3
-            Right False -> 2
-            Right True -> 0
+            Right Nothing -> 2
+            Right (Just False) -> 3
+            Right (Just True) -> 0
 
 ha_engine_stage_turn_images
     :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize -> IO CInt
@@ -1788,11 +1794,12 @@ enqueueSessionMutation pointer mutation callback context
         accepted <- tryAny do
             let stable = castPtrToStablePtr pointer :: StablePtr Engine
             engine <- deRefStablePtr stable
-            atomically $ writeTQueue engine.engineCommands
+            atomically $ acceptEngineCommand engine.engineCommands
                 (EngineSessionMutation mutation callback context)
         pure $ case accepted of
             Left _ -> 3
-            Right () -> 0
+            Right False -> 3
+            Right True -> 0
 
 ha_engine_destroy :: Ptr () -> IO ()
 ha_engine_destroy pointer
@@ -1801,7 +1808,8 @@ ha_engine_destroy pointer
         let stable = castPtrToStablePtr pointer :: StablePtr Engine
         (do
             engine <- deRefStablePtr stable
-            atomically (writeTQueue engine.engineCommands EngineStop)
+            _ <- atomically
+                (closeEngineMailbox engine.engineCommands EngineStop)
             readMVar engine.engineDone)
             `finally` freeStablePtr stable
 
@@ -1810,27 +1818,41 @@ workerLifecycle
     -> Ptr ()
     -> ManagedPostgresConfig
     -> OsPath
-    -> TQueue EngineCommand
+    -> EngineMailbox EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> IO ()
-workerLifecycle callback context config root commands stagedImages browser = do
-    store <- newMVar Nothing
-    processRuntime <- newNativeProcessRuntime root
-    let cleanup =
-            closeNativeProcessRuntime processRuntime
-                `finally` closeEngineStore store
-    idleLoop
-        callback
-        context
-        config
-        store
-        root
-        processRuntime
-        commands
-        stagedImages
-        browser
-        `finally` cleanup
+workerLifecycle callback context config root commands stagedImages browser =
+    (do
+        store <- newMVar Nothing
+        processRuntime <- newNativeProcessRuntime root
+        let cleanup =
+                closeNativeProcessRuntime processRuntime
+                    `finally` closeEngineStore store
+        idleLoop
+            callback
+            context
+            config
+            store
+            root
+            processRuntime
+            commands
+            stagedImages
+            browser
+            `finally` cleanup)
+        `finally` cancelPendingMcpRestarts commands
+
+cancelPendingMcpRestarts :: EngineMailbox EngineCommand -> IO ()
+cancelPendingMcpRestarts commands = do
+    pending <- atomically do
+        _ <- closeEngineMailbox commands EngineStop
+        drainEngineCommands commands
+    forM_ pending \case
+        EngineMcpRestart expected _ callback context ->
+            void $ tryAny $
+                withText "engine stopped before MCP restart completed" $
+                    invokeMcpResultCallback callback context (-1) expected
+        _ -> pure ()
 
 idleLoop
     :: FunPtr EventCallback
@@ -1839,12 +1861,12 @@ idleLoop
     -> MVar (Maybe Store)
     -> OsPath
     -> NativeProcessRuntime
-    -> TQueue EngineCommand
+    -> EngineMailbox EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> IO ()
 idleLoop callback context config store root processRuntime commands stagedImages browser =
-    atomically (readTQueue commands) >>= \case
+    atomically (readEngineCommand commands) >>= \case
         EngineStop -> pure ()
         EngineSearch query limit searchCallback searchContext -> do
             runConversationSearch
@@ -1855,21 +1877,26 @@ idleLoop callback context config store root processRuntime commands stagedImages
                 config store root mutation resultCallback resultContext
             continue
         EngineMcpRestart expected name resultCallback resultContext -> do
-            home <- getHomeDirectory
-            mcpAdminTry (restartMcpAdminServer home expected name) >>= \case
-                Left err -> emitMcpResult resultCallback resultContext
-                    (Left err :: Either McpAdminError (McpAdminSnapshot ()))
-                Right snapshot -> do
-                    restarted <- tryAny (restartNativeMcpRuntime processRuntime)
-                    case restarted of
-                        Left exception ->
-                            withText (Text.pack (show exception)) $
-                                invokeMcpResultCallback resultCallback
-                                    resultContext (-1)
-                                    snapshot.mcpAdminRevision
-                        Right () ->
-                            invokeMcpResultCallback resultCallback resultContext
-                                0 snapshot.mcpAdminRevision nullPtr 0
+            restarted <- tryAny do
+                home <- getHomeDirectory
+                mcpAdminTry
+                    (restartMcpAdminServer home expected name) >>= \case
+                        Left err -> pure (Left err)
+                        Right snapshot -> do
+                            restartNativeMcpRuntime processRuntime
+                            pure (Right snapshot)
+            case restarted of
+                Left exception ->
+                    withText (Text.pack (show exception)) $
+                        invokeMcpResultCallback resultCallback
+                            resultContext (-1) expected
+                Right (Left err) ->
+                    emitMcpResult resultCallback resultContext
+                        (Left err
+                            :: Either McpAdminError (McpAdminSnapshot ()))
+                Right (Right snapshot) ->
+                    invokeMcpResultCallback resultCallback resultContext
+                        0 snapshot.mcpAdminRevision nullPtr 0
             continue
         EngineRequest request
             | request.requestMethod == "turn.start" ->
@@ -1952,13 +1979,13 @@ activeLoop
     -> ManagedPostgresConfig
     -> MVar (Maybe Store)
     -> OsPath
-    -> TQueue EngineCommand
+    -> EngineMailbox EngineCommand
     -> TurnControl
     -> Async TurnOutcome
     -> IO ActiveExit
 activeLoop callback context config store root commands control running =
     atomically
-        ((Left <$> readTQueue commands)
+        ((Left <$> readEngineCommand commands)
             `orElse` (Right <$> waitCatchSTM running)) >>= \case
         Right outcome -> do
             finishTurnEvent callback context control.turnControlId outcome

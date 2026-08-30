@@ -258,6 +258,7 @@ foreign-library haskell-agent-bridge
     options:          standalone
     hs-source-dirs:   ffi
     other-modules:    Agent.CLI.MacOS.Bridge
+                    , Agent.CLI.MacOS.EngineMailbox
                     , Agent.CLI.MacOS.NativeLoopEvent
     c-sources:        cbits/HaskellAgentBridgeRuntime.c
     include-dirs:     include
@@ -353,6 +354,8 @@ test-suite agent-cli-test
     other-modules:    Agent.CLI.AccountSelectionSpec
                     , Agent.CLI.MacOS.BrowserBridgeFFISpec
                     , Agent.CLI.MacOS.BridgeSpec
+                    , Agent.CLI.MacOS.EngineMailboxSpec
+                    , Agent.CLI.MacOS.EngineMailbox
                     , Agent.CLI.MacOS.NativeLoopEventSpec
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.BridgeHeaderSpec

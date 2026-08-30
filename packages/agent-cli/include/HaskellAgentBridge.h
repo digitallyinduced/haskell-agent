@@ -284,7 +284,11 @@ int32_t ha_mcp_server_add(
 /*
  * Restart discards the engine's warm MCP fleet after validating name and
  * revision. It is rejected asynchronously if a turn is active; the next turn
- * starts servers from the current catalog.
+ * starts servers from the current catalog. A 0 return accepts the callback:
+ * it is delivered exactly once before a concurrent ha_engine_destroy returns,
+ * with success or an error (including shutdown cancellation if the worker
+ * exits early). Once destruction has won the acceptance race, restart returns
+ * 3 synchronously and no callback is delivered.
  */
 int32_t ha_engine_mcp_server_restart(
     void *engine,
