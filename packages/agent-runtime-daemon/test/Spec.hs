@@ -959,11 +959,11 @@ main = hspec $ do
                     runner =
                         TaskRunner
                             { runTask = \_ logLine -> do
-                                mapM_ logLine (replicate 8 "12345")
+                                mapM_ logLine (replicate 10_000 "12345")
                                 pure (Right ())
                             }
                 journal <- openJournal journalConfig
-                withTaskAdapter journal runner $ \supervisor -> do
+                withTaskAdapterQueueSize 1 journal runner $ \supervisor -> do
                     supervisor.handleCommand
                         (CommandId "submit")
                         (submitCommand "bounded-log" "bounded-session")

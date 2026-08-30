@@ -138,6 +138,7 @@ withTaskAdapterQueueSize ::
 withTaskAdapterQueueSize rawQueueSize journal runner action = do
     saved <- snapshot journal
     commands <- newTBQueueIO (fromIntegral (max 1 rawQueueSize))
+    completions <- newTQueueIO
     let initial =
             AdapterState
                 { adapterLimit = defaultTaskLimit
@@ -169,7 +170,9 @@ withTaskAdapterQueueSize rawQueueSize journal runner action = do
                                 else pure (Left "task scheduler command queue is full")
                 }
     workers <- newTVarIO Map.empty
-    let loop = schedulerLoopWithRegistry journal runner commands workers initial
+    let loop =
+            schedulerLoopWithRegistry
+                journal runner commands completions workers initial
     ( race loop (action supervisor) >>= \case
         Left () -> fail "task scheduler stopped unexpectedly"
         Right value -> pure value
@@ -179,14 +182,17 @@ schedulerLoopWithRegistry
     :: Journal
     -> TaskRunner
     -> TBQueue AdapterMessage
+    -> TQueue AdapterMessage
     -> TVar (Map TaskId RunningTask)
     -> AdapterState
     -> IO ()
-schedulerLoopWithRegistry journal runner commands registry = go
+schedulerLoopWithRegistry journal runner commands completions registry = go
   where
     go state0 = do
-        state <- startRunnable journal runner commands registry state0
-        message <- atomically (readTBQueue commands)
+        state <- startRunnable journal runner commands completions registry state0
+        message <-
+            atomically $
+                readTQueue completions `orElse` readTBQueue commands
         handleMessage state message >>= go
 
     handleMessage state = \case
@@ -387,10 +393,11 @@ startRunnable
     :: Journal
     -> TaskRunner
     -> TBQueue AdapterMessage
+    -> TQueue AdapterMessage
     -> TVar (Map TaskId RunningTask)
     -> AdapterState
     -> IO AdapterState
-startRunnable journal runner commands registry state = do
+startRunnable journal runner commands completions registry state = do
     let activeSessions =
             Set.fromList
                 [ sessionId
@@ -434,7 +441,7 @@ startRunnable journal runner commands registry state = do
                                     , updatedAt = persisted.updatedAt
                                     , logTail = persisted.logTail
                                     }
-                worker <- launchWorker commands runner executionTask
+                worker <- launchWorker commands completions runner executionTask
                 let runningTask =
                         RunningTask
                             { runningAttempt = persisted.attempt
@@ -446,23 +453,31 @@ startRunnable journal runner commands registry state = do
                     , Map.insert taskId runningTask running
                     )
 
-launchWorker :: TBQueue AdapterMessage -> TaskRunner -> DurableTask -> IO (Async ())
-launchWorker commands runner task =
+launchWorker ::
+    TBQueue AdapterMessage ->
+    TQueue AdapterMessage ->
+    TaskRunner ->
+    DurableTask ->
+    IO (Async ())
+launchWorker commands completions runner task =
     mask $ \_ -> do
         gate <- newEmptyMVar
         worker <- asyncWithUnmask $ \unmask -> do
             takeMVar gate
             let finished outcome =
                     atomically $
-                        writeTBQueue commands
+                        writeTQueue completions
                             (TaskFinished task.taskId task.attempt outcome)
+                logged line =
+                    atomically $ do
+                        full <- isFullTBQueue commands
+                        unless full $
+                            writeTBQueue commands
+                                (TaskLogged task.taskId task.attempt line)
             result <-
                 tryAny
                     ( unmask $
-                        runner.runTask task $ \line ->
-                            atomically $
-                                writeTBQueue commands
-                                    (TaskLogged task.taskId task.attempt line)
+                        runner.runTask task logged
                     )
             case result of
                 Left exception

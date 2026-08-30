@@ -81,7 +81,10 @@ and optional worktree creation. It always passes `--no-yolo`, so a noninteractiv
 task fails closed rather than implicitly approving mutating tools. Stdout and
 stderr are concurrently drained in
 bounded chunks before journal log limits are applied, total output is capped,
-and every process task has a six-hour wall-clock deadline. Embedders can supply
+and every process task has a six-hour wall-clock deadline. Log publication is
+best-effort when the bounded scheduler queue is full; terminal completion uses
+a separate control queue so noisy output cannot deadlock completion or daemon
+shutdown. Embedders can supply
 a typed `TaskRunner` while retaining the same scheduler, persistence, and wire
 protocol; the adapter intentionally exposes no approval-resolver hook.
 
