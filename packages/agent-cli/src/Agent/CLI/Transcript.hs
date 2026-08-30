@@ -4,7 +4,8 @@
 
 -- | Pure projection and Markdown rendering for persisted session history.
 module Agent.CLI.Transcript
-    ( projectTranscriptTurn
+    ( assistantResponseBodies
+    , projectTranscriptTurn
     , foldTranscriptTurns
     , renderTranscriptMarkdown
     , renderSessionTranscript
@@ -122,6 +123,16 @@ searchTranscriptBlocks rawQuery blocks
             , block.blockDetail
             , block.blockTimestamp
             ]
+
+-- | Non-empty assistant messages, newest first, for Grok-compatible @/copy N@.
+assistantResponseBodies :: [UiBlock] -> [Text]
+assistantResponseBodies =
+    reverse
+        . map (.blockBody)
+        . filter
+            (\block ->
+                block.blockKind == BlockAssistant
+                    && not (Text.null (Text.strip block.blockBody)))
 
 shown :: Show a => a -> Text
 shown = Text.pack . show

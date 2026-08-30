@@ -7,11 +7,13 @@ import Agent.CLI.TranscriptExport
     ( defaultExportFileName
     , renderTranscriptMarkdown
     , resolveExportPath
+    , saveCopyText
     , saveTranscriptNoClobber
     , visibleSessionTurns
     )
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe (bracket)
+import Data.Bits ((.&.))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
@@ -26,6 +28,7 @@ import qualified System.Directory.OsPath as Directory
 import qualified System.FilePath as FilePath
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Temp (mkdtemp)
+import System.Posix.Files (fileMode, getFileStatus, setFileMode)
 import Test.Hspec
 
 spec :: Spec
@@ -68,6 +71,20 @@ spec = do
         it "uses a stable default filename" do
             defaultExportFileName "2026-01-01-abcd"
                 `shouldBe` "agent-session-2026-01-01-abcd.md"
+
+        it "privately overwrites copy targets and creates parent directories" $
+          withTempDir "agent-copy-spec-" \root -> do
+            let target =
+                    root
+                        `appendPath` "nested"
+                        `appendPath` "response.txt"
+            saveCopyText target "first" `shouldReturn` Right ()
+            setFileMode (unsafeToFilePath target) 0o644
+            saveCopyText target "second 🌍" `shouldReturn` Right ()
+            TextIO.readFile (unsafeToFilePath target)
+                `shouldReturn` "second 🌍"
+            status <- getFileStatus (unsafeToFilePath target)
+            fileMode status .&. 0o777 `shouldBe` 0o600
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True

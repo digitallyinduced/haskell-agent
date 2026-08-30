@@ -9,7 +9,8 @@ import Agent.CLI.Session
     )
 import Agent.Dialect (DialectId(CodexDialect))
 import Agent.CLI.Transcript
-    ( foldTranscriptTurns
+    ( assistantResponseBodies
+    , foldTranscriptTurns
     , markdownFence
     , renderTranscriptMarkdown
     , searchTranscriptBlocks
@@ -78,6 +79,17 @@ spec = describe "Agent.CLI.Transcript" do
         searchTranscriptBlocks "ghc" blocks `shouldBe` [first]
         searchTranscriptBlocks "EXAMPLES" blocks `shouldBe` [second]
         searchTranscriptBlocks "   " blocks `shouldBe` blocks
+
+    it "selects non-empty assistant responses newest-first" do
+        let oldest = testBlock { blockBody = "oldest" }
+            tool = testBlock
+                { blockKind = BlockTool
+                , blockBody = "tool output"
+                }
+            empty = testBlock { blockBody = "  " }
+            newest = testBlock { blockBody = "newest" }
+        assistantResponseBodies [oldest, tool, empty, newest]
+            `shouldBe` ["newest", "oldest"]
 
 turn :: TranscriptEffect -> Text -> SessionTurn
 turn effect text = SessionTurn

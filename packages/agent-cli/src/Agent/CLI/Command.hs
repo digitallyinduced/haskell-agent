@@ -1,6 +1,7 @@
 -- | Interactive REPL slash commands.
 module Agent.CLI.Command
-    ( ForkRequest(..)
+    ( CopyRequest(..)
+    , ForkRequest(..)
     , ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
@@ -352,6 +353,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplNew
                     else ReplCommandError "usage: /new"
+            "delete" ->
+                if null args
+                    then ReplDelete
+                    else ReplCommandError "usage: /delete"
             "usage" ->
                 if null args
                     then ReplUsage
@@ -371,9 +376,8 @@ parseSlash catalog raw line = case Text.words line of
                     then ReplClearAttachments
                     else ReplCommandError "usage: /clear-attachments"
             "copy" ->
-                if null args
-                    then ReplCopyLast
-                    else ReplCommandError "usage: /copy"
+                parseCopyCommand
+                    (Text.strip (Text.drop (Text.length command) line))
             "copy-code" -> parseCopyCodeCommand args
             "copy-diff" ->
                 if null args
@@ -583,6 +587,31 @@ parseForkCommand input =
                             "--worktree and --no-worktree are mutually exclusive"
                 "--at" -> Left "--at is not supported in this version"
                 _ -> finish
+
+parseCopyCommand :: Text -> ReplAction
+parseCopyCommand input
+    | Text.null stripped = copy 1 Nothing
+    | Text.all isDigit first =
+        case reads (Text.unpack first) :: [(Integer, String)] of
+            [(number, "")]
+                | number > 0
+                , number <= toInteger (maxBound :: Int) ->
+                    copy
+                        (fromInteger number)
+                        (nonEmptyText (Text.stripStart rest))
+            _ -> usage
+    | otherwise = copy 1 (Just stripped)
+  where
+    stripped = Text.strip input
+    (first, rest) = Text.break isSpace stripped
+    copy index destination =
+        ReplCopy CopyRequest
+            { copyResponseIndex = index
+            , copyDestination = destination
+            }
+    usage =
+        ReplCommandError
+            "usage: /copy [N] [PATH] where N is 1 (latest), 2, 3, ..."
 
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
