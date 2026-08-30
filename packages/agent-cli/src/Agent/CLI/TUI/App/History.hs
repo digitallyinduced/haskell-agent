@@ -358,6 +358,8 @@ truncateUiBlocks count ui =
                 ]
         selectedIndex =
             ui.uiSelectedBlock >>= (`Map.lookup` indices)
+        shellProcesses =
+            Map.filter (`Map.member` indices) ui.uiShellProcesses
     in ui
         { uiBlocks = blocks
         , uiSelectedBlock =
@@ -371,6 +373,9 @@ truncateUiBlocks count ui =
             Map.filter
                 (\(index, _) -> index < count)
                 ui.uiToolCalls
+        , uiShellProcesses = shellProcesses
+        , uiShellPolls =
+            Map.filter (`Map.member` shellProcesses) ui.uiShellPolls
         , uiRetryCountdown = Nothing
         }
 

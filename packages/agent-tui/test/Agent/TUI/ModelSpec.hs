@@ -501,6 +501,225 @@ spec = describe "fullscreen UI reducer" do
                 block.blockTitle `shouldBe` "Continued session 3"
             _ -> expectationFailure "expected one running shell block"
 
+    it "keeps empty background-shell polls on the original command block" do
+        let command =
+                functionToolCall
+                    "shell-1"
+                    "shell_command"
+                    "{\"command\":\"slow\"}"
+            poll1 =
+                functionToolCall
+                    "poll-1"
+                    "write_stdin"
+                    "{\"session_id\":6,\"yield_time_ms\":1}"
+            poll2 =
+                functionToolCall
+                    "poll-2"
+                    "write_stdin"
+                    "{\"session_id\":6,\"chars\":null}"
+            running callId output =
+                ToolCallResult
+                    { callId
+                    , output =
+                        "Process still running.\nsession_id: 6\n" <> output
+                    , callKind = FunctionCallKind
+                    }
+            finished =
+                ToolCallResult
+                    { callId = "poll-2"
+                    , output = "Exit code: 0\nthird\n"
+                    , callKind = FunctionCallKind
+                    }
+            commandRunning =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted command)
+                    , UiLoop (ToolFinished (running "shell-1" "first\n"))
+                    ]
+            waiting =
+                applyFrom
+                    commandRunning
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted poll1)
+                    ]
+            polled =
+                applyFrom
+                    waiting
+                    [ UiLoop (ToolFinished (running "poll-1" "second\n"))
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted poll2)
+                    , UiLoop (ToolFinished finished)
+                    ]
+        length waiting.uiBlocks `shouldBe` 1
+        waiting.uiActivity `shouldBe` "Waiting for background terminal…"
+        Map.lookup "poll-1" waiting.uiShellPolls `shouldBe` Just 6
+        case Foldable.toList polled.uiBlocks of
+            [block] -> do
+                block.blockTitle `shouldBe` "$ slow"
+                block.blockBody `shouldBe` "first\nsecond\nthird\n"
+                block.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected one coalesced shell block"
+        polled.uiToolCalls `shouldBe` mempty
+        polled.uiShellProcesses `shouldBe` mempty
+        polled.uiShellPolls `shouldBe` mempty
+
+    it "keeps the command tracked when an empty poll itself is cancelled" do
+        let command =
+                functionToolCall
+                    "shell-1"
+                    "shell_command"
+                    "{\"command\":\"slow\"}"
+            poll =
+                functionToolCall
+                    "poll-1"
+                    "write_stdin"
+                    "{\"session_id\":6}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted command)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "shell-1"
+                                , output =
+                                    "Process still running.\nsession_id: 6\nfirst\n"
+                                , callKind = FunctionCallKind
+                                })
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted poll)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "poll-1"
+                                , output =
+                                    "Error: Poll cancelled; session 6 is still running"
+                                , callKind = FunctionCallKind
+                                })
+                    ]
+        Map.lookup 6 state.uiShellProcesses `shouldBe` Just (BlockId 1)
+        state.uiShellPolls `shouldBe` mempty
+        case Foldable.toList state.uiBlocks of
+            [block] -> block.blockState `shouldBe` BlockRunning
+            _ -> expectationFailure "expected one tracked shell block"
+
+    it "coalesces a write_stdin call once its streamed arguments identify a poll" do
+        let command =
+                functionToolCall
+                    "shell-1"
+                    "shell_command"
+                    "{\"command\":\"slow\"}"
+            earlyPoll = functionToolCall "poll-1" "write_stdin" ""
+            poll =
+                functionToolCall
+                    "poll-1"
+                    "write_stdin"
+                    "{\"session_id\":6}"
+            commandRunning =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted command)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "shell-1"
+                                , output =
+                                    "Process still running.\nsession_id: 6\n"
+                                , callKind = FunctionCallKind
+                                })
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted earlyPoll)
+                    ]
+            coalesced =
+                reduceUi (UiLoop (ToolArgumentsUpdated poll)) commandRunning
+        length commandRunning.uiBlocks `shouldBe` 2
+        length coalesced.uiBlocks `shouldBe` 1
+        Map.lookup "poll-1" coalesced.uiShellPolls `shouldBe` Just 6
+
+    it "keeps a background command as the owner after terminal input" do
+        let command =
+                functionToolCall
+                    "shell-1"
+                    "shell_command"
+                    "{\"command\":\"slow\"}"
+            input =
+                functionToolCall
+                    "input-1"
+                    "write_stdin"
+                    "{\"session_id\":6,\"chars\":\"yes\\n\"}"
+            running callId output =
+                ToolCallResult
+                    { callId
+                    , output =
+                        "Process still running.\nsession_id: 6\n" <> output
+                    , callKind = FunctionCallKind
+                    }
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted command)
+                    , UiLoop (ToolFinished (running "shell-1" "first\n"))
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted input)
+                    , UiLoop (ToolFinished (running "input-1" "second\n"))
+                    ]
+        Map.lookup 6 state.uiShellProcesses `shouldBe` Just (BlockId 1)
+        case Foldable.toList state.uiBlocks of
+            [commandBlock, inputBlock] -> do
+                commandBlock.blockState `shouldBe` BlockRunning
+                commandBlock.blockBody `shouldBe` "first\n"
+                inputBlock.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected the command and input blocks"
+
+    it "settles a background command when terminal input observes its exit" do
+        let command =
+                functionToolCall
+                    "shell-1"
+                    "shell_command"
+                    "{\"command\":\"slow\"}"
+            input =
+                functionToolCall
+                    "input-1"
+                    "write_stdin"
+                    "{\"session_id\":6,\"chars\":\"yes\\n\"}"
+            running =
+                ToolCallResult
+                    { callId = "shell-1"
+                    , output =
+                        "Process still running.\nsession_id: 6\nfirst\n"
+                    , callKind = FunctionCallKind
+                    }
+            runScenario output =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted command)
+                    , UiLoop (ToolFinished running)
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted input)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "input-1"
+                                , output
+                                , callKind = FunctionCallKind
+                                })
+                    ]
+        mapM_
+            (\(output, expectedState) -> do
+                let state = runScenario output
+                state.uiShellProcesses `shouldBe` mempty
+                case Foldable.toList state.uiBlocks of
+                    [commandBlock, inputBlock] -> do
+                        commandBlock.blockState `shouldBe` expectedState
+                        inputBlock.blockState `shouldBe` expectedState
+                    _ ->
+                        expectationFailure
+                            "expected the command and input blocks")
+            [ ("Exit code: 0\ndone\n", BlockComplete)
+            , ("Exit code: 1\nfailed\n", BlockFailed)
+            , ("Error: Command cancelled\n", BlockCancelled)
+            ]
+
     it "stores GHCi source separately from its compact shell heading" do
         let call =
                 functionToolCall

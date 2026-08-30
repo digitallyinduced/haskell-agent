@@ -389,6 +389,48 @@ spec = describe "Codex dialect" do
                 Left _ -> False
             Text.readFile path `shouldReturn` "after\n"
 
+    it "waits instead of hot-polling an empty write_stdin call" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    let handlers = appToolHandlers coding.codexAppTools
+                    started <- dispatchToolCall
+                        testDispatchConfig
+                        handlers
+                        (functionToolCall
+                            "shell-wait"
+                            "shell_command"
+                            "{\"command\":\"sleep 0.2; printf done\",\"yield_time_ms\":1}")
+                    started.output `shouldSatisfy`
+                        Text.isPrefixOf "Process still running."
+                    sessionId <-
+                        case
+                            [ ident
+                            | line <- Text.lines started.output
+                            , Just ident <-
+                                [Text.stripPrefix "session_id: " line]
+                            ]
+                        of
+                            [ident] -> pure ident
+                            _ ->
+                                expectationFailure
+                                    "expected one retained shell session id"
+                                    >> pure "0"
+                    continued <- dispatchToolCall
+                        testDispatchConfig
+                        handlers
+                        (functionToolCall
+                            "shell-poll"
+                            "write_stdin"
+                            ("{\"session_id\":" <> sessionId
+                                <> ",\"yield_time_ms\":1}"))
+                    continued.output `shouldSatisfy`
+                        Text.isPrefixOf "Exit code: 0\n"
+                    continued.output `shouldSatisfy` Text.isInfixOf "done"
+
     it "serializes write_stdin only per shell session" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
