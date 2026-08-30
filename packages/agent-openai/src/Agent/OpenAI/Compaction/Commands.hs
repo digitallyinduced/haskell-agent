@@ -4,8 +4,10 @@ module Agent.OpenAI.Compaction.Commands
     , isCompactSessionTurn
     , clearSessionUserText
     , newSessionUserText
+    , rewindSessionUserText
     , isClearSessionTurn
     , isNewSessionTurn
+    , isRewindSessionTurn
     , isTranscriptResetTurn
     ) where
 
@@ -36,14 +38,21 @@ clearSessionUserText = "/clear"
 newSessionUserText :: Text
 newSessionUserText = "/new"
 
+rewindSessionUserText :: Text
+rewindSessionUserText = "/rewind"
+
 isClearSessionTurn :: Text -> Bool
 isClearSessionTurn text = Text.strip text == clearSessionUserText
 
 isNewSessionTurn :: Text -> Bool
 isNewSessionTurn text = Text.strip text == newSessionUserText
 
+isRewindSessionTurn :: Text -> Bool
+isRewindSessionTurn text = Text.strip text == rewindSessionUserText
+
 isTranscriptResetTurn :: Text -> Bool
 isTranscriptResetTurn text =
     isCompactSessionTurn text
         || isClearSessionTurn text
         || isNewSessionTurn text
+        || isRewindSessionTurn text

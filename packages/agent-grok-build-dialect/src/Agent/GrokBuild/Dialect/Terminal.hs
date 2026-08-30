@@ -7,7 +7,6 @@ import Agent.ToolDispatch
     , decodeToolArguments
     , typedStreamingTool
     )
-import Agent.Tools.Dangerous (blockedShellCommandReason)
 import Agent.GrokBuild.Dialect.Common (jsonTool, stripAnsi)
 import Agent.GrokBuild.Dialect.Json
     ( optionalBool
@@ -101,18 +100,21 @@ runTerminal
 runTerminal session emitOutput args
     | Text.null args.description =
         pure (Left "Missing parameter: description")
-    | Just reason <- blockedShellCommandReason args.command =
-        pure (Left reason)
-    | not args.background && hasUnwaitedBackgroundOp args.command =
+    | not args.background
+    , hasUnwaitedBackgroundOp args.command =
         pure $ Left
             "The command contains a background '&'. Set background=true to run it as a background task, or append `wait` if you meant to wait for the children."
-    | args.background = startBackground session args.command
+    | args.background =
+        startBackground session args.command
     | otherwise = do
-        let timeoutMs = min 300000 (max 1 (fromMaybe 120000 args.timeout))
+        let timeoutMs =
+                min 300000
+                    (max 1 (fromMaybe 120000 args.timeout))
         result <- runForegroundStreaming
             session
-            (Text.unpack args.command)
+            args.command
             timeoutMs
             (\out err ->
-                emitOutput (stripAnsi (combineCommandOutput out err)))
-        pure $ Right $ stripAnsi (formatCommandResult result)
+                emitOutput
+                    (stripAnsi (combineCommandOutput out err)))
+        pure $ stripAnsi . formatCommandResult <$> result

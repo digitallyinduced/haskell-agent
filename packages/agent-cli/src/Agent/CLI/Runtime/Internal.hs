@@ -1,6 +1,8 @@
 -- | Command-line entry point: one-shot @-p@ or an interactive REPL.
 module Agent.CLI.Runtime.Internal
-    ( DevResult(..)
+    ( BuildInfo(..)
+    , DevResult(..)
+    , agentBuildInfo
     , afterDev
     , accountSwitchTarget
     , applyReplMode
@@ -12,6 +14,8 @@ module Agent.CLI.Runtime.Internal
     , formatMcpModelNotice
     , formatMcpModelNoticeFor
     , formatMcpProgress
+    , formatBuildInfo
+    , formatBuildInfoCompact
     , formatReplStatusLine
     , formatRepositoryPath
     , formatStartupTimings
@@ -63,7 +67,13 @@ import Agent.CLI.SessionAdmin
     )
 import Agent.CLI.Startup.Auth ( learnAboutUserOnboardingPrompt )
 import Agent.CLI.Startup.Format
-    ( formatRepositoryPath, formatStartupTimings )
+    ( BuildInfo(..)
+    , agentBuildInfo
+    , formatBuildInfo
+    , formatBuildInfoCompact
+    , formatRepositoryPath
+    , formatStartupTimings
+    )
 import Agent.CLI.Status
     ( applyReplMode
     , cycleReplInteraction
@@ -74,7 +84,9 @@ import Agent.CLI.Status
     )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
-import Control.Exception.Safe ( finally, onException )
+import Control.Concurrent.Async ( withAsync )
+import Control.Concurrent.MVar ( newEmptyMVar, putMVar, takeMVar )
+import Control.Exception.Safe ( finally, mask_, onException )
 import Data.Text ( Text )
 import System.Directory.OsPath
     ( getCurrentDirectory, getHomeDirectory, makeAbsolute )
@@ -83,7 +95,7 @@ import System.Exit ( die )
 import System.IO ( stderr )
 
 import qualified Agent.MCP as MCP
-import Data.IORef (newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
@@ -137,7 +149,8 @@ devMainResume resumeId = do
     case parseArgs args of
         Left err -> die err
         Right ShowHelp -> putStr usage >> pure DevQuit
-        Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
+        Right ShowVersion ->
+            putStrLn (Text.unpack (formatBuildInfo agentBuildInfo)) >> pure DevQuit
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
@@ -163,7 +176,8 @@ run = do
     case parseArgs args of
         Left err -> die err
         Right ShowHelp -> putStr usage
-        Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
+        Right ShowVersion ->
+            putStrLn (Text.unpack (formatBuildInfo agentBuildInfo))
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
@@ -193,24 +207,36 @@ runAgentWithRestarts options =
             let root = sessionsRoot home
             elicitationRef <- newIORef Nothing
             cleanupStarted <- newIORef False
-            mcpSupervisor <-
-                MCP.newMcpSupervisorWith
-                    MCP.defaultMcpHostHooks
-                        { MCP.mcpHostElicit = readIORef elicitationRef }
-            sessionThreads <-
-                newSessionThreadManager root
-                    `onException` MCP.closeMcpSupervisor mcpSupervisor
-            let processRuntime = AgentProcessRuntime
-                    { processMcpSupervisor = mcpSupervisor
-                    , processSessionThreads = sessionThreads
-                    , processCleanupStarted = cleanupStarted
-                    , processMcpElicitation = elicitationRef
-                    }
-            withRestoredCurrentDirectory
-                (runAgentWithRuntime processRuntime foregroundRunMode options)
-                `finally`
-                    (closeSessionThreadManager sessionThreads
-                        `finally` MCP.closeMcpSupervisor mcpSupervisor))
+            cleanupRequest <- newEmptyMVar
+            -- Cleanup is intentionally process-scoped rather than
+            -- session-scoped: provider restarts must not rescan every
+            -- worktree. 'withAsync' owns and joins the worker on shutdown.
+            withAsync (takeMVar cleanupRequest >>= id) \_ -> do
+                mcpSupervisor <-
+                    MCP.newMcpSupervisorWith
+                        MCP.defaultMcpHostHooks
+                            { MCP.mcpHostElicit = readIORef elicitationRef }
+                sessionThreads <-
+                    newSessionThreadManager root
+                        `onException` MCP.closeMcpSupervisor mcpSupervisor
+                let startCleanup action = mask_ do
+                        shouldStart <- atomicModifyIORef'
+                            cleanupStarted
+                            (\started -> (True, not started))
+                        if shouldStart
+                            then putMVar cleanupRequest action
+                            else pure ()
+                    processRuntime = AgentProcessRuntime
+                        { processMcpSupervisor = mcpSupervisor
+                        , processSessionThreads = sessionThreads
+                        , processStartCleanup = startCleanup
+                        , processMcpElicitation = elicitationRef
+                        }
+                withRestoredCurrentDirectory
+                    (runAgentWithRuntime processRuntime foregroundRunMode options)
+                    `finally`
+                        (closeSessionThreadManager sessionThreads
+                            `finally` MCP.closeMcpSupervisor mcpSupervisor))
         (pure DevQuit)
 
 loginMcpWithScopes :: [Text] -> Text -> IO ()

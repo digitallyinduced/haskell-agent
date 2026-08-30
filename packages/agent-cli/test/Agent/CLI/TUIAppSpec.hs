@@ -42,6 +42,8 @@ import Agent.CLI.TUI.App
     , lambdaArtWidget
     , quickStartRows
     , quickStartVisible
+    , quickStartWideVisible
+    , startupCapabilityLines
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , onboardingVisibleRowIndices
@@ -744,7 +746,12 @@ spec = do
         it "shows quick-start actions only when the empty pane has room" do
             quickStartVisible 100 30 `shouldBe` True
             quickStartVisible 47 30 `shouldBe` False
-            quickStartVisible 100 19 `shouldBe` False
+            quickStartVisible 100 21 `shouldBe` False
+
+        it "uses the two-column dashboard only in wide render contexts" do
+            quickStartWideVisible 140 35 `shouldBe` True
+            quickStartWideVisible 103 35 `shouldBe` False
+            quickStartWideVisible 140 28 `shouldBe` False
 
         it "surfaces the existing high-value startup commands" do
             quickStartRows
@@ -754,6 +761,37 @@ spec = do
                     , (QuickStartCommands, "Browse commands", "/")
                     , (QuickStartModel, "Manage models", "/model")
                     ]
+
+        it "packs capability names into bounded startup rows" do
+            let lines' =
+                    startupCapabilityLines
+                        20
+                        2
+                        [ "read_file"
+                        , "grep"
+                        , "shell_command"
+                        , "apply_patch"
+                        ]
+            lines'
+                `shouldBe`
+                    [ "read_file · grep"
+                    , "shell_command · … +1"
+                    ]
+            map terminalTextWidth lines'
+                `shouldSatisfy` all (<= 20)
+
+        it "summarizes omitted capabilities and handles an empty catalog" do
+            startupCapabilityLines
+                20
+                1
+                ["read_file", "grep", "shell_command", "apply_patch"]
+                `shouldBe` ["read_file · … +3"]
+            startupCapabilityLines 20 2 []
+                `shouldBe` ["none"]
+
+        it "renders untrusted capability names without terminal controls" do
+            startupCapabilityLines 40 1 ["  safe\nname\ESC[31m  "]
+                `shouldBe` ["safe↵name␛[31m"]
 
         it "paints an exact terminal-sized backing surface" do
             let image =

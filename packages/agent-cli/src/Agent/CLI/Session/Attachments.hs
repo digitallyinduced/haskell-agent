@@ -10,7 +10,7 @@ import Agent.CLI.Clipboard
     , formatImageSize
     , pendingImageAttachmentByteLimit
     , pendingImageAttachmentCountLimit
-    , readClipboardImagesForPaste
+    , readClipboardImagesImageFirst
     )
 import Agent.CLI.ImagePreview
     ( detectImagePreviewProtocol
@@ -121,7 +121,10 @@ queueClipboardImages
     previewIdRef
     color
     showPreview = do
-    imagesResult <- readClipboardImagesForPaste
+    -- Terminal image pastes normally expose bitmap bytes directly. Avoid the
+    -- comparatively slow macOS Finder file-list coercion unless that fast
+    -- path fails.
+    imagesResult <- readClipboardImagesImageFirst
     case imagesResult of
         Right images@(_:_) ->
             Right <$> queueAttachedImages

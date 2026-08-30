@@ -32,6 +32,8 @@ module Agent.CLI.TUI.App
     , lambdaArtWidget
     , quickStartRows
     , quickStartVisible
+    , quickStartWideVisible
+    , startupCapabilityLines
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , newFullscreenInputBuffer

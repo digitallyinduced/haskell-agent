@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 -- | Shared filesystem and process helpers for coding tools.
 module Agent.Tools.IO
     ( CommandResult(..)
@@ -20,6 +22,7 @@ module Agent.Tools.IO
     , runShellCommandStreaming
     , startShellCommand
     , startShellCommandWithInput
+    , configuredProcess
     , configuredProcessEnv
     , sessionTempProcessEnv
     , writeShellCommandInput
@@ -101,6 +104,13 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
+#if defined(darwin_HOST_OS)
+import qualified System.Directory as Directory
+import System.FilePath
+    ( takeDirectory
+    , takeFileName
+    )
+#endif
 import System.IO (Handle, hClose, hFlush)
 import System.Posix.Signals
     ( sigINT
@@ -109,6 +119,7 @@ import System.Posix.Signals
 import System.Posix.Types (ProcessGroupID)
 import System.Process
     ( CreateProcess(..)
+    , CmdSpec(..)
     , ProcessHandle
     , StdStream(..)
     , createProcess
@@ -252,16 +263,15 @@ runShellCommandStreaming
     -> IO CommandResult
 runShellCommandStreaming env workdir command timeoutMs onSnapshot =
     mask \restore -> do
-    processEnv <- configuredProcessEnv env
-    let spec = (shell command)
+    let baseSpec = (shell command)
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
             , create_group = True
-            , env = processEnv
             }
-    try @_ @SomeException (createProcess spec) >>= \case
+    try @_ @SomeException
+        (configuredProcess env baseSpec >>= createProcess) >>= \case
         Left err -> pure CommandResult
             { commandExitCode = Just 127
             , commandStdout = ""
@@ -408,25 +418,106 @@ startShellCommandWithStdin
     -> String
     -> IO (Either Text RunningCommand)
 startShellCommandWithStdin keepStdin env workdir command = do
-    processEnv <- configuredProcessEnv env
-    let spec = (shell command)
+    let baseSpec = (shell command)
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
             , create_group = True
-            , env = processEnv
             }
     try @_ @SomeException
-        (acquireRunningCommand env spec keepStdin) >>= \case
+        (configuredProcess env baseSpec >>= \spec ->
+            acquireRunningCommand env spec keepStdin) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
         Right running -> pure (Right running)
 
+-- | Apply the session-private environment and, on macOS, a Seatbelt profile
+-- that denies the shared temp namespace. Managed session layouts also hide
+-- sibling scratch directories while allowing the current one.
+configuredProcess :: ToolEnv -> CreateProcess -> IO CreateProcess
+configuredProcess env spec = do
+    sessionTmp <- readIORef env.toolSessionTmp
+    processEnv <- configuredProcessEnvFor sessionTmp spec.env
+    command <- configuredCommandSpec sessionTmp spec.cmdspec
+    pure spec
+        { cmdspec = command
+        , env = case processEnv of
+            Nothing -> spec.env
+            Just values -> Just values
+        }
+
+configuredCommandSpec :: Maybe OsPath -> CmdSpec -> IO CmdSpec
+#if defined(darwin_HOST_OS)
+configuredCommandSpec sessionTmp command =
+    case sessionTmp of
+        Nothing -> pure command
+        Just temp -> do
+            let sandboxExecutable = "/usr/bin/sandbox-exec"
+            canonicalTemp <-
+                Directory.canonicalizePath (unsafeToFilePath temp)
+            let profile = sessionSandboxProfile canonicalTemp
+                wrapped = case command of
+                    RawCommand executable arguments ->
+                        executable : arguments
+                    ShellCommand script ->
+                        ["/bin/sh", "-c", script]
+            pure $
+                RawCommand sandboxExecutable
+                    (["-p", profile] <> wrapped)
+#else
+configuredCommandSpec _ command = pure command
+#endif
+
+#if defined(darwin_HOST_OS)
+sessionSandboxProfile :: FilePath -> String
+sessionSandboxProfile temp =
+    unwords $
+        [ "(version 1)"
+        , "(allow default)"
+        , "(deny file-read* file-write*"
+        , "  (subpath \"/tmp\")"
+        , "  (subpath \"/private/tmp\")"
+        ]
+        <> managedParentRule
+        <> [")"]
+        <> [ "(allow file-read* file-write*"
+           , "  (subpath " <> sandboxString temp <> "))"
+           ]
+  where
+    parent = takeDirectory temp
+    grandparent = takeDirectory parent
+    managedParentRule
+        | takeFileName parent == "sessions"
+        , takeFileName grandparent == "tmp" =
+            ["  (subpath " <> sandboxString parent <> ")"]
+        | otherwise = []
+
+sandboxString :: String -> String
+sandboxString value =
+    "\"" <> concatMap escape value <> "\""
+  where
+    escape '\\' = "\\\\"
+    escape '"' = "\\\""
+    escape '\n' = "\\n"
+    escape '\r' = "\\r"
+    escape '\t' = "\\t"
+    escape char = [char]
+#endif
+
 configuredProcessEnv :: ToolEnv -> IO (Maybe [(String, String)])
-configuredProcessEnv env = readIORef env.toolSessionTmp >>= \case
-    Nothing -> pure Nothing
-    Just temp ->
-        Just . sessionTempProcessEnv temp <$> getEnvironment
+configuredProcessEnv env =
+    readIORef env.toolSessionTmp >>= (`configuredProcessEnvFor` Nothing)
+
+configuredProcessEnvFor
+    :: Maybe OsPath
+    -> Maybe [(String, String)]
+    -> IO (Maybe [(String, String)])
+configuredProcessEnvFor sessionTmp inherited =
+    case sessionTmp of
+        Nothing -> pure inherited
+        Just temp ->
+            Just . sessionTempProcessEnv temp
+                <$> maybe getEnvironment pure inherited
 
 -- | Point a child process at one session's private scratch directory without
 -- mutating the parent process environment (several sessions may coexist).

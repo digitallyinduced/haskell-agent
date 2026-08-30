@@ -1193,12 +1193,15 @@ spec = do
             isCompactSessionTurn "/compact focus auth" `shouldBe` True
             isCompactSessionTurn "hello" `shouldBe` False
 
-    describe "clear/new session markers" do
-        it "recognizes /clear and /new as transcript resets" do
+    describe "session reset markers" do
+        it "recognizes /clear, /new, and /rewind as transcript resets" do
             isClearSessionTurn "/clear" `shouldBe` True
             isNewSessionTurn "/new" `shouldBe` True
+            isRewindSessionTurn "/rewind" `shouldBe` True
+            isRewindSessionTurn "/undo" `shouldBe` False
             isTranscriptResetTurn "/clear" `shouldBe` True
             isTranscriptResetTurn "/new" `shouldBe` True
+            isTranscriptResetTurn "/rewind" `shouldBe` True
             isTranscriptResetTurn "/compact" `shouldBe` True
             isTranscriptResetTurn "hello" `shouldBe` False
 

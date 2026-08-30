@@ -24,6 +24,7 @@ import Agent.CLI.AgentViewport ( AgentEntry(..)
     , agentStatusGlyph
     , lookupAgentEntry
     )
+import Agent.Subagents.Types ( SubagentId(..) )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.ImagePreview ( ImagePreviewProtocol(..)
     , detectImagePreviewProtocol
@@ -31,7 +32,8 @@ import Agent.CLI.ImagePreview ( ImagePreviewProtocol(..)
     , kittyPlacedImageSequence
     , positionImagePayload
     )
-import Agent.CLI.Command ( SkillCommand , SlashCatalog(..)
+import Agent.CLI.Command ( SkillCommand(..) , SlashCatalog(..)
+    , SlashCommand(..)
     , defaultSlashCatalog
     , slashCatalogWithSkills
     )
@@ -122,9 +124,22 @@ import Agent.TUI.Motion ( MotionDemand(..)
     , quietIndicator
     , waitingIndicator
     )
-import Agent.TUI.Presentation ( permissionToolCallPromptRelative )
-import Agent.Loop (ImageAttachment(..), LoopEvent(..))
-import Agent.ToolDispatch (ToolCall(..))
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , permissionToolCallPromptRelative
+    )
+import Agent.Loop
+    ( ImageAttachment(..)
+    , LoopEvent(..)
+    , TurnCompletion(..)
+    , TurnOutput(..)
+    )
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallResult(..)
+    , ToolResultImage(..)
+    , toolCallResultImages
+    )
 import Brick
 import qualified Brick.Types as B
 import Brick.BChan ( newBChan , writeBChan )
@@ -213,9 +228,9 @@ enqueueStreamingText runtime reasoning = go
   where
     go text
         | Text.null text =
-            enqueueChunk text
+            enqueueChunk Text.empty
         | Text.length text <= appEventMailboxTextChunkCodeUnits =
-            enqueueChunk text
+            enqueueChunk (Text.copy text)
         | otherwise = do
             let (chunk0, rest) =
                     Text.splitAt appEventMailboxTextChunkCodeUnits text
@@ -557,38 +572,65 @@ uiEventLogicalBytes = \case
             TextDelta text -> logicalTextBytes text
             ReasoningDelta text -> logicalTextBytes text
             ActivityUpdated text -> logicalTextBytes text
+            ProviderLimitUpdated
+                { providerLimitText = text
+                } ->
+                logicalTextBytes text
             WarningRaised text -> logicalTextBytes text
             ResponseRestarted text -> logicalTextBytes text
-            ToolUpdated call ->
-                logicalTextsBytes
-                    [call.callId, call.name, call.arguments]
+            TurnStarted -> 128
+            TurnFinished output -> turnOutputLogicalBytes output
+            ToolStarted call -> toolCallLogicalBytes call
+            ToolUpdated call -> toolCallLogicalBytes call
+            ToolArgumentsUpdated call -> toolCallLogicalBytes call
             ToolOutputUpdated callId output ->
                 logicalTextsBytes [callId, output]
+            ToolFinished result -> toolCallResultLogicalBytes result
+            ToolRetracted callId -> logicalTextBytes callId
+            ResponseAttemptDiscarded -> 128
             NativeAgentStarted agent parent prompt model ->
                 logicalTextsBytes
                     ([agent, prompt] <> maybeToList parent <> maybeToList model)
             NativeAgentOutput agent output ->
                 logicalTextsBytes [agent, output]
             NativeAgentFinished agent _ -> logicalTextBytes agent
-            _ -> 128
     UiUserSubmitted text -> logicalTextBytes text
+    UiDraftSubmitted -> 128
     UiInputSteered text -> logicalTextBytes text
     UiInputQueued text -> logicalTextBytes text
     UiInputPromoted text -> logicalTextBytes text
+    UiQueuedInputStarted -> 128
     UiSetDraft text _ -> logicalTextBytes text
+    UiSetPrompt prompt -> promptStateLogicalBytes prompt
     UiSetPromptEffort text -> logicalTextBytes text
+    UiSetPromptLimitStatus status ->
+        maybe 128 (logicalTextBytes . (.promptLimitText)) status
+    UiSetAwaitingInput _ -> 128
     UiSetRepository branch cwd root ->
         logicalTextsBytes [branch, cwd, root]
+    UiSetNotice notice ->
+        maybe 128 (logicalTextBytes . (.noticeText)) notice
+    UiMoveSelection _ -> 128
+    UiSelectBlock _ -> 128
+    UiActivateBlock _ -> 128
+    UiToggleSelected -> 128
+    UiFocusChanged _ -> 128
     UiPermissionShown text -> logicalTextBytes text
+    UiPermissionMoved _ -> 128
+    UiPermissionHidden -> 128
     UiHistory text -> logicalTextBytes text
     UiAssistantHistory text -> logicalTextBytes text
     UiSystemMessage text -> logicalTextBytes text
+    UiRecapStarted -> 128
     UiRecapReady text -> logicalTextBytes text
     UiRecapUnavailable text -> logicalTextBytes text
     UiErrorMessage text -> logicalTextBytes text
     UiRetryCountdown prefix _ suffix ->
         logicalTextsBytes [prefix, suffix]
-    _ -> 128
+    UiConversationCleared -> 128
+    UiSetFollow _ -> 128
+    UiTurnEnded _ -> 128
+    UiTurnRestarted -> 128
 
 appEventLogicalBytes :: AppEvent -> Int
 appEventLogicalBytes = \case
@@ -598,19 +640,41 @@ appEventLogicalBytes = \case
             (\size event -> saturatingAdd size (uiEventLogicalBytes event))
             0
             events
-    AppAgentSnapshot _ entries ->
+    AppAskPermission prompt _ ->
+        saturatingAdd 256 (logicalTextBytes prompt)
+    AppAskChoice _ title body _ rows _ ->
+        saturatingAdd 256
+            (saturatingAdd
+                (logicalTextsBytes [title, body])
+                (textRowsLogicalBytes rows))
+    AppAskFilterChoice title _ rows _ ->
+        saturatingAdd 256
+            (saturatingAdd
+                (logicalTextBytes title)
+                (textRowsLogicalBytes rows))
+    AppAskText _ title body draft _ ->
+        saturatingAdd 256 (logicalTextsBytes [title, body, draft])
+    AppAskResume browser _ _ _ _ ->
+        max opaqueAppEventLogicalBytes
+            (saturatingAdd 512 (resumeBrowserLogicalBytes browser))
+    AppSuspend{} -> opaqueAppEventLogicalBytes
+    AppSetSlashCatalog catalog ->
+        saturatingAdd 512 (slashCatalogLogicalBytes catalog)
+    AppSetSkillCommands skills ->
+        saturatingAdd 256
+            (foldl'
+                (\size skill ->
+                    saturatingAdd size (skillCommandLogicalBytes skill))
+                0
+                skills)
+    AppSetModelIds modelIds ->
+        saturatingAdd 256 (logicalTextsBytes modelIds)
+    AppAgentSnapshot target entries ->
         foldl'
             (\size entry ->
                 saturatingAdd size
-                    ( 512
-                        + logicalTextsBytes
-                            ( entry.agentPath
-                                : entry.agentStatus
-                                : entry.agentTranscript
-                            )
-                        + maybe 0 logicalTextBytes entry.agentModel
-                    ))
-            0
+                    (agentEntryLogicalBytes entry))
+            (agentTargetLogicalBytes target)
             entries
     AppSetWindowTitle text -> logicalTextBytes text
     AppDictationPartial text -> logicalTextBytes text
@@ -624,7 +688,263 @@ appEventLogicalBytes = \case
         saturatingAdd
             (logicalTextBytes callId)
             (imagePreviewLogicalBytes preview)
-    _ -> 256
+    AppSyntaxHighlighterChanged -> 256
+    AppHistoryReset page ->
+        saturatingAdd 256 (historyPageLogicalBytes page)
+    AppHistoryLoaded _ result ->
+        saturatingAdd 256 $
+            either logicalTextBytes historyPageLogicalBytes result
+    AppHistoryCommitted _ turn _ ->
+        saturatingAdd 256 (historyTurnLogicalBytes turn)
+    AppHistoryLiveStarted -> 256
+    AppConversationReflow -> 256
+    AppSyncSubmittedImagePlacements -> 256
+    AppMotionTick -> 256
+    AppRecapPoll -> 256
+    AppStop -> 256
+
+opaqueAppEventLogicalBytes :: Int
+opaqueAppEventLogicalBytes =
+    saturatingAdd
+        appEventMailboxPayloadBudgetBytes
+        (appEventMailboxControlReserveBytes + 1)
+
+toolCallLogicalBytes :: ToolCall -> Int
+toolCallLogicalBytes call =
+    saturatingAdd 256 $
+        logicalTextsBytes [call.callId, call.name, call.arguments]
+
+toolCallResultLogicalBytes :: ToolCallResult -> Int
+toolCallResultLogicalBytes result =
+    saturatingAdd 256 $
+        saturatingAdd
+            (logicalTextsBytes [result.callId, result.output])
+            (foldl'
+                (\size image ->
+                    saturatingAdd size
+                        (logicalTextsBytes
+                            (image.imageUrl : maybeToList image.imageDetail)))
+                0
+                (toolCallResultImages result))
+
+turnOutputLogicalBytes :: TurnOutput -> Int
+turnOutputLogicalBytes output =
+    saturatingAdd 512 $
+        saturatingAdd
+            (logicalTextsBytes
+                (output.responseId : maybeToList output.assistantText))
+            (saturatingAdd
+                (foldl'
+                    (\size call ->
+                        saturatingAdd size (toolCallLogicalBytes call))
+                    0
+                    output.toolCalls)
+                (case output.completion of
+                    TurnCompleted -> 0
+                    TurnIncomplete reason _ -> logicalTextBytes reason))
+
+promptStateLogicalBytes :: PromptState -> Int
+promptStateLogicalBytes prompt =
+    saturatingAdd 256 $
+        logicalTextsBytes
+            ( [ prompt.promptModel
+              , prompt.promptEffort
+              , prompt.promptMode
+              , prompt.promptAccount
+              ]
+                <> prompt.promptEffortOptions
+                <> maybe
+                    []
+                    (pure . (.promptLimitText))
+                    prompt.promptLimitStatus
+            )
+
+uiBlockLogicalBytes :: UiBlock -> Int
+uiBlockLogicalBytes block =
+    saturatingAdd 256 $
+        logicalTextsBytes
+            ( [ block.blockTitle
+              , block.blockBody
+              , block.blockTimestamp
+              , block.blockDetail
+              ]
+                <> maybeToList block.blockCallId
+            )
+
+uiStateLogicalBytes :: UiState -> Int
+uiStateLogicalBytes ui =
+    foldl'
+        saturatingAdd
+        1024
+        [ foldl'
+            (\size block ->
+                saturatingAdd size (uiBlockLogicalBytes block))
+            0
+            ui.uiBlocks
+        , logicalTextBytes ui.uiDraft
+        , logicalTextsBytes ui.uiQueuedInputs
+        , logicalTextBytes ui.uiActivity
+        , promptStateLogicalBytes ui.uiPrompt
+        , logicalTextsBytes [ui.uiBranch, ui.uiCwd, ui.uiWorkspaceRoot]
+        , maybe 0
+            (logicalTextBytes . (.permissionSummary))
+            ui.uiPermission
+        , maybe 0 (logicalTextBytes . (.noticeText)) ui.uiNotice
+        , maybe
+            0
+            (\retry ->
+                logicalTextsBytes
+                    [ retry.retryCountdownPrefix
+                    , retry.retryCountdownSuffix
+                    ])
+            ui.uiRetryCountdown
+        , Map.foldlWithKey'
+            (\size callId (_, call) ->
+                saturatingAdd size $
+                    saturatingAdd
+                        (logicalTextBytes callId)
+                        (toolCallLogicalBytes call))
+            0
+            ui.uiToolCalls
+        , foldl'
+            (\size todo ->
+                saturatingAdd size
+                    (saturatingAdd
+                        128
+                        (logicalTextsBytes [todo.todoLineText])))
+            0
+            ui.uiTodos
+        ]
+
+agentEntryLogicalBytes :: AgentEntry -> Int
+agentEntryLogicalBytes entry =
+    foldl'
+        saturatingAdd
+        512
+        [ agentTargetLogicalBytes entry.agentTarget
+        , logicalTextsBytes
+            (entry.agentPath : entry.agentStatus : entry.agentTranscript)
+        , maybe 0 logicalTextBytes entry.agentModel
+        , foldl'
+            (\size step ->
+                saturatingAdd size $
+                    saturatingAdd 128 $
+                        saturatingAdd
+                            (logicalTextBytes step.agentStepTitle)
+                            (maybe 0 logicalTextBytes step.agentStepDetail))
+            0
+            entry.agentSteps
+        , uiStateLogicalBytes entry.agentConversation
+        ]
+
+historyTurnLogicalBytes :: HistoryTurn -> Int
+historyTurnLogicalBytes turn =
+    saturatingAdd 256 $
+        foldl'
+            (\size block ->
+                saturatingAdd size (uiBlockLogicalBytes block))
+            0
+            turn.historyTurnBlocks
+
+historyPageLogicalBytes :: HistoryPage -> Int
+historyPageLogicalBytes page =
+    saturatingAdd 512 $
+        foldl'
+            (\size turn ->
+                saturatingAdd size (historyTurnLogicalBytes turn))
+            0
+            page.historyPageTurns
+
+resumeBrowserLogicalBytes :: ResumeBrowser -> Int
+resumeBrowserLogicalBytes browser =
+    foldl'
+        saturatingAdd
+        512
+        [ logicalTextBytes browser.resumeBrowserQuery
+        , maybe 0 logicalTextBytes browser.resumeBrowserAppliedQuery
+        , maybe 0 logicalTextBytes browser.resumeBrowserExpanded
+        , maybe 0 logicalTextBytes browser.resumeBrowserDeletePending
+        , maybe 0 logicalTextBytes browser.resumeBrowserNotice
+        , foldl'
+            (\size entry ->
+                saturatingAdd size (resumeEntryLogicalBytes entry))
+            0
+            browser.resumeBrowserAll
+        ]
+
+resumeEntryLogicalBytes :: ResumeEntry -> Int
+resumeEntryLogicalBytes entry =
+    saturatingAdd 512 $
+        logicalTextsBytes
+            ( [ entry.resumeId
+              , entry.resumeTitle
+              , entry.resumeModel
+              , entry.resumeCwd
+              , entry.resumeProject
+              , entry.resumeWhen
+              , entry.resumeProvider
+              , entry.resumePrompt
+              ]
+                <> maybeToList entry.resumeRecap
+                <> maybeToList entry.resumeLastTurnSummary
+                <> maybeToList entry.resumeMatch
+                <> entry.resumeTranscript
+            )
+
+textRowsLogicalBytes :: [(Text, Text)] -> Int
+textRowsLogicalBytes =
+    foldl'
+        (\size (title, detail) ->
+            saturatingAdd size (logicalTextsBytes [title, detail]))
+        0
+
+agentTargetLogicalBytes :: AgentTarget -> Int
+agentTargetLogicalBytes = \case
+    AgentRoot -> 64
+    AgentChild (SubagentId identifier) -> logicalTextChunkBytes identifier
+    AgentNative identifier -> logicalTextChunkBytes identifier
+
+skillCommandLogicalBytes :: SkillCommand -> Int
+skillCommandLogicalBytes skill =
+    saturatingAdd 256 $
+        logicalTextsBytes
+            ( [ skill.skillCommandName
+              , skill.skillCommandSummary
+              , skill.skillCommandSource
+              ]
+                <> maybeToList skill.skillCommandArgumentHint
+            )
+
+slashCommandLogicalBytes :: SlashCommand -> Int
+slashCommandLogicalBytes command =
+    saturatingAdd 256 $
+        logicalTextsBytes
+            ( [ command.slashName
+              , command.slashUsage
+              , command.slashSummary
+              ]
+                <> command.slashAliases
+                <> command.slashRequiredTools
+            )
+
+slashCatalogLogicalBytes :: SlashCatalog -> Int
+slashCatalogLogicalBytes catalog =
+    foldl'
+        saturatingAdd
+        512
+        [ logicalTextsBytes catalog.slashCatalogToolNames
+        , foldl'
+            (\size command ->
+                saturatingAdd size (slashCommandLogicalBytes command))
+            0
+            catalog.slashCatalogCommands
+        , foldl'
+            (\size skill ->
+                saturatingAdd size (skillCommandLogicalBytes skill))
+            0
+            catalog.slashCatalogSkills
+        , logicalTextsBytes catalog.slashCatalogModelIds
+        ]
 
 imagePreviewPairsLogicalBytes
     :: [(ImageAttachment, TuiImagePreview)]
@@ -666,7 +986,9 @@ imagePreviewLogicalBytes preview =
 logicalTextsBytes :: Foldable f => f Text -> Int
 logicalTextsBytes =
     foldl'
-        (\size text -> saturatingAdd size (logicalTextBytes text))
+        (\size text ->
+            saturatingAdd size $
+                saturatingAdd 64 (logicalTextBytes text))
         0
 
 logicalTextBytes :: Text -> Int

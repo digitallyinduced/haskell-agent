@@ -26,6 +26,7 @@ import Agent.ResourceScope
     , newResourceScope
     , releaseResource
     )
+import Agent.Tools.Dangerous (blockedShellCommandReasonIn)
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
@@ -190,23 +191,31 @@ resetGrokBackgroundTasks session = do
 
 runForegroundStreaming
     :: GrokSession
-    -> String
+    -> Text
     -> Int
     -> (Text -> Text -> IO ())
-    -> IO CommandResult
+    -> IO (Either Text CommandResult)
 runForegroundStreaming session command timeoutMs onSnapshot =
     modifyMVar session.grokShell \shell -> do
-        let wrapped = bashWrap (wrapScript shell True command)
-        result <- runShellCommandStreaming
-            session.grokEnv
-            session.grokEnv.toolCwd
-            wrapped
-            timeoutMs
-            onSnapshot
-        next <- if result.commandTimedOut || result.commandCancelled
-            then pure shell
-            else refreshCwd session.grokEnv shell
-        pure (next, result)
+        sessionTmp <- readIORef session.grokEnv.toolSessionTmp
+        blockedShellCommandReasonIn
+            sessionTmp shell.shellCwd command >>= \case
+                Just reason -> pure (shell, Left reason)
+                Nothing -> do
+                    let wrapped =
+                            bashWrap
+                                (wrapScript shell True (Text.unpack command))
+                    result <- runShellCommandStreaming
+                        session.grokEnv
+                        session.grokEnv.toolCwd
+                        wrapped
+                        timeoutMs
+                        onSnapshot
+                    next <- if result.commandTimedOut
+                            || result.commandCancelled
+                        then pure shell
+                        else refreshCwd session.grokEnv shell
+                    pure (next, Right result)
 
 startBackground :: GrokSession -> Text -> IO (Either Text Text)
 startBackground session command =
@@ -217,42 +226,62 @@ startMonitor session command timeoutMs =
     startBackgroundCommand session (monitorCommand command timeoutMs)
 
 startBackgroundCommand :: GrokSession -> Text -> IO (Either Text Text)
-startBackgroundCommand session command = do
-    shell <- readMVar session.grokShell
-    -- Background wrappers source cwd/env but must not write them back;
-    -- a later foreground command owns the persistent session.
-    let wrapped = bashWrap (wrapScript shell False (Text.unpack command))
-    started <- tryAny $
-        allocateResource session.grokResources
-            (startShellCommand session.grokEnv session.grokEnv.toolCwd wrapped
-                >>= either (throwIO . userError . Text.unpack) pure)
-            stopShellCommand
-    case started of
-        Left exception ->
-            pure (Left (Text.pack (show exception)))
-        Right (resource, running) -> do
-            taskId <-
-                (modifyMVar session.grokTasks \store -> do
-                    let next = store.backgroundNextId + 1
-                        taskId = "t" <> Text.pack (show next)
-                        task = BackgroundTask
-                            { backgroundId = taskId
-                            , backgroundRunning = running
-                            , backgroundResource = resource
-                            }
-                    pure
-                        ( store
-                            { backgroundNextId = next
-                            , backgroundTasks =
-                                Map.insert taskId task store.backgroundTasks
-                            }
-                        , taskId
-                        ))
-                `onException` releaseResource resource
-            pure $ Right $
-                "Command moved to background.\n\
-                \task_id: " <> taskId <> "\n\
-                \Use get_command_or_subagent_output to read output. Do not poll in a loop."
+startBackgroundCommand session command =
+    modifyMVar session.grokShell \shell -> do
+        sessionTmp <- readIORef session.grokEnv.toolSessionTmp
+        blockedShellCommandReasonIn
+            sessionTmp shell.shellCwd command >>= \case
+                Just reason -> pure (shell, Left reason)
+                Nothing -> do
+                    -- Background wrappers source cwd/env but must not write
+                    -- them back; a later foreground command owns the
+                    -- persistent session.
+                    let wrapped =
+                            bashWrap
+                                (wrapScript shell False
+                                    (Text.unpack command))
+                    started <- tryAny $
+                        allocateResource session.grokResources
+                            (startShellCommand
+                                session.grokEnv
+                                session.grokEnv.toolCwd
+                                wrapped
+                                >>= either
+                                    (throwIO . userError . Text.unpack)
+                                    pure)
+                            stopShellCommand
+                    case started of
+                        Left exception ->
+                            pure
+                                (shell, Left (Text.pack (show exception)))
+                        Right (resource, running) -> do
+                            taskId <-
+                                (modifyMVar session.grokTasks \store -> do
+                                    let next = store.backgroundNextId + 1
+                                        taskId =
+                                            "t" <> Text.pack (show next)
+                                        task = BackgroundTask
+                                            { backgroundId = taskId
+                                            , backgroundRunning = running
+                                            , backgroundResource = resource
+                                            }
+                                    pure
+                                        ( store
+                                            { backgroundNextId = next
+                                            , backgroundTasks =
+                                                Map.insert taskId task
+                                                    store.backgroundTasks
+                                            }
+                                        , taskId
+                                        ))
+                                `onException` releaseResource resource
+                            pure
+                                ( shell
+                                , Right $
+                                    "Command moved to background.\n\
+                                    \task_id: " <> taskId <> "\n\
+                                    \Use get_command_or_subagent_output to read output. Do not poll in a loop."
+                                )
 
 readTaskOutput :: GrokSession -> Text -> Maybe Int -> IO Text
 readTaskOutput session taskId timeoutMs = do

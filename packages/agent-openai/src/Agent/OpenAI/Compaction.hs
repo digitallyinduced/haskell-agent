@@ -29,10 +29,12 @@ module Agent.OpenAI.Compaction
     , isCompactSessionTurn
     , isClearSessionTurn
     , isNewSessionTurn
+    , isRewindSessionTurn
     , isTranscriptResetTurn
     , compactSessionUserText
     , clearSessionUserText
     , newSessionUserText
+    , rewindSessionUserText
     ) where
 
 import Agent.OpenAI.Compaction.Request
@@ -48,8 +50,10 @@ import Agent.OpenAI.Compaction.Commands
     , isClearSessionTurn
     , isCompactSessionTurn
     , isNewSessionTurn
+    , isRewindSessionTurn
     , isTranscriptResetTurn
     , newSessionUserText
+    , rewindSessionUserText
     )
 import Agent.Responses.Types
 import Agent.Json (RawJson, rawJsonFromEncoding)

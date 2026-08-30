@@ -3,6 +3,7 @@ module Agent.Tools.FileSystem
     ( deleteTextFile
     , displayPathInWorkspace
     , listDirectoryEntries
+    , pathTargetsSystemTemp
     , readTextFile
     , renameTextFile
     , resolveForRead
@@ -17,11 +18,11 @@ import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (relativeDisplayPath, toText, unsafeToFilePath)
 import Agent.Tools.Types (ToolEnv(..), addToolAllowedRoot)
 import Control.Exception.Safe (SomeException, try, tryAny, tryIO)
+import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
 import Data.IORef (readIORef)
-import Data.List (stripPrefix)
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory.OsPath
@@ -48,6 +49,12 @@ import System.OsPath
     , (</>)
     )
 import System.IO.Error (isDoesNotExistError)
+import System.Posix.Files
+    ( deviceID
+    , fileID
+    , getFileStatus
+    )
+import System.Posix.Types (DeviceID, FileID)
 
 -- | Resolve a model-supplied path against the tool cwd and reject anything
 -- that canonicalizes outside the cwd or an explicitly allowed root, including
@@ -148,9 +155,10 @@ resolveWithRootsAttempt env requested extraRoots = do
             | isAbsolute requested = requested
             | otherwise = absCwd </> requested
         roots = absCwd : allowedRoots
-        tempAlias
-            | isAbsolute requested = systemTempRelative combined
-            | otherwise = Nothing
+    tempAlias <-
+        if isAbsolute requested
+            then systemTempRelative combined
+            else pure Nothing
     case (canonicalSessionTmp, tempAlias) of
         (Just tempRoot, Just (aliasRoot, relative)) -> do
             explicitlyAllowed <-
@@ -188,13 +196,24 @@ resolvePath path = do
         then Right <$> canonicalizePath path
         else resolveMissing path
 
--- | Treat both common spellings of the conventional POSIX temp namespace as
--- aliases for the session-private temp root. Match components before resolving
--- the path so macOS's @/tmp@ symlink and its @/private/tmp@ target behave the
--- same way, while preserving @..@ and symlink semantics in the remapped path.
-systemTempRelative :: OsPath -> Maybe (OsPath, OsPath)
+-- | Treat existing spellings of the conventional POSIX temp namespace as
+-- aliases for the session-private temp root. Inspect each on-disk prefix so
+-- @..@ follows preceding symlinks exactly as the filesystem does. This also
+-- makes case variants aliases only on filesystems where they resolve to the
+-- same directory.
+systemTempRelative :: OsPath -> IO (Maybe (OsPath, OsPath))
 systemTempRelative path =
-    firstMatch [systemTmpRoot, privateSystemTmpRoot]
+    case directAlias components of
+        Just match -> pure (Just match)
+        Nothing -> do
+            aliases <- fmap concat $
+                mapM
+                    (\alias ->
+                        pathIdentity alias >>= \case
+                            Nothing -> pure []
+                            Just identity -> pure [(alias, identity)])
+                    [systemTmpRoot, privateSystemTmpRoot]
+            findAlias aliases [] components
   where
     components =
         normalizePosixRoot $
@@ -206,16 +225,53 @@ systemTempRelative path =
             , Text.all (== '/') display ->
                 posixRoot : rest
         other -> other
-    firstMatch [] = Nothing
-    firstMatch (alias : aliases) =
-        case
-            stripPrefix
-                (splitDirectories (dropTrailingPathSeparator alias))
-                components
-        of
-            Just [] -> Just (alias, currentDirectory)
-            Just relative -> Just (alias, joinPath relative)
-            Nothing -> firstMatch aliases
+
+    directAlias = \case
+        [root, tmp]
+            | root == posixRoot
+            , tmp == tmpComponent ->
+                Just (systemTmpRoot, currentDirectory)
+        root : tmp : rest
+            | root == posixRoot
+            , tmp == tmpComponent ->
+                Just (systemTmpRoot, joinPath rest)
+        [root, private, tmp]
+            | root == posixRoot
+            , private == privateComponent
+            , tmp == tmpComponent ->
+                Just (privateSystemTmpRoot, currentDirectory)
+        root : private : tmp : rest
+            | root == posixRoot
+            , private == privateComponent
+            , tmp == tmpComponent ->
+                Just (privateSystemTmpRoot, joinPath rest)
+        _ -> Nothing
+    findAlias _ _ [] = pure Nothing
+    findAlias aliases prefix (component : rest) = do
+        let nextPrefix = prefix <> [component]
+        candidateIdentity <- pathIdentity (joinPath nextPrefix)
+        case candidateIdentity >>= matchingAlias aliases of
+            Just alias ->
+                pure $ Just
+                    ( alias
+                    , if null rest then currentDirectory else joinPath rest
+                    )
+            Nothing -> findAlias aliases nextPrefix rest
+
+    matchingAlias aliases identity =
+        fst <$> find ((== identity) . snd) aliases
+
+pathIdentity :: OsPath -> IO (Maybe (DeviceID, FileID))
+pathIdentity path =
+    tryAny (getFileStatus (unsafeToFilePath path)) >>= \case
+        Left _ -> pure Nothing
+        Right status -> pure $ Just (deviceID status, fileID status)
+
+-- | Whether the host filesystem resolves any prefix of this absolute path to
+-- the conventional shared temp directory.
+pathTargetsSystemTemp :: OsPath -> IO Bool
+pathTargetsSystemTemp path =
+    maybe False (const True) <$> systemTempRelative path
 
 -- | A preconfigured host-temp root is an explicit escape hatch from the
 -- private alias. Canonicalize only the alias root, not its descendants, so
@@ -239,6 +295,12 @@ systemTmpRoot = unsafeEncodeUtf "/tmp"
 
 privateSystemTmpRoot :: OsPath
 privateSystemTmpRoot = unsafeEncodeUtf "/private/tmp"
+
+tmpComponent :: OsPath
+tmpComponent = unsafeEncodeUtf "tmp"
+
+privateComponent :: OsPath
+privateComponent = unsafeEncodeUtf "private"
 
 currentDirectory :: OsPath
 currentDirectory = unsafeEncodeUtf "."

@@ -12,12 +12,26 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "parseReplLine" do
-        it "keeps :q and :quit as quit" do
-            parseReplLine ":q" `shouldBe` ReplQuit
-            parseReplLine ":quit" `shouldBe` ReplQuit
-            parseReplLine "  :quit  " `shouldBe` ReplQuit
+        it "recognizes bare shell- and Vim-style exit aliases" do
+            map parseReplLine
+                [ "exit"
+                , "quit"
+                , "EXIT"
+                , " Quit "
+                , ":q"
+                , ":Q!"
+                , ":quit"
+                , ":wq"
+                , ":WQ!"
+                ]
+                `shouldBe` replicate 9 ReplQuit
             parseReplLine "/quit" `shouldBe` ReplQuit
             parseReplLine "/exit" `shouldBe` ReplQuit
+
+        it "does not exit for near matches" do
+            map parseReplLine ["exiting", "quite", "q", "wq", ":w", ":x"]
+                `shouldBe`
+                    map ReplPrompt ["exiting", "quite", "q", "wq", ":w", ":x"]
 
         it "treats :reload as a GHCi reload request" do
             parseReplLine ":reload" `shouldBe` ReplReload
@@ -217,6 +231,16 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /new"
             parseReplLine "/delete now"
                 `shouldBe` ReplCommandError "usage: /delete"
+
+        it "returns home or rewinds through Grok-compatible aliases" do
+            parseReplLine "/home" `shouldBe` ReplHome
+            parseReplLine "/welcome" `shouldBe` ReplHome
+            parseReplLine "/rewind" `shouldBe` ReplRewind
+            parseReplLine "/undo" `shouldBe` ReplRewind
+            parseReplLine "/home now"
+                `shouldBe` ReplCommandError "usage: /home"
+            parseReplLine "/undo now"
+                `shouldBe` ReplCommandError "usage: /rewind"
 
         it "compacts with optional focus text" do
             parseReplLine "/compact" `shouldBe` ReplCompact Nothing
@@ -437,8 +461,10 @@ spec = do
                     , "rename"
                     , "login"
                     , "resume"
+                    , "home"
                     , "search"
                     , "compact"
+                    , "rewind"
                     , "clear"
                     , "new"
                     , "delete"
@@ -490,6 +516,10 @@ spec = do
                 `shouldBe` Just "view-plan"
             fmap (.slashName) (lookupSlashCommand "/log")
                 `shouldBe` Just "transcript"
+            fmap (.slashName) (lookupSlashCommand "/welcome")
+                `shouldBe` Just "home"
+            fmap (.slashName) (lookupSlashCommand "/undo")
+                `shouldBe` Just "rewind"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
@@ -499,7 +529,9 @@ spec = do
                         && "/m" `elem` xs
                         && "/agents" `elem` xs
                         && "/mcp" `elem` xs
-                        && "/btw" `elem` xs)
+                        && "/btw" `elem` xs
+                        && "/rewind" `elem` xs
+                        && "/undo" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
 

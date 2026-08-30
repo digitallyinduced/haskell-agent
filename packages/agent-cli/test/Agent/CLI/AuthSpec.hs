@@ -25,8 +25,10 @@ import Agent.Provider
     , FailedCredential(..)
     , Provider(..)
     , getNextToken
+    , runWithTokenProvider
     , tokenProvider
     , tokenProviderBillingMode
+    , tokenProviderWithNextToken
     )
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Exception.Safe (bracket)
@@ -212,6 +214,95 @@ spec = do
                                 loaded.loadedTokenProvider
                                 Nothing
                                 `shouldReturn` Right localCredential
+
+        it "falls back after a gateway WebSocket handshake 403" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth (Just OpenAIProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            pool <- case loaded.loadedOpenAiPool of
+                                Nothing -> do
+                                    expectationFailure
+                                        "expected local OpenAI fallback pool"
+                                    fail "missing local OpenAI fallback pool"
+                                Just pool -> pure pool
+                            preferred <- newIORef Nothing
+                            let selectableProvider =
+                                    preferredOpenAiTokenProvider
+                                        preferred
+                                        pool
+                                        loaded.loadedTokenProvider
+                                -- The live runtime applies another acquisition
+                                -- decorator to track the active account.
+                                runtimeProvider =
+                                    tokenProviderWithNextToken
+                                        selectableProvider
+                                        (getNextToken selectableProvider)
+                            attempts <- newIORef ([] :: [Text])
+                            result <- runWithTokenProvider
+                                runtimeProvider
+                                \credential -> do
+                                    modifyIORef'
+                                        attempts
+                                        (<> [credential.accountId])
+                                    pure $
+                                        if credential.accountId
+                                            == "wss://gateway.example/v1/responses"
+                                            then Left $ HttpError 403
+                                                "WebSocket handshake returned HTTP 403"
+                                            else Right credential.accountId
+
+                            result `shouldBe` Right "local-account"
+                            readIORef attempts `shouldReturn`
+                                [ "wss://gateway.example/v1/responses"
+                                , "local-account"
+                                ]
+
+        it "does not replay an ordinary gateway request 403" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth (Just OpenAIProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            pool <- case loaded.loadedOpenAiPool of
+                                Nothing -> do
+                                    expectationFailure
+                                        "expected local OpenAI fallback pool"
+                                    fail "missing local OpenAI fallback pool"
+                                Just pool -> pure pool
+                            preferred <- newIORef Nothing
+                            let provider =
+                                    preferredOpenAiTokenProvider
+                                        preferred
+                                        pool
+                                        loaded.loadedTokenProvider
+                                forbidden =
+                                    HttpError 403
+                                        "request forbidden after connection"
+                            attempts <- newIORef ([] :: [Text])
+                            result <- runWithTokenProvider provider
+                                \credential -> do
+                                    modifyIORef'
+                                        attempts
+                                        (<> [credential.accountId])
+                                    pure (Left forbidden :: Either ApiError Text)
+
+                            result `shouldBe` Left forbidden
+                            readIORef attempts `shouldReturn`
+                                ["wss://gateway.example/v1/responses"]
 
         it "does not turn a rejected gateway into API-credit spending" $
             withTempHome \home ->

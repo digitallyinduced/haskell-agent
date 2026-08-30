@@ -130,6 +130,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async
     ( mapConcurrently
     , mapConcurrently_
+    , race
     , withAsync
     )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
@@ -1681,30 +1682,47 @@ connectOpenAI color = do
                 roleMuted color "Enter code "
                     <> rolePrompt color device.userCode
             hFlush stderr
-            OpenAILogin.completeDeviceCodeLogin options device >>= \case
-                Left err -> printLoginMessage color False err >> pure Nothing
-                Right authJson -> do
-                    now <- getCurrentTime
-                    case openaiAuthStateFromJson now (Aeson.encode authJson) of
-                        Nothing ->
-                            printLoginMessage color False
-                                "OpenAI login returned invalid account data"
-                                >> pure Nothing
-                        Just auth ->
-                            storeConnectedCredential color
-                                OpenAIProvider
-                                auth.accountId
-                                (fromMaybe "ChatGPT"
-                                    (openAIAccountEmail auth))
-                                SubscriptionBilled
-                                ManagedOpenAIAuthJson
-                                (Text.decodeUtf8
-                                    (LBS.toStrict (Aeson.encode authJson)))
-                                >>= \stored ->
-                                    pure $
-                                        if stored
-                                            then Just auth.accountId
-                                            else Nothing
+            race
+                (OpenAILogin.completeDeviceCodeLogin options device)
+                (runOverlay
+                    (const
+                        (roleMuted color
+                            "Waiting for OpenAI authorization · Esc/q cancel"))
+                    (\key state -> case key of
+                        PickerKeyCancel -> Left ()
+                        _ -> Right state)
+                    ())
+                >>= \case
+                Right _ -> do
+                    printLoginMessage color True
+                        "OpenAI login cancelled"
+                    pure Nothing
+                Left completed -> case completed of
+                    Left err ->
+                        printLoginMessage color False err >> pure Nothing
+                    Right authJson -> do
+                        now <- getCurrentTime
+                        case openaiAuthStateFromJson now
+                                (Aeson.encode authJson) of
+                            Nothing ->
+                                printLoginMessage color False
+                                    "OpenAI login returned invalid account data"
+                                    >> pure Nothing
+                            Just auth ->
+                                storeConnectedCredential color
+                                    OpenAIProvider
+                                    auth.accountId
+                                    (fromMaybe "ChatGPT"
+                                        (openAIAccountEmail auth))
+                                    SubscriptionBilled
+                                    ManagedOpenAIAuthJson
+                                    (Text.decodeUtf8
+                                        (LBS.toStrict (Aeson.encode authJson)))
+                                    >>= \stored ->
+                                        pure $
+                                            if stored
+                                                then Just auth.accountId
+                                                else Nothing
 
 connectXAI :: Bool -> IO (Maybe Text)
 connectXAI color = do

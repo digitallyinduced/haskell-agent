@@ -1,6 +1,8 @@
 -- | Public command-line entry point and compatibility façade.
 module Agent.CLI
-    ( DevResult(..)
+    ( BuildInfo(..)
+    , DevResult(..)
+    , agentBuildInfo
     , afterDev
     , accountSwitchTarget
     , applyReplMode
@@ -12,6 +14,8 @@ module Agent.CLI
     , formatMcpModelNotice
     , formatMcpModelNoticeFor
     , formatMcpProgress
+    , formatBuildInfo
+    , formatBuildInfoCompact
     , formatReplStatusLine
     , formatRepositoryPath
     , formatStartupTimings
@@ -25,7 +29,9 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Runtime
-    ( accountSwitchTarget
+    ( BuildInfo(..)
+    , accountSwitchTarget
+    , agentBuildInfo
     , afterDev
     , applyReplMode
     , buildPromptState
@@ -33,6 +39,8 @@ import Agent.CLI.Runtime
     , devArgs
     , devMain
     , devMainResume
+    , formatBuildInfo
+    , formatBuildInfoCompact
     , formatRepositoryPath
     , formatStartupTimings
     , learnAboutUserOnboardingPrompt

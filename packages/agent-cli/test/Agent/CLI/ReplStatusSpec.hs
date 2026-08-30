@@ -1,8 +1,10 @@
 module Agent.CLI.ReplStatusSpec (spec) where
 
 import Agent.CLI
-    ( DevResult(..)
+    ( BuildInfo(..)
+    , DevResult(..)
     , accountSwitchTarget
+    , agentBuildInfo
     , afterDev
     , applyReplMode
     , buildPromptState
@@ -11,6 +13,8 @@ import Agent.CLI
     , formatMcpModelNotice
     , formatMcpModelNoticeFor
     , formatMcpProgress
+    , formatBuildInfo
+    , formatBuildInfoCompact
     , formatReplStatusLine
     , formatRepositoryPath
     , formatStartupTimings
@@ -300,6 +304,26 @@ spec = do
                 ]
                 `shouldBe`
                     "startup: first frame 42ms · Loading tools… 400ms · ready 1.25s"
+
+    describe "build identity" do
+        let info =
+                BuildInfo
+                    { buildVersion = "1.2.3"
+                    , buildCommit = "abc1234"
+                    , buildDate = "2026-08-30"
+                    }
+
+        it "formats full and compact build metadata consistently" do
+            formatBuildInfo info
+                `shouldBe`
+                    "agent-cli 1.2.3 (commit abc1234, built 2026-08-30)"
+            formatBuildInfoCompact info
+                `shouldBe` "v1.2.3 · abc1234 · 2026-08-30"
+
+        it "embeds a package version, commit, and build date" do
+            agentBuildInfo.buildVersion `shouldNotBe` ""
+            agentBuildInfo.buildCommit `shouldNotBe` ""
+            agentBuildInfo.buildDate `shouldNotBe` ""
 
     describe "formatRepositoryPath" do
         it "abbreviates paths below the home directory" do

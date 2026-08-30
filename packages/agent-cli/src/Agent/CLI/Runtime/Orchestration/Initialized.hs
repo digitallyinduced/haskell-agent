@@ -100,7 +100,8 @@ import Agent.CLI.Runtime.Orchestration.Tools ( runAgentTools )
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(activeHttpGeneration, ActiveHttpAuth,
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
-      AgentProcessRuntime(processSessionThreads, processMcpSupervisor, processMcpElicitation),
+      AgentProcessRuntime(processSessionThreads, processMcpSupervisor,
+                          processStartCleanup, processMcpElicitation),
       AgentRunMode )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
@@ -161,8 +162,8 @@ import Agent.Provider
       Credential(..),
       getNextToken,
       providerSlug,
-      tokenProvider,
       tokenProviderBillingMode,
+      tokenProviderWithNextToken,
       BillingMode(ApiBilled),
       FailedCredential(credential) )
 import Agent.ReasoningEffort ()
@@ -815,7 +816,7 @@ trackCredentialAccount
     -> TokenProvider
     -> TokenProvider
 trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provider =
-    tokenProvider (tokenProviderBillingMode provider) \failed ->
+    tokenProviderWithNextToken provider \failed ->
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do

@@ -41,6 +41,7 @@ import Agent.OpenAI.Compaction
     , isClearSessionTurn
     , isCompactSessionTurn
     , isNewSessionTurn
+    , isRewindSessionTurn
     )
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
@@ -311,7 +312,9 @@ parseTranscriptEffect = \case
 
 inferTranscriptEffect :: Text -> [ResponseItem] -> TranscriptEffect
 inferTranscriptEffect userText items
-    | isClearSessionTurn userText || isNewSessionTurn userText =
+    | isClearSessionTurn userText
+        || isNewSessionTurn userText
+        || isRewindSessionTurn userText =
         TranscriptReset
     | isCompactSessionTurn userText || hasCompactionCheckpoint items =
         TranscriptReplace

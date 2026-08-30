@@ -123,10 +123,20 @@ spec = describe "PostgreSQL session schema" do
                                     }
                             createSession pool metadata2
                                 `shouldReturn` Right True
-                            appendSessionTurn pool turn2 metadata2
+                            appendSessionTurns pool [turn2, turn3] metadata2
                                 `shouldReturn` Right True
-                            appendSessionTurn pool turn3 metadata2
+                            appendSessionTurns
+                                pool
+                                []
+                                metadata2
                                 `shouldReturn` Right True
+                            appendSessionTurns
+                                pool
+                                []
+                                metadata2
+                                    { sessionMetadataKey = "missing"
+                                    }
+                                `shouldReturn` Right False
                             loadSessions pool [] `shouldReturn` []
                             loadSessions pool
                                 [ "session-2"

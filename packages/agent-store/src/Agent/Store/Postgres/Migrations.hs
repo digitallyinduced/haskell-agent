@@ -177,7 +177,7 @@ coreMigrations =
             ]
         }
     , Migration
-        { migrationVersion = 11
+        { migrationVersion = 102
         , migrationName = "provider turn telemetry"
         , migrationStatements =
             [ "ALTER TABLE IF EXISTS harness.session_turns\

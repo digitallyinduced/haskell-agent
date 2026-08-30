@@ -1,6 +1,11 @@
 module Agent.CLI.TUIBridgeSpec (spec) where
 
-import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentStep(..)
+    , AgentStepState(..)
+    , AgentTarget(..)
+    )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( appEventLogicalBytes
@@ -25,6 +30,10 @@ import Agent.CLI.TUI.Types
     , SyntaxHighlighterState(..)
     )
 import Agent.TUI.Model
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
+    )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Agent.Provider (Provider(XAIProvider))
 import Agent.Subagents (SubagentId(..))
@@ -186,6 +195,85 @@ spec = describe "fullscreen TUI bridge" do
                 state.mailboxPendingBytes
                     `shouldBe` 16 * 1024 * 1024
                 state.mailboxHighWaterCount `shouldBe` 1
+
+    it "accounts and backpressures tool lifecycle payloads" do
+        runtime <- newBridgeTestRuntime
+        let arguments = Text.replicate (3 * 1024 * 1024) "x"
+            started callId =
+                UiLoop
+                    (ToolStarted
+                        (functionToolCall callId "shell_command" arguments))
+        appEventLogicalBytes (AppUi (started "first"))
+            `shouldSatisfy` (> 8 * 1024 * 1024)
+        emitUiEvent runtime (started "first")
+        withAsync (emitUiEvent runtime (started "second")) \publishing -> do
+            timeout 100000 (wait publishing)
+                `shouldReturn` Nothing
+            let AppEventMailbox stateRef = runtime.runtimeMailbox
+            state <- readTVarIO stateRef
+            state.mailboxPendingCount `shouldBe` 1
+
+    it "accounts retained conversation state in agent snapshots" do
+        let body = Text.replicate (1024 * 1024) "x"
+            conversation =
+                reduceUi (UiAssistantHistory body) initialUiState
+            entry = AgentEntry
+                { agentTarget = AgentRoot
+                , agentPath = "/root"
+                , agentStatus = "active"
+                , agentModel = Nothing
+                , agentSteps = []
+                , agentTranscript = []
+                , agentConversation = conversation
+                }
+        appEventLogicalBytes (AppAgentSnapshot AgentRoot [entry])
+            `shouldSatisfy` (>= 4 * 1024 * 1024)
+
+    it "accounts provider-controlled snapshot target identifiers" do
+        let target = AgentNative (Text.replicate (1024 * 1024) "x")
+        appEventLogicalBytes (AppAgentSnapshot target [])
+            `shouldSatisfy` (>= 4 * 1024 * 1024)
+
+    it "accounts structural overhead in agent steps and todo rows" do
+        let entry conversation steps =
+                AgentEntry
+                    { agentTarget = AgentRoot
+                    , agentPath = "/root"
+                    , agentStatus = "active"
+                    , agentModel = Nothing
+                    , agentSteps = steps
+                    , agentTranscript = []
+                    , agentConversation = conversation
+                    }
+            baseline =
+                appEventLogicalBytes $
+                    AppAgentSnapshot
+                        AgentRoot
+                        [entry initialUiState []]
+            withStep =
+                appEventLogicalBytes $
+                    AppAgentSnapshot
+                        AgentRoot
+                        [ entry
+                            initialUiState
+                            [AgentStep AgentStepInfo "" Nothing]
+                        ]
+            withTodo =
+                appEventLogicalBytes $
+                    AppAgentSnapshot
+                        AgentRoot
+                        [ entry
+                            initialUiState
+                                { uiTodos =
+                                    [ TodoDisplayLine
+                                        TodoDisplayPending
+                                        ""
+                                    ]
+                                }
+                            []
+                        ]
+        withStep - baseline `shouldSatisfy` (>= 128)
+        withTodo - baseline `shouldSatisfy` (>= 128)
 
     it "admits one indivisible event larger than the mailbox byte budget" do
         runtime <- newBridgeTestRuntime

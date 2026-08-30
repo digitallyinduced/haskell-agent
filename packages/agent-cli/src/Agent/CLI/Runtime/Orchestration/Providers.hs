@@ -588,6 +588,7 @@ runAgentProviders
                                                     (tokenProviderBillingMode
                                                         tokenProvider)
                                                     provider
+                                                    model
                                                     unavailableProviders
                                                     Nothing
                                                     err >>= \case

@@ -1,6 +1,8 @@
 -- | Stable public facade for the command-line runtime.
 module Agent.CLI.Runtime
-    ( DevResult(..)
+    ( BuildInfo(..)
+    , DevResult(..)
+    , agentBuildInfo
     , afterDev
     , accountSwitchTarget
     , applyReplMode
@@ -12,6 +14,8 @@ module Agent.CLI.Runtime
     , formatMcpModelNotice
     , formatMcpModelNoticeFor
     , formatMcpProgress
+    , formatBuildInfo
+    , formatBuildInfoCompact
     , formatReplStatusLine
     , formatRepositoryPath
     , formatStartupTimings

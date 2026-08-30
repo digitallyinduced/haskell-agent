@@ -33,6 +33,21 @@
             system:
             let
                 pkgs = import nixpkgs { inherit system; };
+                agentBuildCommit =
+                    if self ? shortRev then self.shortRev
+                    else if self ? dirtyShortRev then self.dirtyShortRev
+                    else "development";
+                agentBuildTimestamp = self.lastModifiedDate or "";
+                # Use the source revision date rather than wall-clock build
+                # time so identical revisions produce identical binaries.
+                agentBuildDate =
+                    if builtins.stringLength agentBuildTimestamp >= 8 then
+                        builtins.substring 0 4 agentBuildTimestamp
+                        + "-"
+                        + builtins.substring 4 2 agentBuildTimestamp
+                        + "-"
+                        + builtins.substring 6 2 agentBuildTimestamp
+                    else "unknown";
                 bun_1_4 = pkgs.bun.overrideAttrs (_old: {
                     version = "1.4.0";
                     src = pkgs.fetchurl {
@@ -456,14 +471,16 @@
                         agent-gemini = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-gemini/package.nix { }) {
                             src = agentGeminiSource;
                         });
-                        claude-agent-sdk-haskell = localPackage (
-                            pkgs.haskell.lib.addTestToolDepends
-                                (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
-                                    src = claudeAgentSdkHaskellSource;
-                                })
-                                (pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-                                    pkgs.util-linux
-                                ]));
+                        claude-agent-sdk-haskell = localPackage
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage
+                                        ./packages/claude-agent-sdk-haskell/package.nix
+                                        { })
+                                    {
+                                        src = claudeAgentSdkHaskellSource;
+                                    })
+                                [ pkgs.util-linux ]);
                         agent-claude = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude/package.nix { }) {
                             src = agentClaudeSource;
                         });
@@ -488,9 +505,14 @@
                                 })
                             [ pkgs.postgresql_18 ]);
                         agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
-                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
+                            ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src = agentCliSource;
-                            })
+                            }).overrideAttrs (old: {
+                                configureFlags = (old.configureFlags or [ ]) ++ [
+                                    "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
+                                    "--ghc-option=-DAGENT_BUILD_DATE=\"${agentBuildDate}\""
+                                ];
+                            }))
                             [
                                 pkgs.git
                                 bun_1_4
