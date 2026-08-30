@@ -31,6 +31,7 @@ data DevResult
 data RunResult
     = RunQuit
     | RunRestart Text
+    | RunUpdateAndRestart Text
     | RunEnableCodeMode Text
     | RunReload Text
     | RunSwitchProvider ProviderTransition

@@ -34,6 +34,7 @@ data CopyRequest = CopyRequest
 data ReplAction
     = ReplQuit
     | ReplReload
+    | ReplUpdateAndRestart
     | ReplPrompt Text
     | ReplExpandedPrompt !Text !Text
       -- ^ Original user-visible text and the model-visible expansion.
