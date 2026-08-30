@@ -449,7 +449,7 @@ createPullRequest requested token =
                                                                                             [ "pr"
                                                                                             , "create"
                                                                                             , "--repo"
-                                                                                            , Text.unpack repository
+                                                                                            , githubRepoArgument repository
                                                                                             , "--base"
                                                                                             , Text.unpack base
                                                                                             , "--head"
@@ -815,7 +815,7 @@ ensureBaseAndNoOpenPullRequest status remote repository base =
                     [ "pr"
                     , "list"
                     , "--repo"
-                    , Text.unpack repository
+                    , githubRepoArgument repository
                     , "--head"
                     , Text.unpack status.deliveryBranch
                     , "--state"
@@ -861,7 +861,7 @@ requireGitHubCli root repository =
                 [ "repo"
                 , "view"
                 , "--repo"
-                , Text.unpack repository
+                , githubRepoArgument repository
                 , "--json"
                 , "nameWithOwner"
                 ]
@@ -884,6 +884,10 @@ requireGitHubCli root repository =
                                             "GitHub CLI returned an invalid repository identity"))
 
 newtype RepositoryIdentity = RepositoryIdentity Text
+
+githubRepoArgument :: Text -> String
+githubRepoArgument repository =
+    Text.unpack ("github.com/" <> repository)
 
 instance Aeson.FromJSON RepositoryIdentity where
     parseJSON = Aeson.withObject "RepositoryIdentity" \object ->
@@ -922,20 +926,46 @@ validRemoteUrl url =
         && BS.all (\byte -> byte >= 0x20 && byte /= 0x7f) url
         && BS8.head url /= '-'
         && (isAbsolute (BS8.unpack url)
-            || any (`BS8.isPrefixOf` url)
-                [ "https://"
-                , "ssh://"
-                , "git://"
-                , "file://"
-                ]
+            || validHttps url
+            || validSsh url
+            || validGit url
+            || validFile url
             || validScpLike url)
   where
+    validHttps value =
+        "https://" `BS8.isPrefixOf` value
+            && not (authorityContains '@' "https://" value)
+            && not (containsQueryOrFragment value)
+    validSsh value =
+        "ssh://" `BS8.isPrefixOf` value
+            && not (userinfoContains ':' "ssh://" value)
+            && not (containsQueryOrFragment value)
+    validGit value =
+        "git://" `BS8.isPrefixOf` value
+            && not (authorityContains '@' "git://" value)
+            && not (containsQueryOrFragment value)
+    validFile value =
+        "file://" `BS8.isPrefixOf` value
+            && not (authorityContains '@' "file://" value)
+            && not (containsQueryOrFragment value)
+    authorityContains character prefix value =
+        BS8.elem character
+            (BS8.takeWhile (/= '/') (BS.drop (BS.length prefix) value))
+    userinfoContains character prefix value =
+        let authority =
+                BS8.takeWhile (/= '/') (BS.drop (BS.length prefix) value)
+            (userinfo, separatorAndHost) = BS8.break (== '@') authority
+        in not (BS.null separatorAndHost)
+            && BS8.elem character userinfo
+    containsQueryOrFragment value =
+        BS8.elem '?' value || BS8.elem '#' value
     validScpLike value =
         case BS8.break (== ':') value of
             (host, path) ->
                 not (BS.null host)
                     && BS8.elem '@' host
                     && BS.length path > 1
+                    && not (containsQueryOrFragment value)
 
 remoteCommandPrefix :: ValidatedRemote -> [String]
 remoteCommandPrefix remote =
@@ -1456,6 +1486,7 @@ nonInteractiveEnvironment executable = do
             , "GCM_INTERACTIVE"
             , "GH_PROMPT_DISABLED"
             , "GH_REPO"
+            , "GH_HOST"
             , "SSH_ASKPASS_REQUIRE"
             , "GIT_DIR"
             , "GIT_WORK_TREE"

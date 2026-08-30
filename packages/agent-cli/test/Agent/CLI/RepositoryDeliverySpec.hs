@@ -62,6 +62,34 @@ spec = describe "repository delivery service" do
             repositoryDeliveryStatus root snapshot.snapshotId
                 `shouldReturnSatisfying` isInvalid
 
+    it "rejects credential-bearing URLs without echoing their secret" $
+        withDeliveryRepository \root _ -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            _ <- git root
+                [ "remote"
+                , "set-url"
+                , "origin"
+                , "ssh://git@example.test/owner/repository.git"
+                ]
+            _ <- expectRight
+                =<< repositoryDeliveryStatus root snapshot.snapshotId
+            let secret = "delivery-secret-must-not-escape"
+                credentialUrl =
+                    "https://user:"
+                        <> secret
+                        <> "@example.test/owner/repository.git"
+            _ <- git root ["remote", "set-url", "origin", credentialUrl]
+            result <- repositoryDeliveryStatus root snapshot.snapshotId
+            result `shouldSatisfy` isInvalid
+            case result of
+                Left err -> do
+                    deliveryErrorText err
+                        `shouldNotSatisfy` Text.isInfixOf (Text.pack secret)
+                    deliveryErrorText err
+                        `shouldNotSatisfy`
+                            Text.isInfixOf (Text.pack credentialUrl)
+                Right _ -> expectationFailure "credential URL was accepted"
+
     it "previews and confirms one exact fast-forward lease push once" $
         withDeliveryRepository \root remote -> do
             appendFile (root <> "/tracked.txt") "second\n"
@@ -316,6 +344,18 @@ spec = describe "repository delivery service" do
                 createPullRequest root preview.pullRequestConfirmation
                     `shouldReturnSatisfying` isConfirmationRejection
 
+    it "ignores hostile GH_HOST and binds gh operations to github.com" $
+        withDeliveryRepository \root _ ->
+            withFakeGh root \_ _ -> do
+                setEnv "GH_HOST" "attacker.example"
+                snapshot <- expectRight =<< repositorySnapshot root
+                preview <- expectRight
+                    =<< previewPullRequest
+                        root snapshot.snapshotId "main" "Title" "Body"
+                _ <- createPullRequest root preview.pullRequestConfirmation
+                    >>= expectRight
+                pure ()
+
     it "kills a gh descendant retaining pipes after its leader exits" $
         withDeliveryRepository \root _ ->
             withFakeGh root \_ _ -> do
@@ -392,6 +432,7 @@ withFakeGh root action = do
     originalFakeUrl <- lookupEnv "GH_FAKE_PR_URL"
     originalFakeRepository <- lookupEnv "GH_FAKE_REPOSITORY"
     originalRetainPipeMarker <- lookupEnv "GH_RETAIN_PIPE_MARKER"
+    originalGhHost <- lookupEnv "GH_HOST"
     withTempDirectory "repository-delivery-gh" \bin -> do
         realGit <- maybe (fail "git not found") pure =<< findExecutable "git"
         localRemote <- Text.unpack . Text.strip
@@ -422,15 +463,37 @@ withFakeGh root action = do
         writeFile executable $ unlines
             [ "#!/bin/sh"
             , "set -eu"
+            , "[ \"${GH_HOST:-}\" = '' ] || exit 65"
             , "if [ \"${GH_RETAIN_PIPE_MARKER:-}\" != '' ] && [ \"$1 $2\" = 'auth status' ]; then"
             , "  (sleep 2; printf survived > \"$GH_RETAIN_PIPE_MARKER\") &"
             , "  exit 0"
             , "fi"
             , "case \"$1 $2\" in"
-            , "  'auth status') exit 0 ;;"
-            , "  'repo view') printf '{\"nameWithOwner\":\"%s\"}\\n' \"${GH_FAKE_REPOSITORY:-owner/repository}\" ;;"
-            , "  'pr list') printf '%s\\n' '[]' ;;"
+            , "  'auth status')"
+            , "    case \" $* \" in"
+            , "      *' --hostname github.com '*) exit 0 ;;"
+            , "      *) exit 65 ;;"
+            , "    esac"
+            , "    ;;"
+            , "  'repo view')"
+            , "    case \" $* \" in"
+            , "      *' --repo github.com/owner/repository '*) ;;"
+            , "      *) exit 65 ;;"
+            , "    esac"
+            , "    printf '{\"nameWithOwner\":\"%s\"}\\n' \"${GH_FAKE_REPOSITORY:-owner/repository}\""
+            , "    ;;"
+            , "  'pr list')"
+            , "    case \" $* \" in"
+            , "      *' --repo github.com/owner/repository '*) ;;"
+            , "      *) exit 65 ;;"
+            , "    esac"
+            , "    printf '%s\\n' '[]'"
+            , "    ;;"
             , "  'pr create')"
+            , "    case \" $* \" in"
+            , "      *' --repo github.com/owner/repository '*) ;;"
+            , "      *) exit 65 ;;"
+            , "    esac"
             , "    cat > \"$GH_BODY_CAPTURE\""
             , "    printf '%s\\n' \"${GH_FAKE_PR_URL:-https://github.com/owner/repository/pull/123}\""
             , "    ;;"
@@ -458,7 +521,10 @@ withFakeGh root action = do
                     Just value -> setEnv "GH_FAKE_REPOSITORY" value
                 case originalRetainPipeMarker of
                     Nothing -> unsetEnv "GH_RETAIN_PIPE_MARKER"
-                    Just value -> setEnv "GH_RETAIN_PIPE_MARKER" value)
+                    Just value -> setEnv "GH_RETAIN_PIPE_MARKER" value
+                case originalGhHost of
+                    Nothing -> unsetEnv "GH_HOST"
+                    Just value -> setEnv "GH_HOST" value)
             (\_ -> action bodyCapture injectionMarker)
 
 git :: FilePath -> [String] -> IO Text.Text
