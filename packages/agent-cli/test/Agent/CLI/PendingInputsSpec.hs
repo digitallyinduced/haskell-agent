@@ -6,6 +6,7 @@ import Agent.CLI.PendingInputs
     , enqueuePendingInput
     , enqueuePendingNotice
     , newPendingInputs
+    , pendingInputByteLimit
     , pendingInputCountLimit
     , withPendingInputs
     )
@@ -222,6 +223,59 @@ spec = do
                         , backendState = state
                         }
         _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+        readIORef seen `shouldReturn` [UserMessage "settled"]
+
+    it "keeps the previous MCP snapshot when its replacement is rejected" do
+        pending <- newPendingInputs
+        enqueuePendingNotice pending PendingMcpNotice
+            (UserMessage "settled")
+            `shouldReturn` Right ()
+        enqueuePendingNotice pending PendingMcpNotice
+            (UserMessage (Text.replicate (pendingInputByteLimit + 1) "x"))
+            `shouldReturn`
+                Left
+                    "Root input queue is full; one or more background notices were omitted."
+        seen <- newIORef []
+        let backend = withPendingInputs pending $ Backend
+                \state _ inputs _ -> do
+                    writeIORef seen inputs
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "ok" [] Nothing
+                        , backendState = state
+                        }
+        _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+        readIORef seen `shouldReturn` [UserMessage "settled"]
+
+    it "drops a stale drained MCP snapshot after an in-flight failure" do
+        pending <- newPendingInputs
+        enqueuePendingNotice pending PendingMcpNotice
+            (UserMessage "connecting")
+            `shouldReturn` Right ()
+        entered <- newEmptyMVar
+        release <- newEmptyMVar
+        let failing = withPendingInputs pending $ Backend
+                \_ _ _ _ -> do
+                    putMVar entered ()
+                    takeMVar release
+                    pure (Left (ConnectionError "offline"))
+        done <- newEmptyMVar
+        _ <- forkIO $
+            failing.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done
+        takeMVar entered
+        enqueuePendingNotice pending PendingMcpNotice
+            (UserMessage "settled")
+            `shouldReturn` Right ()
+        putMVar release ()
+        _ <- takeMVar done
+        seen <- newIORef []
+        let retry = withPendingInputs pending $ Backend
+                \state _ inputs _ -> do
+                    writeIORef seen inputs
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "ok" [] Nothing
+                        , backendState = state
+                        }
+        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` [UserMessage "settled"]
 
     it "reports synthetic overflow once without exceeding the queue bound" do

@@ -58,6 +58,7 @@ providerSupportsUsageAccountSelection = \case
     OpenAIProvider -> True
     XAIProvider -> True
     OpenRouterProvider -> True
+    GeminiProvider -> False
     ClaudeCodeProvider -> False
 
 -- | Whether startup may replace the loaded credential with a usage-ranked

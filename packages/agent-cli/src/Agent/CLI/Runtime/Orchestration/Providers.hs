@@ -127,6 +127,8 @@ import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task ()
 import Agent.GrokBuild.Dialect.Workflow ()
+import Agent.Gemini.LoopBackend
+    ( tokenProviderStatelessGeminiBackend )
 import Agent.Loop ( Backend(submitTurn, Backend) )
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ()
@@ -142,7 +144,7 @@ import Agent.OpenRouter.LoopBackend ( openRouterBackend )
 import Agent.OsPath ( unsafeToFilePath )
 import Agent.Provider
     ( Provider(OpenRouterProvider, OpenAIProvider, XAIProvider,
-               ClaudeCodeProvider),
+               GeminiProvider, ClaudeCodeProvider),
       Credential(accountId, Credential, accessToken, leaseId, provider),
       runWithTokenProvider,
       tokenProviderBillingMode )
@@ -211,6 +213,10 @@ import qualified Agent.XAI.Client as XAIClient
     ( createResponseWith )
 import qualified Agent.XAI.Request as XAIRequest ( mapModel )
 import qualified Agent.XAI.Usage as XAIUsage ()
+import qualified Agent.Gemini.Client as GeminiClient
+    ( createResponseWith, createResponseWithEvents )
+import qualified Agent.Gemini.Options as Gemini
+    ( clientOptionsFromEnv )
 
 runAgentProviders
     modelSwitchScope
@@ -641,6 +647,85 @@ runAgentProviders
                                     then Nothing
                                     else Just selectHttpAccount)
                                 (Just . xaiContextWindow
+                                    <$> readIORef paramsRef)
+                                compactRunner)
+                            SessionBackend
+                                { backend = activeBackend
+                                , btwBackend
+                                , resetBackendState = pure ()
+                                }
+                    GeminiProvider -> do
+                        geminiOptions <- Gemini.clientOptionsFromEnv
+                        geminiOccupancy <- newIORef Nothing
+                        let geminiContextWindow =
+                                contextWindowForParams id 1_048_576
+                            makeBackend getParams =
+                                tokenProviderStatelessGeminiBackend
+                                    tokenProvider
+                                    (GeminiClient.createResponseWithEvents
+                                        geminiOptions)
+                                    getParams
+                            protectGeminiOverflow occupancy getParams backend =
+                                boundCompletedToolContinuations
+                                    geminiContextWindow
+                                    getParams
+                                    occupancy
+                                    backend
+                        case multiCtx of
+                            Just ctx ->
+                                setSubagentRunner ctx.multiRegistry $
+                                    runHttpSubagent
+                                        subagentRuntime
+                                        dialect
+                                        GeminiProvider
+                                        ctx.multiSendToRoot
+                                        (\childParams ->
+                                            protectGeminiOverflow
+                                                geminiOccupancy
+                                                (pure childParams)
+                                                (makeBackend
+                                                    (pure childParams)))
+                            Nothing -> pure ()
+                        let backend =
+                                withPendingInputs pendingNotices $
+                                    withConnectionRecovery $
+                                        protectGeminiOverflow
+                                            geminiOccupancy
+                                            (readIORef paramsRef)
+                                            (makeBackend
+                                                (readIORef paramsRef))
+                            btwBackend privateParams =
+                                makeBackend (pure privateParams)
+                            compactRunner focus = do
+                                contextWindow <-
+                                    currentModelContextWindow id
+                                historyRef <-
+                                    newIORef =<< readLiveTranscript conversationRef
+                                installLiveCompactOutcome conversationRef Nothing
+                                    (runResponsesCompactWithContextWindow
+                                        contextWindow
+                                        (\request ->
+                                            runWithTokenProvider tokenProvider
+                                                \credential ->
+                                                    GeminiClient.createResponseWith
+                                                        geminiOptions
+                                                        credential
+                                                        request)
+                                        recordCompactionUsage
+                                        paramsRef
+                                        historyRef)
+                                    focus
+                        activeBackend <-
+                            prepareTransitionBackend
+                                modelSwitchScope home projectRoot
+                                transition persist backend
+                        runSession
+                            (sessionRequest
+                                startupUnavailable
+                                (Just tokenProvider)
+                                loaded.loadedOpenAiPool
+                                (Just selectHttpAccount)
+                                (Just . geminiContextWindow
                                     <$> readIORef paramsRef)
                                 compactRunner)
                             SessionBackend

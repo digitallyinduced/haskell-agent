@@ -134,18 +134,15 @@ performResponsesHttpSse
                 (body, truncated) <-
                     consumeBodyBounded (HttpClient.responseBody response)
                 let decoded = Text.decodeUtf8With Text.lenientDecode body
-                    bodyText
-                        | truncated =
-                            decoded
-                                <> "\n[response body truncated after "
-                                <> Text.pack (show maxErrorBodyBytes)
-                                <> " bytes]"
-                        | otherwise = decoded
-                pure $ Left $
-                    classifyFailure status
+                    classified =
+                        classifyFailure status
                         (parseRetryAfterSeconds
                             (getResponseHeader "Retry-After" response))
-                        bodyText
+                        decoded
+                pure $ Left $
+                    if truncated
+                        then appendBodyTruncatedMessage classified
+                        else classified
 
     consumeSse body = go newSseDecoder emptyStreamAssemblyState
       where
@@ -209,3 +206,19 @@ performResponsesHttpSse
 
 maxErrorBodyBytes :: Int
 maxErrorBodyBytes = 1024 * 1024
+
+appendBodyTruncatedMessage :: ApiError -> ApiError
+appendBodyTruncatedMessage apiError =
+    let suffix =
+            "\n[response body truncated after "
+                <> Text.pack (show maxErrorBodyBytes)
+                <> " bytes]"
+    in case apiError of
+        HttpError status message -> HttpError status (message <> suffix)
+        JsonDecodeError message body ->
+            JsonDecodeError (message <> suffix) body
+        ProviderError errorType message retryAfter ->
+            ProviderError errorType (message <> suffix) retryAfter
+        ConnectionError message -> ConnectionError (message <> suffix)
+        CredentialError message -> CredentialError (message <> suffix)
+        CredentialsExhausted{} -> apiError

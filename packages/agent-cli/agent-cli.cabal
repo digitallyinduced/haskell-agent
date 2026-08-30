@@ -47,6 +47,7 @@ library
                     , Agent.CLI.AgentViewport.Status
                     , Agent.CLI.Approval.Decision
                     , Agent.CLI.Auth.Grok
+                    , Agent.CLI.Auth.Gemini
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
                     , Agent.CLI.Command.Types
@@ -173,6 +174,7 @@ library
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
                     , Agent.CLI.GatewayClient
+                    , Agent.CLI.GitDiff
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
                     , Agent.CLI.Input.Display
@@ -207,6 +209,7 @@ library
                     , Agent.CLI.Prompt
                     , Agent.CLI.Recap
                     , Agent.CLI.Request
+                    , Agent.CLI.Review
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
                     , Agent.CLI.ProviderTransition
@@ -233,6 +236,7 @@ library
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Transcript
+                    , Agent.CLI.TranscriptExport
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
@@ -260,6 +264,7 @@ library
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
+                    , agent-gemini >= 0.1 && < 0.2
                     , agent-claude >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
@@ -445,6 +450,7 @@ test-suite agent-cli-test
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.GatewayClientSpec
+                    , Agent.CLI.GitDiffSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
@@ -476,6 +482,7 @@ test-suite agent-cli-test
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
+                    , Agent.CLI.ReviewSpec
                     , Agent.CLI.SecretSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
@@ -483,6 +490,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TranscriptSpec
                     , Agent.CLI.TurnSpec
+                    , Agent.CLI.TranscriptExportSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionHistorySpec
                     , Agent.CLI.SessionStateSpec
@@ -511,6 +519,7 @@ test-suite agent-cli-test
                     , agent-tui
                     , agent-openai
                     , agent-openrouter
+                    , agent-gemini
                     , agent-claude
                     , agent-responses
                     , agent-responses-types

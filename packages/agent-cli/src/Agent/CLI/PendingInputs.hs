@@ -102,10 +102,10 @@ enqueuePendingNotice (PendingInputs pending _) kind input =
         in case result of
             Right () -> (next, Right ())
             Left _ ->
-                ( withoutPrevious
+                ( state
                     { pendingOmissionReported = True
                     }
-                , if not withoutPrevious.pendingOmissionReported
+                , if not state.pendingOmissionReported
                     then Left pendingNoticeOmittedMessage
                     else Right ()
                 )
@@ -186,8 +186,42 @@ requeuePendingInputs :: IORef PendingState -> PendingBatch -> IO ()
 requeuePendingInputs pending (PendingBatch epoch queued _ _) =
     atomicModifyIORef' pending \state ->
         if epochOf state == epoch
-            then (state { pendingQueue = queued <> queueOf state }, ())
+            then
+                let (requeued, removedCount, removedBytes) =
+                        mergeRequeuedQueue queued (queueOf state)
+                in
+                ( state
+                    { pendingQueue = requeued
+                    , pendingRetainedCount =
+                        max 0 (state.pendingRetainedCount - removedCount)
+                    , pendingRetainedBytes =
+                        max 0 (state.pendingRetainedBytes - removedBytes)
+                    }
+                , ()
+                )
             else (state, ())
+
+-- A newer MCP snapshot may arrive while an older snapshot is in the drained
+-- in-flight batch. If that submission fails, requeue only the newest snapshot
+-- rather than exposing both stale and current state on the next attempt.
+mergeRequeuedQueue
+    :: Seq.Seq PendingEntry
+    -> Seq.Seq PendingEntry
+    -> (Seq.Seq PendingEntry, Int, Int)
+mergeRequeuedQueue drained current
+    | any ((== Just PendingMcpNotice) . (.entryNoticeKind)) current =
+        let (kept, removedCount, removedBytes) =
+                foldr removeStaleMcp (Seq.empty, 0, 0) drained
+        in (kept <> current, removedCount, removedBytes)
+    | otherwise = (drained <> current, 0, 0)
+  where
+    removeStaleMcp entry (entries, count, bytes)
+        | entry.entryNoticeKind == Just PendingMcpNotice =
+            ( entries
+            , count + 1
+            , bytes `saturatingAdd` entry.entryBytes
+            )
+        | otherwise = (entry Seq.<| entries, count, bytes)
 
 commitPendingInputs :: IORef PendingState -> PendingBatch -> IO ()
 commitPendingInputs pending (PendingBatch epoch _ count bytes) =

@@ -16,6 +16,7 @@ import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.OpenAI.Auth (AuthState(..))
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
+import qualified Agent.Gemini.Auth as Gemini
 import Agent.Provider
     ( AccountFailure(..)
     , BillingMode(..)
@@ -73,6 +74,59 @@ spec = do
                 `shouldBe` True
             authErrorNeedsOnboarding "credential store is unreadable"
                 `shouldBe` False
+
+    describe "geminiAuthErrorNeedsReconnect" do
+        it "recognizes missing, malformed, and rejected Google credentials" do
+            geminiAuthErrorNeedsReconnect
+                "no credentials found. connect a Google account"
+                `shouldBe` True
+            geminiAuthErrorNeedsReconnect
+                "cannot switch to gemini: managed Gemini OAuth credential contains invalid auth JSON; reconnect the account"
+                `shouldBe` True
+            geminiAuthErrorNeedsReconnect
+                "cannot switch to gemini: Authentication failed. Google OAuth token request failed with HTTP 400"
+                `shouldBe` True
+
+        it "does not turn connection or rate-limit failures into login" do
+            geminiAuthErrorNeedsReconnect
+                "cannot switch to gemini: Authentication failed. Google HTTP request failed"
+                `shouldBe` False
+            geminiAuthErrorNeedsReconnect
+                "cannot switch to gemini: Provider unavailable."
+                `shouldBe` False
+
+    describe "geminiStartupAuthNeedsReconnect" do
+        it "recovers stale Gemini auth without hijacking generic onboarding" do
+            geminiStartupAuthNeedsReconnect
+                False
+                "managed Gemini OAuth credential contains invalid auth JSON"
+                `shouldBe` True
+            geminiStartupAuthNeedsReconnect
+                True
+                "no credentials found. connect an account"
+                `shouldBe` True
+            geminiStartupAuthNeedsReconnect
+                False
+                "no credentials found. connect an account"
+                `shouldBe` False
+            geminiStartupAuthNeedsReconnect
+                True
+                "Google HTTP request failed"
+                `shouldBe` False
+
+    describe "classifyGeminiRefreshFailure" do
+        it "separates rejected refresh grants from transient failures" do
+            classifyGeminiRefreshFailure
+                "Google OAuth token request failed with HTTP 400"
+                `shouldBe` CredentialError
+                    "Google OAuth token request failed with HTTP 400"
+            classifyGeminiRefreshFailure
+                "Google HTTP request failed"
+                `shouldBe` ConnectionError "Google HTTP request failed"
+            classifyGeminiRefreshFailure
+                "Google OAuth token request failed with HTTP 503"
+                `shouldBe` ConnectionError
+                    "Google OAuth token request failed with HTTP 503"
 
     describe "loadAuth" do
         it "prefers OpenAI when automatic detection finds OpenAI and xAI auth" $
@@ -220,6 +274,82 @@ spec = do
                             SubscriptionBilled
                             "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
                             "account-home"
+    describe "Gemini loadAuth" do
+        it "loads Google AI Studio keys with GOOGLE_API_KEY precedence" $
+            withTempHome \_ ->
+                withEnv "GOOGLE_API_KEY" (Just "google-key") $
+                withEnv "GEMINI_API_KEY" (Just "gemini-key") do
+                    loadAuth (Just GeminiProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            loaded.loadedProvider `shouldBe` GeminiProvider
+                            loaded.loadedSelectionId
+                                `shouldBe` Just
+                                    (externalAuthSelectionId
+                                        GeminiProvider
+                                        "environment")
+                            tokenProviderBillingMode
+                                loaded.loadedTokenProvider
+                                `shouldBe` ApiBilled
+                            getNextToken loaded.loadedTokenProvider Nothing
+                                >>= \case
+                                    Left apiError ->
+                                        expectationFailure (show apiError)
+                                    Right credential -> do
+                                        credential.accessToken
+                                            `shouldBe` "google-key"
+                                        credential.accountId
+                                            `shouldBe` "gemini"
+                                        credential.provider
+                                            `shouldBe` GeminiProvider
+
+        it "loads a managed Google login as subscription-billed Code Assist auth" $
+            withTempHome \_ ->
+                withEnv "GOOGLE_API_KEY" Nothing $
+                withEnv "GEMINI_API_KEY" Nothing do
+                    now <- getCurrentTime
+                    let state = Gemini.GeminiAuthState
+                            { accessToken = "google-access"
+                            , refreshToken = Just "google-refresh"
+                            , expiresAt = Just (addUTCTime 3600 now)
+                            , email = "person@example.com"
+                            , projectId = "managed-project"
+                            , userTier = "free-tier"
+                            }
+                        payload =
+                            TextEncoding.decodeUtf8
+                                (LBS.toStrict (Aeson.encode state))
+                    upsertManagedCredential
+                        ManagedCredential
+                            { managedId = "gemini-google"
+                            , managedProvider = GeminiProvider
+                            , managedAccountId = "person@example.com"
+                            , managedLabel = "person@example.com"
+                            , managedBilling = SubscriptionBilled
+                            , managedAuthKind = ManagedGeminiAuthJson
+                            , managedEnabled = True
+                            }
+                        (ManagedSecret "gemini-google" payload)
+                        `shouldReturn` Right ()
+                    loadAuth (Just GeminiProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            tokenProviderBillingMode
+                                loaded.loadedTokenProvider
+                                `shouldBe` SubscriptionBilled
+                            loaded.loadedSelectionId
+                                `shouldBe` Just
+                                    (managedAuthSelectionId "gemini-google")
+                            getNextToken loaded.loadedTokenProvider Nothing
+                                `shouldReturn`
+                                    Right Credential
+                                        { accessToken = "google-access"
+                                        , accountId = "person@example.com"
+                                        , leaseId =
+                                            Just
+                                                "code-assist:managed-project"
+                                        , provider = GeminiProvider
+                                        }
 
     describe "probeLoadedAuth" do
         it "rejects auth whose accounts are currently cooling down" do
@@ -386,6 +516,48 @@ spec = do
                                         Just
                                             (managedAuthSelectionId
                                                 "router-b")
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    Nothing
+                                    >>= \case
+                                        Left err ->
+                                            expectationFailure (show err)
+                                        Right credential ->
+                                            credential.accessToken
+                                                `shouldBe` "key-b"
+
+        it "selects duplicate Gemini API-key accounts by managed id" $
+            withTempHome \_ ->
+                withEnv "GOOGLE_API_KEY" Nothing $
+                withEnv "GEMINI_API_KEY" Nothing do
+                    storeManagedAccount
+                        ApiBilled
+                        GeminiProvider
+                        "gemini-a"
+                        "gemini"
+                        "Google Gemini"
+                        True
+                        "key-a"
+                    storeManagedAccount
+                        ApiBilled
+                        GeminiProvider
+                        "gemini-b"
+                        "gemini"
+                        "Google Gemini"
+                        True
+                        "key-b"
+                    loadAuthForAccount
+                        GeminiProvider
+                        (managedAuthSelectionId "gemini-b")
+                        >>= \case
+                            Left err ->
+                                expectationFailure (Text.unpack err)
+                            Right loaded -> do
+                                loaded.loadedSelectionId
+                                    `shouldBe`
+                                        Just
+                                            (managedAuthSelectionId
+                                                "gemini-b")
                                 getNextToken
                                     loaded.loadedTokenProvider
                                     Nothing
@@ -812,6 +984,105 @@ spec = do
             grokNeedsRefresh epoch
                 (GrokAuthState "tok" (Just "refresh") Nothing Nothing)
                 `shouldBe` False
+
+    describe "managedGeminiTokenProvider" do
+        it "refreshes an expiring Google token and persists the rotation" $
+            withTempHome \_ -> do
+                now <- getCurrentTime
+                refreshes <- newIORef (0 :: Int)
+                let metadata = ManagedCredential
+                        { managedId = "gemini-google"
+                        , managedProvider = GeminiProvider
+                        , managedAccountId = "person@example.com"
+                        , managedLabel = "person@example.com"
+                        , managedBilling = SubscriptionBilled
+                        , managedAuthKind = ManagedGeminiAuthJson
+                        , managedEnabled = True
+                        }
+                    state = Gemini.GeminiAuthState
+                        { accessToken = "stale"
+                        , refreshToken = Just "refresh-old"
+                        , expiresAt = Just (addUTCTime 60 now)
+                        , email = "person@example.com"
+                        , projectId = "managed-project"
+                        , userTier = "free-tier"
+                        }
+                    secret = ManagedSecret
+                        metadata.managedId
+                        (geminiAuthStateToJson state)
+                    refresh refreshToken = do
+                        refreshToken `shouldBe` "refresh-old"
+                        modifyIORef' refreshes (+ 1)
+                        pure $ Right Gemini.OAuthTokens
+                            { accessToken = "fresh"
+                            , refreshToken = Just "refresh-new"
+                            , expiresInSeconds = Just 3600
+                            , tokenType = Just "Bearer"
+                            , scope = Nothing
+                            }
+                    expected = Credential
+                        { accessToken = "fresh"
+                        , accountId = "person@example.com"
+                        , leaseId = Just "code-assist:managed-project"
+                        , provider = GeminiProvider
+                        }
+                upsertManagedCredential metadata secret
+                    `shouldReturn` Right ()
+                provider <- managedGeminiTokenProvider
+                    metadata secret state refresh
+                getNextToken provider Nothing `shouldReturn` Right expected
+                getNextToken provider Nothing `shouldReturn` Right expected
+                readIORef refreshes `shouldReturn` 1
+                loadManagedCredentials >>= \case
+                    Right [(_, stored)]
+                        | Just persisted <-
+                            geminiAuthStateFromJson stored.secretPayload -> do
+                                persisted.accessToken `shouldBe` "fresh"
+                                persisted.refreshToken
+                                    `shouldBe` Just "refresh-new"
+                    other ->
+                        expectationFailure
+                            ("expected persisted Gemini OAuth state, got "
+                                <> show other)
+
+        it "does not refresh a credential disabled on disk" $
+            withTempHome \_ -> do
+                now <- getCurrentTime
+                refreshes <- newIORef (0 :: Int)
+                let metadata = ManagedCredential
+                        { managedId = "gemini-disabled"
+                        , managedProvider = GeminiProvider
+                        , managedAccountId = "person@example.com"
+                        , managedLabel = "person@example.com"
+                        , managedBilling = SubscriptionBilled
+                        , managedAuthKind = ManagedGeminiAuthJson
+                        , managedEnabled = True
+                        }
+                    state = Gemini.GeminiAuthState
+                        { accessToken = "stale"
+                        , refreshToken = Just "refresh-old"
+                        , expiresAt = Just (addUTCTime 60 now)
+                        , email = "person@example.com"
+                        , projectId = "managed-project"
+                        , userTier = "free-tier"
+                        }
+                    secret = ManagedSecret
+                        metadata.managedId
+                        (geminiAuthStateToJson state)
+                    refresh _ = do
+                        modifyIORef' refreshes (+ 1)
+                        pure $ Left "refresh should not run"
+                upsertManagedCredential metadata secret
+                    `shouldReturn` Right ()
+                provider <- managedGeminiTokenProvider
+                    metadata secret state refresh
+                setManagedCredentialEnabled metadata.managedId False
+                    `shouldReturn` Right ()
+                result <- getNextToken provider Nothing
+                result `shouldBe` Left
+                    (CredentialError
+                        "managed Gemini credential is disabled: gemini-disabled")
+                readIORef refreshes `shouldReturn` 0
 
     describe "grokCredentialFromAuthJson" do
         it "accepts a plain access_token object or a nested grok CLI map" do

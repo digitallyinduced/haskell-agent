@@ -138,6 +138,7 @@ let
             "openai"
             "xai"
             "openrouter"
+            "gemini"
             "claude-code"
           ];
           default = "openai";

@@ -265,6 +265,21 @@ runAgentWithRuntime processRuntime runMode options = do
                             , optResume = Just sessionId
                             }
                         Nothing
+            RunForkSession sessionId directive ->
+                newSessionState >>= \nextState -> do
+                    writeIORef nextState.sessionInitialPrompt directive
+                    go fullscreenInputs nextState
+                        current
+                            { optProvider = Nothing
+                            , optModel = Nothing
+                            , optCwd = Nothing
+                            , optWorktree = False
+                            , optEffort = Nothing
+                            , optPrompt = Nothing
+                            , optPromptFile = Nothing
+                            , optResume = Just sessionId
+                            }
+                        Nothing
             RunSwitchWorktree path provider model effort ->
                 newSessionState >>= \nextState ->
                     go fullscreenInputs nextState

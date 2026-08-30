@@ -147,7 +147,7 @@ import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ()
 import Agent.Provider
     ( Provider(OpenAIProvider, XAIProvider, OpenRouterProvider,
-               ClaudeCodeProvider),
+               GeminiProvider, ClaudeCodeProvider),
       TokenProvider,
       Credential(..),
       getNextToken,
@@ -561,6 +561,7 @@ runAgentInitializedWithLock
                         let fallback = case loaded.loadedProvider of
                                 XAIProvider -> "Grok"
                                 OpenRouterProvider -> "OpenRouter"
+                                GeminiProvider -> "Google Gemini"
                                 ClaudeCodeProvider -> "Claude Code"
                             selectionId = fromMaybe "" loaded.loadedSelectionId
                         writeIORef activeAccountRef fallback

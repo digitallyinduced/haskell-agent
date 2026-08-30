@@ -475,7 +475,8 @@ spec = describe "runLoop" do
 
     it "bounds a single oversized live tool-output snapshot" do
         delivered <- newIORef Nothing
-        let oversized = Text.replicate (3 * 1024 * 1024) "x"
+        let oversized =
+                Text.replicate (3 * 1024 * 1024) "x" <> "newest-tail"
             backend = Backend \_state _prev _inputs onEvent -> do
                 onEvent (ToolOutputUpdated "large" oversized)
                 pure $ Right BackendResult
@@ -500,7 +501,8 @@ spec = describe "runLoop" do
             Just output -> do
                 Text.length output `shouldSatisfy` (<= 2 * 1024 * 1024)
                 output `shouldSatisfy`
-                    Text.isSuffixOf "[tool output truncated]"
+                    Text.isPrefixOf "[earlier tool output truncated]"
+                output `shouldSatisfy` Text.isSuffixOf "newest-tail"
 
     it "dispatches consecutive parallel-safe tool calls concurrently" do
         firstStarted <- newEmptyMVar

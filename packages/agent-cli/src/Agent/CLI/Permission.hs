@@ -7,6 +7,13 @@ module Agent.CLI.Permission
     , promptPermission
     , promptRootAccess
     , renderPermissionFrame
+    , ApprovalPolicyChoice(..)
+    , ApprovalPolicyDecision(..)
+    , ApprovalPolicyState(..)
+    , initialApprovalPolicyState
+    , applyApprovalPolicyKey
+    , approvalPolicyOptions
+    , renderApprovalPolicyFrame
     ) where
 
 import Agent.CLI.Input (readApprovalLine)
@@ -15,6 +22,7 @@ import Agent.CLI.Notification
     , notifyAttention
     )
 import Agent.CLI.Options (ApprovalAnswer(..), parseApprovalAnswer)
+import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (glyphWarn, roleMuted, roleSuccess, roleWarn)
 import Agent.TUI.Presentation (permissionToolCallPromptRelative)
@@ -32,6 +40,105 @@ data PermissionChoice
     | PermissionAllowTool
     | PermissionDeny
     deriving (Eq, Show)
+
+data ApprovalPolicyDecision
+    = ApprovalPolicySelected !ApprovalPolicy
+    | ApprovalPolicyCancelled
+    deriving (Eq, Show)
+
+data ApprovalPolicyChoice
+    = ChoosePromptMutating
+    | ChooseDenyMutating
+    | ChooseApproveAll
+    deriving (Eq, Show)
+
+data ApprovalPolicyState = ApprovalPolicyState
+    { approvalPolicyCurrent :: !ApprovalPolicy
+    , approvalPolicyIndex :: !Int
+    }
+    deriving (Eq, Show)
+
+approvalPolicyChoices :: [ApprovalPolicyChoice]
+approvalPolicyChoices =
+    [ ChoosePromptMutating
+    , ChooseDenyMutating
+    , ChooseApproveAll
+    ]
+
+approvalPolicyOptions :: [(ApprovalPolicy, Text, Text)]
+approvalPolicyOptions =
+    [ ( PromptMutating
+      , "Ask before changes"
+      , "Prompt before mutating tools"
+      )
+    , ( DenyMutating
+      , "Read-only for this session"
+      , "Block all mutating tools"
+      )
+    , ( ApproveAll
+      , "Full access for this project"
+      , "Automatically approve mutating tools"
+      )
+    ]
+
+choicePolicy :: ApprovalPolicyChoice -> ApprovalPolicy
+choicePolicy = \case
+    ChoosePromptMutating -> PromptMutating
+    ChooseDenyMutating -> DenyMutating
+    ChooseApproveAll -> ApproveAll
+
+initialApprovalPolicyState :: ApprovalPolicy -> ApprovalPolicyState
+initialApprovalPolicyState policy =
+    ApprovalPolicyState
+        { approvalPolicyCurrent = policy
+        , approvalPolicyIndex =
+            case policy of
+                PromptMutating -> 0
+                DenyMutating -> 1
+                ApproveAll -> 2
+        }
+
+applyApprovalPolicyKey
+    :: PickerKey
+    -> ApprovalPolicyState
+    -> Either ApprovalPolicyDecision ApprovalPolicyState
+applyApprovalPolicyKey key state = case key of
+    PickerKeyCancel -> Left ApprovalPolicyCancelled
+    PickerKeyConfirm ->
+        Left
+            (ApprovalPolicySelected
+                (choicePolicy
+                    (approvalPolicyChoices !! state.approvalPolicyIndex)))
+    PickerKeyUp -> Right (move (-1) state)
+    PickerKeyDown -> Right (move 1 state)
+    PickerKeyChar c -> case Text.toLower (Text.singleton c) of
+        "p" -> Left (ApprovalPolicySelected PromptMutating)
+        "r" -> Left (ApprovalPolicySelected DenyMutating)
+        "f" -> Left (ApprovalPolicySelected ApproveAll)
+        _ -> Right state
+    PickerKeyBackspace -> Right state
+  where
+    move delta current =
+        current
+            { approvalPolicyIndex =
+                (current.approvalPolicyIndex + delta)
+                    `mod` length approvalPolicyChoices
+            }
+
+renderApprovalPolicyFrame :: Bool -> ApprovalPolicyState -> Text
+renderApprovalPolicyFrame color state =
+    let labels =
+            [ (label, detail)
+            | (_, label, detail) <- approvalPolicyOptions
+            ]
+        rows = zipWith
+            (\i (label, detail) ->
+                renderRow color (i == state.approvalPolicyIndex)
+                    (label <> " — " <> roleMuted color detail))
+            [0 ..] labels
+    in Text.intercalate "\n"
+        (roleWarn color (glyphWarn <> "Permissions") : rows
+            <> [roleMuted color "↑↓/jk · enter/click · p ask · r read-only · f full access · esc cancel"])
 
 data PermissionState = PermissionState
     { permSummary :: !Text

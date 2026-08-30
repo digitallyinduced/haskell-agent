@@ -245,6 +245,9 @@ createCodexMessageWithProviderAtWithOptionsInternal options turnState
             OpenRouterProvider -> pure $ Left $ ProviderError ApiErrorType
                 "OpenRouter credentials must be used through agent-openrouter"
                 Nothing
+            GeminiProvider -> pure $ Left $ ProviderError ApiErrorType
+                "Gemini credentials must be used through agent-gemini"
+                Nothing
             ClaudeCodeProvider -> pure $ Left $ ProviderError ApiErrorType
                 "Claude Code subscription sessions must use agent-claude"
                 Nothing
@@ -336,12 +339,11 @@ responseHandler idleTimeoutMicros modelHint turnState response stream = do
     let status = getStatusCode response
     captureResponseTurnState turnState response
     if status >= 200 && status < 300
-        then
-            if responseIsEventStream response
-                then readCodexSseResponse
-                    idleTimeoutMicros modelHint stream []
-                else sniffSuccessfulResponse
-                    idleTimeoutMicros modelHint stream
+        then sniffSuccessfulResponse
+            idleTimeoutMicros
+            modelHint
+            (responseIsEventStream response)
+            stream
         else do
             bodyResult <- readBoundedBodyWithIdleTimeout
                 idleTimeoutMicros maxErrorBodyBytes stream [] 0
@@ -439,9 +441,10 @@ readBoundedBodyWithIdleTimeout idleMicros byteLimit stream =
 sniffSuccessfulResponse
     :: Int
     -> Maybe Text
+    -> Bool
     -> Streams.InputStream BS.ByteString
     -> IO (Either ApiError OpenAI.Response)
-sniffSuccessfulResponse idleMicros modelHint stream =
+sniffSuccessfulResponse idleMicros modelHint preferSse stream =
     sniff [] 0 ""
   where
     sniff reversedChunks bytesRead probe = do
@@ -449,9 +452,13 @@ sniffSuccessfulResponse idleMicros modelHint stream =
         case next of
             Nothing -> pure $ Left $ ConnectionError
                 "Codex HTTP response idle timeout"
-            Just Nothing ->
-                pure $ decodeCodexHttpBodyBytesWithModel modelHint $
-                    LBS.toStrict (LBS.fromChunks (reverse reversedChunks))
+            Just Nothing
+                | preferSse ->
+                    readCodexSseResponse
+                        idleMicros modelHint stream (reverse reversedChunks)
+                | otherwise ->
+                    pure $ decodeCodexHttpBodyBytesWithModel modelHint $
+                        LBS.toStrict (LBS.fromChunks (reverse reversedChunks))
             Just (Just chunk) -> do
                 let chunks' = chunk : reversedChunks
                     bytesRead' = bytesRead + BS.length chunk
@@ -459,7 +466,7 @@ sniffSuccessfulResponse idleMicros modelHint stream =
                         (maxResponseSniffBytes - bytesRead)
                         probe
                         chunk
-                case classifyResponseProbe probe' of
+                case classifyResponseProbe preferSse probe' of
                     Just ResponseBodySse ->
                         readCodexSseResponse
                             idleMicros modelHint stream (reverse chunks')
@@ -468,8 +475,11 @@ sniffSuccessfulResponse idleMicros modelHint stream =
                             idleMicros modelHint stream chunks' bytesRead'
                     Nothing
                         | bytesRead' >= maxResponseSniffBytes ->
-                            readSuccessfulJsonResponse
-                                idleMicros modelHint stream chunks' bytesRead'
+                            if preferSse
+                                then readCodexSseResponse
+                                    idleMicros modelHint stream (reverse chunks')
+                                else readSuccessfulJsonResponse
+                                    idleMicros modelHint stream chunks' bytesRead'
                         | otherwise -> sniff chunks' bytesRead' probe'
 
 readSuccessfulJsonResponse
@@ -595,12 +605,13 @@ advanceResponseProbe remaining current chunk
         (if BS.null current then dropAsciiSpace else id)
             (BS.take remaining chunk)
 
-classifyResponseProbe :: BS.ByteString -> Maybe ResponseBodyKind
-classifyResponseProbe probe =
+classifyResponseProbe :: Bool -> BS.ByteString -> Maybe ResponseBodyKind
+classifyResponseProbe preferSse probe =
     case BS.uncons probe of
         Nothing -> Nothing
         Just (byte, _)
             | byte == 0x7b || byte == 0x5b -> Just ResponseBodyJson
+            | preferSse -> Just ResponseBodySse
             | byte == 0x3a -> Just ResponseBodySse
             | any (`BS.isPrefixOf` probe) sseFieldPrefixes ->
                 Just ResponseBodySse

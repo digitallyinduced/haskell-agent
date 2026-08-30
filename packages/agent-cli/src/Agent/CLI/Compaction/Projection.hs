@@ -103,6 +103,7 @@ providerLabel = \case
     OpenAIProvider -> "openai"
     XAIProvider -> "xai"
     OpenRouterProvider -> "openrouter"
+    GeminiProvider -> "gemini"
     ClaudeCodeProvider -> "claude-code"
 
 requestTooLargeError :: Text -> ApiError

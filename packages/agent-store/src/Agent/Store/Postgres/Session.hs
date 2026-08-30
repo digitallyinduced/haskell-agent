@@ -14,6 +14,7 @@ module Agent.Store.Postgres.Session
     , sessionSchemaStatements
     , sessionSearchIndexStatements
     , createSession
+    , createSessionFromSnapshot
     , replaceSessionMetadata
     , appendSessionTurn
     , appendSessionTurnIndexed

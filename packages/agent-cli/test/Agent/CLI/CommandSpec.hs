@@ -68,6 +68,64 @@ spec = do
             parseReplLine "/effort MAX" `shouldBe` ReplSetEffort EffortMax
             parseReplLine "/effort medium" `shouldBe` ReplSetEffort EffortMedium
 
+        it "parses the Codex workflow commands" do
+            parseReplLine "/init" `shouldBe` ReplInit
+            parseReplLine "/init now"
+                `shouldBe` ReplCommandError "usage: /init"
+            parseReplLine "/review" `shouldBe` ReplReview Nothing
+            parseReplLine "/review   inspect auth  "
+                `shouldBe` ReplReview (Just "inspect auth")
+            parseReplLine "/diff" `shouldBe` ReplDiff
+            parseReplLine "/diff now"
+                `shouldBe` ReplCommandError "usage: /diff"
+            parseReplLine "/fork"
+                `shouldBe` ReplFork (ForkRequest Nothing Nothing)
+            parseReplLine "/fork   experiment branch  "
+                `shouldBe`
+                    ReplFork
+                        (ForkRequest Nothing (Just "experiment branch"))
+            parseReplLine "/fork --worktree fix the tests"
+                `shouldBe`
+                    ReplFork
+                        (ForkRequest (Just True) (Just "fix the tests"))
+            parseReplLine "/fork --no-worktree"
+                `shouldBe` ReplFork (ForkRequest (Just False) Nothing)
+            parseReplLine "/fork --unknown stays a directive"
+                `shouldBe`
+                    ReplFork
+                        (ForkRequest
+                            Nothing
+                            (Just "--unknown stays a directive"))
+            parseReplLine "/fork --worktree --no-worktree"
+                `shouldBe`
+                    ReplCommandError
+                        "--worktree and --no-worktree are mutually exclusive"
+            parseReplLine "/fork --worktree --worktree"
+                `shouldBe`
+                    ReplCommandError "--worktree specified twice"
+            parseReplLine "/fork --at 3"
+                `shouldBe`
+                    ReplCommandError
+                        "--at is not supported in this version"
+            parseReplLine "/export" `shouldBe` ReplExport Nothing
+            parseReplLine "/export  notes/session.md  "
+                `shouldBe` ReplExport (Just "notes/session.md")
+            parseReplLine "/history" `shouldBe` ReplHistory
+            parseReplLine "/history now"
+                `shouldBe` ReplCommandError "usage: /history"
+            parseReplLine "/find" `shouldBe` ReplFind Nothing
+            parseReplLine "/find   exact  phrase"
+                `shouldBe` ReplFind (Just "exact  phrase")
+            parseReplLine "/permissions" `shouldBe` ReplPermissions
+            parseReplLine "/permissions now"
+                `shouldBe` ReplCommandError "usage: /permissions"
+
+        it "includes the no-overwrite AGENTS.md init prompt" do
+            initInstruction `shouldSatisfy` Text.isInfixOf
+                "Before writing, check whether AGENTS.md already exists"
+            initInstruction `shouldSatisfy` Text.isInfixOf
+                "Repository Guidelines"
+
         it "toggles always-approve from slash and colon aliases" do
             parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
             parseReplLine "/Always-Approve" `shouldBe` ReplToggleAlwaysApprove
@@ -333,6 +391,14 @@ spec = do
             names
                 `shouldBe`
                     [ "help"
+                    , "init"
+                    , "review"
+                    , "diff"
+                    , "fork"
+                    , "export"
+                    , "history"
+                    , "find"
+                    , "permissions"
                     , "model"
                     , "effort"
                     , "fast"
@@ -447,6 +513,8 @@ spec = do
                 `shouldBe` ["qwen-local"]
             slashCompletionCandidates "emaner/" "-"
                 `shouldBe` ["--auto"]
+            slashCompletionCandidates "krof/" "-"
+                `shouldBe` ["--worktree", "--no-worktree"]
             slashCompletionCandidates "llehs/" "b"
                 `shouldBe` ["bash", "both"]
 
@@ -463,7 +531,8 @@ spec = do
                     map
                         (("/" <>) . (.slashName))
                         defaultSlashCatalog.slashCatalogCommands
-            displays "/mo" 3 `shouldBe` ["/model", "/codemod"]
+            displays "/mo" 3
+                `shouldBe` ["/model", "/codemod", "/permissions"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 

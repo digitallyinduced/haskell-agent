@@ -1,6 +1,7 @@
 -- | Interactive REPL slash commands.
 module Agent.CLI.Command
-    ( ReplAction(..)
+    ( ForkRequest(..)
+    , ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
     , SlashCatalog(..)
@@ -15,6 +16,7 @@ module Agent.CLI.Command
     , formatSlashHelpWithCatalog
     , formatSlashHelpWithSkills
     , goalInstruction
+    , initInstruction
     , lookupSlashCommand
     , lookupSlashCommandIn
     , loopScheduleInstruction
@@ -48,6 +50,7 @@ import Agent.CLI.Command.Catalog (slashCommands)
 import Agent.CLI.Command.Instructions
     ( deepResearchInstruction
     , goalInstruction
+    , initInstruction
     , loopScheduleInstruction
     , workflowInstruction
     )
@@ -212,6 +215,38 @@ parseSlash catalog raw line = case Text.words line of
             Nothing -> unknownCommand command
         Just spec -> case spec.slashName of
             "help" -> parseHelpCommand catalog args
+            "init" ->
+                if null args
+                    then ReplInit
+                    else ReplCommandError "usage: /init"
+            "review" ->
+                let instructions =
+                        Text.strip (Text.drop (Text.length command) line)
+                in ReplReview
+                    (if Text.null instructions then Nothing else Just instructions)
+            "diff" ->
+                if null args
+                    then ReplDiff
+                    else ReplCommandError "usage: /diff"
+            "fork" ->
+                parseForkCommand
+                    (Text.strip (Text.drop (Text.length command) line))
+            "export" ->
+                let path = Text.strip (Text.drop (Text.length command) line)
+                in ReplExport
+                    (if Text.null path then Nothing else Just path)
+            "history" ->
+                if null args
+                    then ReplHistory
+                    else ReplCommandError "usage: /history"
+            "find" ->
+                ReplFind
+                    (nonEmptyText
+                        (Text.strip (Text.drop (Text.length command) line)))
+            "permissions" ->
+                if null args
+                    then ReplPermissions
+                    else ReplCommandError "usage: /permissions"
             "effort" -> parseEffortCommand args
             "fast" ->
                 if null args
@@ -515,6 +550,40 @@ parseDeepResearchCommand original query
     | otherwise =
         ReplExpandedPrompt original (deepResearchInstruction query)
 
+parseForkCommand :: Text -> ReplAction
+parseForkCommand input =
+    either ReplCommandError ReplFork (go Nothing (Text.stripStart input))
+  where
+    go worktree rest
+        | Text.null rest =
+            Right ForkRequest
+                { forkWorktree = worktree
+                , forkDirective = Nothing
+                }
+        | otherwise =
+            let (token, suffix) = Text.break isSpace rest
+                remaining = Text.stripStart suffix
+                finish =
+                    Right ForkRequest
+                        { forkWorktree = worktree
+                        , forkDirective = nonEmptyText (Text.strip rest)
+                        }
+            in case token of
+                "--worktree" -> case worktree of
+                    Nothing -> go (Just True) remaining
+                    Just True -> Left "--worktree specified twice"
+                    Just False ->
+                        Left
+                            "--worktree and --no-worktree are mutually exclusive"
+                "--no-worktree" -> case worktree of
+                    Nothing -> go (Just False) remaining
+                    Just False -> Left "--no-worktree specified twice"
+                    Just True ->
+                        Left
+                            "--worktree and --no-worktree are mutually exclusive"
+                "--at" -> Left "--at is not supported in this version"
+                _ -> finish
+
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
     | Text.null value = Nothing
@@ -789,6 +858,7 @@ argCompletions catalog spec = case spec.slashName of
         map (.slashName) catalog.slashCatalogCommands
             <> map (.skillCommandName) catalog.slashCatalogSkills
     "rename" -> ["--auto"]
+    "fork" -> ["--worktree", "--no-worktree"]
     "paste" -> ["--send"]
     "goal" -> ["status", "pause", "resume", "clear"]
     "workflow" -> ["runs"]

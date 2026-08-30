@@ -51,6 +51,24 @@ spec =
                 LBS.unpack metadata `shouldNotSatisfy` isInfixOf "super-secret"
                 LBS.unpack secrets `shouldSatisfy` isInfixOf "super-secret"
 
+        it "round-trips managed Gemini OAuth metadata" $
+            withTempHome \_ -> do
+                let geminiAccount = account
+                        { managedId = "gemini-google"
+                        , managedProvider = GeminiProvider
+                        , managedAccountId = "person@example.com"
+                        , managedBilling = SubscriptionBilled
+                        , managedAuthKind = ManagedGeminiAuthJson
+                        }
+                    geminiSecret = secret
+                        { secretManagedId = "gemini-google"
+                        , secretPayload = "{\"access_token\":\"redacted\"}"
+                        }
+                upsertManagedCredential geminiAccount geminiSecret
+                    `shouldReturn` Right ()
+                loadManagedCredentials
+                    `shouldReturn` Right [(geminiAccount, geminiSecret)]
+
         it "writes private directories and files" $
             withTempHome \home -> do
                 upsertManagedCredential account secret `shouldReturn` Right ()
@@ -108,6 +126,28 @@ spec =
                     `shouldBe` Right [False]
                 deleteManagedCredential account.managedId
                     `shouldReturn` Right ()
+                loadManagedCredentials `shouldReturn` Right []
+
+        it "does not resurrect a credential disabled or deleted during refresh" $
+            withTempHome \_ -> do
+                let rotated = secret { secretPayload = "rotated-secret" }
+                upsertManagedCredential account secret `shouldReturn` Right ()
+                setManagedCredentialEnabled account.managedId False
+                    `shouldReturn` Right ()
+                upsertManagedCredentialAfterRefresh account rotated
+                    `shouldReturn` Left
+                        "managed credential openrouter-test is disabled"
+                loadManagedCredentials `shouldReturn`
+                    Right
+                        [ ( account { managedEnabled = False }
+                          , secret
+                          )
+                        ]
+                deleteManagedCredential account.managedId
+                    `shouldReturn` Right ()
+                upsertManagedCredentialAfterRefresh account rotated
+                    `shouldReturn` Left
+                        "managed credential openrouter-test no longer exists during refresh"
                 loadManagedCredentials `shouldReturn` Right []
 
         it "updates one secret without replacing sibling accounts" $

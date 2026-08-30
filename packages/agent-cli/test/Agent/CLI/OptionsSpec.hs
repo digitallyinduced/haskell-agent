@@ -93,6 +93,18 @@ spec = do
                     , optPrompt = Just "hi"
                     })
 
+        it "accepts gemini and google as provider names" do
+            parseArgs ["--provider", "gemini", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optProvider = Just GeminiProvider
+                    , optPrompt = Just "hi"
+                    })
+            parseArgs ["--provider", "google", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optProvider = Just GeminiProvider
+                    , optPrompt = Just "hi"
+                    })
+
         it "accepts claude-code and claude as provider names" do
             parseArgs ["--provider", "claude-code", "-p", "hi"]
                 `shouldBe` Right (RunAgent defaultCliOptions
@@ -357,6 +369,7 @@ spec = do
             defaultEffortFor XAIProvider `shouldBe` EffortHigh
             defaultEffortFor OpenAIProvider `shouldBe` EffortMedium
             defaultEffortFor OpenRouterProvider `shouldBe` EffortMedium
+            defaultEffortFor GeminiProvider `shouldBe` EffortMedium
             defaultEffortFor ClaudeCodeProvider `shouldBe` EffortXHigh
 
     describe "reasoningEffortsForDialect" do

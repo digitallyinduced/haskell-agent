@@ -1,6 +1,7 @@
 # Model catalog and local models
 
-The model picker merges the shipped OpenAI, xAI, OpenRouter, and Meta catalog
+The model picker merges the shipped OpenAI, xAI, OpenRouter, Meta, and Gemini
+catalog
 with:
 
 ```text
@@ -48,6 +49,11 @@ Select it with `agent-cli --model qwen-local` or from `/model`. For an
 authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
 that variable. Omit `"api_key_optional": true` when a key is required.
 
+Built-in provider credentials are configured separately from the catalog.
+Selecting a Gemini entry in `/model` starts browser-based Google sign-in when
+no Gemini credential exists; no API key is required. Google AI Studio API keys
+remain available through `GOOGLE_API_KEY` or `GEMINI_API_KEY`.
+
 Set `context_window` to the endpoint's documented token limit so `/compact`
 can bound its summary request and installed snapshot. Inference works without
 this metadata, but `/compact` refuses to guess a portable model's limit.
@@ -60,8 +66,8 @@ Supported dialects are:
 
 Custom connections are selected manually and are not considered for automatic
 billing fallback. Shipped connection names (`openai`, `xai`, `openrouter`,
-`meta`, and `claude-code`) are reserved. Invalid catalogs are reported at
-startup.
+`meta`, `gemini`, and `claude-code`) are reserved. Invalid catalogs are
+reported at startup.
 
 The built-in `add-model` skill handles requests such as “use the model running
 at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.

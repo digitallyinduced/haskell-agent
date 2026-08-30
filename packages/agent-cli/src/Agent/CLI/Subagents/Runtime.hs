@@ -563,7 +563,8 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                         (\config ->
                             runLoopInputs config previous [AgentMessage prompt])
 
--- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
+-- | Child xAI/OpenRouter/Gemini agent: HTTP backend, filtered tools by
+-- @subagent_type@.
 runHttpSubagent
     :: SubagentRuntime
     -> Dialect
@@ -863,8 +864,9 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
             , loopMaxTurns = runtime.subagentOptions.optMaxTurns
             , loopOnEvent = onEvent
             , loopApprove =
-                \call ->
-                    childApprove runtime.subagentPolicy toolRegistry call
+                \call -> do
+                    policy <- readIORef runtime.subagentPolicy
+                    childApprove policy toolRegistry call
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
             , loopCancel = env.subCancel

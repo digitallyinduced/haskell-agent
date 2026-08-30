@@ -232,6 +232,22 @@ spec = describe "fullscreen UI reducer" do
                     (warningNotice
                         "Codex usage is low: primary 8% left.")
 
+    it "updates provider capacity in the prompt chrome" do
+        let state =
+                apply
+                    [ UiLoop
+                        ProviderLimitUpdated
+                            { providerLimitText = "Weekly limit left: 8%"
+                            , providerLimitWarning = True
+                            }
+                    ]
+        state.uiPrompt.promptLimitStatus
+            `shouldBe`
+                Just PromptLimitStatus
+                    { promptLimitText = "Weekly limit left: 8%"
+                    , promptLimitWarning = True
+                    }
+
     it "separates a partial response from its automatic retry" do
         let message =
                 "Connection interrupted the response; restarting automatically."

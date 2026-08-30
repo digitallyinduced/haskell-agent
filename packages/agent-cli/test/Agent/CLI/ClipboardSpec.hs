@@ -133,6 +133,20 @@ spec = do
                     check "quoted" quoted
                     check "file-url" filed
 
+        it "rejects an oversized path without retaining the whole file" do
+            tmp <- getTemporaryDirectory
+            bracket
+                (do
+                    (path, handle) <-
+                        openBinaryTempFile tmp "agent-paste-large-.png"
+                    BS.hPut handle (BS.replicate (20 * 1024 * 1024 + 1) 0)
+                    hClose handle
+                    pure path)
+                removeFile
+                \path -> do
+                    result <- loadImagesFromPastedText (Text.pack path)
+                    result `shouldBe` Nothing
+
 withEmptyPath :: IO a -> IO a
 withEmptyPath action = do
     tmp <- getTemporaryDirectory

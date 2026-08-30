@@ -136,6 +136,9 @@ listModelsWithCredentialAt baseUrl clientVersion knownEtag credential =
         OpenRouterProvider -> pure $ Left $ ProviderError ApiErrorType
             "OpenRouter credentials must be used through agent-openrouter"
             Nothing
+        GeminiProvider -> pure $ Left $ ProviderError ApiErrorType
+            "Gemini credentials must be used through agent-gemini"
+            Nothing
         ClaudeCodeProvider -> pure $ Left $ ProviderError ApiErrorType
             "Claude Code credentials must be used through agent-claude"
             Nothing
@@ -203,6 +206,7 @@ modelsCacheKeyForCredential baseUrl credential = ModelsCacheKey
         OpenAIProvider -> "openai"
         XAIProvider -> "xai"
         OpenRouterProvider -> "openrouter"
+        GeminiProvider -> "gemini"
         ClaudeCodeProvider -> "claude-code"
     , baseUrl
     , accountId =
