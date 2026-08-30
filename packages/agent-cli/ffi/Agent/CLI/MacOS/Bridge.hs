@@ -177,6 +177,7 @@ import Control.Exception.Safe
     , finally
     , isAsyncException
     , mask
+    , onException
     , throwIO
     , throwString
     , tryAny
@@ -1215,63 +1216,75 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                             cancelRef <- newIORef False
                             gate <- newEmptyMVar
                             owner <- asyncWithUnmask \unmask ->
-                                readMVar gate >> unmask do
-                                    started <- tryRepositorySynchronous
-                                        (RepositoryReview.startRepositoryCheck
-                                            (Text.unpack path)
-                                            expected
-                                            (Text.unpack executable)
-                                            (map Text.unpack arguments)
-                                            (\stream bytes ->
-                                                BS.useAsCStringLen bytes
-                                                    \(pointer, length) ->
-                                                        withRepositoryCallbackThread
-                                                            (invokeRepositoryCheckOutputCallback
-                                                                outputCallback
-                                                                context
-                                                                (case stream of
-                                                                    RepositoryReview.RepositoryCheckStdout -> 1
-                                                                    RepositoryReview.RepositoryCheckStderr -> 2)
-                                                                (castPtr pointer)
-                                                                (fromIntegral length)))
-                                            (\cancelled exitCode ->
-                                                withRepositoryCallbackThread
-                                                    (invokeRepositoryCheckExitCallback
-                                                        exitCallback
-                                                        context
-                                                        (if cancelled then 1 else 0)
-                                                        (case exitCode of
-                                                            System.Exit.ExitSuccess -> 0
-                                                            System.Exit.ExitFailure code ->
-                                                                fromIntegral code)
-                                                        nullPtr 0)))
+                                readMVar gate >> do
+                                    -- asyncWithUnmask starts masked. Only the
+                                    -- potentially long start is unmasked;
+                                    -- publishing its handle remains atomic
+                                    -- with respect to owner cancellation.
+                                    started <- unmask
+                                        (tryRepositorySynchronous
+                                            (RepositoryReview.startRepositoryCheck
+                                                (Text.unpack path)
+                                                expected
+                                                (Text.unpack executable)
+                                                (map Text.unpack arguments)
+                                                (\stream bytes ->
+                                                    BS.useAsCStringLen bytes
+                                                        \(pointer, length) ->
+                                                            withRepositoryCallbackThread
+                                                                (invokeRepositoryCheckOutputCallback
+                                                                    outputCallback
+                                                                    context
+                                                                    (case stream of
+                                                                        RepositoryReview.RepositoryCheckStdout -> 1
+                                                                        RepositoryReview.RepositoryCheckStderr -> 2)
+                                                                    (castPtr pointer)
+                                                                    (fromIntegral length)))
+                                                (\cancelled exitCode ->
+                                                    withRepositoryCallbackThread
+                                                        (invokeRepositoryCheckExitCallback
+                                                            exitCallback
+                                                            context
+                                                            (if cancelled then 1 else 0)
+                                                            (case exitCode of
+                                                                System.Exit.ExitSuccess -> 0
+                                                                System.Exit.ExitFailure code ->
+                                                                    fromIntegral code)
+                                                            nullPtr 0))))
                                     case started of
                                         Left exception ->
-                                            withText
-                                                (Text.pack (show exception))
-                                                \errorPtr errorLength ->
-                                                    withRepositoryCallbackThread
-                                                        (invokeRepositoryCheckExitCallback
-                                                            exitCallback
-                                                            context 0 (-1)
-                                                            errorPtr errorLength)
+                                            unmask
+                                                (withText
+                                                    (Text.pack (show exception))
+                                                    \errorPtr errorLength ->
+                                                        withRepositoryCallbackThread
+                                                            (invokeRepositoryCheckExitCallback
+                                                                exitCallback
+                                                                context 0 (-1)
+                                                                errorPtr errorLength))
                                         Right (Left err) ->
-                                            withText
-                                                (RepositoryReview.repositoryErrorText
-                                                    err)
-                                                \errorPtr errorLength ->
-                                                    withRepositoryCallbackThread
-                                                        (invokeRepositoryCheckExitCallback
-                                                            exitCallback
-                                                            context 0 (-1)
-                                                            errorPtr errorLength)
+                                            unmask
+                                                (withText
+                                                    (RepositoryReview.repositoryErrorText
+                                                        err)
+                                                    \errorPtr errorLength ->
+                                                        withRepositoryCallbackThread
+                                                            (invokeRepositoryCheckExitCallback
+                                                                exitCallback
+                                                                context 0 (-1)
+                                                                errorPtr errorLength))
                                         Right (Right check) -> do
                                             writeIORef checkRef (Just check)
                                             cancelRequested <- readIORef cancelRef
                                             when cancelRequested
                                                 (RepositoryReview.cancelRepositoryCheck
                                                     check)
-                                            RepositoryReview.waitRepositoryCheck check
+                                            unmask
+                                                (RepositoryReview.waitRepositoryCheck
+                                                    check)
+                                                `onException`
+                                                    RepositoryReview.cancelRepositoryCheck
+                                                        check
                             stable <- newStablePtr RepositoryCheckHandle
                                 { repositoryCheckValue = checkRef
                                 , repositoryCheckCancelRequested = cancelRef

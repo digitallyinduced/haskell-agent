@@ -22,6 +22,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
+    , cancel
     , poll
     , wait
     , waitCatch
@@ -38,6 +39,7 @@ import Control.Exception.Safe
     , bracket
     , finally
     , isAsyncException
+    , mask
     , onException
     , throwIO
     , throwString
@@ -91,6 +93,7 @@ import System.Process
     , terminateProcess
     , waitForProcess
     )
+import System.Timeout (timeout)
 
 data RepositorySnapshot = RepositorySnapshot
     { snapshotId :: !Text
@@ -345,6 +348,11 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                         (Left
                             (InvalidRepositoryRequest
                                 "check argument contains a NUL byte"))
+                | any null arguments ->
+                    pure
+                        (Left
+                            (InvalidRepositoryRequest
+                                "check argument is empty"))
                 | any
                     ((> maxRepositoryArgumentCharacters) . length)
                     arguments ->
@@ -359,52 +367,83 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                                 (InvalidRepositoryRequest
                                     "check arguments exceed the 8 MiB total limit"))
                 | otherwise -> do
-                    created <- trySynchronous do
+                    -- Keep asynchronous cancellation masked across process
+                    -- acquisition and construction of its owning worker.
+                    -- Once this returns, every resource is reachable through
+                    -- RepositoryCheck and cancellation is owned by that
+                    -- worker's finalizer.
+                    created <- trySynchronous (mask \_ -> do
                         (maybeOutput, maybeError, process) <-
                             createCheckProcess root executable arguments
                         processGroup <- getPid process
                         cancelled <- newIORef False
-                        worker <-
-                            asyncWithUnmask
-                                (\unmask ->
-                                    unmask
-                                        (withAsync
-                                            (drainCheckOutput
-                                                RepositoryCheckStdout
-                                                maybeOutput)
-                                            \outputReader ->
-                                                withAsync
-                                                    (drainCheckOutput
-                                                        RepositoryCheckStderr
-                                                        maybeError)
-                                                    \errorReader -> do
-                                                        exitCode <-
-                                                            waitForProcess process
-                                                        -- Reader failures
-                                                        -- (including callback
-                                                        -- failures) must not
-                                                        -- suppress the one
-                                                        -- terminal callback.
-                                                        _ <- waitCatch outputReader
-                                                        _ <- waitCatch errorReader
-                                                        wasCancelled <-
-                                                            readIORef cancelled
-                                                        onExit
-                                                            wasCancelled
-                                                            exitCode))
-                                `onException` do
-                                    closeQuietly maybeOutput
-                                    closeQuietly maybeError
-                                    signalCheckProcessGroup
-                                        sigKILL processGroup process
-                                    _ <- tryAny (waitForProcess process)
-                                    pure ()
+                        let cleanup = do
+                                closeQuietly maybeOutput
+                                closeQuietly maybeError
+                                signalCheckProcessGroup
+                                    sigKILL processGroup process
+                                _ <- tryAny (waitForProcess process)
+                                pure ()
+                        worker <- asyncWithUnmask
+                            (\unmask ->
+                                unmask
+                                    (withAsync
+                                        (drainCheckOutput
+                                            RepositoryCheckStdout
+                                            maybeOutput)
+                                        \outputReader ->
+                                            withAsync
+                                                (drainCheckOutput
+                                                    RepositoryCheckStderr
+                                                    maybeError)
+                                                \errorReader -> do
+                                                    exitCode <-
+                                                        waitForProcess process
+                                                    -- The requested leader is
+                                                    -- complete. Any process
+                                                    -- still in its dedicated
+                                                    -- group is a residual
+                                                    -- descendant and must not
+                                                    -- outlive the check.
+                                                    signalCheckProcessGroup
+                                                        sigKILL
+                                                        processGroup
+                                                        process
+                                                    -- Reader failures
+                                                    -- (including callback
+                                                    -- failures) must not
+                                                    -- suppress the one terminal
+                                                    -- callback. An escaped
+                                                    -- process outside the
+                                                    -- group still cannot hold
+                                                    -- this worker indefinitely.
+                                                    drained <- timeout
+                                                        processPipeTeardownMicros
+                                                        ((,)
+                                                            <$> waitCatch outputReader
+                                                            <*> waitCatch errorReader)
+                                                    case drained of
+                                                        Just _ -> pure ()
+                                                        Nothing -> do
+                                                            closeQuietly
+                                                                maybeOutput
+                                                            closeQuietly
+                                                                maybeError
+                                                            cancel outputReader
+                                                            cancel errorReader
+                                                    wasCancelled <-
+                                                        readIORef cancelled
+                                                    onExit
+                                                        wasCancelled
+                                                        exitCode)
+                                    `finally` cleanup)
+                                `onException` cleanup
                         pure RepositoryCheck
                             { repositoryCheckProcess = process
                             , repositoryCheckProcessGroup = processGroup
                             , repositoryCheckWorker = worker
                             , repositoryCheckCancelled = cancelled
-                            }
+                            })
                     pure case created of
                         Left exception ->
                             Left
@@ -1048,7 +1087,7 @@ runProcessBytes
     -> IO (ExitCode, BS.ByteString, BS.ByteString)
 runProcessBytes workingDirectory executable arguments input =
     bracket start stop
-        \(inputHandle, outputHandle, errorHandle, process, _, completed) -> do
+        \(inputHandle, outputHandle, errorHandle, process, processGroup, completed) -> do
         withAsync
             (BS.hPut inputHandle input `finally` closeQuietly inputHandle)
             \inputWriter ->
@@ -1063,9 +1102,20 @@ runProcessBytes workingDirectory executable arguments input =
                             errorHandle)
                         \errorReader -> do
                         exitCode <- waitForProcess process
+                        -- The requested leader is complete. Kill any residual
+                        -- member of its dedicated group before waiting for
+                        -- pipe EOF; escaped groups are bounded by the timeout.
+                        signalCheckProcessGroup
+                            sigKILL processGroup process
                         _ <- wait inputWriter
-                        output <- wait outputReader
-                        errors <- wait errorReader
+                        drained <- timeout
+                            processPipeTeardownMicros
+                            ((,) <$> wait outputReader <*> wait errorReader)
+                        (output, errors) <- case drained of
+                            Just values -> pure values
+                            Nothing ->
+                                throwString
+                                    "repository process descendants retained output pipes"
                         writeIORef completed True
                         pure (exitCode, output, errors)
   where
@@ -1194,6 +1244,9 @@ maxRepositoryProcessOutputBytes = 64 * 1024 * 1024
 
 maxRepositoryProcessErrorBytes :: Int
 maxRepositoryProcessErrorBytes = 8 * 1024 * 1024
+
+processPipeTeardownMicros :: Int
+processPipeTeardownMicros = 1_000_000
 
 trySynchronous :: IO value -> IO (Either SomeException value)
 trySynchronous action =

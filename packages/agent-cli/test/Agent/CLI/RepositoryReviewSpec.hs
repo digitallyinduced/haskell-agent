@@ -407,6 +407,69 @@ spec = describe "repository review service" do
             takeMVar terminal `shouldReturn` (False, ExitFailure 9)
             readIORef terminalCount `shouldReturn` 1
 
+    it "joins a check descendant that retains output after its leader exits" $
+        withRepository \root -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            let pidFile = root <> "/check-background-child.pid"
+            terminal <- newEmptyMVar
+            check <- expectRight
+                =<< startRepositoryCheck
+                    root
+                    snapshot.snapshotId
+                    "/bin/sh"
+                    [ "-c"
+                    , "/bin/sh -c 'trap \"\" TERM; echo $$ > "
+                        <> shellQuote pidFile
+                        <> "; exec /bin/sleep 30' & "
+                        <> "while [ ! -s "
+                        <> shellQuote pidFile
+                        <> " ]; do /bin/sleep 0.01; done; exit 0"
+                    ]
+                    (\_ _ -> pure ())
+                    (\cancelled exitCode ->
+                        putMVar terminal (cancelled, exitCode))
+            childPid <- awaitFileContents pidFile 200
+            timeout 2_000_000 (waitRepositoryCheck check)
+                `shouldReturn` Just ()
+            takeMVar terminal `shouldReturn` (False, ExitSuccess)
+            awaitProcessGone (Text.strip childPid) 200
+                `shouldReturn` True
+
+    it "joins a successful commit hook descendant that retains Git output" $
+        withRepository \root -> do
+            appendFile (root <> "/tracked.txt") "hook completion\n"
+            before <- expectRight =<< repositorySnapshot root
+            staged <- expectRight
+                =<< mutateRepository root before.snapshotId
+                    (StagePath "tracked.txt")
+            let pidFile = root <> "/completed-hook-child.pid"
+                hook = root <> "/.git/hooks/pre-commit"
+            writeFile hook
+                ( "#!/usr/bin/python3\n"
+                    <> "import os, signal, time\n"
+                    <> "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    <> "pid = os.fork()\n"
+                    <> "if pid:\n"
+                    <> "    with open(" <> show pidFile
+                    <> ", 'w') as stream:\n"
+                    <> "        stream.write(str(pid))\n"
+                    <> "    os._exit(0)\n"
+                    <> "time.sleep(30)\n"
+                )
+            setFileMode hook
+                (ownerReadMode
+                    `unionFileModes` ownerWriteMode
+                    `unionFileModes` ownerExecuteMode)
+
+            result <- timeout 5_000_000
+                (commitRepository root staged.snapshotId "completed hook\n")
+            result `shouldSatisfy` \case
+                Just (Right _) -> True
+                _ -> False
+            childPid <- awaitFileContents pidFile 200
+            awaitProcessGone (Text.strip childPid) 200
+                `shouldReturn` True
+
     it "kills commit-hook descendants when the commit worker is cancelled" $
         withRepository \root -> do
             appendFile (root <> "/tracked.txt") "hook cancellation\n"
