@@ -13,7 +13,7 @@
 mkDerivation {
   pname = "agent-cli";
   version = "0.1.0.0";
-  src = packages/agent-cli;
+  src = ./.;
   isLibrary = true;
   isExecutable = true;
   enableSeparateDataOutput = true;

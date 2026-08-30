@@ -13,6 +13,7 @@ slashCommands =
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
+    , cmd "meta" ["configure"] "/meta <REQUEST>" "Configure the harness without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
     , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False
     , cmd "session" [] "/session" "Print the current session id" False

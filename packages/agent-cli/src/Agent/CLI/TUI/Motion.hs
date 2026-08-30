@@ -172,6 +172,7 @@ userActionPending state =
     isJust state.appTextPrompt
         || isJust state.appChoice
         || isJust state.appResume
+        || isJust state.appMetaConsole
         || isJust state.appUi.uiPermission
 
 progressNoticeActive :: UiState -> Bool

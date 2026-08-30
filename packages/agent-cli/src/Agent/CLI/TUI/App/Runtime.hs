@@ -70,6 +70,7 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
     , kittyEscapeCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
+    , kittySuperCsiBodies
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
     )
@@ -760,6 +761,12 @@ fullscreenVtyConfig =
                  , V.EvKey (V.KChar 'v') [V.MMeta]
                  )
                | body <- kittySuperVCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar 'k') [V.MMeta]
+                 )
+               | body <- kittySuperCsiBodies 'k'
                ]
             <> [ ( Nothing
                  , "\ESC[" <> body

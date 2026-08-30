@@ -84,6 +84,7 @@ library
                     , Agent.CLI.Runtime.Orchestration.Tools
                     , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
+                    , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Runtime.Persistence
                     , Agent.CLI.Runtime.Recap
                     , Agent.CLI.Runtime.Repl
@@ -184,6 +185,7 @@ library
                     , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
+                    , Agent.CLI.MetaConsole
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
                     , Agent.CLI.McpManager
@@ -439,6 +441,8 @@ test-suite agent-cli-test
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.McpManagerSpec
+                    , Agent.CLI.MetaConsoleSpec
+                    , Agent.CLI.MetaConsoleRuntimeSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
