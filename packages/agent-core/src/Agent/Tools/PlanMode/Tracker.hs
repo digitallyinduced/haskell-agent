@@ -20,6 +20,8 @@ module Agent.Tools.PlanMode.Tracker
     , resetPlanReminders
     , bufferPlanActivation
     , consumeBufferedPlanActivation
+    , queuePlanExitNotice
+    , consumePlanExitNotice
     , markPlanContinuationDelivered
     , restorePlanTrackerIfRevision
     , normalizePlanTrackerAfterRestart
@@ -116,6 +118,7 @@ requestPlanActivation tracker =
                     { trackerPhase = TrackerPending
                     , trackerReminderCount = 0
                     , trackerReentered = tracker.trackerEverActivated
+                    , trackerExitNoticePending = False
                     }
             TrackerPending -> tracker
             TrackerActive ->
@@ -139,6 +142,7 @@ activatePlanTracker tracker =
         , trackerEverActivated = True
         , trackerReentered = tracker.trackerEverActivated
         , trackerBufferedActivation = False
+        , trackerExitNoticePending = False
         , trackerPendingApproval = Nothing
         }
 
@@ -233,6 +237,20 @@ consumeBufferedPlanActivation tracker =
     bumpRevision tracker
         { trackerBufferedActivation = False }
 
+queuePlanExitNotice :: PlanTracker -> PlanTracker
+queuePlanExitNotice tracker
+    | tracker.trackerExitNoticePending = tracker
+    | otherwise =
+        bumpRevision tracker
+            { trackerExitNoticePending = True }
+
+consumePlanExitNotice :: PlanTracker -> PlanTracker
+consumePlanExitNotice tracker
+    | not tracker.trackerExitNoticePending = tracker
+    | otherwise =
+        bumpRevision tracker
+            { trackerExitNoticePending = False }
+
 markPlanContinuationDelivered :: PlanTracker -> PlanTracker
 markPlanContinuationDelivered tracker =
     bumpRevision tracker
@@ -270,7 +288,6 @@ normalizePlanTrackerAfterRestart :: PlanTracker -> PlanTracker
 normalizePlanTrackerAfterRestart tracker =
     let normalized = tracker
             { trackerBufferedActivation = False
-            , trackerExitNoticePending = False
             }
     in if normalized == tracker
         then tracker

@@ -8,6 +8,12 @@
 module Agent.Tools.PlanMode
     ( PlanModeState(..)
     , PlanDecision(..)
+    , PlanReviewRequest(..)
+    , PlanReviewDecision(..)
+    , PlanReviewOutcome(..)
+    , PlanReminderKind(..)
+    , PlanReminderToolNames(..)
+    , PlanReminder(..)
     , PlanCompletion(..)
     , PlanDigest(..)
     , PlanSnapshot(..)
@@ -35,6 +41,10 @@ module Agent.Tools.PlanMode
     , writePlanSnapshot
     , ensurePlanMarkdown
     , planModeReminder
+    , nextPlanModeReminder
+    , submitPlanForReview
+    , planReviewRequestKey
+    , legacyPlanReviewHook
     , planApprovedContinuation
     , planModeBlockedEditMessage
     , isPlanFileEditTarget
@@ -72,19 +82,33 @@ import Agent.Tools.PlanMode.File
     , renderPlanFileError
     , writePlanFile
     )
+import Agent.Tools.PlanMode.Document
+    ( PlanDocument(..)
+    , PlanValidationWarning(..)
+    , parsePlanDocument
+    )
 import Agent.Tools.PlanMode.Persistence
     ( readPlanTrackerState
     , validatePlanTracker
     , writePlanTrackerState
     )
 import Agent.Tools.PlanMode.Tracker
-    ( PlanTracker(..)
+    ( ApprovedPlanContinuation(..)
+    , PlanTracker(..)
     , PlanTrackerPhase(..)
     , activatePlanTracker
+    , beginPlanExit
+    , consumePlanExitNotice
     , deactivatePlanTracker
     , initialPlanTracker
+    , notePlanReminder
     , normalizePlanTrackerAfterRestart
+    , PlanApprovalResolution(..)
+    , PlanGeneration(..)
+    , PendingPlanApproval(..)
+    , queuePlanExitNotice
     , requestPlanActivation
+    , resolvePlanApproval
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar
@@ -93,7 +117,7 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
-import Control.Exception.Safe (displayException, throwString, tryIO)
+import Control.Exception.Safe (displayException, throwString, tryAny, tryIO)
 import Control.Monad (when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -121,6 +145,56 @@ data PlanDecision
     | PlanCancel
     deriving (Eq, Show)
 
+-- | Immutable data presented to the host for one correlated plan review.
+-- The digest covers the exact UTF-8 bytes read from 'planReviewPath'.
+data PlanReviewRequest = PlanReviewRequest
+    { planReviewRequestKey :: !Text
+    , planReviewPath :: !OsPath
+    , planReviewSnapshotDigest :: !PlanDigest
+    , planReviewMarkdown :: !Text
+    , planReviewWarnings :: ![PlanValidationWarning]
+    , planReviewVerification :: ![Text]
+    , planReviewSummary :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+data PlanReviewDecision
+    = PlanReviewApprove
+    | PlanReviewApproveAnyway
+    | PlanReviewRequestChanges !Text
+    | PlanReviewAbandon
+    | PlanReviewDefer
+    deriving (Eq, Show)
+
+-- | Result of the shared review protocol. Provider integrations should use
+-- this rather than inferring approval from assistant text.
+data PlanReviewOutcome
+    = PlanReviewAccepted !ApprovedPlanContinuation
+    | PlanReviewRevisionRequired !Text
+    | PlanReviewApprovalOverrideRequired !PlanReviewRequest
+    | PlanReviewAbandoned
+    | PlanReviewDeferred !PlanReviewRequest
+    deriving (Eq, Show)
+
+data PlanReminderKind
+    = PlanReminderFull
+    | PlanReminderSparse
+    | PlanReminderReentry
+    | PlanReminderPostExit
+    deriving (Eq, Show)
+
+-- | Actual client-facing tool names for reminder text. Codex callers may use
+-- @\<proposed_plan\>@ as the completion name.
+data PlanReminderToolNames = PlanReminderToolNames
+    { planReminderWriteToolName :: !Text
+    , planReminderQuestionToolName :: !Text
+    , planReminderCompletionToolName :: !Text
+    } deriving (Eq, Show)
+
+data PlanReminder = PlanReminder
+    { planReminderKind :: !PlanReminderKind
+    , planReminderText :: !Text
+    } deriving (Eq, Show)
+
 -- | Session-scoped plan mode. 'planSessionDir' is the persisted session
 -- directory when known; otherwise plans live under the tool cwd.
 data PlanModeEnv = PlanModeEnv
@@ -134,16 +208,31 @@ data PlanModeEnv = PlanModeEnv
 data PlanTrackerRuntime = PlanTrackerRuntime
     { runtimeTracker :: !PlanTracker
     , runtimeAttachedDir :: !(Maybe OsPath)
+    , runtimeQuiesced :: !Bool
     }
 
-data PlanModeHooks = PlanModeHooks
-    { planConfirmEnter :: !(Text -> IO Bool)
-    -- ^ Ask the user before agent-initiated enter_plan_mode.
-    , planDecideExit :: !(Text -> IO PlanDecision)
-    -- ^ Present plan markdown; return approve / changes / cancel.
-    , planAskQuestion :: !(Text -> [Text] -> IO (Maybe Text))
-    -- ^ Optional multiple-choice style question during planning.
-    }
+-- | Hosts can keep using the compatibility constructor, or opt into the
+-- correlated lifecycle constructor. Keeping distinct constructors means old
+-- record construction remains total under @-Werror=missing-fields@.
+data PlanModeHooks
+    = PlanModeHooks
+        { planConfirmEnter :: !(Text -> IO Bool)
+        -- ^ Ask the user before agent-initiated enter_plan_mode.
+        , planDecideExit :: !(Text -> IO PlanDecision)
+        -- ^ Compatibility review hook.
+        , planAskQuestion :: !(Text -> [Text] -> IO (Maybe Text))
+        -- ^ Optional multiple-choice style question during planning.
+        }
+    | PlanModeLifecycleHooks
+        { planConfirmEnter :: !(Text -> IO Bool)
+        , planAskQuestion :: !(Text -> [Text] -> IO (Maybe Text))
+        , planReviewPlan :: !(PlanReviewRequest -> IO PlanReviewDecision)
+        -- ^ Correlated typed review used by all new provider integrations.
+        , planQuiesceBeforeActivation :: !(IO (Either Text ()))
+        -- ^ Stop or suspend writers before plan-mode restrictions activate.
+        , planResumeAfterExit :: !(IO ())
+        -- ^ Resume quiesced work only after durable policy relaxation.
+        }
 
 planFileName :: OsPath
 planFileName = unsafeEncodeUtf "plan.md"
@@ -162,6 +251,7 @@ newPlanModeEnv fallbackDir hooks = do
     trackerRuntime <- newMVar PlanTrackerRuntime
         { runtimeTracker = initialPlanTracker
         , runtimeAttachedDir = Nothing
+        , runtimeQuiesced = False
         }
     pure PlanModeEnv
         { planStateRef = stateRef
@@ -219,60 +309,78 @@ attachPlanSessionDir env rawDirectory = do
                         | equalFilePath attached directory -> do
                             setPlanSessionDir env (Just directory)
                             pure (runtime, Right ())
-                        | otherwise ->
+                        | not (trackerCanReattach runtime.runtimeTracker) ->
                             pure
                                 ( runtime
                                 , Left
-                                    ("plan mode is already attached to "
-                                        <> toText attached)
+                                    ("cannot reattach plan mode from "
+                                        <> toText attached
+                                        <> " while its tracker is restricted "
+                                        <> "or has an undelivered continuation")
                                 )
+                        | otherwise ->
+                            attachDirectory env runtime directory False
                     Nothing ->
-                        readPlanTrackerState directory >>= \case
-                            Left err -> pure (runtime, Left err)
-                            Right persisted -> do
-                                legacyState <- readIORef env.planStateRef
-                                let selected = case persisted of
-                                        Just tracker ->
-                                            normalizePlanTrackerAfterRestart tracker
-                                        Nothing ->
-                                            mergeLegacyState
-                                                legacyState
-                                                runtime.runtimeTracker
-                                    shouldWrite =
-                                        maybe
-                                            (selected /= initialPlanTracker)
-                                            (/= selected)
-                                            persisted
-                                    restricted = trackerRestricts selected
-                                when restricted $
-                                    mirrorTrackerState env selected
-                                persistedResult <-
-                                    if shouldWrite
-                                        then
-                                            writePlanTrackerState
-                                                directory
-                                                selected
-                                        else pure (Right ())
-                                case persistedResult of
-                                    Left err ->
-                                        pure
-                                            ( if restricted
-                                                then runtime
-                                                    { runtimeTracker = selected }
-                                                else runtime
-                                            , Left err
-                                            )
-                                    Right () -> do
-                                        mirrorTrackerState env selected
-                                        setPlanSessionDir env (Just directory)
-                                        pure
-                                            ( runtime
-                                                { runtimeTracker = selected
-                                                , runtimeAttachedDir =
-                                                    Just directory
-                                                }
-                                            , Right ()
-                                            )
+                        attachDirectory env runtime directory True
+
+attachDirectory
+    :: PlanModeEnv
+    -> PlanTrackerRuntime
+    -> OsPath
+    -> Bool
+    -> IO (PlanTrackerRuntime, Either Text ())
+attachDirectory env runtime directory mergeLegacy =
+    readPlanTrackerState directory >>= \case
+        Left err -> pure (runtime, Left err)
+        Right persisted -> do
+            legacyState <- readIORef env.planStateRef
+            let selected = case persisted of
+                    Just tracker ->
+                        normalizePlanTrackerAfterRestart tracker
+                    Nothing
+                        | mergeLegacy ->
+                            mergeLegacyState
+                                legacyState
+                                runtime.runtimeTracker
+                        | otherwise -> initialPlanTracker
+                shouldWrite =
+                    maybe
+                        (selected /= initialPlanTracker)
+                        (/= selected)
+                        persisted
+                restricted = trackerRestricts selected
+            ensureRuntimeQuiesced env runtime selected >>= \case
+                Left err -> do
+                    when restricted (mirrorTrackerState env selected)
+                    pure
+                        ( if restricted
+                            then runtime { runtimeTracker = selected }
+                            else runtime
+                        , Left err
+                        )
+                Right prepared -> do
+                    when restricted (mirrorTrackerState env selected)
+                    persistedResult <-
+                        if shouldWrite
+                            then writePlanTrackerState directory selected
+                            else pure (Right ())
+                    case persistedResult of
+                        Left err ->
+                            pure
+                                ( if restricted
+                                    then prepared
+                                        { runtimeTracker = selected }
+                                    else runtime
+                                , Left err
+                                )
+                        Right () -> do
+                            mirrorTrackerState env selected
+                            setPlanSessionDir env (Just directory)
+                            let attached = prepared
+                                    { runtimeTracker = selected
+                                    , runtimeAttachedDir = Just directory
+                                    }
+                            finishRuntimeTransition env attached (Right ())
 
 readPlanTracker :: PlanModeEnv -> IO PlanTracker
 readPlanTracker env =
@@ -313,42 +421,51 @@ changePlanTracker order env transition =
                 | Left err <- validatePlanTracker candidate ->
                     pure (runtime, Left err)
                 | otherwise ->
-                    case
-                        ( effectiveCommitOrder
-                            order
-                            runtime.runtimeTracker
-                            candidate
-                        , runtime.runtimeAttachedDir
-                        )
-                    of
-                        (_, Nothing) -> do
-                            mirrorTrackerState env candidate
-                            pure
-                                ( runtime { runtimeTracker = candidate }
-                                , Right candidate
-                                )
-                        (PersistBeforeExpose, Just directory) ->
-                            writePlanTrackerState directory candidate >>= \case
-                                Left err -> pure (runtime, Left err)
-                                Right () -> do
-                                    mirrorTrackerState env candidate
-                                    pure
-                                        ( runtime { runtimeTracker = candidate }
-                                        , Right candidate
-                                        )
-                        (ExposeBeforePersist, Just directory) -> do
-                            mirrorTrackerState env candidate
-                            writePlanTrackerState directory candidate >>= \case
-                                Left err ->
-                                    pure
-                                        ( runtime { runtimeTracker = candidate }
-                                        , Left err
-                                        )
-                                Right () ->
-                                    pure
-                                        ( runtime { runtimeTracker = candidate }
-                                        , Right candidate
-                                        )
+                    ensureRuntimeQuiesced env runtime candidate >>= \case
+                        Left err -> pure (runtime, Left err)
+                        Right prepared ->
+                            commitPlanTracker
+                                order
+                                env
+                                runtime
+                                prepared
+                                candidate
+
+commitPlanTracker
+    :: TrackerCommitOrder
+    -> PlanModeEnv
+    -> PlanTrackerRuntime
+    -> PlanTrackerRuntime
+    -> PlanTracker
+    -> IO (PlanTrackerRuntime, Either Text PlanTracker)
+commitPlanTracker order env previous prepared candidate =
+    case
+        ( effectiveCommitOrder order previous.runtimeTracker candidate
+        , prepared.runtimeAttachedDir
+        )
+    of
+        (_, Nothing) -> exposeAndFinish
+        (PersistBeforeExpose, Just directory) ->
+            writePlanTrackerState directory candidate >>= \case
+                Left err -> do
+                    restored <- rollbackQuiescence env previous prepared
+                    pure (restored, Left err)
+                Right () -> exposeAndFinish
+        (ExposeBeforePersist, Just directory) -> do
+            mirrorTrackerState env candidate
+            let exposed = prepared { runtimeTracker = candidate }
+            writePlanTrackerState directory candidate >>= \case
+                Left err -> pure (exposed, Left err)
+                Right () ->
+                    finishRuntimeTransition env exposed
+                        (Right candidate)
+  where
+    exposeAndFinish = do
+        mirrorTrackerState env candidate
+        finishRuntimeTransition
+            env
+            (prepared { runtimeTracker = candidate })
+            (Right candidate)
 
 effectiveCommitOrder
     :: TrackerCommitOrder
@@ -360,6 +477,75 @@ effectiveCommitOrder requested previous candidate
         requested
     | otherwise = PersistBeforeExpose
 
+ensureRuntimeQuiesced
+    :: PlanModeEnv
+    -> PlanTrackerRuntime
+    -> PlanTracker
+    -> IO (Either Text PlanTrackerRuntime)
+ensureRuntimeQuiesced env runtime candidate
+    | not (trackerRestricts candidate) || runtime.runtimeQuiesced =
+        pure (Right runtime)
+    | otherwise =
+        planQuiesceAction env.planHooks >>= \case
+            Left err -> pure (Left err)
+            Right () ->
+                pure (Right runtime { runtimeQuiesced = True })
+
+rollbackQuiescence
+    :: PlanModeEnv
+    -> PlanTrackerRuntime
+    -> PlanTrackerRuntime
+    -> IO PlanTrackerRuntime
+rollbackQuiescence env previous prepared
+    | not previous.runtimeQuiesced && prepared.runtimeQuiesced = do
+        _ <- tryAny (planResumeAction env.planHooks)
+        pure previous
+    | otherwise = pure previous
+
+finishRuntimeTransition
+    :: PlanModeEnv
+    -> PlanTrackerRuntime
+    -> Either Text a
+    -> IO (PlanTrackerRuntime, Either Text a)
+finishRuntimeTransition env runtime result
+    | runtime.runtimeQuiesced
+    , not (trackerRestricts runtime.runtimeTracker) = do
+        resumed <- tryAny (planResumeAction env.planHooks)
+        pure
+            ( runtime { runtimeQuiesced = False }
+            , case resumed of
+                Left err ->
+                    Left
+                        ("plan mode relaxed, but its resume callback failed: "
+                            <> Text.pack (displayException err))
+                Right () -> result
+            )
+    | otherwise = pure (runtime, result)
+
+planQuiesceAction :: PlanModeHooks -> IO (Either Text ())
+planQuiesceAction = \case
+    PlanModeHooks{} -> pure (Right ())
+    PlanModeLifecycleHooks{planQuiesceBeforeActivation} ->
+        tryAny planQuiesceBeforeActivation >>= \case
+            Left err ->
+                pure
+                    (Left
+                        ("could not quiesce before entering plan mode: "
+                            <> Text.pack (displayException err)))
+            Right result -> pure result
+
+planResumeAction :: PlanModeHooks -> IO ()
+planResumeAction = \case
+    PlanModeHooks{} -> pure ()
+    PlanModeLifecycleHooks{planResumeAfterExit} ->
+        planResumeAfterExit
+
+trackerCanReattach :: PlanTracker -> Bool
+trackerCanReattach tracker =
+    not (trackerRestricts tracker)
+        && tracker.trackerPendingApproval == Nothing
+        && tracker.trackerApprovedContinuation == Nothing
+
 isPlanModeActive :: PlanModeEnv -> IO Bool
 isPlanModeActive env = (== PlanActive) <$> readPlanModeState env
 
@@ -367,7 +553,16 @@ activatePlanMode :: PlanModeEnv -> IO ()
 activatePlanMode env = writePlanModeState env PlanActive
 
 deactivatePlanMode :: PlanModeEnv -> IO ()
-deactivatePlanMode env = writePlanModeState env PlanInactive
+deactivatePlanMode env =
+    updatePlanTracker env transition >>= \case
+        Left err -> throwString (Text.unpack err)
+        Right _ -> pure ()
+  where
+    transition tracker =
+        Right
+            (deactivatePlanTracker
+                (trackerRestricts tracker)
+                tracker)
 
 legacyStateTransition :: PlanModeState -> PlanTracker -> PlanTracker
 legacyStateTransition = \case
@@ -426,6 +621,268 @@ ensurePlanMarkdown
 ensurePlanMarkdown env =
     planFilePath env >>= ensurePlanFile
 
+-- | Submit the authoritative plan snapshot through the correlated review
+-- protocol. This is the single entry point for both tool-based and
+-- assistant-text-based completion flows.
+submitPlanForReview
+    :: PlanModeEnv
+    -> Maybe Text
+    -> IO (Either Text PlanReviewOutcome)
+submitPlanForReview env summary = do
+    path <- planFilePath env
+    readPlanFile path >>= \case
+        PlanAbsent ->
+            failOrRevisePending
+                env
+                "The plan file is missing. Return to planning and write it again."
+        PlanUnreadable err ->
+            failOrRevisePending env (renderPlanFileError err)
+        PlanPresent snapshot ->
+            preparePlanReview env snapshot >>= \case
+                Left err -> pure (Left err)
+                Right pending
+                    | pending.pendingPlanDigest
+                        /= snapshot.planSnapshotDigest ->
+                            reviseStalePlan
+                                env
+                                pending
+                                "The plan changed after this review request was created."
+                    | otherwise -> do
+                        let document =
+                                parsePlanDocument
+                                    snapshot.planSnapshotMarkdown
+                            request = PlanReviewRequest
+                                { planReviewRequestKey =
+                                    pending.pendingPlanRequestKey
+                                , planReviewPath = path
+                                , planReviewSnapshotDigest =
+                                    snapshot.planSnapshotDigest
+                                , planReviewMarkdown =
+                                    snapshot.planSnapshotMarkdown
+                                , planReviewWarnings =
+                                    document.planDocumentWarnings
+                                , planReviewVerification =
+                                    document.planDocumentVerification
+                                , planReviewSummary = summary
+                                }
+                        invokePlanReviewHook env.planHooks request >>= \case
+                            Left err -> pure (Left err)
+                            Right decision ->
+                                finishPlanReview
+                                    env
+                                    pending
+                                    request
+                                    decision
+
+preparePlanReview
+    :: PlanModeEnv
+    -> PlanSnapshot
+    -> IO (Either Text PendingPlanApproval)
+preparePlanReview env snapshot =
+    updatePlanTracker env transition >>= \case
+        Left err -> pure (Left err)
+        Right tracker ->
+            pure $ case tracker.trackerPendingApproval of
+                Just pending -> Right pending
+                Nothing ->
+                    Left "plan review did not produce a pending approval"
+  where
+    transition tracker = case tracker.trackerPhase of
+        TrackerActive ->
+            let generation =
+                    PlanGeneration
+                        (tracker.trackerGeneration.unPlanGeneration + 1)
+                requestKey =
+                    planReviewRequestKey
+                        generation
+                        snapshot.planSnapshotDigest
+            in firstTrackerError
+                (beginPlanExit
+                    requestKey
+                    snapshot.planSnapshotDigest
+                    tracker)
+        TrackerExitPending -> Right tracker
+        TrackerInactive ->
+            Left "plan mode is not active"
+        TrackerPending ->
+            Left "plan mode activation is still pending"
+
+finishPlanReview
+    :: PlanModeEnv
+    -> PendingPlanApproval
+    -> PlanReviewRequest
+    -> PlanReviewDecision
+    -> IO (Either Text PlanReviewOutcome)
+finishPlanReview env pending request decision =
+    readPlanFile request.planReviewPath >>= \case
+        PlanAbsent ->
+            reviseStalePlan
+                env
+                pending
+                "The plan file disappeared while it was being reviewed."
+        PlanUnreadable err ->
+            reviseStalePlan env pending (renderPlanFileError err)
+        PlanPresent current
+            | current.planSnapshotDigest
+                /= request.planReviewSnapshotDigest ->
+                    reviseStalePlan
+                        env
+                        pending
+                        "The plan changed while it was being reviewed."
+            | otherwise ->
+                applyPlanReviewDecision env pending request decision
+
+applyPlanReviewDecision
+    :: PlanModeEnv
+    -> PendingPlanApproval
+    -> PlanReviewRequest
+    -> PlanReviewDecision
+    -> IO (Either Text PlanReviewOutcome)
+applyPlanReviewDecision env pending request = \case
+    PlanReviewDefer ->
+        pure (Right (PlanReviewDeferred request))
+    PlanReviewApprove
+        | not (null request.planReviewWarnings) ->
+            pure
+                (Right
+                    (PlanReviewApprovalOverrideRequired request))
+    PlanReviewApprove ->
+        acceptPlanReview env pending request
+    PlanReviewApproveAnyway ->
+        acceptPlanReview env pending request
+    PlanReviewRequestChanges notes ->
+        resolveReview env pending RevisePlan >>= \case
+            Left err -> pure (Left err)
+            Right _ ->
+                pure
+                    (Right
+                        (PlanReviewRevisionRequired
+                            (nonBlankPlanNotes notes)))
+    PlanReviewAbandon ->
+        resolveReview env pending AbandonPlan >>= \case
+            Left err -> pure (Left err)
+            Right _ -> pure (Right PlanReviewAbandoned)
+
+acceptPlanReview
+    :: PlanModeEnv
+    -> PendingPlanApproval
+    -> PlanReviewRequest
+    -> IO (Either Text PlanReviewOutcome)
+acceptPlanReview env pending request = do
+    let continuation = ApprovedPlanContinuation
+            { approvedPlanDigest = request.planReviewSnapshotDigest
+            , approvedPlanVerification = request.planReviewVerification
+            , approvedPlanContinuation = planApprovedContinuation
+            }
+    resolveReview env pending (ApprovePlan continuation) >>= \case
+        Left err -> pure (Left err)
+        Right _ -> pure (Right (PlanReviewAccepted continuation))
+
+resolveReview
+    :: PlanModeEnv
+    -> PendingPlanApproval
+    -> PlanApprovalResolution
+    -> IO (Either Text PlanTracker)
+resolveReview env pending resolution =
+    updatePlanTracker env \tracker -> do
+        resolved <-
+            firstTrackerError
+                (resolvePlanApproval
+                    pending.pendingPlanGeneration
+                    pending.pendingPlanDigest
+                    resolution
+                    tracker)
+        pure $ case resolution of
+            RevisePlan -> resolved
+            _ -> queuePlanExitNotice resolved
+
+reviseStalePlan
+    :: PlanModeEnv
+    -> PendingPlanApproval
+    -> Text
+    -> IO (Either Text PlanReviewOutcome)
+reviseStalePlan env pending message =
+    resolveReview env pending RevisePlan >>= \case
+        Left err -> pure (Left err)
+        Right _ -> pure (Right (PlanReviewRevisionRequired message))
+
+failOrRevisePending
+    :: PlanModeEnv
+    -> Text
+    -> IO (Either Text PlanReviewOutcome)
+failOrRevisePending env message = do
+    tracker <- readPlanTracker env
+    case tracker.trackerPendingApproval of
+        Just pending -> reviseStalePlan env pending message
+        Nothing -> pure (Left message)
+
+invokePlanReviewHook
+    :: PlanModeHooks
+    -> PlanReviewRequest
+    -> IO (Either Text PlanReviewDecision)
+invokePlanReviewHook hooks request =
+    tryAny action >>= \case
+        Left err ->
+            pure
+                (Left
+                    ("plan review failed while awaiting a decision: "
+                        <> Text.pack (displayException err)))
+        Right decision -> pure (Right decision)
+  where
+    action = case hooks of
+        PlanModeHooks{planDecideExit} ->
+            legacyPlanReviewHook planDecideExit request
+        PlanModeLifecycleHooks{planReviewPlan} ->
+            planReviewPlan request
+
+legacyPlanReviewHook
+    :: (Text -> IO PlanDecision)
+    -> PlanReviewRequest
+    -> IO PlanReviewDecision
+legacyPlanReviewHook decide request =
+    decide (legacyPlanReviewBody request) >>= \case
+        PlanApprove -> pure PlanReviewApprove
+        PlanRequestChanges notes ->
+            pure (PlanReviewRequestChanges notes)
+        PlanCancel -> pure PlanReviewAbandon
+
+legacyPlanReviewBody :: PlanReviewRequest -> Text
+legacyPlanReviewBody request =
+    summary <> request.planReviewMarkdown <> warnings
+  where
+    summary = case request.planReviewSummary of
+        Just value
+            | not (Text.null (Text.strip value)) ->
+                value <> "\n\n"
+        _ -> ""
+    warnings = case request.planReviewWarnings of
+        [] -> ""
+        values ->
+            "\n\nAdvisory plan warnings:\n"
+                <> Text.unlines
+                    [ "- " <> value.planWarningMessage
+                    | value <- values
+                    ]
+
+planReviewRequestKey :: PlanGeneration -> PlanDigest -> Text
+planReviewRequestKey generation digest =
+    "plan-review-v1:"
+        <> Text.pack (show generation.unPlanGeneration)
+        <> ":"
+        <> digest.unPlanDigest
+
+firstTrackerError
+    :: Show error
+    => Either error value
+    -> Either Text value
+firstTrackerError =
+    either (Left . Text.pack . show) Right
+
+nonBlankPlanNotes :: Text -> Text
+nonBlankPlanNotes notes
+    | Text.null (Text.strip notes) = "(no review notes)"
+    | otherwise = Text.strip notes
+
 planModeReminder :: PlanCompletion -> OsPath -> Text
 planModeReminder completion path =
     Text.unlines
@@ -439,6 +896,141 @@ planModeReminder completion path =
         , ""
         , completionInstruction completion
         ]
+
+-- | Persistently alternate full and sparse reminders, use a dedicated first
+-- reminder on re-entry, and consume a one-shot post-exit notice only after its
+-- state update is durable.
+nextPlanModeReminder
+    :: PlanModeEnv
+    -> PlanReminderToolNames
+    -> IO (Either Text (Maybe PlanReminder))
+nextPlanModeReminder env tools = do
+    tracker <- readPlanTracker env
+    if tracker.trackerExitNoticePending
+        then consumePostExitReminder env tracker
+        else case tracker.trackerPhase of
+            TrackerActive -> activeReminder env tools tracker
+            TrackerExitPending -> activeReminder env tools tracker
+            _ -> pure (Right Nothing)
+
+consumePostExitReminder
+    :: PlanModeEnv
+    -> PlanTracker
+    -> IO (Either Text (Maybe PlanReminder))
+consumePostExitReminder env expected =
+    updatePlanTracker env transition >>= \case
+        Left err -> pure (Left err)
+        Right _ ->
+            pure
+                (Right
+                    (Just PlanReminder
+                        { planReminderKind = PlanReminderPostExit
+                        , planReminderText =
+                            "You have exited plan mode. You can now make edits, run tools, and take actions."
+                        }))
+  where
+    transition current
+        | current.trackerRevision /= expected.trackerRevision =
+            Left "plan mode changed while preparing its post-exit reminder"
+        | otherwise = Right (consumePlanExitNotice current)
+
+activeReminder
+    :: PlanModeEnv
+    -> PlanReminderToolNames
+    -> PlanTracker
+    -> IO (Either Text (Maybe PlanReminder))
+activeReminder env tools expected = do
+    path <- planFilePath env
+    readPlanFile path >>= \case
+        PlanUnreadable err -> pure (Left (renderPlanFileError err))
+        snapshotResult -> do
+            let hasContent = case snapshotResult of
+                    PlanPresent snapshot ->
+                        not
+                            (Text.null
+                                (Text.strip snapshot.planSnapshotMarkdown))
+                    PlanAbsent -> False
+                kind
+                    | expected.trackerReentered
+                        && expected.trackerReminderCount == 0 =
+                            PlanReminderReentry
+                    | even expected.trackerReminderCount =
+                        PlanReminderFull
+                    | otherwise = PlanReminderSparse
+                reminder = PlanReminder
+                    { planReminderKind = kind
+                    , planReminderText =
+                        renderTrackedPlanReminder
+                            kind
+                            tools
+                            path
+                            hasContent
+                    }
+            updatePlanTracker env (advance expected) >>= \case
+                Left err -> pure (Left err)
+                Right _ -> pure (Right (Just reminder))
+  where
+    advance
+        :: PlanTracker
+        -> PlanTracker
+        -> Either Text PlanTracker
+    advance expectedTracker current
+        | current.trackerRevision /= expectedTracker.trackerRevision =
+            Left "plan mode changed while preparing its reminder"
+        | not (trackerRestricts current) =
+            Left "plan mode ended while preparing its reminder"
+        | otherwise = Right (notePlanReminder current)
+
+renderTrackedPlanReminder
+    :: PlanReminderKind
+    -> PlanReminderToolNames
+    -> OsPath
+    -> Bool
+    -> Text
+renderTrackedPlanReminder kind tools path hasContent =
+    case kind of
+        PlanReminderSparse ->
+            "Plan mode is still active. Do not make any edits or writes to the system except for the plan file."
+        PlanReminderPostExit ->
+            "You have exited plan mode. You can now make edits, run tools, and take actions."
+        PlanReminderReentry ->
+            Text.unlines
+                [ "## Returning to Plan Mode"
+                , ""
+                , "You are entering plan mode again. The existing plan file is at `"
+                    <> toText path
+                    <> "`."
+                , completionToolsInstruction tools
+                ]
+        PlanReminderFull ->
+            Text.unlines
+                [ "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
+                , ""
+                , "## Plan File"
+                , if hasContent
+                    then
+                        "A plan exists at `"
+                            <> toText path
+                            <> "`. Read and update it with `"
+                            <> tools.planReminderWriteToolName
+                            <> "`."
+                    else
+                        "No plan is written yet. Write it to `"
+                            <> toText path
+                            <> "` with `"
+                            <> tools.planReminderWriteToolName
+                            <> "`."
+                , "That is the only file you may create or modify."
+                , completionToolsInstruction tools
+                ]
+
+completionToolsInstruction :: PlanReminderToolNames -> Text
+completionToolsInstruction tools =
+    "End the planning turn only with `"
+        <> tools.planReminderQuestionToolName
+        <> "` to clarify requirements or `"
+        <> tools.planReminderCompletionToolName
+        <> "` to present the plan."
 
 completionInstruction :: PlanCompletion -> Text
 completionInstruction = \case
@@ -608,37 +1200,32 @@ runExitPlanMode env args = do
     active <- isPlanModeActive env
     if not active
         then pure $ Left "Plan mode is not active."
-        else do
-            path <- planFilePath env
-            readPlanFile path >>= \case
-                PlanUnreadable err ->
-                    pure (Left (renderPlanFileError err))
-                PlanAbsent -> reviewPlanContent path ""
-                PlanPresent snapshot ->
-                    reviewPlanContent path snapshot.planSnapshotMarkdown
-  where
-    reviewPlanContent path content = do
-        let body
-                | Text.null (Text.strip content) =
-                    "No plan written yet.\n\n(expected plan file: " <> toText path <> ")"
-                | otherwise = content
-            header = case args.summary of
-                Just s | not (Text.null (Text.strip s)) -> s <> "\n\n"
-                _ -> ""
-        decision <- env.planHooks.planDecideExit (header <> body)
-        case decision of
-            PlanApprove -> do
-                deactivatePlanMode env
-                pure (Right planApprovedContinuation)
-            PlanRequestChanges notes ->
+        else submitPlanForReview env args.summary >>= \case
+            Left err -> pure (Left err)
+            Right (PlanReviewAccepted continuation) ->
+                pure (Right continuation.approvedPlanContinuation)
+            Right (PlanReviewRevisionRequired notes) ->
                 pure $ Right $
-                    "The user requested changes to the plan. Stay in plan mode and revise plan.md.\n"
+                    "The plan needs revision. Stay in plan mode and revise plan.md.\n"
                         <> "Feedback:\n"
                         <> notes
-            PlanCancel -> do
-                deactivatePlanMode env
+            Right (PlanReviewApprovalOverrideRequired request) ->
+                pure $ Left $
+                    "The plan has advisory warnings and was not approved. "
+                        <> "The user must explicitly choose approve-anyway.\n"
+                        <> Text.unlines
+                            [ "- " <> warning.planWarningMessage
+                            | warning <- request.planReviewWarnings
+                            ]
+            Right PlanReviewAbandoned ->
                 pure $ Right
-                    "The user cancelled the plan. Plan mode is off. Do not call exit_plan_mode again unless asked to re-enter plan mode."
+                    "The user abandoned the plan. Plan mode is off. Do not call exit_plan_mode again unless asked to re-enter plan mode."
+            Right (PlanReviewDeferred request) ->
+                pure $ Right $
+                    "Plan review was deferred. Plan mode remains write-restricted; "
+                        <> "retry the same review request later ("
+                        <> request.planReviewRequestKey
+                        <> ")."
 
 data AskUserQuestionOption = AskUserQuestionOption
     { label :: Text

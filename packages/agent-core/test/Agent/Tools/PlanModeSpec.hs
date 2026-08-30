@@ -22,12 +22,14 @@ import Control.Exception.Safe (bracket, tryAny)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isLeft, isRight)
+import Data.Functor ((<&>))
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( createFileLink
+    , createDirectory
     , doesFileExist
     , getTemporaryDirectory
     , removeFile
@@ -398,6 +400,213 @@ spec = describe "Agent.Tools.PlanMode" do
                 deactivation `shouldSatisfy` isLeft
                 isPlanModeActive env `shouldReturn` True
 
+    describe "correlated plan review lifecycle" do
+        it "presents a typed canonical snapshot and stores its continuation" do
+            requests <- newIORef []
+            events <- newIORef []
+            let hooks = testLifecycleHooks
+                    (\request -> do
+                        modifyIORef' requests (<> [request])
+                        pure PlanReviewApprove)
+                    (modifyIORef' events (<> ["quiesce"]) >> pure (Right ()))
+                    (modifyIORef' events (<> ["resume"]))
+            withTempPlanHooks hooks \env -> do
+                attachPlanSessionDir env env.planFallbackDir
+                    `shouldReturn` Right ()
+                writePlanMarkdown env validPlanMarkdown
+                    `shouldReturn` Right ()
+                activatePlanMode env
+                result <- submitPlanForReview env (Just "Ready")
+                continuation <- case result of
+                    Right (PlanReviewAccepted value) -> pure value
+                    other -> expectationFailure
+                        ("expected accepted plan, got " <> show other)
+                        >> fail "unreachable"
+                continuation.approvedPlanVerification
+                    `shouldBe` ["cabal repl agent-core:test:agent-core-test"]
+                request <- expectSingle =<< readIORef requests
+                canonical <- planFilePath env
+                request.planReviewPath `shouldBe` canonical
+                request.planReviewMarkdown `shouldBe` validPlanMarkdown
+                request.planReviewWarnings `shouldBe` []
+                request.planReviewSummary `shouldBe` Just "Ready"
+                request.planReviewRequestKey `shouldBe`
+                    planReviewRequestKey
+                        (PlanGeneration 1)
+                        request.planReviewSnapshotDigest
+                readPlanModeState env `shouldReturn` PlanInactive
+                tracker <- readPlanTracker env
+                tracker.trackerApprovedContinuation
+                    `shouldBe` Just continuation
+                readIORef events `shouldReturn` ["quiesce", "resume"]
+
+        it "persists defer and replays the same request after restart" do
+            decisions <- newIORef
+                [PlanReviewDefer, PlanReviewApprove]
+            requests <- newIORef []
+            let review request = do
+                    modifyIORef' requests (<> [request])
+                    atomicModifyIORef' decisions \case
+                        decision : rest -> (rest, decision)
+                        [] -> ([], PlanReviewDefer)
+                hooks = testLifecycleHooks
+                    review
+                    (pure (Right ()))
+                    (pure ())
+            withTempPlanHooks hooks \env -> do
+                let directory = env.planFallbackDir
+                attachPlanSessionDir env directory `shouldReturn` Right ()
+                writePlanMarkdown env validPlanMarkdown
+                    `shouldReturn` Right ()
+                activatePlanMode env
+                first <- submitPlanForReview env Nothing
+                first `shouldSatisfy` \case
+                    Right PlanReviewDeferred{} -> True
+                    _ -> False
+                (readPlanTracker env <&> (.trackerPhase))
+                    `shouldReturn` TrackerExitPending
+                resumed <- newPlanModeEnv directory (Just hooks)
+                attachPlanSessionDir resumed directory
+                    `shouldReturn` Right ()
+                second <- submitPlanForReview resumed Nothing
+                second `shouldSatisfy` \case
+                    Right PlanReviewAccepted{} -> True
+                    _ -> False
+                (firstRequest, secondRequest) <-
+                    expectPair =<< readIORef requests
+                secondRequest.planReviewRequestKey
+                    `shouldBe` firstRequest.planReviewRequestKey
+                secondRequest.planReviewSnapshotDigest
+                    `shouldBe` firstRequest.planReviewSnapshotDigest
+
+        it "returns to active when the reviewed bytes become stale" do
+            let hooks = testLifecycleHooks
+                    (\request -> do
+                        writeFile
+                            (pathText request.planReviewPath)
+                            (Text.unpack (validPlanMarkdown <> "\nchanged"))
+                        pure PlanReviewApprove)
+                    (pure (Right ()))
+                    (pure ())
+            withTempPlanHooks hooks \env -> do
+                attachPlanSessionDir env env.planFallbackDir
+                    `shouldReturn` Right ()
+                writePlanMarkdown env validPlanMarkdown
+                    `shouldReturn` Right ()
+                activatePlanMode env
+                submitPlanForReview env Nothing `shouldReturn`
+                    Right
+                        (PlanReviewRevisionRequired
+                            "The plan changed while it was being reviewed.")
+                (readPlanTracker env <&> (.trackerPhase))
+                    `shouldReturn` TrackerActive
+                isPlanModeActive env `shouldReturn` True
+
+        it "requires approve-anyway for advisory warnings" do
+            decisions <- newIORef
+                [PlanReviewApprove, PlanReviewApproveAnyway]
+            requests <- newIORef []
+            let hooks = testLifecycleHooks
+                    (\request -> do
+                        modifyIORef' requests (<> [request])
+                        atomicModifyIORef' decisions \case
+                            decision : rest -> (rest, decision)
+                            [] -> ([], PlanReviewDefer))
+                    (pure (Right ()))
+                    (pure ())
+            withTempPlanHooks hooks \env -> do
+                attachPlanSessionDir env env.planFallbackDir
+                    `shouldReturn` Right ()
+                writePlanMarkdown env "# Summary\nIncomplete.\n"
+                    `shouldReturn` Right ()
+                activatePlanMode env
+                first <- submitPlanForReview env Nothing
+                first `shouldSatisfy` \case
+                    Right PlanReviewApprovalOverrideRequired{} -> True
+                    _ -> False
+                (readPlanTracker env <&> (.trackerPhase))
+                    `shouldReturn` TrackerExitPending
+                second <- submitPlanForReview env Nothing
+                second `shouldSatisfy` \case
+                    Right PlanReviewAccepted{} -> True
+                    _ -> False
+                (firstRequest, secondRequest) <-
+                    expectPair =<< readIORef requests
+                firstRequest.planReviewWarnings
+                    `shouldSatisfy` (not . null)
+                secondRequest.planReviewRequestKey
+                    `shouldBe` firstRequest.planReviewRequestKey
+
+        it "fails activation before restriction when quiescence fails" do
+            resumed <- newIORef False
+            let hooks = testLifecycleHooks
+                    (\_ -> pure PlanReviewDefer)
+                    (pure (Left "writers are still active"))
+                    (writeIORef resumed True)
+            withTempPlanHooks hooks \env -> do
+                activation <- tryAny (activatePlanMode env)
+                activation `shouldSatisfy` isLeft
+                readPlanModeState env `shouldReturn` PlanInactive
+                readIORef resumed `shouldReturn` False
+
+        it "allows safe reattach only without restrictions or continuation" do
+            let hooks = testLifecycleHooks
+                    (\_ -> pure PlanReviewApprove)
+                    (pure (Right ()))
+                    (pure ())
+            withTempPlanHooks hooks \env -> do
+                let first = env.planFallbackDir
+                    secondPath = pathText first </> "second-session"
+                    second = fromFilePath secondPath
+                createDirectory secondPath
+                attachPlanSessionDir env first `shouldReturn` Right ()
+                attachPlanSessionDir env second `shouldReturn` Right ()
+                activatePlanMode env
+                restrictedReattach <- attachPlanSessionDir env first
+                restrictedReattach `shouldSatisfy` isLeft
+                writePlanMarkdown env validPlanMarkdown
+                    `shouldReturn` Right ()
+                reviewed <- submitPlanForReview env Nothing
+                reviewed `shouldSatisfy` \case
+                    Right PlanReviewAccepted{} -> True
+                    _ -> False
+                continuationReattach <- attachPlanSessionDir env first
+                continuationReattach `shouldSatisfy` isLeft
+
+    describe "tracked plan reminders" do
+        it "alternates full/sparse, supports reentry, and consumes post-exit" do
+            let tools = PlanReminderToolNames
+                    { planReminderWriteToolName = "edit_exact_plan"
+                    , planReminderQuestionToolName = "clarify"
+                    , planReminderCompletionToolName = "submit_plan"
+                    }
+                hooks = testLifecycleHooks
+                    (\_ -> pure PlanReviewDefer)
+                    (pure (Right ()))
+                    (pure ())
+            withTempPlanHooks hooks \env -> do
+                attachPlanSessionDir env env.planFallbackDir
+                    `shouldReturn` Right ()
+                activatePlanMode env
+                first <- nextPlanModeReminder env tools
+                first `shouldSatisfy` hasReminderKind PlanReminderFull
+                first `shouldSatisfy`
+                    reminderContains "edit_exact_plan"
+                first `shouldSatisfy` reminderContains "submit_plan"
+                second <- nextPlanModeReminder env tools
+                second `shouldSatisfy` hasReminderKind PlanReminderSparse
+                deactivatePlanMode env
+                exited <- nextPlanModeReminder env tools
+                exited `shouldSatisfy`
+                    hasReminderKind PlanReminderPostExit
+                nextPlanModeReminder env tools `shouldReturn` Right Nothing
+                activatePlanMode env
+                reentry <- nextPlanModeReminder env tools
+                reentry `shouldSatisfy`
+                    hasReminderKind PlanReminderReentry
+                (readPlanTracker env <&> (.trackerReminderCount))
+                    `shouldReturn` 1
+
     describe "ask_user_question" do
         it "advertises the structured Grok Build questions schema" do
             withTempPlan \env -> do
@@ -512,6 +721,59 @@ spec = describe "Agent.Tools.PlanMode" do
                         <> "You can now continue with the user's answers in mind."
                 readIORef seen `shouldReturn`
                     [("Which database?", ["Postgres", "SQLite"])]
+
+validPlanMarkdown :: Text
+validPlanMarkdown =
+    "## Approach\nUse the shared lifecycle.\n\n"
+        <> "## Changes\n- Update agent-core.\n\n"
+        <> "## Verification\n"
+        <> "- cabal repl agent-core:test:agent-core-test\n"
+
+testLifecycleHooks
+    :: (PlanReviewRequest -> IO PlanReviewDecision)
+    -> IO (Either Text ())
+    -> IO ()
+    -> PlanModeHooks
+testLifecycleHooks review quiesce resume = PlanModeLifecycleHooks
+    { planConfirmEnter = \_ -> pure True
+    , planAskQuestion = \_ _ -> pure Nothing
+    , planReviewPlan = review
+    , planQuiesceBeforeActivation = quiesce
+    , planResumeAfterExit = resume
+    }
+
+hasReminderKind
+    :: PlanReminderKind
+    -> Either Text (Maybe PlanReminder)
+    -> Bool
+hasReminderKind expected = \case
+    Right (Just reminder) -> reminder.planReminderKind == expected
+    _ -> False
+
+reminderContains
+    :: Text
+    -> Either Text (Maybe PlanReminder)
+    -> Bool
+reminderContains needle = \case
+    Right (Just reminder) ->
+        needle `Text.isInfixOf` reminder.planReminderText
+    _ -> False
+
+expectSingle :: Show value => [value] -> IO value
+expectSingle = \case
+    [value] -> pure value
+    values -> do
+        expectationFailure
+            ("expected one value, got " <> show values)
+        fail "unreachable"
+
+expectPair :: Show value => [value] -> IO (value, value)
+expectPair = \case
+    [first, second] -> pure (first, second)
+    values -> do
+        expectationFailure
+            ("expected two values, got " <> show values)
+        fail "unreachable"
 
 withTempPlan :: (PlanModeEnv -> IO a) -> IO a
 withTempPlan = withTempPlanHooks testHooksDefault
