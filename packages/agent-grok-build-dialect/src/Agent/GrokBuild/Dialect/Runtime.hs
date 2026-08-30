@@ -12,6 +12,7 @@ import Agent.GrokBuild.Dialect.Scheduler
     ( SchedulerRuntime
     , closeSchedulerRuntime
     , newSchedulerRuntime
+    , setSchedulerPaused
     )
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.GrokBuild.Dialect.Tools
@@ -19,6 +20,7 @@ import Agent.GrokBuild.Dialect.Tools
     , grokTools
     , newGrokSession
     )
+import Agent.GrokBuild.Dialect.Shell (stopGrokBackgroundTasks)
 import Agent.GrokBuild.Dialect.Workflow
     ( WorkflowRuntime
     , newWorkflowRuntime
@@ -34,10 +36,16 @@ import Agent.Tools.Ghci
     , suspendGhciSession
     )
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
-import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
+import Agent.Tools.PlanMode
+    ( PlanModeEnv
+    , PlanModeHooks
+    , newPlanModeEnv
+    , withPlanModeLifecycle
+    )
 import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Agent.Subagents (interruptActiveSubagents)
 import Control.Exception.Safe (onException)
-import Control.Monad (forM)
+import Control.Monad (forM, forM_)
 import Data.Maybe (isNothing)
 
 data GrokCodingTools = GrokCodingTools
@@ -67,7 +75,6 @@ newGrokCodingTools
 newGrokCodingTools env hooks multi typesRef = do
     resources <- newResourceScope
     flip onException (closeResourceScope resources) do
-        plan <- newPlanModeEnv env.toolCwd hooks
         (_, session) <- allocateResource resources
             (newGrokSession env)
             closeGrokSession
@@ -84,6 +91,20 @@ newGrokCodingTools env hooks multi typesRef = do
                 closeSchedulerRuntime
         workflows <- forM rootMulti \ctx ->
             newWorkflowRuntime env.toolCwd ctx typesRef
+        let planHooks =
+                fmap
+                    (withPlanModeLifecycle
+                        ( do
+                            forM_ scheduler (`setSchedulerPaused` True)
+                            stopGrokBackgroundTasks session
+                            suspendGhciSession ghci
+                            forM_ rootMulti
+                                (interruptActiveSubagents . (.multiRegistry))
+                            pure (Right ())
+                        )
+                        (forM_ scheduler (`setSchedulerPaused` False)))
+                    hooks
+        plan <- newPlanModeEnv env.toolCwd planHooks
         let runtimeControl = GrokRuntimeControl
                 { grokGoalRuntime = goals
                 , grokSchedulerRuntime = scheduler

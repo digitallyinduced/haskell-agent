@@ -6,6 +6,7 @@ module Agent.Codex.Dialect.Runtime
 import Agent.Codex.Dialect.Shell
     ( closeCodexShellSession
     , newCodexShellSession
+    , stopCodexShellCommands
     )
 import Agent.Codex.Dialect.Tools (codexTools)
 import Agent.ResourceScope
@@ -19,7 +20,12 @@ import Agent.Tools.Ghci
     , suspendGhciSession
     )
 import Agent.Tools.MultiAgents (MultiAgentContext)
-import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
+import Agent.Tools.PlanMode
+    ( PlanModeEnv
+    , PlanModeHooks
+    , newPlanModeEnv
+    , withPlanModeLifecycle
+    )
 import Agent.Tools.Types (AppTool, ToolEnv(..))
 import Control.Exception.Safe (onException)
 
@@ -38,13 +44,23 @@ newCodexCodingTools
 newCodexCodingTools env hooks multi = do
     resources <- newResourceScope
     flip onException (closeResourceScope resources) do
-        plan <- newPlanModeEnv env.toolCwd hooks
         (_, shellSession) <- allocateResource resources
             (newCodexShellSession env)
             closeCodexShellSession
         (_, ghci) <- allocateResource resources
             (newGhciSession env)
             closeGhciSession
+        let planHooks =
+                fmap
+                    (withPlanModeLifecycle
+                        ( do
+                            stopCodexShellCommands shellSession
+                            suspendGhciSession ghci
+                            pure (Right ())
+                        )
+                        (pure ()))
+                    hooks
+        plan <- newPlanModeEnv env.toolCwd planHooks
         tools <- codexTools env shellSession ghci plan multi
         pure CodexCodingTools
             { codexAppTools = tools

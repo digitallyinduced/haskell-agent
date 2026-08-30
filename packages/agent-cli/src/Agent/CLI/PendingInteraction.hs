@@ -13,12 +13,14 @@ module Agent.CLI.PendingInteraction
     , PendingInteractionError(..)
     , PlanModeInteractionRequest(..)
     , PlanModeInteractionContextProvider
+    , deterministicPlanModeInteractionContext
     , ExternalInteractionResponse(..)
     , canonicalizeExternalInteractionResponse
     , mkPendingInteractionCoordinator
     , postgresPendingInteractionCoordinator
     , coordinatePlanConfirmEnter
     , coordinatePlanDecision
+    , coordinatePlanReview
     , coordinatePlanQuestion
     , wrapDurablePlanModeHooks
     , renderPendingInteractionError
@@ -26,7 +28,7 @@ module Agent.CLI.PendingInteraction
 
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Interaction
-    ( InteractionOrigin
+    ( InteractionOrigin(..)
     , InteractionPublishResult(..)
     , InteractionRequest(..)
     , InteractionResolution(..)
@@ -38,7 +40,16 @@ import Agent.Store.Postgres.Interaction
     , resolveSessionInteraction
     )
 import Agent.Store.Types (StoreError, renderStoreError)
-import Agent.Tools.PlanMode (PlanDecision(..), PlanModeHooks(..))
+import Agent.OsPath (toText)
+import Agent.Tools.PlanMode
+    ( PlanDecision(..)
+    , PlanModeHooks(..)
+    , PlanReviewDecision(..)
+    , PlanReviewRequest(..)
+    )
+import Agent.Tools.PlanMode.Document
+    ( PlanValidationWarning(..) )
+import Agent.Tools.PlanMode.File (PlanDigest(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Data.Aeson ((.:), (.:?), (.=))
@@ -50,6 +61,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Time.Clock (UTCTime, getCurrentTime)
+import Crypto.Hash (Digest, SHA256, hash)
 
 -- | Minimal store surface used by the coordinator.  The PostgreSQL-backed
 -- constructor is used in production; exposing the record also keeps the race
@@ -123,6 +135,9 @@ data PlanModeInteractionRequest
     | PlanModeDecisionRequest
         { planModePlanMarkdown :: !Text
         }
+    | PlanModeReviewRequest
+        { planModeReview :: !PlanReviewRequest
+        }
     | PlanModeQuestionRequest
         { planModeQuestion :: !Text
         , planModeQuestionOptions :: ![Text]
@@ -131,6 +146,42 @@ data PlanModeInteractionRequest
 
 type PlanModeInteractionContextProvider =
     PlanModeInteractionRequest -> IO PendingInteractionContext
+
+-- | Stable fallback correlation when the host cannot expose a provider tool
+-- call id. Reviews retain the core generation+digest key; other requests hash
+-- their complete immutable payload. Hosts with a real call id should prefer
+-- supplying it directly.
+deterministicPlanModeInteractionContext
+    :: PlanModeInteractionRequest
+    -> PendingInteractionContext
+deterministicPlanModeInteractionContext request =
+    PendingInteractionContext
+        { pendingInteractionRequestKey = requestKey
+        , pendingInteractionOrigin =
+            Just InteractionOrigin
+                { interactionOriginToolName = planRequestToolName request
+                , interactionOriginCallId = requestKey
+                }
+        }
+  where
+    requestKey = case request of
+        PlanModeReviewRequest review ->
+            review.planReviewRequestKey
+        _ ->
+            planRequestKind request
+                <> ":"
+                <> Text.pack
+                    (show
+                        (hash
+                            (Text.encodeUtf8 (encodePlanRequest request))
+                            :: Digest SHA256))
+
+planRequestToolName :: PlanModeInteractionRequest -> Text
+planRequestToolName = \case
+    PlanModeConfirmEnterRequest{} -> "enter_plan_mode"
+    PlanModeDecisionRequest{} -> "exit_plan_mode"
+    PlanModeReviewRequest{} -> "exit_plan_mode"
+    PlanModeQuestionRequest{} -> "ask_user_question"
 
 -- | A validated response supplied by a non-local client.  Deferral is
 -- deliberately not stored as a resolution: the immutable request remains
@@ -173,6 +224,17 @@ canonicalizeExternalInteractionResponse interaction raw
                 pure
                     (ExternalInteractionResolve
                         (encodeDecisionAnswer answer))
+            "plan_mode.review" -> do
+                ensureRequestType "plan_mode.review"
+                answer <-
+                    decodeCanonical decodeReviewAnswer
+                        <|> parseReviewText stripped
+                case answer of
+                    PlanReviewDefer ->
+                        Right ExternalInteractionDefer
+                    _ ->
+                        ExternalInteractionResolve
+                            <$> encodeReviewAnswer answer
             "plan_mode.ask_question" -> do
                 ensureRequestType "plan_mode.ask_question"
                 options <- requestOptions
@@ -245,6 +307,23 @@ canonicalizeExternalInteractionResponse interaction raw
         | otherwise =
             Left
                 "review response must be approve, revise <feedback>, abandon, defer, or canonical JSON"
+      where
+        folded = Text.toCaseFold value
+
+    parseReviewText value
+        | folded `elem` ["approve", "approved"] =
+            Right PlanReviewApprove
+        | folded `elem` ["approve_anyway", "approve anyway"] =
+            Right PlanReviewApproveAnyway
+        | folded `elem` ["abandon", "cancel"] =
+            Right PlanReviewAbandon
+        | folded == "defer" =
+            Right PlanReviewDefer
+        | Just feedback <- revisionFeedback value =
+            Right (PlanReviewRequestChanges feedback)
+        | otherwise =
+            Left
+                "review response must be approve, approve_anyway, revise <feedback>, abandon, or defer"
       where
         folded = Text.toCaseFold value
 
@@ -344,6 +423,23 @@ coordinatePlanDecision coordinator context planMarkdown =
         (Right . encodeDecisionAnswer)
         decodeDecisionAnswer
 
+coordinatePlanReview
+    :: PendingInteractionCoordinator
+    -> PendingInteractionContext
+    -> PlanReviewRequest
+    -> IO (PendingInteractionLocal PlanReviewDecision)
+    -> IO
+        (Either
+            PendingInteractionError
+            (PendingInteractionOutcome PlanReviewDecision))
+coordinatePlanReview coordinator context request =
+    coordinatePlanInteraction
+        coordinator
+        context
+        (PlanModeReviewRequest request)
+        encodeReviewAnswer
+        decodeReviewAnswer
+
 coordinatePlanQuestion
     :: PendingInteractionCoordinator
     -> PendingInteractionContext
@@ -376,7 +472,7 @@ wrapDurablePlanModeHooks
     -> PlanModeHooks
     -> PlanModeHooks
 wrapDurablePlanModeHooks coordinator provideContext onFailure localHooks =
-    PlanModeHooks
+    PlanModeLifecycleHooks
         { planConfirmEnter = \reason -> do
             let request = PlanModeConfirmEnterRequest reason
             context <- provideContext request
@@ -384,13 +480,6 @@ wrapDurablePlanModeHooks coordinator provideContext onFailure localHooks =
                 coordinatePlanConfirmEnter coordinator context reason
                     (PendingInteractionRespond
                         <$> localHooks.planConfirmEnter reason)
-        , planDecideExit = \planMarkdown -> do
-            let request = PlanModeDecisionRequest planMarkdown
-            context <- provideContext request
-            closeOnFailure PlanCancel onFailure $
-                coordinatePlanDecision coordinator context planMarkdown
-                    (PendingInteractionRespond
-                        <$> localHooks.planDecideExit planMarkdown)
         , planAskQuestion = \question options -> do
             let request = PlanModeQuestionRequest question options
             context <- provideContext request
@@ -401,7 +490,46 @@ wrapDurablePlanModeHooks coordinator provideContext onFailure localHooks =
                         Just answer ->
                             pure
                                 (PendingInteractionRespond (Just answer))
+        , planReviewPlan = \request -> do
+            let interactionRequest = PlanModeReviewRequest request
+            supplied <- provideContext interactionRequest
+            let context = supplied
+                    { pendingInteractionRequestKey =
+                        request.planReviewRequestKey
+                    }
+            closeOnFailure PlanReviewDefer onFailure $
+                coordinatePlanReview coordinator context request do
+                    localPlanReview localHooks request >>= \case
+                        PlanReviewDefer -> pure PendingInteractionDefer
+                        decision ->
+                            pure (PendingInteractionRespond decision)
+        , planQuiesceBeforeActivation =
+            case localHooks of
+                PlanModeHooks{} -> pure (Right ())
+                PlanModeLifecycleHooks{planQuiesceBeforeActivation} ->
+                    planQuiesceBeforeActivation
+        , planResumeAfterExit =
+            case localHooks of
+                PlanModeHooks{} -> pure ()
+                PlanModeLifecycleHooks{planResumeAfterExit} ->
+                    planResumeAfterExit
         }
+
+localPlanReview
+    :: PlanModeHooks
+    -> PlanReviewRequest
+    -> IO PlanReviewDecision
+localPlanReview hooks request =
+    case hooks of
+        PlanModeHooks{planDecideExit} ->
+            case planDecideExit of
+                decide -> decide request.planReviewMarkdown >>= \case
+                    PlanApprove -> pure PlanReviewApprove
+                    PlanRequestChanges notes ->
+                        pure (PlanReviewRequestChanges notes)
+                    PlanCancel -> pure PlanReviewAbandon
+        PlanModeLifecycleHooks{planReviewPlan} ->
+            planReviewPlan request
 
 renderPendingInteractionError :: PendingInteractionError -> Text
 renderPendingInteractionError = \case
@@ -708,6 +836,7 @@ planRequestKind :: PlanModeInteractionRequest -> Text
 planRequestKind = \case
     PlanModeConfirmEnterRequest{} -> "plan_mode.confirm_enter"
     PlanModeDecisionRequest{} -> "plan_mode.decide_exit"
+    PlanModeReviewRequest{} -> "plan_mode.review"
     PlanModeQuestionRequest{} -> "plan_mode.ask_question"
 
 encodePlanRequest :: PlanModeInteractionRequest -> Text
@@ -723,6 +852,27 @@ encodePlanRequest = \case
             (Aeson.object
                 [ "type" .= ("plan_mode.decide_exit" :: Text)
                 , "plan_markdown" .= planMarkdown
+                ])
+    PlanModeReviewRequest request ->
+        encodeJson
+            (Aeson.object
+                [ "type" .= ("plan_mode.review" :: Text)
+                , "request_key" .= request.planReviewRequestKey
+                , "path" .= toText request.planReviewPath
+                , "digest" .=
+                    request.planReviewSnapshotDigest.unPlanDigest
+                , "plan_markdown" .= request.planReviewMarkdown
+                , "warnings" .=
+                    [ Aeson.object
+                        [ "code" .=
+                            Text.pack (show warning.planWarningCode)
+                        , "message" .= warning.planWarningMessage
+                        , "line" .= warning.planWarningLine
+                        ]
+                    | warning <- request.planReviewWarnings
+                    ]
+                , "verification" .= request.planReviewVerification
+                , "summary" .= request.planReviewSummary
                 ])
     PlanModeQuestionRequest question options ->
         encodeJson
@@ -782,6 +932,49 @@ decisionName = \case
     PlanApprove -> "approve"
     PlanRequestChanges _ -> "request_changes"
     PlanCancel -> "cancel"
+
+encodeReviewAnswer :: PlanReviewDecision -> Either Text Text
+encodeReviewAnswer = \case
+    PlanReviewDefer ->
+        Left "defer must leave the durable interaction unresolved"
+    decision ->
+        Right $
+            encodeJson
+                (Aeson.object
+                    ([ "type" .= ("plan_mode.review" :: Text)
+                     , "decision" .= reviewDecisionName decision
+                     ]
+                        <> case decision of
+                            PlanReviewRequestChanges feedback ->
+                                ["feedback" .= feedback]
+                            _ -> []))
+
+decodeReviewAnswer :: Text -> Either Text PlanReviewDecision
+decodeReviewAnswer =
+    decodeJson "plan-mode review response" $
+        Aeson.withObject "plan-mode review response" \object -> do
+            requirePayloadType "plan_mode.review" object
+            decision <- object .: "decision"
+            case (decision :: Text) of
+                "approve" -> pure PlanReviewApprove
+                "approve_anyway" -> pure PlanReviewApproveAnyway
+                "revise" ->
+                    PlanReviewRequestChanges
+                        <$> object .:? "feedback" Aeson..!= ""
+                "abandon" -> pure PlanReviewAbandon
+                "defer" -> pure PlanReviewDefer
+                other ->
+                    fail
+                        ("unknown plan-mode review decision: "
+                            <> Text.unpack other)
+
+reviewDecisionName :: PlanReviewDecision -> Text
+reviewDecisionName = \case
+    PlanReviewApprove -> "approve"
+    PlanReviewApproveAnyway -> "approve_anyway"
+    PlanReviewRequestChanges _ -> "revise"
+    PlanReviewAbandon -> "abandon"
+    PlanReviewDefer -> "defer"
 
 encodeQuestionAnswer :: [Text] -> Maybe Text -> Either Text Text
 encodeQuestionAnswer options answer = do

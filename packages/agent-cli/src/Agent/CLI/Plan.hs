@@ -65,8 +65,11 @@ import Agent.OsPath (toText)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeHooks(..)
+    , PlanReviewDecision(..)
+    , PlanReviewRequest(..)
     , planApprovedContinuation
     )
+import Agent.Tools.PlanMode.Document (PlanValidationWarning(..))
 import Control.Applicative ((<|>))
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
@@ -88,11 +91,14 @@ import System.OsPath (OsPath)
 -- | Build plan-mode prompts. @escPaused@ pauses the Esc cancel watcher so
 -- arrow keys / single-key answers are not stolen mid-turn.
 cliPlanHooks :: InterruptState -> IORef Bool -> IO Bool -> PlanModeHooks
-cliPlanHooks interrupt escPaused resolveColor = PlanModeHooks
+cliPlanHooks interrupt escPaused resolveColor = PlanModeLifecycleHooks
     { planConfirmEnter = withStdinPaused escPaused . confirmEnter resolveColor
-    , planDecideExit = withStdinPaused escPaused . decideExit interrupt resolveColor
     , planAskQuestion = \q opts ->
         withStdinPaused escPaused (askQuestion interrupt resolveColor q opts)
+    , planReviewPlan =
+        withStdinPaused escPaused . reviewPlan interrupt resolveColor
+    , planQuiesceBeforeActivation = pure (Right ())
+    , planResumeAfterExit = pure ()
     }
 
 data PlanEnterChoice = PlanEnter | PlanStayNormal
@@ -400,6 +406,61 @@ decideExit interrupt resolveColor planBody = do
         else do
             notifyAttention stderr InputRequested
             promptDecision interrupt color
+
+reviewPlan
+    :: InterruptState
+    -> IO Bool
+    -> PlanReviewRequest
+    -> IO PlanReviewDecision
+reviewPlan interrupt resolveColor request = do
+    color <- resolveColor
+    isTty <- hIsTerminalDevice stdin
+    putTextLn stderr ""
+    putTextLn stderr (roleMuted color "── plan review ──")
+    Text.hPutStrLn stderr
+        (renderPlanMarkdown color request.planReviewMarkdown)
+    hFlush stderr
+    putTextLn stderr (roleMuted color "─────────────────")
+    if not isTty
+        then pure PlanReviewDefer
+        else do
+            notifyAttention stderr InputRequested
+            result <-
+                runOverlay
+                    (renderTerminalPlanReviewFrame color)
+                    applyTerminalPlanReviewKey
+                    (initialTerminalPlanReviewState
+                        [ warning.planWarningMessage
+                        | warning <- request.planReviewWarnings
+                        ])
+            finishTerminalReview interrupt color $
+                fromMaybe TerminalPlanDefer result
+
+finishTerminalReview
+    :: InterruptState
+    -> Bool
+    -> TerminalPlanReviewDecision
+    -> IO PlanReviewDecision
+finishTerminalReview interrupt color = \case
+    TerminalPlanApprove -> do
+        putTextLn stderr (roleSuccess color "plan approved")
+        pure PlanReviewApprove
+    TerminalPlanApproveAnyway -> do
+        putTextLn stderr (roleSuccess color "plan approved with warnings")
+        pure PlanReviewApproveAnyway
+    TerminalPlanRevise feedback -> do
+        notes <-
+            if Text.null (Text.strip (renderPlanReviewFeedback feedback))
+                    || renderPlanReviewFeedback feedback == "(no notes)"
+                then readChangeNotes interrupt color
+                else pure (renderPlanReviewFeedback feedback)
+        pure (PlanReviewRequestChanges notes)
+    TerminalPlanAbandon -> do
+        putTextLn stderr (roleMuted color "plan abandoned")
+        pure PlanReviewAbandon
+    TerminalPlanDefer -> do
+        putTextLn stderr (roleMuted color "plan review closed")
+        pure PlanReviewDefer
 
 promptDecision :: InterruptState -> Bool -> IO PlanDecision
 promptDecision interrupt color = do

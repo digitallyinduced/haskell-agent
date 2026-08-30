@@ -14,16 +14,9 @@ import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Plan
-    ( PlanReviewAdapter(..)
-    , PlanReviewResolution(..)
-    , ProposedPlanParseError(..)
-    , TerminalPlanReviewDecision(..)
+    ( ProposedPlanParseError(..)
     , parseProposedPlan
-    , parsePlanReviewFeedback
-    , renderPlanReviewAdapterError
     , renderProposedPlanParseError
-    , resolveTerminalPlanReview
-    , runPlanReviewAdapter
     )
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
 import Agent.CLI.ProviderTransition
@@ -121,7 +114,6 @@ import Agent.CLI.TurnState
     , turnReplacesTranscript
     )
 import Agent.Dialect (DialectId(..), dialectId)
-import Agent.FileRetry (retryOnFileBusy)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopExecution(..)
@@ -137,18 +129,18 @@ import Agent.Loop
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
-    ( PlanDecision(..)
-    , PlanCompletion(..)
+    ( PlanCompletion(..)
     , PlanModeEnv(..)
-    , PlanModeHooks(..)
     , PlanModeState(..)
+    , PlanReviewOutcome(..)
     , activatePlanMode
-    , deactivatePlanMode
     , isPlanModeActive
     , planFilePath
     , planModeReminder
+    , submitPlanForReview
     , writePlanMarkdown
     )
+import Agent.Tools.PlanMode.Tracker (ApprovedPlanContinuation(..))
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
 import Control.Exception.Safe (bracket_, finally, onException, tryAny)
@@ -160,7 +152,6 @@ import Data.IORef
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
 import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
@@ -920,30 +911,34 @@ handleProposedPlan planMode = \case
         active <- isPlanModeActive planMode
         case (active, parseProposedPlan text) of
             (True, Right planBody) -> do
-                path <- planFilePath planMode
-                let PlanModeHooks{ planDecideExit = decideExit } =
-                        planMode.planHooks
-                    adapter = PlanReviewAdapter
-                        { planReviewWriteSnapshot =
-                            writePlanMarkdown planMode
-                        , planReviewReadSnapshot =
-                            readPlanReviewSnapshot path
-                        , planReviewPresentSnapshot =
-                            \persistedPlan _warnings ->
-                                legacyTerminalPlanDecision
-                                    <$> decideExit persistedPlan
-                        }
-                runPlanReviewAdapter adapter [] planBody >>= \case
-                    Left reviewError ->
+                writePlanMarkdown planMode planBody >>= \case
+                    Left writeError ->
                         pure $ Just $
                             "The proposed plan could not be reviewed because "
-                                <> renderPlanReviewAdapterError reviewError
+                                <> writeError
                                 <> ". Stay in plan mode and present a fresh, readable plan."
-                    Right decision -> do
-                        let resolution = resolveTerminalPlanReview decision
-                        when resolution.planReviewShouldDeactivate
-                            (deactivatePlanMode planMode)
-                        pure resolution.planReviewContinuation
+                    Right () ->
+                        submitPlanForReview planMode Nothing >>= \case
+                            Left reviewError ->
+                                pure $ Just $
+                                    "The proposed plan could not be reviewed because "
+                                        <> reviewError
+                                        <> ". Stay in plan mode and present a fresh, readable plan."
+                            Right (PlanReviewAccepted continuation) ->
+                                pure
+                                    (Just
+                                        continuation.approvedPlanContinuation)
+                            Right (PlanReviewRevisionRequired notes) ->
+                                pure $ Just $
+                                    "The user requested changes to the plan. Stay in plan mode and revise plan.md.\nFeedback:\n"
+                                        <> notes
+                            Right PlanReviewApprovalOverrideRequired{} ->
+                                pure $ Just
+                                    "The plan has advisory warnings. It remains pending until the user explicitly chooses Approve anyway."
+                            Right PlanReviewAbandoned ->
+                                pure Nothing
+                            Right PlanReviewDeferred{} ->
+                                pure Nothing
             (True, Left ProposedPlanNotFound) -> pure Nothing
             (True, Left parseError) ->
                 pure $ Just $
@@ -951,24 +946,3 @@ handleProposedPlan planMode = \case
                         <> renderProposedPlanParseError parseError
                         <> ". Stay in plan mode and end with exactly one complete, non-nested <proposed_plan>…</proposed_plan> block outside fenced code."
             _ -> pure Nothing
-
-legacyTerminalPlanDecision
-    :: PlanDecision
-    -> TerminalPlanReviewDecision
-legacyTerminalPlanDecision = \case
-    PlanApprove -> TerminalPlanApprove
-    PlanRequestChanges notes ->
-        TerminalPlanRevise (parsePlanReviewFeedback notes)
-    PlanCancel -> TerminalPlanAbandon
-
-readPlanReviewSnapshot
-    :: System.OsPath.OsPath
-    -> IO (Either Text Text)
-readPlanReviewSnapshot path =
-    tryAny
-        (retryOnFileBusy
-            (TextIO.readFile (unsafeToFilePath path))) >>= \case
-        Left readError ->
-            pure (Left (Text.pack (show readError)))
-        Right content ->
-            pure (Right content)

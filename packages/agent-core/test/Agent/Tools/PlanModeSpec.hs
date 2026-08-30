@@ -403,7 +403,7 @@ spec = describe "Agent.Tools.PlanMode" do
     describe "correlated plan review lifecycle" do
         it "presents a typed canonical snapshot and stores its continuation" do
             requests <- newIORef []
-            events <- newIORef []
+            events <- newIORef ([] :: [Text])
             let hooks = testLifecycleHooks
                     (\request -> do
                         modifyIORef' requests (<> [request])

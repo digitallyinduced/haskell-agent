@@ -16,7 +16,8 @@ import Agent.CLI.TUI.App
     , showFullscreenToolImage
     )
 import Agent.TUI.PlanReview
-    ( PlanLineRange(..)
+    ( PlanApproval(..)
+    , PlanLineRange(..)
     , PlanRevision(..)
     , PlanReviewComment(..)
     , PlanReviewId(..)
@@ -34,9 +35,9 @@ import Agent.TUI.Questionnaire
     , QuestionnaireSubmission(..)
     )
 import Agent.Tools.PlanMode
-    ( PlanDecision(..)
-    , PlanModeHooks(..)
-    )
+    ( PlanModeHooks(..) )
+import qualified Agent.Tools.PlanMode as Plan
+import Agent.Tools.PlanMode.Document (PlanValidationWarning(..))
 import Agent.Tools.Secret
     ( SecretPrompt(..)
     , SecretPromptHooks(..)
@@ -52,13 +53,19 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Crypto.Hash (Digest, SHA256, hash)
+import System.OsPath (unsafeEncodeUtf)
 
-fullscreenAwarePlanHooks
+fullscreenCompatibilityHooks
     :: IORef (Maybe FullscreenRuntime)
     -> PlanModeHooks
     -> PlanModeHooks
-fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
-    { planConfirmEnter = \reason ->
+fullscreenCompatibilityHooks runtimeRef hooks = PlanModeHooks
+    { planConfirmEnter = confirmEnter
+    , planDecideExit = compatibilityReview
+    , planAskQuestion = askQuestion
+    }
+  where
+    confirmEnter reason =
         withCurrentFullscreen runtimeRef
             (hooks.planConfirmEnter reason)
             \runtime ->
@@ -71,15 +78,21 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
                     , ("Stay in normal mode", "Continue without entering plan mode")
                     ]
                     >>= pure . (== Just 0)
-    , planDecideExit = \planBody ->
-        withCurrentFullscreen runtimeRef
-            (hooks.planDecideExit planBody)
-            \runtime ->
-                planReviewDecision
-                    <$> requestFullscreenPlanReview
-                        runtime
-                        (planReviewRequest planBody)
-    , planAskQuestion = \question options ->
+
+    compatibilityReview planBody =
+        case hooks of
+            PlanModeHooks{planDecideExit} ->
+                planDecideExit planBody
+            PlanModeLifecycleHooks{planReviewPlan} ->
+                planReviewPlan (syntheticCoreReview planBody) >>= \case
+                    Plan.PlanReviewApprove -> pure Plan.PlanApprove
+                    Plan.PlanReviewApproveAnyway -> pure Plan.PlanApprove
+                    Plan.PlanReviewRequestChanges notes ->
+                        pure (Plan.PlanRequestChanges notes)
+                    Plan.PlanReviewAbandon -> pure Plan.PlanCancel
+                    Plan.PlanReviewDefer -> pure Plan.PlanCancel
+
+    askQuestion question options =
         withCurrentFullscreen runtimeRef
             (hooks.planAskQuestion question options)
             \runtime ->
@@ -87,7 +100,46 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
                     <$> requestFullscreenQuestionnaire
                         runtime
                         (planningQuestionnaire question options)
-    }
+
+-- | Upgrade the compatibility wrapper above to the typed review lifecycle.
+-- Provider runtimes add their quiesce/resume barriers afterwards.
+fullscreenAwarePlanHooks
+    :: IORef (Maybe FullscreenRuntime)
+    -> PlanModeHooks
+    -> PlanModeHooks
+fullscreenAwarePlanHooks runtimeRef hooks =
+    PlanModeLifecycleHooks
+        { planConfirmEnter = wrapped.planConfirmEnter
+        , planAskQuestion = wrapped.planAskQuestion
+        , planReviewPlan = \request ->
+            withCurrentFullscreen runtimeRef
+                (reviewFallback request)
+                \runtime ->
+                    planReviewDecision
+                        <$> requestFullscreenPlanReview
+                            runtime
+                            (planReviewRequest request)
+        , planQuiesceBeforeActivation = existingQuiesce
+        , planResumeAfterExit = existingResume
+        }
+  where
+    wrapped = fullscreenCompatibilityHooks runtimeRef hooks
+    reviewFallback request =
+        case hooks of
+            PlanModeHooks{planDecideExit} ->
+                Plan.legacyPlanReviewHook planDecideExit request
+            PlanModeLifecycleHooks{planReviewPlan} ->
+                planReviewPlan request
+    existingQuiesce =
+        case hooks of
+            PlanModeHooks{} -> pure (Right ())
+            PlanModeLifecycleHooks{planQuiesceBeforeActivation} ->
+                planQuiesceBeforeActivation
+    existingResume =
+        case hooks of
+            PlanModeHooks{} -> pure ()
+            PlanModeLifecycleHooks{planResumeAfterExit} ->
+                planResumeAfterExit
 
 fullscreenAwareSecretHooks
     :: IORef (Maybe FullscreenRuntime)
@@ -150,36 +202,57 @@ nonBlank =
         let stripped = Text.strip text
         in if Text.null stripped then Nothing else Just stripped)
 
-planReviewRequest :: Text -> PlanReviewRequest
-planReviewRequest planBody =
+planReviewRequest :: Plan.PlanReviewRequest -> PlanReviewRequest
+planReviewRequest request =
     PlanReviewRequest
-        { requestId = PlanReviewId ("plan-review:" <> digest)
-        , requestTitle = "Ready to implement this plan?"
-        , requestMarkdown = planBody
-        , requestDigest = digest
+        { requestId = PlanReviewId request.planReviewRequestKey
+        , requestTitle =
+            maybe
+                "Ready to implement this plan?"
+                (\summary ->
+                    if Text.null (Text.strip summary)
+                        then "Ready to implement this plan?"
+                        else Text.strip summary)
+                request.planReviewSummary
+        , requestMarkdown = request.planReviewMarkdown
+        , requestDigest =
+            request.planReviewSnapshotDigest.unPlanDigest
         , requestWarnings =
             [ PlanReviewWarning
-                { warningCode = "empty-plan"
-                , warningMessage = "The proposed plan is empty."
+                { warningCode =
+                    Text.pack (show warning.planWarningCode)
+                , warningMessage = warning.planWarningMessage
                 }
-            | Text.null (Text.strip planBody)
+            | warning <- request.planReviewWarnings
             ]
         }
-  where
-    digest = sha256Text planBody
 
-planReviewDecision :: PlanReviewOutcome -> PlanDecision
+planReviewDecision :: PlanReviewOutcome -> Plan.PlanReviewDecision
 planReviewDecision = \case
-    PlanApproved _ -> PlanApprove
+    PlanApproved approval
+        | approval.approvalAcceptedWarnings ->
+            Plan.PlanReviewApproveAnyway
+        | otherwise ->
+            Plan.PlanReviewApprove
     PlanRevisionRequested revision ->
-        PlanRequestChanges (revisionNotes revision)
-    PlanAbandoned _ _ -> PlanCancel
-    -- The current PlanMode hook predates a durable defer decision. Closing the
-    -- fullscreen review therefore takes the same safe, non-implementation
-    -- path as cancellation; callers of requestFullscreenPlanReview retain the
-    -- distinct typed outcome.
-    PlanDeferred _ -> PlanCancel
-    PlanReviewExternallyResolved _ -> PlanCancel
+        Plan.PlanReviewRequestChanges (revisionNotes revision)
+    PlanAbandoned _ _ -> Plan.PlanReviewAbandon
+    PlanDeferred _ -> Plan.PlanReviewDefer
+    PlanReviewExternallyResolved _ -> Plan.PlanReviewDefer
+
+syntheticCoreReview :: Text -> Plan.PlanReviewRequest
+syntheticCoreReview markdown =
+    Plan.PlanReviewRequest
+        { Plan.planReviewRequestKey = "legacy-plan-review:" <> digest
+        , Plan.planReviewPath = unsafeEncodeUtf "plan.md"
+        , Plan.planReviewSnapshotDigest = Plan.PlanDigest digest
+        , Plan.planReviewMarkdown = markdown
+        , Plan.planReviewWarnings = []
+        , Plan.planReviewVerification = []
+        , Plan.planReviewSummary = Nothing
+        }
+  where
+    digest = sha256Text markdown
 
 revisionNotes :: PlanRevision -> Text
 revisionNotes revision =

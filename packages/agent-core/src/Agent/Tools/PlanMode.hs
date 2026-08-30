@@ -21,6 +21,7 @@ module Agent.Tools.PlanMode
     , PlanReadResult(..)
     , PlanModeEnv(..)
     , PlanModeHooks(..)
+    , withPlanModeLifecycle
     , newPlanModeEnv
     , planFileName
     , planFilePath
@@ -233,6 +234,55 @@ data PlanModeHooks
         , planResumeAfterExit :: !(IO ())
         -- ^ Resume quiesced work only after durable policy relaxation.
         }
+
+-- | Add provider or host lifecycle barriers without discarding a typed review
+-- hook. Multiple layers compose: quiescers run outside-in and resumptions run
+-- inside-out, with both resume actions attempted.
+withPlanModeLifecycle
+    :: IO (Either Text ())
+    -> IO ()
+    -> PlanModeHooks
+    -> PlanModeHooks
+withPlanModeLifecycle quiesce resume = \case
+    PlanModeHooks
+        { planConfirmEnter
+        , planDecideExit
+        , planAskQuestion
+        } ->
+            PlanModeLifecycleHooks
+                { planConfirmEnter
+                , planAskQuestion
+                , planReviewPlan =
+                    legacyPlanReviewHook planDecideExit
+                , planQuiesceBeforeActivation = quiesce
+                , planResumeAfterExit = resume
+                }
+    PlanModeLifecycleHooks
+        { planConfirmEnter
+        , planAskQuestion
+        , planReviewPlan
+        , planQuiesceBeforeActivation
+        , planResumeAfterExit
+        } ->
+            PlanModeLifecycleHooks
+                { planConfirmEnter
+                , planAskQuestion
+                , planReviewPlan
+                , planQuiesceBeforeActivation = do
+                    planQuiesceBeforeActivation >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> quiesce
+                , planResumeAfterExit =
+                    resume `finallyAny` planResumeAfterExit
+                }
+  where
+    finallyAny first second = do
+        firstResult <- tryAny first
+        secondResult <- tryAny second
+        case (firstResult, secondResult) of
+            (Left err, _) -> throwString (displayException err)
+            (_, Left err) -> throwString (displayException err)
+            _ -> pure ()
 
 planFileName :: OsPath
 planFileName = unsafeEncodeUtf "plan.md"
