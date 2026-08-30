@@ -479,7 +479,11 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
             , sequenceNumber = Nothing
             }
         events `shouldBe`
-            [ProviderLimitUpdated "Weekly limit left: 21%" False]
+            [ ProviderLimitUpdated
+                { providerLimitText = "Weekly limit left: 21%"
+                , providerLimitWarning = False
+                }
+            ]
 
     it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False

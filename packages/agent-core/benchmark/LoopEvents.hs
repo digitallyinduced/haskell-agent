@@ -313,7 +313,10 @@ eventWeight = \case
     TextDelta text -> Text.length text
     ReasoningDelta text -> Text.length text
     ActivityUpdated text -> Text.length text
-    ProviderLimitUpdated text warning ->
+    ProviderLimitUpdated
+        { providerLimitText = text
+        , providerLimitWarning = warning
+        } ->
         Text.length text + if warning then 1 else 0
     WarningRaised text -> Text.length text
     ResponseRestarted text -> Text.length text

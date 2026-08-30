@@ -683,8 +683,10 @@ codexRateLimitsUpdate = \case
         let remaining :: Int
             remaining = max 0 (min 100 (round (100 - used)))
         in ProviderLimitUpdated
-            (label <> ": " <> Text.pack (show remaining) <> "%")
-            (remaining <= 10)
+            { providerLimitText =
+                label <> ": " <> Text.pack (show remaining) <> "%"
+            , providerLimitWarning = remaining <= 10
+            }
 
 -- | Emit an updated argument-streaming activity after this many additional
 -- streamed argument characters.

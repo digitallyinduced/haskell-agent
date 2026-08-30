@@ -374,7 +374,10 @@ reduceLoop event state = case event of
                 }
     ActivityUpdated activity ->
         state { uiActivity = activity }
-    ProviderLimitUpdated text warning ->
+    ProviderLimitUpdated
+        { providerLimitText = text
+        , providerLimitWarning = warning
+        } ->
         state
             { uiPrompt =
                 state.uiPrompt

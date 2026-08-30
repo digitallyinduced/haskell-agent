@@ -267,7 +267,10 @@ data LoopEvent
     -- | Ephemeral transport/tool activity for the live CLI status line.
     | ActivityUpdated Text
     -- | Latest provider-reported limit status for retained prompt chrome.
-    | ProviderLimitUpdated Text Bool
+    | ProviderLimitUpdated
+        { providerLimitText :: !Text
+        , providerLimitWarning :: !Bool
+        }
     -- | A persistent user-visible warning that must not replace live activity.
     | WarningRaised Text
     -- | A streamed response was interrupted and its provider submission is

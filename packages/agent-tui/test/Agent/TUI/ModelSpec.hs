@@ -236,7 +236,10 @@ spec = describe "fullscreen UI reducer" do
         let state =
                 apply
                     [ UiLoop
-                        (ProviderLimitUpdated "Weekly limit left: 8%" True)
+                        ProviderLimitUpdated
+                            { providerLimitText = "Weekly limit left: 8%"
+                            , providerLimitWarning = True
+                            }
                     ]
         state.uiPrompt.promptLimitStatus
             `shouldBe`
