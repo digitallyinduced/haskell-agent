@@ -101,6 +101,7 @@ import Agent.CLI.TurnState
     ( ConversationOutcome(..)
     , ConversationPatch(..)
     , FieldUpdate(..)
+    , GrokContextUpdate(..)
     , PreparedTurn(..)
     , StartupUpdate(..)
     , TurnAbort(..)
@@ -366,6 +367,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     let prepared = PreparedTurn
             { preparedBeforeItems = beforeItems
             , preparedConsumedStartup = sentStartupContext
+            , preparedConsumedGrokContext = pendingGrokContext
             , preparedTurnInputs = turnInputs
             }
         commitConversationPatch patch = do
@@ -380,6 +382,15 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 RestoreStartup consumed ->
                     atomicModifyIORef' startupContext \current ->
                         (restoreStartupContext consumed current, ())
+            case patch.patchGrokFirstTurnContext of
+                KeepGrokContext -> pure ()
+                RestoreGrokContext consumed ->
+                    atomicModifyIORef' grokFirstTurnContext \current ->
+                        ( case current of
+                            Nothing -> Just consumed
+                            Just _ -> current
+                        , ()
+                        )
             atomicModifyIORef' usageRef \current ->
                 (addTokenUsage current patch.patchUsageDelta, ())
             case patch.patchLastAssistant of

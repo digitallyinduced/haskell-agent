@@ -23,6 +23,7 @@ module Agent.Store.Postgres.Session
     , appendSessionPromptEpoch
     , appendSessionTurn
     , appendSessionTurnIndexed
+    , appendSessionTurnIndexedWithPromptReset
     , appendSessionTurns
     , loadSession
     , loadSessionWithImplementation

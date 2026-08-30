@@ -194,6 +194,15 @@ coreMigrations =
                  \ ON harness.session_prompt_epochs TO ha_runtime"
                ]
         }
+    , Migration
+        { migrationVersion = 104
+        , migrationName = "prompt epoch invalidation markers"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.session_prompt_epochs\
+              \ ADD COLUMN IF NOT EXISTS is_active boolean\
+              \ NOT NULL DEFAULT TRUE"
+            ]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty

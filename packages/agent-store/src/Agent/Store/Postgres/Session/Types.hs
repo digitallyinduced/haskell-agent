@@ -172,5 +172,6 @@ data LegacySession = LegacySession
     , legacyContentHash :: !Text
     , legacyMetadata :: !SessionMetadata
     , legacyTurns :: ![SessionTurn]
+    , legacyPromptSnapshot :: !(Maybe SessionPromptSnapshot)
     }
     deriving (Eq, Show)

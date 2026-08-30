@@ -71,6 +71,7 @@ spec = describe "PostgreSQL session schema" do
         ddl `shouldContainBytes` "session_turns_immutable"
         ddl `shouldContainBytes`
             "CREATE TABLE IF NOT EXISTS harness.session_prompt_epochs"
+        ddl `shouldContainBytes` "is_active boolean NOT NULL DEFAULT TRUE"
         ddl `shouldContainBytes` "session_prompt_epochs_immutable"
 
     it "tracks restart-safe legacy imports" do
@@ -131,6 +132,72 @@ spec = describe "PostgreSQL session schema" do
                                             { sessionPromptEpochIndex = 1
                                             , sessionPromptEpochSnapshot =
                                                 nextPrompt
+                                            })
+                            let resetTurn = turn
+                                    { sessionTurnUserText = "/clear"
+                                    , sessionTurnAssistantText =
+                                        Just "Conversation cleared."
+                                    , sessionTurnResponseId = Nothing
+                                    , sessionTurnEffect = TranscriptReset
+                                    , sessionTurnItems = []
+                                    , sessionTurnUsage = Nothing
+                                    , sessionTurnProviderTelemetry = Nothing
+                                    }
+                            appendSessionTurnIndexedWithPromptReset
+                                pool resetTurn promptMetadata
+                                `shouldReturn` Right (Just 0)
+                            loadLatestSessionPromptEpoch
+                                pool "session-prompt"
+                                `shouldReturn` Right Nothing
+                            let reactivatedPrompt = nextPrompt
+                                    { sessionPromptGeneratedContext = Nothing
+                                    }
+                            appendSessionPromptEpoch
+                                pool "session-prompt" reactivatedPrompt
+                                `shouldReturn` Right (Just 3)
+                            appendSessionTurn
+                                pool
+                                resetTurn
+                                    { sessionTurnUserText = "/rewind"
+                                    }
+                                promptMetadata
+                                `shouldReturn` Right True
+                            loadLatestSessionPromptEpoch
+                                pool "session-prompt"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionPromptEpoch
+                                            { sessionPromptEpochIndex = 3
+                                            , sessionPromptEpochSnapshot =
+                                                reactivatedPrompt
+                                            })
+                            let importedMetadata = promptMetadata
+                                    { sessionMetadataKey =
+                                        "session-imported-prompt"
+                                    }
+                                importedPrompt = promptSnapshot
+                                    { sessionPromptCacheKey =
+                                        "session-imported-prompt"
+                                    }
+                                legacy = LegacySession
+                                    { legacySourcePath =
+                                        "afk:session-imported-prompt"
+                                    , legacyContentHash = "transfer-hash"
+                                    , legacyMetadata = importedMetadata
+                                    , legacyTurns = []
+                                    , legacyPromptSnapshot =
+                                        Just importedPrompt
+                                    }
+                            importLegacySession pool legacy
+                                `shouldReturn` Right True
+                            loadLatestSessionPromptEpoch
+                                pool "session-imported-prompt"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionPromptEpoch
+                                            { sessionPromptEpochIndex = 0
+                                            , sessionPromptEpochSnapshot =
+                                                importedPrompt
                                             })
                             createSession pool metadata
                                 `shouldReturn` Right True

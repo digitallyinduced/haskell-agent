@@ -161,6 +161,7 @@ sessionPromptEpochSchemaStatements =
       \ session_id uuid NOT NULL\
       \   REFERENCES harness.sessions(session_id),\
       \ epoch_index bigint NOT NULL CHECK (epoch_index >= 0),\
+      \ is_active boolean NOT NULL DEFAULT TRUE,\
       \ prompt_version integer NOT NULL CHECK (prompt_version > 0),\
       \ created_at timestamptz NOT NULL,\
       \ provider text NOT NULL CHECK (length(btrim(provider)) > 0),\

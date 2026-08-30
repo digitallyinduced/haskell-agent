@@ -73,6 +73,8 @@ spec = do
             final.conversationTranscript `shouldBe` history
             final.conversationStartupContext
                 `shouldBe` Just "startup instructions\n\nnewer skills"
+            final.conversationGrokFirstTurnContext
+                `shouldBe` Just "grok environment"
             final.conversationUsage `shouldBe` priorUsage
             final.conversationLastAssistant `shouldBe` Just "old answer"
 
@@ -93,6 +95,7 @@ spec = do
             final.conversationPreviousResponseId `shouldBe` Nothing
             final.conversationTranscript `shouldBe` history <> retained
             final.conversationStartupContext `shouldBe` Just "newer skills"
+            final.conversationGrokFirstTurnContext `shouldBe` Nothing
             final.conversationUsage `shouldBe` priorUsage
             final.conversationLastAssistant `shouldBe` Just "old answer"
 
@@ -107,6 +110,7 @@ spec = do
                 multimodalPrepared = PreparedTurn
                     { preparedBeforeItems = history
                     , preparedConsumedStartup = Nothing
+                    , preparedConsumedGrokContext = Nothing
                     , preparedTurnInputs =
                         [ userMessageWithAttachments
                             "inspect this"
@@ -128,7 +132,7 @@ spec = do
                                 [ImageAttachmentItem image]
                             ]
 
-        it "restores startup without changing conversation state for retry" do
+        it "restores one-shot context without changing conversation state for retry" do
             let final = applyConversationPatch
                     (finishConversation
                         prepared
@@ -138,8 +142,23 @@ spec = do
             final.conversationTranscript `shouldBe` mutatedTranscript
             final.conversationStartupContext
                 `shouldBe` Just "startup instructions\n\nnewer skills"
+            final.conversationGrokFirstTurnContext
+                `shouldBe` Just "grok environment"
             final.conversationUsage `shouldBe` priorUsage
             final.conversationLastAssistant `shouldBe` Just "old answer"
+
+        it "does not overwrite newer Grok context while restoring a retry" do
+            let state = runningState
+                    { conversationGrokFirstTurnContext =
+                        Just "newer environment"
+                    }
+                final = applyConversationPatch
+                    (finishConversation
+                        prepared
+                        ConversationProviderUnavailable)
+                    state
+            final.conversationGrokFirstTurnContext
+                `shouldBe` Just "newer environment"
 
         it "commits successful metadata without rewriting backend state" do
             let usage = TokenUsage
@@ -157,6 +176,7 @@ spec = do
             final.conversationPreviousResponseId `shouldBe` Just "resp-newer"
             final.conversationTranscript `shouldBe` mutatedTranscript
             final.conversationStartupContext `shouldBe` Just "newer skills"
+            final.conversationGrokFirstTurnContext `shouldBe` Nothing
             final.conversationUsage `shouldBe` TokenUsage
                 { inputTokens = 17
                 , outputTokens = 7
@@ -207,6 +227,7 @@ spec = do
             cancelled.conversationTranscript `shouldBe` expected
             failed.conversationTranscript `shouldBe` expected
             inputOnlyTurnItems committed `shouldBe` []
+            committed.preparedConsumedGrokContext `shouldBe` Nothing
 
         it "persists only the post-checkpoint suffix after success" do
             let checkpoint =
@@ -480,6 +501,7 @@ prepared :: PreparedTurn
 prepared = PreparedTurn
     { preparedBeforeItems = history
     , preparedConsumedStartup = Just "startup instructions"
+    , preparedConsumedGrokContext = Just "grok environment"
     , preparedTurnInputs =
         [ UserMessage "startup instructions [2026-08-23 13:10 CEST]"
         , UserMessage "build failed [2026-08-23 13:10 CEST]"
@@ -491,6 +513,7 @@ runningState = ConversationState
     { conversationPreviousResponseId = Just "resp-newer"
     , conversationTranscript = mutatedTranscript
     , conversationStartupContext = Just "newer skills"
+    , conversationGrokFirstTurnContext = Nothing
     , conversationUsage = priorUsage
     , conversationLastAssistant = Just "old answer"
     }

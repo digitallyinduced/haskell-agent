@@ -408,6 +408,8 @@ importLegacySession schemaVersion validId sessionDirForId pool sessionId = do
                         contentFingerprint (metaBytes <> transcriptBytes)
                     , legacyMetadata = toStoredMetadata meta
                     , legacyTurns = map toStoredTurn turns
+                    , legacyPromptSnapshot =
+                        toStoredPromptSnapshot <$> meta.metaPromptSnapshot
                     }
             lift (Store.importLegacySession pool legacy) >>= \case
                 Left err -> throwE (renderStoreError err)

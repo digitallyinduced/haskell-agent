@@ -421,17 +421,21 @@ loadMetadataManyStatement = mkStatement
 loadLatestPromptEpochStatement
     :: Statement Text (Maybe SessionPromptEpoch)
 loadLatestPromptEpochStatement = mkStatement
-    "SELECT epoch.epoch_index, epoch.prompt_version, epoch.created_at,\
-    \ epoch.provider, epoch.connection_id, epoch.model_id, epoch.dialect,\
-    \ epoch.cwd_text, epoch.instructions_text, epoch.tools_text,\
-    \ epoch.generated_context_text, epoch.grok_context_text,\
-    \ epoch.prompt_cache_key\
-    \ FROM harness.session_prompt_epochs epoch\
-    \ JOIN harness.sessions session\
-    \   ON session.session_id = epoch.session_id\
-    \ WHERE session.session_key = $1 AND session.deleted_at IS NULL\
-    \ ORDER BY epoch.epoch_index DESC\
-    \ LIMIT 1"
+    "SELECT latest.epoch_index, latest.prompt_version, latest.created_at,\
+    \ latest.provider, latest.connection_id, latest.model_id, latest.dialect,\
+    \ latest.cwd_text, latest.instructions_text, latest.tools_text,\
+    \ latest.generated_context_text, latest.grok_context_text,\
+    \ latest.prompt_cache_key\
+    \ FROM (\
+    \   SELECT epoch.*\
+    \   FROM harness.session_prompt_epochs epoch\
+    \   JOIN harness.sessions session\
+    \     ON session.session_id = epoch.session_id\
+    \   WHERE session.session_key = $1 AND session.deleted_at IS NULL\
+    \   ORDER BY epoch.epoch_index DESC\
+    \   LIMIT 1\
+    \ ) latest\
+    \ WHERE latest.is_active"
     (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         SessionPromptEpoch

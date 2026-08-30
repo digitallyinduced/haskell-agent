@@ -32,6 +32,7 @@ module Agent.CLI.Session
     , appendTurnIndexed
     , appendTurnWithMetaUpdate
     , appendTurnWithMetaUpdateIndexed
+    , appendTurnWithPromptResetIndexed
     , appendTurnKeepTitle
     , appendTurnKeepTitleIndexed
     , sessionRewindChoices
@@ -849,7 +850,42 @@ appendTurnWithMetaTransitionIndexed
     -> SessionTurn
     -> (SessionMeta -> SessionMeta)
     -> IO (SessionHandle, Int64)
-appendTurnWithMetaTransitionIndexed handle turn transition = do
+appendTurnWithMetaTransitionIndexed =
+    appendTurnWithMetaTransitionIndexedUsing Store.appendSessionTurnIndexed
+
+-- | Append a turn while atomically retiring the current provider-visible
+-- prompt epoch. The returned handle has no prompt snapshot, so its next
+-- request establishes a fresh stable prefix.
+appendTurnWithPromptResetIndexed
+    :: SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> IO (SessionHandle, Int64)
+appendTurnWithPromptResetIndexed handle turn transition =
+    appendTurnWithMetaTransitionIndexedUsing
+        Store.appendSessionTurnIndexedWithPromptReset
+        handle
+        turn
+        (\meta ->
+            (transition meta)
+                { metaPromptSnapshot = Nothing
+                })
+
+appendTurnWithMetaTransitionIndexedUsing
+    :: ( StorePool
+        -> Store.SessionTurn
+        -> Store.SessionMetadata
+        -> IO (Either StoreError (Maybe Int64))
+       )
+    -> SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> IO (SessionHandle, Int64)
+appendTurnWithMetaTransitionIndexedUsing
+    appendStoredTurn
+    handle
+    turn
+    transition = do
     let pool = handle.sessionPool
     now <- normalizePostgresTimestamp <$> getCurrentTime
     let meta0 = handle.sessionMeta
@@ -858,7 +894,7 @@ appendTurnWithMetaTransitionIndexed handle turn transition = do
             , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
             }
         finalMeta = transition meta
-    Store.appendSessionTurnIndexed
+    appendStoredTurn
         pool
         (toStoredTurn turn)
         (toStoredMetadata finalMeta) >>= \case
@@ -1277,6 +1313,8 @@ importSessionTransfer pool root cwd transfer = runExceptT do
             , legacyContentHash = contentFingerprint bytes
             , legacyMetadata = toStoredMetadata meta
             , legacyTurns = map toStoredTurn transfer.transferTurns
+            , legacyPromptSnapshot =
+                toStoredPromptSnapshot <$> meta.metaPromptSnapshot
             }
     lift (Store.importLegacySession pool legacy) >>= \case
         Left err -> do

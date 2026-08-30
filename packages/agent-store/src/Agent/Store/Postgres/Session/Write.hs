@@ -12,13 +12,14 @@ module Agent.Store.Postgres.Session.Write
     , appendSessionPromptEpoch
     , appendSessionTurn
     , appendSessionTurnIndexed
+    , appendSessionTurnIndexedWithPromptReset
     , appendSessionTurns
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
     ) where
 
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -181,7 +182,26 @@ appendSessionTurnIndexed
     -> SessionTurn
     -> SessionMetadata
     -> IO (Either StoreError (Maybe Int64))
-appendSessionTurnIndexed pool turn metadata =
+appendSessionTurnIndexed =
+    appendSessionTurnIndexedInternal False
+
+-- | Append a turn and retire the current provider-visible prompt prefix in
+-- the same transaction. The next request must establish a new prompt epoch.
+appendSessionTurnIndexedWithPromptReset
+    :: StorePool
+    -> SessionTurn
+    -> SessionMetadata
+    -> IO (Either StoreError (Maybe Int64))
+appendSessionTurnIndexedWithPromptReset =
+    appendSessionTurnIndexedInternal True
+
+appendSessionTurnIndexedInternal
+    :: Bool
+    -> StorePool
+    -> SessionTurn
+    -> SessionMetadata
+    -> IO (Either StoreError (Maybe Int64))
+appendSessionTurnIndexedInternal resetPrompt pool turn metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
             _ <- Transaction.statement
@@ -209,6 +229,13 @@ appendSessionTurnIndexed pool turn metadata =
                             }
                         insertTurnStatement
                     insertResponseItems turnId turn.sessionTurnItems
+                    when resetPrompt do
+                        _ <- Transaction.statement
+                            ( metadata.sessionMetadataKey
+                            , turn.sessionTurnOccurredAt
+                            )
+                            invalidatePromptEpochStatement
+                        pure ()
                     pure (Just turnIndex)
 
 -- | Append a sequence of turns as one atomic transcript transition.
@@ -284,6 +311,13 @@ importLegacySession pool legacy =
                         "legacy.import_completed"
                         metadata
                         legacy.legacyTurns
+                    forM_ legacy.legacyPromptSnapshot \snapshot -> do
+                        epoch <- Transaction.statement
+                            (sessionKey, snapshot)
+                            insertPromptEpochStatement
+                        case epoch of
+                            Just 0 -> pure ()
+                            _ -> Transaction.condemn
                     Transaction.statement
                         ( legacy.legacySourcePath
                         , legacy.legacyContentHash
@@ -400,7 +434,7 @@ insertPromptEpochStatement
     :: Statement (Text, SessionPromptSnapshot) (Maybe Int64)
 insertPromptEpochStatement = mkStatement
     "INSERT INTO harness.session_prompt_epochs (\
-    \ session_id, epoch_index, prompt_version, created_at,\
+    \ session_id, epoch_index, is_active, prompt_version, created_at,\
     \ provider, connection_id, model_id, dialect, cwd_text,\
     \ instructions_text, tools_text,\
     \ generated_context_text, grok_context_text, prompt_cache_key\
@@ -411,7 +445,7 @@ insertPromptEpochStatement = mkStatement
     \     FROM harness.session_prompt_epochs existing\
     \     WHERE existing.session_id = session.session_id\
     \   ), 0),\
-    \   $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
+    \   TRUE, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
     \ FROM harness.sessions session\
     \ WHERE session.session_key = $1 AND session.deleted_at IS NULL\
     \ RETURNING epoch_index"
@@ -445,6 +479,40 @@ insertPromptEpochStatement = mkStatement
     True
   where
     snapshotField field = field . snd
+
+invalidatePromptEpochStatement
+    :: Statement (Text, UTCTime) (Maybe Int64)
+invalidatePromptEpochStatement = mkStatement
+    "WITH latest AS (\
+    \ SELECT epoch.*\
+    \ FROM harness.session_prompt_epochs epoch\
+    \ JOIN harness.sessions session\
+    \   ON session.session_id = epoch.session_id\
+    \ WHERE session.session_key = $1 AND session.deleted_at IS NULL\
+    \ ORDER BY epoch.epoch_index DESC\
+    \ LIMIT 1\
+    \ )\
+    \ INSERT INTO harness.session_prompt_epochs (\
+    \ session_id, epoch_index, is_active, prompt_version, created_at,\
+    \ provider, connection_id, model_id, dialect, cwd_text,\
+    \ instructions_text, tools_text,\
+    \ generated_context_text, grok_context_text, prompt_cache_key\
+    \ )\
+    \ SELECT latest.session_id, latest.epoch_index + 1, FALSE,\
+    \   latest.prompt_version, $2, latest.provider, latest.connection_id,\
+    \   latest.model_id, latest.dialect, latest.cwd_text,\
+    \   latest.instructions_text, latest.tools_text,\
+    \   latest.generated_context_text, latest.grok_context_text,\
+    \   latest.prompt_cache_key\
+    \ FROM latest\
+    \ WHERE latest.is_active\
+    \ RETURNING epoch_index"
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd
+            >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+    )
+    (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.int8)))
+    True
 
 insertSessionStatement :: Statement SessionMetadata Text
 insertSessionStatement = mkStatement
