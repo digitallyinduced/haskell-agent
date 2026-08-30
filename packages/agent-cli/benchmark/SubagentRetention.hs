@@ -3,7 +3,7 @@ module Main (main) where
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Compaction (OccupancySnapshot(..), estimatedOccupancy)
 import Agent.CLI.NativeAgents
-import Agent.CLI.Subagents.Runtime (SubagentSession(..))
+import Agent.CLI.Subagents.Runtime (SubagentResidency(..), SubagentSession(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
 import Agent.Provider (Provider(..))
@@ -271,8 +271,7 @@ buildSessions agentCount itemCount payloadBytes sampleIndex =
                 ]
         transcript <- newIORef items
         contextTokens <- newIORef (Just (estimatedOccupancy itemCount payloadBytes))
-        pinned <- newIORef False
-        hydrated <- newMVar True
+        residency <- newMVar SessionResident
         pure
             ( agentIndex
             , SubagentSession
@@ -282,18 +281,17 @@ buildSessions agentCount itemCount payloadBytes sampleIndex =
                 , subSessionConnection = "openai"
                 , subSessionEffectiveModel = "gpt-5.6-luna"
                 , subSessionDialect = CodexDialect
-                , subSessionPinned = pinned
-                , subSessionHydrated = hydrated
+                , subSessionResidency = residency
                 }
             )
 
 evictSessions :: Map Int SubagentSession -> IO ()
 evictSessions sessions =
     forM_ (Map.elems sessions) \session ->
-        modifyMVar_ session.subSessionHydrated \_ -> do
+        modifyMVar_ session.subSessionResidency \_ -> do
             writeIORef session.subSessionTranscript []
             writeIORef session.subSessionContextTokens Nothing
-            pure False
+            pure SessionEvicted
 
 checksumSessions :: Map Int SubagentSession -> IO Int
 checksumSessions sessions =

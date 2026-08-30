@@ -6,14 +6,17 @@ import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import Agent.CLI.Subagents.Runtime
-    ( SubagentSession(..)
+    ( SubagentResidency(..)
+    , SubagentSession(..)
     , flushAllSubagentSnapshots
     , lookupOrCreateSubagentSession
+    , pinSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn
     , grokSpawnedChildIdentity
     , restoreAgentFromDisk
     , resolveChildModelAndEffort
+    , unpinSubagentSession
     , usesOpenAiChildTransport
     , validatePersistedSubagentTarget
     )
@@ -516,7 +519,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                                 readIORef session.subSessionTranscript
                                     `shouldReturn` marker
 
-    it "keeps the installed session across concurrent registry restores" do
+    it "keeps the installed pinned session across concurrent registry restores" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-concurrent-restore"
                 persisted = [messageItem RoleUser "persisted"]
@@ -540,6 +543,10 @@ spec = describe "Agent.CLI.SubagentStore" do
                 lookupTestSession
                     sessionsRef storeRootRef typesRef agentId
             writeIORef installed.subSessionTranscript inMemory
+            pinSubagentSession
+                storeRootRef typesRef Nothing agentId installed
+            readMVar installed.subSessionResidency
+                `shouldReturn` SessionPinned
             bracket
                 (newSubagentRegistry defaultSubagentConfig dir
                     (\_ _ _ _ -> fail "unexpected subagent runner invocation")
@@ -566,6 +573,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                         Just current -> do
                             readIORef current.subSessionTranscript
                                 `shouldReturn` inMemory
+                            readMVar current.subSessionResidency
+                                `shouldReturn` SessionPinned
                             let marker = [messageItem RoleAssistant "same-ref"]
                             writeIORef current.subSessionTranscript marker
                             readIORef installed.subSessionTranscript
@@ -593,16 +602,18 @@ spec = describe "Agent.CLI.SubagentStore" do
                     (\_ _ -> pure ()))
                 closeSubagentRegistry
                 \registry -> do
-                    writeIORef session.subSessionPinned True
+                    pinSubagentSession
+                        storeRootRef typesRef Nothing agentId session
                     persistAndEvictSubagentSessionWithStatus
                         storeRootRef registry typesRef agentId
                         (Completed (Just "answer")) session
                         `shouldReturn` Right False
                     readIORef session.subSessionTranscript
                         `shouldReturn` items
-                    readMVar session.subSessionHydrated `shouldReturn` True
+                    readMVar session.subSessionResidency
+                        `shouldReturn` SessionPinned
 
-                    writeIORef session.subSessionPinned False
+                    unpinSubagentSession session
                     persistAndEvictSubagentSessionWithStatus
                         storeRootRef registry typesRef agentId
                         (Completed (Just "answer")) session
@@ -610,17 +621,23 @@ spec = describe "Agent.CLI.SubagentStore" do
                     readIORef session.subSessionTranscript `shouldReturn` []
                     readIORef session.subSessionContextTokens
                         `shouldReturn` Nothing
-                    readMVar session.subSessionHydrated `shouldReturn` False
+                    readMVar session.subSessionResidency
+                        `shouldReturn` SessionEvicted
 
+                    pinSubagentSession
+                        storeRootRef typesRef Nothing agentId session
+                    readMVar session.subSessionResidency
+                        `shouldReturn` SessionPinned
                     rehydrated <-
                         lookupTestSession
                             sessionsRef storeRootRef typesRef agentId
                     readIORef rehydrated.subSessionTranscript
                         `shouldReturn` items
-                    readMVar rehydrated.subSessionHydrated
-                        `shouldReturn` True
+                    readMVar rehydrated.subSessionResidency
+                        `shouldReturn` SessionPinned
                     writeIORef rehydrated.subSessionTranscript
                         [messageItem RoleAssistant "poison"]
+                    unpinSubagentSession rehydrated
                     persistAndEvictSubagentSessionWithStatus
                         storeRootRef registry typesRef agentId
                         (Completed (Just "answer")) rehydrated
@@ -660,7 +677,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                         noStoreRef registry typesRef validId Interrupted noStore
                         `shouldReturn` Right False
                     readIORef noStore.subSessionTranscript `shouldReturn` items
-                    readMVar noStore.subSessionHydrated `shouldReturn` True
+                    readMVar noStore.subSessionResidency
+                        `shouldReturn` SessionResident
 
                     failed <-
                         lookupTestSession
@@ -673,7 +691,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                             Left _ -> True
                             Right _ -> False)
                     readIORef failed.subSessionTranscript `shouldReturn` items
-                    readMVar failed.subSessionHydrated `shouldReturn` True
+                    readMVar failed.subSessionResidency
+                        `shouldReturn` SessionResident
 
 lookupTestSession sessionsRef storeRootRef typesRef agentId =
     lookupOrCreateSubagentSession
