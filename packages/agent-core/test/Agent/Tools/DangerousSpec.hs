@@ -2,6 +2,7 @@ module Agent.Tools.DangerousSpec (spec) where
 
 import Agent.Tools.Dangerous
     ( commandLooksLikeRmRf
+    , commandEscapesSessionTempVariable
     , commandUsesHardcodedSystemTmp
     , commandUsesHardcodedSystemTmpAt
     , forbiddenRmRfReason
@@ -12,7 +13,9 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import Control.Exception.Safe (tryAny)
 import System.OsPath (unsafeEncodeUtf)
+import System.Posix.Files (deviceID, fileID, getFileStatus)
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import Test.QuickCheck
@@ -184,31 +187,51 @@ spec = do
                 `shouldBe` replicate 4 True
 
         it "resolves relative aliases against the shell working directory" do
-            let cwd = unsafeEncodeUtf "/workspace/haskell-agent"
-            map (commandUsesHardcodedSystemTmpAt cwd)
+            let cwd = unsafeEncodeUtf "/usr/local"
+            mapM (commandUsesHardcodedSystemTmpAt cwd)
                 [ "cat ../../tmp/other-session"
                 , "cat ../../private/tmp/other-session"
-                , "cat src/../../../tmp/other-session"
+                , "cat ../local/../../tmp/other-session"
                 ]
-                `shouldBe` replicate 3 True
-            map (commandUsesHardcodedSystemTmpAt cwd)
+                `shouldReturn` replicate 3 True
+            mapM (commandUsesHardcodedSystemTmpAt cwd)
                 [ "cat ../tmp/project-file"
                 , "cat ../../tmpfile"
                 , "curl https://example.test/../../tmp/file"
                 ]
-                `shouldBe` replicate 3 False
+                `shouldReturn` replicate 3 False
 
-        it "matches shared temp components case-insensitively" do
-            map commandUsesHardcodedSystemTmp
+        it "matches case variants only when the host filesystem aliases them" do
+            aliasesCase <- pathsReferToSameFile "/tmp" "/TMP"
+            let cwd = unsafeEncodeUtf "/usr/local"
+            mapM (commandUsesHardcodedSystemTmpAt cwd)
                 [ "cat /TMP/other-session"
                 , "cat /PRIVATE/TMP/other-session"
                 , "cat /private/TmP/other-session"
                 , "curl file:///TMP/other-session"
                 , "cat /usr/../TmP/other-session"
                 ]
-                `shouldBe` replicate 5 True
+                `shouldReturn` replicate 5 aliasesCase
+            commandUsesHardcodedSystemTmp "cat /TMP/other-session"
+                `shouldBe` False
             commandUsesHardcodedSystemTmp "cat /TMPfile"
                 `shouldBe` False
+
+        it "follows simple shell cwd changes before checking relative aliases" do
+            let cwd = unsafeEncodeUtf "/usr/local"
+            commandUsesHardcodedSystemTmpAt cwd
+                "cd ../..; cat tmp/other-session"
+                `shouldReturn` True
+            commandUsesHardcodedSystemTmpAt cwd
+                "cd /; cat private/tmp/other-session"
+                `shouldReturn` True
+
+        it "preserves symlink semantics in normalized shell paths" do
+            aliases <- pathsReferToSameFile "/bin/../tmp" "/tmp"
+            commandUsesHardcodedSystemTmpAt
+                (unsafeEncodeUtf "/")
+                "cat /bin/../tmp/other-session"
+                `shouldReturn` aliases
 
         it "blocks local file URLs targeting shared temp" do
             map commandUsesHardcodedSystemTmp
@@ -251,6 +274,26 @@ spec = do
                 `shouldBe` False
             commandUsesHardcodedSystemTmp "cat /usr/../private/tmpfile"
                 `shouldBe` False
+
+        it "rejects traversal outside session temp variables" do
+            map commandEscapesSessionTempVariable
+                [ "ls \"$TMPDIR/..\""
+                , "cat ${TMPDIR}/../other-session/secret"
+                , "cat \"$HASKELL_AGENT_TMPDIR/a/../../secret\""
+                , "cat \"$TMPDIR-other-session/secret\""
+                , "cat \"${TMPDIR}\"../other-session/secret"
+                , "cd \"$TMPDIR\"; cat ../other-session/secret"
+                , "cd \"$TMPDIR\"/nested; cat ../../other-session/secret"
+                , "cd \"${HASKELL_AGENT_TMPDIR}/nested\"; cd ../.."
+                ]
+                `shouldBe` replicate 8 True
+            map commandEscapesSessionTempVariable
+                [ "cat \"$TMPDIR/result\""
+                , "cat \"$TMPDIR\"/result"
+                , "cat \"$TMPDIR/build/../result\""
+                , "cd \"$TMPDIR/nested\"; cat ../result"
+                ]
+                `shouldBe` replicate 4 False
 
     describe "shellCommandBlocked" do
         it "blocks shell tools with a clear reason" do
@@ -331,3 +374,15 @@ spec = do
         TextEncoding.decodeUtf8
             (LazyByteString.toStrict
                 (Aeson.encode (Aeson.object ["command" Aeson..= command])))
+
+pathsReferToSameFile :: FilePath -> FilePath -> IO Bool
+pathsReferToSameFile left right =
+    tryAny
+        ((,)
+            <$> getFileStatus left
+            <*> getFileStatus right) >>= \case
+        Left _ -> pure False
+        Right (leftStatus, rightStatus) ->
+            pure $
+                deviceID leftStatus == deviceID rightStatus
+                    && fileID leftStatus == fileID rightStatus

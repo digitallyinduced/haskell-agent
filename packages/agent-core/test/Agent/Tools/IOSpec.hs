@@ -37,7 +37,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar)
-import Control.Exception.Safe (bracket, tryIO)
+import Control.Exception.Safe (bracket, tryAny, tryIO)
 import Control.Monad (replicateM)
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Either (isLeft, isRight)
@@ -47,6 +47,7 @@ import qualified Data.Text as Text
 import System.Directory
     ( canonicalizePath
     , createDirectory
+    , createDirectoryIfMissing
     , createDirectoryLink
     , getTemporaryDirectory
     , listDirectory
@@ -55,7 +56,9 @@ import System.Directory
 import System.FilePath ((</>), takeFileName)
 import System.IO (IOMode(..), hClose, openFile)
 import System.IO.Error (alreadyInUseErrorType, mkIOError)
+import System.Info (os)
 import System.Posix.Temp (mkdtemp)
+import System.Posix.Files (deviceID, fileID, getFileStatus)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -268,16 +271,46 @@ spec = describe "Agent.Tools.IO" do
             resolveUnderCwd env
                 (fromFilePath ("/usr/../tmp" </> relative))
                 `shouldReturn` expected
-            resolveUnderCwd env
-                (fromFilePath ("/var/../private/tmp" </> relative))
-                `shouldReturn` expected
-            resolveUnderCwd env
-                (fromFilePath ("/TMP" </> relative))
-                `shouldReturn` expected
-            resolveUnderCwd env
-                (fromFilePath ("/PRIVATE/TMP" </> relative))
-                `shouldReturn` expected
             readIORef requests `shouldReturn` []
+            varPrivateAliases <-
+                pathsReferToSameFile "/var/../private/tmp" "/private/tmp"
+            varPrivate <- resolveUnderCwd env
+                (fromFilePath ("/var/../private/tmp" </> relative))
+            if varPrivateAliases
+                then varPrivate `shouldBe` expected
+                else varPrivate `shouldSatisfy` isLeft
+            upperTmpAliases <- pathsReferToSameFile "/tmp" "/TMP"
+            upperTmp <- resolveUnderCwd env
+                (fromFilePath ("/TMP" </> relative))
+            if upperTmpAliases
+                then upperTmp `shouldBe` expected
+                else upperTmp `shouldSatisfy` isLeft
+            upperPrivateAliases <-
+                pathsReferToSameFile "/private/tmp" "/PRIVATE/TMP"
+            upperPrivate <- resolveUnderCwd env
+                (fromFilePath ("/PRIVATE/TMP" </> relative))
+            if upperPrivateAliases
+                then upperPrivate `shouldBe` expected
+                else upperPrivate `shouldSatisfy` isLeft
+
+    it "preserves symlink semantics before recognizing a normalized alias" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                scratch = dir </> "scratch"
+                requested = "/bin/../tmp/haskell-agent-alias-probe"
+            mapM_ createDirectory [workspace, scratch]
+            env <- defaultToolEnv (fromFilePath workspace)
+            setToolSessionTmp env (Just (fromFilePath scratch))
+            aliases <- pathsReferToSameFile "/bin/../tmp" "/tmp"
+            result <- resolveUnderCwd env (fromFilePath requested)
+            if aliases
+                then do
+                    canonicalScratch <- canonicalizePath scratch
+                    result `shouldBe` Right
+                        (fromFilePath
+                            (canonicalScratch
+                                </> "haskell-agent-alias-probe"))
+                else result `shouldSatisfy` isLeft
 
     it "maps an existing host temp file unless its root was explicitly allowed" do
         withTempDir \dir ->
@@ -419,6 +452,34 @@ spec = describe "Agent.Tools.IO" do
                 5000
             result.commandStdout `shouldBe`
                 Text.pack scratch <> "\n" <> Text.pack scratch <> "\nunset"
+
+    it "isolates managed sibling scratch directories at the process boundary" do
+        if os /= "darwin"
+            then pendingWith "the process-level Seatbelt boundary is macOS-only"
+            else withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                    sessions =
+                        dir </> ".haskell-agent" </> "tmp" </> "sessions"
+                    scratch = sessions </> "current"
+                    sibling = sessions </> "other"
+                    ownFile = scratch </> "own"
+                    secret = sibling </> "secret"
+                mapM_ (createDirectoryIfMissing True)
+                    [workspace, scratch, sibling]
+                writeFile ownFile "own-scratch"
+                writeFile secret "sibling-secret"
+                env <- defaultToolEnv (fromFilePath workspace)
+                setToolSessionTmp env (Just (fromFilePath scratch))
+                ownResult <- runShellCommand env (fromFilePath workspace)
+                    "cat \"$TMPDIR/own\""
+                    5000
+                ownResult.commandExitCode `shouldBe` Just 0
+                ownResult.commandStdout `shouldBe` "own-scratch"
+                result <- runShellCommand env (fromFilePath workspace)
+                    "cat \"$TMPDIR/../other/secret\""
+                    5000
+                result.commandExitCode `shouldNotBe` Just 0
+                result.commandStdout `shouldNotBe` "sibling-secret"
 
     it "replaces inherited temp variables without exposing host temp" do
         let scratch = fromFilePath "/session/private"
@@ -657,6 +718,18 @@ checkConcurrentAppends dir = do
 startAppend path (payload, var) =
     forkIO $
         tryIO (appendLazyFileRetryingOpen path payload) >>= putMVar var
+
+pathsReferToSameFile :: FilePath -> FilePath -> IO Bool
+pathsReferToSameFile left right =
+    tryAny
+        ((,)
+            <$> getFileStatus left
+            <*> getFileStatus right) >>= \case
+        Left _ -> pure False
+        Right (leftStatus, rightStatus) ->
+            pure $
+                deviceID leftStatus == deviceID rightStatus
+                    && fileID leftStatus == fileID rightStatus
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do

@@ -274,6 +274,39 @@ spec = describe "Grok Build dialect" do
                 takeDirectory (unsafeToFilePath shell.shellEnvFile)
                     `shouldBe` scratch
 
+    it "checks temp traversal while holding the persistent shell state" do
+        withTempDir \dir -> do
+            let scratch = dir </> "session-scratch"
+            createDirectory scratch
+            createDirectory (scratch </> "nested")
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                Right moved <- runForegroundStreaming
+                    session
+                    "cd \"$TMPDIR\""
+                    10000
+                    (\_ _ -> pure ())
+                moved.commandExitCode `shouldBe` Just 0
+                nestedEscape <- runForegroundStreaming
+                    session
+                    "cd nested; cat ../../other-session/secret"
+                    10000
+                    (\_ _ -> pure ())
+                nestedEscape `shouldSatisfy`
+                    either
+                        (Text.isInfixOf "Blocked path traversal")
+                        (const False)
+                escaped <- runForegroundStreaming
+                    session
+                    "cat ../other-session/secret"
+                    10000
+                    (\_ _ -> pure ())
+                escaped `shouldSatisfy`
+                    either
+                        (Text.isInfixOf "Blocked path traversal")
+                        (const False)
+
     it "recreates shell state after the session temp directory changes" do
         withTempDir \dir -> do
             let firstScratch = dir </> "first-session"
@@ -283,7 +316,7 @@ spec = describe "Grok Build dialect" do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
             setToolSessionTmp env (Just (unsafeEncodeUtf firstScratch))
             bracket (newGrokSession env) closeGrokSession \session -> do
-                moved <- runForegroundStreaming
+                Right moved <- runForegroundStreaming
                     session
                     "cd \"$TMPDIR\""
                     10000
@@ -307,7 +340,7 @@ spec = describe "Grok Build dialect" do
                 unsafeToFilePath nextShell.shellCwd `shouldBe` dir
                 doesFileExist nextEnvFile `shouldReturn` True
 
-                result <- runForegroundStreaming
+                Right result <- runForegroundStreaming
                     session
                     "printf reset-ok"
                     10000

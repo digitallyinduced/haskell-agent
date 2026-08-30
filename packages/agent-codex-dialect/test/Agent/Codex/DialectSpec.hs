@@ -130,6 +130,23 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf "Blocked hardcoded system temp path"
                     result.output `shouldSatisfy` Text.isInfixOf "$TMPDIR"
 
+    it "rejects traversal above the private temp variables" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-session-tmp-traversal"
+                            "shell_command"
+                            "{\"command\":\"cat \\\"$TMPDIR/../other-session/secret\\\"\"}")
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf "Blocked path traversal"
+
     it "rejects system temp paths relative to the shell cwd" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
