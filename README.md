@@ -7,7 +7,7 @@ An independent agent harness, written in Haskell.
 ## Try it out
 
 ```bash
-nix run "github:digitallyinduced/haskell-agent"
+nix run --accept-flake-config "github:digitallyinduced/haskell-agent"
 ```
 
 ## Supported LLM Providers
@@ -96,10 +96,11 @@ These are important product features, but not the core differentiation.
 ## Install
 
 Install [Nix](https://nixos.org/download/) with flakes enabled, then install
-`haskell-agent`:
+`haskell-agent`. `--accept-flake-config` enables the public IHP binary cache
+declared by the flake:
 
 ```console
-nix profile add github:digitallyinduced/haskell-agent
+nix profile add --accept-flake-config github:digitallyinduced/haskell-agent
 ```
 
 ## Run

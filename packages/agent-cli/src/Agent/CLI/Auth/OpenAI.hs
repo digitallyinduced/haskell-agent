@@ -112,13 +112,28 @@ preferredOpenAiTokenProvider preferredAccount pool fallback =
                             selectedCredential accountId
                         Nothing ->
                             pure fallbackResult
-            Nothing ->
-                readIORef preferredAccount >>= \case
-                    Nothing ->
-                        getNextToken fallback Nothing
-                    Just accountId ->
-                        selectedCredential accountId
+            Nothing -> checkoutPreferred
   where
+    checkoutPreferred =
+        readIORef preferredAccount >>= \case
+            Nothing ->
+                getNextToken fallback Nothing
+            Just accountId ->
+                selectedCredential accountId >>= \case
+                    Left CredentialsExhausted{} ->
+                        clearStalePreference accountId
+                    result ->
+                        pure result
+
+    clearStalePreference accountId = do
+        cleared <- atomicModifyIORef' preferredAccount \current ->
+            if current == Just accountId
+                then (Nothing, True)
+                else (current, False)
+        if cleared
+            then getNextToken fallback Nothing
+            else checkoutPreferred
+
     selectedCredential accountId =
         OpenAI.getAccessTokenForAccount pool accountId >>= \case
             Right (accessToken, selectedAccountId) ->

@@ -748,6 +748,30 @@ spec = do
                             ("expected fallback account, got " <> show err)
             readIORef preferred `shouldReturn` Nothing
 
+        it "falls back when the preferred account is already cooling down" do
+            pool <- OpenAI.newPool
+                [ testAuthStateFor "acc-1"
+                , testAuthStateFor "acc-2"
+                ]
+                (pure . Right)
+            fallback <- OpenAICredential.poolTokenProvider pool
+            preferred <- newIORef (Just "acc-2")
+            let provider =
+                    preferredOpenAiTokenProvider
+                        preferred
+                        pool
+                        fallback
+
+            OpenAI.reportRateLimit pool "acc-2" (Just 60)
+
+            getNextToken provider Nothing >>= \case
+                Right credential ->
+                    credential.accountId `shouldBe` "acc-1"
+                Left err ->
+                    expectationFailure
+                        ("expected fallback account, got " <> show err)
+            readIORef preferred `shouldReturn` Nothing
+
         it "keeps the selection when another credential reports failure" do
             pool <- OpenAI.newPool
                 [ testAuthStateFor "acc-1"
