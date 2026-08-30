@@ -151,6 +151,14 @@ exerciseStore pool = do
 
     readLearnedSkill pool repositoryScope "postgres-session-storage"
         `shouldReturn` Right (Just createdSkill)
+    fmap (fmap (map (.learnedSkillSlug))) (
+        listAllLearnedSkillsLimited
+            pool scopes (Just RepositoryScope) 1)
+        `shouldReturn` Right ["postgres-session-storage"]
+    fmap (fmap (map (.learnedSkillSlug))) (
+        listAllLearnedSkillsLimited
+            pool scopes (Just UserScope) 1)
+        `shouldReturn` Right []
     searchLearnedSkills pool scopes "tool outputs text" 10 >>= \case
         Right [match] -> do
             match.learnedSkillSearchSkill.learnedSkillSlug
@@ -205,6 +213,14 @@ exerciseStore pool = do
                 map (.learnedSkillRevisionNumber) revisions `shouldBe` [2, 1]
             other ->
                 expectationFailure ("unexpected skill revisions: " <> show other)
+    fmap (fmap (map (.learnedSkillRevisionNumber))) (
+        listLearnedSkillRevisionsLimited
+            pool repositoryScope "postgres-session-storage" 1)
+        `shouldReturn` Right [2]
+    fmap (fmap (fmap (.learnedSkillRevisionNumber))) (
+        readLearnedSkillRevision
+            pool repositoryScope "postgres-session-storage" 1)
+        `shouldReturn` Right (Just 1)
     listLearnedSkillSources
         pool repositoryScope "postgres-session-storage" 2 >>= \case
             Right [storedSource] -> do

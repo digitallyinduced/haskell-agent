@@ -14,6 +14,9 @@ foreign import ccall "ha_gateway_abi_smoke"
 foreign import ccall "ha_mcp_admin_abi_smoke"
     mcpAdminAbiSmoke :: IO CInt
 
+foreign import ccall "ha_learned_skill_admin_abi_smoke"
+    learnedSkillAdminAbiSmoke :: IO CInt
+
 spec :: Spec
 spec = describe "native image attachment ABI" do
     it "preserves the documented image struct layout and ordered buffers" do
@@ -23,3 +26,5 @@ spec = describe "native image attachment ABI" do
 
     it "preserves the typed MCP argument and environment layouts" do
         mcpAdminAbiSmoke `shouldReturn` 0
+    it "compiles typed learned resource callbacks and stable enum values" do
+        learnedSkillAdminAbiSmoke `shouldReturn` 0

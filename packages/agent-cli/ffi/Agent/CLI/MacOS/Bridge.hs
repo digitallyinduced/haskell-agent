@@ -13,6 +13,7 @@ module Agent.CLI.MacOS.Bridge
     , nativeTurnArguments
     ) where
 
+import Agent.CLI.MacOS.ResourceAdmin ()
 import qualified Agent.CLI.AgentViewport as Viewport
 import Agent.CLI.BrowserTools
     ( BrowserCommand(..)
@@ -54,7 +55,7 @@ import Agent.Store.Postgres.Skill
     ( LearnedSkill(..)
     , learnedSkillActivationText
     , learnedSkillStatusText
-    , listAllLearnedSkills
+    , listAllLearnedSkillsLimited
     )
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
@@ -1071,9 +1072,11 @@ ha_learned_skills_list cwdBytes (CSize cwdLength) callback context
                     Right opened ->
                         bracket (pure opened) closeStore \store ->
                             first renderStoreError
-                                <$> listAllLearnedSkills
+                                <$> listAllLearnedSkillsLimited
                                     (trustedPool store)
                                     (applicableDatabaseScopes databaseScopes)
+                                    Nothing
+                                    1000
 
 type LearnedSkillItemCallback =
     CString -> CSize -> CString -> CSize -> CLLong
