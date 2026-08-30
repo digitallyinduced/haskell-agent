@@ -26,7 +26,10 @@ import Agent.Store.Postgres
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
+import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar)
+import Control.Concurrent.Async (concurrently, mapConcurrently)
 import Control.Exception.Safe (bracket)
+import Control.Monad (replicateM)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -572,6 +575,28 @@ spec = describe "Agent.CLI.Session" do
                 report.tempCleanupRemoved `shouldBe` [older]
                 doesDirectoryExist older `shouldReturn` False
                 doesDirectoryExist newer `shouldReturn` True
+
+        it "tolerates concurrent stale scratch directory cleanup" $
+            withTempSessionRoot \root -> do
+                let workerCount = 32
+                    sessionId n =
+                        "2026-08-20-"
+                            <> replicate (8 - length (show n)) '0'
+                            <> show n
+                mapM_ (addSessionTemp root . sessionId) [1 .. workerCount]
+                ready <- replicateM workerCount newEmptyMVar
+                start <- newEmptyMVar
+                (reports, ()) <-
+                    concurrently
+                        (mapConcurrently
+                            (\readyVar -> do
+                                putMVar readyVar ()
+                                readMVar start
+                                cleanupStaleSessionTemps root 1 [])
+                            ready)
+                        (mapM_ takeMVar ready >> putMVar start ())
+
+                concatMap (.tempCleanupFailures) reports `shouldBe` []
 
         it "never collects scratch directories allocated today" $
             withTempSessionRoot \root -> do
