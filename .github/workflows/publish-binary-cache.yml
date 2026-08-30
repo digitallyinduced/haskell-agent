@@ -36,9 +36,23 @@ jobs:
         experimental-features = nix-command flakes
       ATTIC_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#attic-client
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          fetch-depth: 1
+      - name: Check out the triggering revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_dir="$RUNNER_TEMP/haskell-agent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+
+          git init "$source_dir"
+          git -C "$source_dir" remote add origin \
+            https://github.com/digitallyinduced/haskell-agent.git
+          git -C "$source_dir" fetch \
+            --depth=1 \
+            --no-tags \
+            origin \
+            "$GITHUB_SHA"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
 
       - name: Build install and run closures
         shell: bash
@@ -48,6 +62,8 @@ jobs:
           BUILD_CORES: ${{ matrix.build-cores }}
         run: |
           set -euo pipefail
+
+          cd "$SOURCE_DIR"
 
           nix_bin="$(command -v nix || true)"
           if [[ -z "$nix_bin" && -x /run/current-system/sw/bin/nix ]]; then
