@@ -13,8 +13,9 @@ import Control.Concurrent.MVar
     , takeMVar
     )
 import Control.Exception.Safe (bracket, throwString)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import qualified Data.ByteString.Char8 as BS8
+import Data.Char (isLower, toUpper)
 import Data.Either (isLeft)
 import Data.IORef
     ( atomicModifyIORef'
@@ -25,12 +26,14 @@ import Data.IORef
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
+    , doesDirectoryExist
     , doesFileExist
     , getTemporaryDirectory
     , removeFile
     , removePathForcibly
     )
 import System.Exit (ExitCode(..))
+import System.Environment (getEnv, lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, openTempFile)
 import System.Process
     ( CreateProcess(..)
@@ -42,7 +45,8 @@ import System.Process
     )
 import System.Timeout (timeout)
 import System.Posix.Files
-    ( createSymbolicLink
+    ( createNamedPipe
+    , createSymbolicLink
     , ownerExecuteMode
     , ownerReadMode
     , ownerWriteMode
@@ -53,6 +57,199 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "repository review service" do
+    it "rejects repository-local Git and disables configured helpers" $
+        withRepository \root -> do
+            let bin = root <> "/bin"
+                fakeGit = bin <> "/git"
+                gitMarker = root <> "/repository-git-ran"
+                fsmonitor = root <> "/fsmonitor"
+                fsmonitorMarker = root <> "/fsmonitor-ran"
+                subdirectory = root <> "/nested"
+            createDirectory bin
+            createDirectory subdirectory
+            writeFile (subdirectory <> "/.git") "not a repository boundary\n"
+            writeFile fakeGit $
+                "#!/bin/sh\nprintf ran > "
+                    <> shellQuote gitMarker
+                    <> "\nexec /usr/bin/git \"$@\"\n"
+            writeFile fsmonitor $
+                "#!/bin/sh\nprintf ran > "
+                    <> shellQuote fsmonitorMarker
+                    <> "\nexit 0\n"
+            mapM_ (`setFileMode` 0o700) [fakeGit, fsmonitor]
+            originalPath <- getEnv "PATH"
+            bracket
+                (setEnv "PATH" (bin <> ":" <> originalPath))
+                (\_ -> setEnv "PATH" originalPath)
+                \_ -> do
+                    repositorySnapshot root
+                        `shouldReturnSatisfying` isLeft
+                    repositorySnapshot subdirectory
+                        `shouldReturnSatisfying` isLeft
+                    doesFileExist gitMarker `shouldReturn` False
+            let caseVariantBin = changePathCase root <> "/bin"
+            caseVariantExists <- doesDirectoryExist caseVariantBin
+            when caseVariantExists $
+                bracket
+                    (setEnv "PATH" (caseVariantBin <> ":" <> originalPath))
+                    (\_ -> setEnv "PATH" originalPath)
+                    \_ -> do
+                        repositorySnapshot root
+                            `shouldReturnSatisfying` isLeft
+                        doesFileExist gitMarker `shouldReturn` False
+
+            _ <- git root ["config", "core.fsmonitor", fsmonitor]
+            _ <- expectRight =<< repositorySnapshot root
+            doesFileExist fsmonitorMarker `shouldReturn` False
+
+    it "isolates snapshots from clean filters and injected Git config" $
+        withRepository \root -> do
+            let filterScript = root <> "/clean-filter"
+                filterMarker = root <> "/clean-filter-ran"
+                injectedConfig = root <> "/injected.gitconfig"
+                injectedScript = root <> "/injected-fsmonitor"
+                injectedMarker = root <> "/injected-fsmonitor-ran"
+            writeFile filterScript $
+                "#!/bin/sh\nprintf ran > "
+                    <> shellQuote filterMarker
+                    <> "\ncat\n"
+            setFileMode filterScript 0o700
+            writeFile (root <> "/.gitattributes") $
+                "tracked.txt filter=pwn\n*.filtered filter=pwn\n"
+            _ <- git root ["config", "filter.pwn.clean", filterScript]
+            _ <- git root ["config", "filter.pwn.required", "true"]
+            appendFile (root <> "/tracked.txt") "changed\n"
+            writeFile (root <> "/untracked.filtered") "untracked\n"
+            snapshot <- expectRight =<< repositorySnapshot root
+            _ <- expectRight
+                =<< repositoryDiff
+                    root
+                    snapshot.snapshotId
+                    RepositoryWorktreeDiff
+                    "tracked.txt"
+            doesFileExist filterMarker `shouldReturn` False
+
+            writeFile injectedScript $
+                "#!/bin/sh\nprintf ran > "
+                    <> shellQuote injectedMarker
+                    <> "\nexit 0\n"
+            setFileMode injectedScript 0o700
+            writeFile injectedConfig $
+                "[core]\n\tfsmonitor = "
+                    <> injectedScript
+                    <> "\n"
+            originalGlobal <- lookupEnv "GIT_CONFIG_GLOBAL"
+            bracket
+                (setEnv "GIT_CONFIG_GLOBAL" injectedConfig)
+                (\_ -> case originalGlobal of
+                    Nothing -> unsetEnv "GIT_CONFIG_GLOBAL"
+                    Just value -> setEnv "GIT_CONFIG_GLOBAL" value)
+                \_ -> do
+                    _ <- expectRight =<< repositorySnapshot root
+                    doesFileExist injectedMarker `shouldReturn` False
+
+    it "keeps isolated Git metadata outside the repository when TMPDIR is inside it" $
+        withRepository \root -> do
+            originalTemporaryDirectory <- lookupEnv "TMPDIR"
+            bracket
+                (setEnv "TMPDIR" root)
+                (\_ -> case originalTemporaryDirectory of
+                    Nothing -> unsetEnv "TMPDIR"
+                    Just value -> setEnv "TMPDIR" value)
+                \_ -> do
+                    first <- expectRight =<< repositorySnapshot root
+                    second <- expectRight =<< repositorySnapshot root
+                    first.snapshotFiles `shouldBe` []
+                    second.snapshotFiles `shouldBe` []
+                    second.snapshotId `shouldBe` first.snapshotId
+
+    it "preserves repository-local and configured exclude rules" $
+        withRepository \root -> do
+            let repositoryExclude = root <> "/.git/info/exclude"
+                configuredExclude = root <> "/.git/configured-excludes"
+            appendFile repositoryExclude
+                ( "repository-secret.env\n"
+                    <> "repository-wins.env\n"
+                    <> "!repository-unignored.env\n"
+                )
+            writeFile configuredExclude
+                ( "configured-secret.env\n"
+                    <> "!repository-wins.env\n"
+                    <> "repository-unignored.env\n"
+                )
+            _ <- git root
+                [ "config"
+                , "core.excludesFile"
+                , ".git/configured-excludes"
+                ]
+            writeFile (root <> "/repository-secret.env") "secret\n"
+            writeFile (root <> "/configured-secret.env") "secret\n"
+            writeFile (root <> "/repository-wins.env") "secret\n"
+            writeFile (root <> "/repository-unignored.env") "visible\n"
+            snapshot <- expectRight =<< repositorySnapshot root
+            map (.repositoryFilePath) snapshot.snapshotFiles
+                `shouldBe` ["repository-unignored.env"]
+
+    it "fails closed without blocking on a special exclude file" $
+        withRepository \root -> do
+            let repositoryExclude = root <> "/.git/info/exclude"
+            removeFile repositoryExclude
+            createNamedPipe repositoryExclude
+                (ownerReadMode `unionFileModes` ownerWriteMode)
+            result <- timeout 2_000_000 (repositorySnapshot root)
+            result `shouldSatisfy` \case
+                Just (Left (RepositoryCommandFailed _ _ _)) -> True
+                _ -> False
+
+    it "bounds repository-local config include stalls" $
+        withRepository \root -> do
+            let includedConfig = root <> "/.git/included-config"
+            _ <- git root ["config", "include.path", includedConfig]
+            createNamedPipe includedConfig
+                (ownerReadMode `unionFileModes` ownerWriteMode)
+            result <- timeout 3_000_000 (repositorySnapshot root)
+            result `shouldSatisfy` \case
+                Just (Left _) -> True
+                _ -> False
+
+    it "rejects untracked special files and fingerprints symlinks without following them" $
+        withRepository \root -> do
+            let untrackedPipe = root <> "/untracked-pipe"
+                hiddenPipe = root <> "/.git/hidden-pipe"
+                link = root <> "/pipe-link"
+            createNamedPipe untrackedPipe
+                (ownerReadMode `unionFileModes` ownerWriteMode)
+            blocked <- timeout 2_000_000 (repositorySnapshot root)
+            blocked `shouldSatisfy` \case
+                Just (Left (InvalidRepositoryRequest _)) -> True
+                Just (Right _) -> True
+                _ -> False
+            removeFile untrackedPipe
+
+            createNamedPipe hiddenPipe
+                (ownerReadMode `unionFileModes` ownerWriteMode)
+            createSymbolicLink ".git/hidden-pipe" link
+            linked <- timeout 2_000_000 (repositorySnapshot root)
+            linked `shouldSatisfy` \case
+                Just (Right snapshot) ->
+                    any
+                        ((== "pipe-link") . (.repositoryFilePath))
+                        snapshot.snapshotFiles
+                _ -> False
+            case linked of
+                Just (Right snapshot) ->
+                    timeout 2_000_000
+                        (repositoryDiff
+                            root
+                            snapshot.snapshotId
+                            RepositoryWorktreeDiff
+                            "pipe-link")
+                        `shouldReturnSatisfying` \case
+                            Just (Left (InvalidRepositoryRequest _)) -> True
+                            _ -> False
+                _ -> expectationFailure
+                    "symlink snapshot was unavailable for diff regression"
+
     it "distinguishes an unborn HEAD from a broken HEAD" do
         withTempDirectory "repository-review-unborn" \root -> do
             _ <- git root ["init", "-q"]
@@ -614,3 +811,11 @@ shellQuote value = "'" <> concatMap escape value <> "'"
   where
     escape '\'' = "'\\''"
     escape character = [character]
+
+changePathCase :: FilePath -> FilePath
+changePathCase = go
+  where
+    go [] = []
+    go (character : rest)
+        | isLower character = toUpper character : rest
+        | otherwise = character : go rest

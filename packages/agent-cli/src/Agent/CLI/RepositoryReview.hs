@@ -19,6 +19,7 @@ module Agent.CLI.RepositoryReview
     ) where
 
 import Control.Concurrent (threadDelay)
+import Control.Applicative ((<|>))
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -44,11 +45,12 @@ import Control.Exception.Safe
     , throwIO
     , throwString
     , tryAny
+    , tryIO
     )
 import Control.Monad (foldM, unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import Data.Char (isDigit)
+import Data.Char (isDigit, toLower)
 import Data.List (find, nub, sort)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -64,10 +66,18 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode(..))
+import System.Environment (getEnvironment)
 import qualified System.FileLock as FileLock
 import System.IO (Handle, hClose)
+import System.IO.Error (isDoesNotExistError)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Directory (canonicalizePath)
+import System.Directory
+    ( canonicalizePath
+    , createDirectory
+    , doesDirectoryExist
+    , getTemporaryDirectory
+    , removePathForcibly
+    )
 import System.FilePath
     ( isAbsolute
     , makeRelative
@@ -81,8 +91,28 @@ import System.Posix.Signals
     , sigTERM
     , signalProcessGroup
     )
-import System.Posix.Files (fileMode, getSymbolicLinkStatus)
-import System.Posix.Types (ProcessID)
+import System.Posix.Files
+    ( fileMode
+    , getFdStatus
+    , getSymbolicLinkStatus
+    , isRegularFile
+    , isSymbolicLink
+    , readSymbolicLink
+    , setFileMode
+    )
+import System.Posix.IO
+    ( OpenMode(ReadOnly)
+    , cloexec
+    , closeFd
+    , defaultFileFlags
+    , dup
+    , fdToHandle
+    , nonBlock
+    , nofollow
+    , openFd
+    )
+import System.Posix.Temp (mkdtemp)
+import System.Posix.Types (FileMode, ProcessID)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
@@ -94,6 +124,12 @@ import System.Process
     , waitForProcess
     )
 import System.Timeout (timeout)
+
+import Agent.CLI.ProcessSecurity
+    ( canonicalPathOutside
+    , resolveExecutableOutside
+    , sanitizeSearchPathOutside
+    )
 
 data RepositorySnapshot = RepositorySnapshot
     { snapshotId :: !Text
@@ -210,6 +246,7 @@ repositoryDiffAtRoot root expected kind path = do
                                     , "--no-index"
                                     , "--binary"
                                     , "--no-ext-diff"
+                                    , "--no-textconv"
                                     , "--no-color"
                                     , "--"
                                     , "/dev/null"
@@ -220,13 +257,20 @@ repositoryDiffAtRoot root expected kind path = do
                                     , "diff"
                                     , "--binary"
                                     , "--no-ext-diff"
+                                    , "--no-textconv"
                                     , "--no-color"
                                     ]
                                         <> case kind of
                                             RepositoryWorktreeDiff -> []
                                             RepositoryStagedDiff -> ["--cached"]
                                         <> ["--", path]
-                        result <- runGitDiff root arguments
+                        result <-
+                            if untracked
+                                then
+                                    validateUntrackedDiffPath root path >>= \case
+                                        Left err -> pure (Left err)
+                                        Right () -> runGitDiff root arguments
+                                else runGitDiff root arguments
                         after <- snapshotAtRoot root
                         pure do
                             patch <- result
@@ -553,41 +597,74 @@ createCheckProcess root executable arguments = mask \_ -> do
             fail "could not create check output pipes"
 
 snapshotAtRoot :: FilePath -> IO (Either RepositoryError RepositorySnapshot)
-snapshotAtRoot root = do
-    headResult <- repositoryHead root
-    indexResult <- runGit root ["ls-files", "--stage", "-z"] BS.empty
-    statusResult <- runGit root
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
-        BS.empty
-    diffResult <- runGit root
-        ["diff", "--binary", "--no-ext-diff", "--no-color"]
-        BS.empty
-    case (headResult, indexResult, statusResult, diffResult) of
-        (Right headOid, Right indexBytes, Right statusBytes, Right diffBytes) -> do
-            worktreeMaterial <- appendUntrackedHashes root statusBytes diffBytes
-            indexHash <- hashMaterial root indexBytes
-            worktreeHash <- case worktreeMaterial of
-                Left err -> pure (Left err)
-                Right material -> hashMaterial root material
-            pure do
-                indexFingerprint <- indexHash
-                worktreeFingerprint <- worktreeHash
-                let headFingerprint = fromMaybe "unborn" headOid
-                    identity = Text.intercalate ":"
-                        [headFingerprint, indexFingerprint, worktreeFingerprint]
-                files <- parsePorcelain statusBytes
-                pure RepositorySnapshot
-                    { snapshotId = identity
-                    , snapshotRoot = root
-                    , snapshotHead = headOid
-                    , snapshotIndexFingerprint = indexFingerprint
-                    , snapshotWorktreeFingerprint = worktreeFingerprint
-                    , snapshotFiles = files
-                    }
-        (Left err, _, _, _) -> pure (Left err)
-        (_, Left err, _, _) -> pure (Left err)
-        (_, _, Left err, _) -> pure (Left err)
-        (_, _, _, Left err) -> pure (Left err)
+snapshotAtRoot root =
+    withIsolatedRepositoryGit root \headOid environment -> do
+        indexResult <-
+            runGitWithEnvironment
+                environment root ["ls-files", "--stage", "-z"] BS.empty
+        statusResult <-
+            runGitWithEnvironment
+                environment
+                root
+                [ "status"
+                , "--porcelain=v1"
+                , "-z"
+                , "--untracked-files=all"
+                , "--ignore-submodules=all"
+                ]
+                BS.empty
+        diffResult <-
+            runGitWithEnvironment
+                environment
+                root
+                [ "diff"
+                , "--binary"
+                , "--no-ext-diff"
+                , "--no-textconv"
+                , "--no-color"
+                , "--ignore-submodules=all"
+                ]
+                BS.empty
+        case (indexResult, statusResult, diffResult) of
+            (Right indexBytes, Right statusBytes, Right diffBytes) -> do
+                worktreeMaterial <-
+                    appendUntrackedHashesWith
+                        (runGitWithEnvironment environment)
+                        root
+                        statusBytes
+                        diffBytes
+                indexHash <- hashMaterialWith
+                    (runGitWithEnvironment environment)
+                    root
+                    indexBytes
+                worktreeHash <- case worktreeMaterial of
+                    Left err -> pure (Left err)
+                    Right material ->
+                        hashMaterialWith
+                            (runGitWithEnvironment environment)
+                            root
+                            material
+                pure do
+                    indexFingerprint <- indexHash
+                    worktreeFingerprint <- worktreeHash
+                    let headFingerprint = fromMaybe "unborn" headOid
+                        identity = Text.intercalate ":"
+                            [ headFingerprint
+                            , indexFingerprint
+                            , worktreeFingerprint
+                            ]
+                    files <- parsePorcelain statusBytes
+                    pure RepositorySnapshot
+                        { snapshotId = identity
+                        , snapshotRoot = root
+                        , snapshotHead = headOid
+                        , snapshotIndexFingerprint = indexFingerprint
+                        , snapshotWorktreeFingerprint = worktreeFingerprint
+                        , snapshotFiles = files
+                        }
+            (Left err, _, _) -> pure (Left err)
+            (_, Left err, _) -> pure (Left err)
+            (_, _, Left err) -> pure (Left err)
 
 repositoryHead
     :: FilePath
@@ -717,10 +794,13 @@ applyPatch root expected flags patch
         case checked of
             Left err -> pure (Left err)
             Right _ ->
-                voidResult
-                    <$> runGit root
-                        (["apply", "--recount"] <> flags <> ["-"])
-                        patch
+                withIsolatedRepositoryGit root \_ environment ->
+                    voidResult
+                        <$> runGitWithEnvironment
+                            environment
+                            root
+                            (["apply", "--recount"] <> flags <> ["-"])
+                            patch
 
 validateRepositoryPath
     :: FilePath
@@ -830,12 +910,16 @@ textPatchSections patch = do
                     else reverse lastHunk : reversed)
         in if null result then Nothing else Just result
 
-appendUntrackedHashes
-    :: FilePath
+appendUntrackedHashesWith
+    :: (FilePath
+        -> [String]
+        -> BS.ByteString
+        -> IO (Either RepositoryError BS.ByteString))
+    -> FilePath
     -> BS.ByteString
     -> BS.ByteString
     -> IO (Either RepositoryError BS.ByteString)
-appendUntrackedHashes root statusBytes diffBytes =
+appendUntrackedHashesWith run root statusBytes diffBytes =
     foldM addHash (Right (statusBytes <> diffBytes)) untracked
   where
     untracked =
@@ -845,30 +929,114 @@ appendUntrackedHashes root statusBytes diffBytes =
         ]
     addHash (Left err) _ = pure (Left err)
     addHash (Right material) path = do
-        result <- runGit root
-            ["--literal-pathspecs", "hash-object", "--", path]
-            BS.empty
-        modeResult <- trySynchronous
-            (fileMode <$> getSymbolicLinkStatus (root </> path))
-        pure do
-            contentHash <- result
-            mode <- case modeResult of
-                Left exception ->
-                    Left
-                        (InvalidRepositoryRequest
-                            ("could not fingerprint untracked file mode: "
-                                <> Text.pack (show exception)))
-                Right value -> Right value
-            pure
-                ( material
-                    <> contentHash
-                    <> BS8.pack (show mode)
-                    <> "\NUL"
-                )
+        fingerprintUntrackedPath run root path >>= \case
+            Left err -> pure (Left err)
+            Right (contentHash, mode) ->
+                pure
+                    (Right
+                        ( material
+                            <> contentHash
+                            <> BS8.pack (show mode)
+                            <> "\NUL"
+                        ))
 
-hashMaterial :: FilePath -> BS.ByteString -> IO (Either RepositoryError Text)
-hashMaterial root bytes =
-    fmap decodeTrimmed <$> runGit root ["hash-object", "--stdin"] bytes
+fingerprintUntrackedPath
+    :: (FilePath
+        -> [String]
+        -> BS.ByteString
+        -> IO (Either RepositoryError BS.ByteString))
+    -> FilePath
+    -> FilePath
+    -> IO (Either RepositoryError (BS.ByteString, FileMode))
+fingerprintUntrackedPath run root path = do
+    let absolutePath = root </> path
+    trySynchronous (getSymbolicLinkStatus absolutePath) >>= \case
+        Left exception -> pure (Left (fingerprintError exception))
+        Right status
+            | isRegularFile status ->
+                readUntrackedRegularFile absolutePath >>= \case
+                    Left err -> pure (Left err)
+                    Right (contents, openedMode) ->
+                        hashContents contents openedMode
+            | isSymbolicLink status ->
+                trySynchronous
+                    (TextEncoding.encodeUtf8 . Text.pack
+                        <$> readSymbolicLink absolutePath) >>= \case
+                            Left exception ->
+                                pure (Left (fingerprintError exception))
+                            Right contents ->
+                                hashContents contents (fileMode status)
+            | otherwise ->
+                pure
+                    (Left
+                        (InvalidRepositoryRequest
+                            "untracked special files cannot be reviewed"))
+  where
+    hashContents contents mode =
+        run root
+            [ "hash-object"
+            , "--no-filters"
+            , "--stdin"
+            ]
+            contents >>= \case
+                Left err -> pure (Left err)
+                Right contentHash -> pure (Right (contentHash, mode))
+    fingerprintError exception =
+        InvalidRepositoryRequest
+            ("could not fingerprint untracked file: "
+                <> Text.pack (show exception))
+
+readUntrackedRegularFile
+    :: FilePath
+    -> IO (Either RepositoryError (BS.ByteString, FileMode))
+readUntrackedRegularFile path =
+    trySynchronous
+        (bracket
+            (openFd
+                path
+                ReadOnly
+                defaultFileFlags
+                    { nofollow = True
+                    , nonBlock = True
+                    , cloexec = True
+                    })
+            closeFd
+            \descriptor -> do
+                status <- getFdStatus descriptor
+                unless (isRegularFile status) $
+                    throwString "untracked file changed type while fingerprinting"
+                duplicate <- dup descriptor
+                handle <- fdToHandle duplicate
+                    `onException` closeFd duplicate
+                bytes <-
+                    BS.hGet
+                        handle
+                        (maxRepositoryUntrackedFileBytes + 1)
+                        `finally` hClose handle
+                when
+                    (BS.length bytes > maxRepositoryUntrackedFileBytes)
+                    (throwString
+                        "untracked file exceeds the review size limit")
+                pure (bytes, fileMode status)) >>= \case
+                    Left exception ->
+                        pure
+                            (Left
+                                (InvalidRepositoryRequest
+                                    ("could not fingerprint untracked file: "
+                                        <> Text.pack (show exception))))
+                    Right bytes -> pure (Right bytes)
+
+hashMaterialWith
+    :: (FilePath
+        -> [String]
+        -> BS.ByteString
+        -> IO (Either RepositoryError BS.ByteString))
+    -> FilePath
+    -> BS.ByteString
+    -> IO (Either RepositoryError Text)
+hashMaterialWith run root bytes =
+    fmap decodeTrimmed
+        <$> run root ["hash-object", "--no-filters", "--stdin"] bytes
 
 parsePorcelain :: BS.ByteString -> Either RepositoryError [RepositoryFile]
 parsePorcelain bytes = go (filter (not . BS.null) (BS.split 0 bytes)) []
@@ -997,6 +1165,18 @@ repositoryAdvisoryLockPath
     :: FilePath
     -> IO (Either RepositoryError FilePath)
 repositoryAdvisoryLockPath root =
+    repositoryCommonDirectory root >>= \case
+        Left err -> pure (Left err)
+        Right commonDirectory ->
+            pure
+                (Right
+                    (commonDirectory
+                        </> "haskell-agent-repository-review.lock"))
+
+repositoryCommonDirectory
+    :: FilePath
+    -> IO (Either RepositoryError FilePath)
+repositoryCommonDirectory root =
     runGit root ["rev-parse", "--git-common-dir"] BS.empty >>= \case
         Left err -> pure (Left err)
         Right commonDirectory -> do
@@ -1011,21 +1191,22 @@ repositoryAdvisoryLockPath root =
                         pure
                             (Left
                                 (RepositoryCommandFailed
-                                    "resolve repository advisory lock"
+                                    "resolve repository common directory"
                                     (-1)
                                     (Text.pack (show exception))))
                     Right canonical ->
-                        pure
-                            (Right
-                                (canonical
-                                    </> "haskell-agent-repository-review.lock"))
+                        pure (Right canonical)
 
 repositoryRoot :: FilePath -> IO (Either RepositoryError FilePath)
 repositoryRoot requested
     | null requested =
         pure (Left (NotARepository "repository path is empty"))
     | otherwise =
-        runGit requested ["rev-parse", "--show-toplevel"] BS.empty >>= \case
+        runGitWithTimeout
+            repositoryDiscoveryTimeoutMicros
+            requested
+            ["rev-parse", "--show-toplevel"]
+            BS.empty >>= \case
             Left err -> pure (Left (NotARepository (repositoryErrorText err)))
             Right rootBytes ->
                 trySynchronous
@@ -1051,8 +1232,25 @@ runGit
     -> [String]
     -> BS.ByteString
     -> IO (Either RepositoryError BS.ByteString)
-runGit root arguments input = do
-    result <- trySynchronous (runProcessBytes root "git" arguments input)
+runGit =
+    runGitWithTimeout maxRepositoryGitCommandMicros
+
+runGitWithTimeout
+    :: Int
+    -> FilePath
+    -> [String]
+    -> BS.ByteString
+    -> IO (Either RepositoryError BS.ByteString)
+runGitWithTimeout timeoutMicros root arguments input = do
+    result <-
+        trySynchronous
+            (timeout timeoutMicros
+                (runProcessBytesWithEnvironment
+                    []
+                    root
+                    "git"
+                    (safeGitArguments <> arguments)
+                    input))
     pure case result of
         Left exception ->
             Left
@@ -1060,22 +1258,87 @@ runGit root arguments input = do
                     (renderCommand "git" arguments)
                     (-1)
                     (Text.pack (show exception)))
-        Right (exitCode, output, errors) -> case exitCode of
-            ExitSuccess -> Right output
-            ExitFailure code ->
-                Left
-                    (RepositoryCommandFailed
-                        (renderCommand "git" arguments)
-                        code
-                        (Text.strip
-                            (TextEncoding.decodeUtf8With lenientDecode errors)))
+        Right Nothing ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    (-1)
+                    "repository Git command timed out")
+        Right (Just (exitCode, output, errors)) ->
+            gitProcessResult arguments exitCode output errors
+
+runGitWithEnvironment
+    :: [(String, String)]
+    -> FilePath
+    -> [String]
+    -> BS.ByteString
+    -> IO (Either RepositoryError BS.ByteString)
+runGitWithEnvironment environment root arguments input = do
+    result <-
+        trySynchronous
+            (timeout maxRepositoryGitCommandMicros
+                (runProcessBytesWithEnvironment
+                    environment
+                    root
+                    "git"
+                    (safeGitArguments <> arguments)
+                    input))
+    pure case result of
+        Left exception ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    (-1)
+                    (Text.pack (show exception)))
+        Right Nothing ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    (-1)
+                    "repository Git command timed out")
+        Right (Just (exitCode, output, errors)) ->
+            gitProcessResult arguments exitCode output errors
+
+gitProcessResult
+    :: [String]
+    -> ExitCode
+    -> BS.ByteString
+    -> BS.ByteString
+    -> Either RepositoryError BS.ByteString
+gitProcessResult arguments exitCode output errors =
+    case exitCode of
+        ExitSuccess -> Right output
+        ExitFailure code ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    code
+                    (Text.strip
+                        (TextEncoding.decodeUtf8With lenientDecode errors)))
 
 runGitDiff
     :: FilePath
     -> [String]
     -> IO (Either RepositoryError BS.ByteString)
 runGitDiff root arguments = do
-    result <- trySynchronous (runProcessBytes root "git" arguments BS.empty)
+    withIsolatedRepositoryGit root \_ environment ->
+        runGitDiffWithEnvironment environment root arguments
+
+runGitDiffWithEnvironment
+    :: [(String, String)]
+    -> FilePath
+    -> [String]
+    -> IO (Either RepositoryError BS.ByteString)
+runGitDiffWithEnvironment environment root arguments = do
+    result <-
+        trySynchronous
+            (timeout maxRepositoryDiffCommandMicros
+                (runProcessBytesWithEnvironment
+                    environment
+                    root
+                    "git"
+                    (safeGitArguments <> arguments)
+                    BS.empty))
     pure case result of
         Left exception ->
             Left
@@ -1083,7 +1346,13 @@ runGitDiff root arguments = do
                     (renderCommand "git" arguments)
                     (-1)
                     (Text.pack (show exception)))
-        Right (exitCode, output, errors) -> case exitCode of
+        Right Nothing ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    (-1)
+                    "repository diff command timed out")
+        Right (Just (exitCode, output, errors)) -> case exitCode of
             ExitSuccess -> Right output
             ExitFailure 1 -> Right output
             ExitFailure code ->
@@ -1094,13 +1363,39 @@ runGitDiff root arguments = do
                         (Text.strip
                             (TextEncoding.decodeUtf8With lenientDecode errors)))
 
-runProcessBytes
+validateUntrackedDiffPath
     :: FilePath
+    -> FilePath
+    -> IO (Either RepositoryError ())
+validateUntrackedDiffPath root path =
+    trySynchronous (getSymbolicLinkStatus (root </> path)) >>= \case
+        Left exception ->
+            pure
+                (Left
+                    (InvalidRepositoryRequest
+                        ("could not inspect untracked diff path: "
+                            <> Text.pack (show exception))))
+        Right status
+            | isRegularFile status -> pure (Right ())
+            | otherwise ->
+                pure
+                    (Left
+                        (InvalidRepositoryRequest
+                            "untracked special-file diffs are not supported"))
+
+runProcessBytesWithEnvironment
+    :: [(String, String)]
+    -> FilePath
     -> FilePath
     -> [String]
     -> BS.ByteString
     -> IO (ExitCode, BS.ByteString, BS.ByteString)
-runProcessBytes workingDirectory executable arguments input =
+runProcessBytesWithEnvironment
+    overrides
+    workingDirectory
+    executable
+    arguments
+    input =
     bracket start stop
         \(inputHandle, outputHandle, errorHandle, process, processGroup, completed) -> do
         withAsync
@@ -1135,15 +1430,22 @@ runProcessBytes workingDirectory executable arguments input =
                         pure (exitCode, output, errors)
   where
     start = mask \_ -> do
+        resolvedExecutable <-
+            resolveExecutableOutside workingDirectory executable
+                >>= either (fail . Text.unpack) pure
+        environment <-
+            applyEnvironmentOverrides overrides
+                <$> repositoryProcessEnvironment workingDirectory
         (maybeInput, maybeOutput, maybeError, process) <-
             createProcess
-                (proc executable arguments)
+                (proc resolvedExecutable arguments)
                     { cwd = Just workingDirectory
                     , std_in = CreatePipe
                     , std_out = CreatePipe
                     , std_err = CreatePipe
                     , close_fds = True
                     , create_group = True
+                    , env = Just environment
                     }
         let closePipes = do
                 mapM_ closeQuietly maybeInput
@@ -1197,6 +1499,568 @@ runProcessBytes workingDirectory executable arguments input =
             signalCheckProcessGroup sigKILL processGroup process
         _ <- tryAny (waitForProcess process)
         pure ()
+
+withIsolatedRepositoryGit
+    :: FilePath
+    -> ( Maybe Text
+        -> [(String, String)]
+        -> IO (Either RepositoryError value)
+       )
+    -> IO (Either RepositoryError value)
+withIsolatedRepositoryGit root action = do
+    repositoryCommonDirectory root >>= \case
+        Left err -> pure (Left err)
+        Right commonDirectory -> do
+            attempted <- trySynchronous $
+                withPrivateTempDirectoryOutside
+                    [root, commonDirectory]
+                    "haskell-agent-review"
+                    \gitDirectory ->
+                        prepareIsolatedRepositoryGit root gitDirectory >>= \case
+                            Left err -> pure (Left err)
+                            Right (headOid, environment) ->
+                                action headOid environment
+            pure case attempted of
+                Left exception ->
+                    Left
+                        (RepositoryCommandFailed
+                            "prepare isolated repository"
+                            (-1)
+                            (Text.pack (show exception)))
+                Right result -> result
+
+prepareIsolatedRepositoryGit
+    :: FilePath
+    -> FilePath
+    -> IO
+        (Either
+            RepositoryError
+            (Maybe Text, [(String, String)]))
+prepareIsolatedRepositoryGit root gitDirectory = do
+    headResult <- repositoryHead root
+    objectsResult <-
+        runGit
+            root
+            [ "rev-parse"
+            , "--path-format=absolute"
+            , "--git-path"
+            , "objects"
+            ]
+            BS.empty
+    indexResult <-
+        runGit
+            root
+            [ "rev-parse"
+            , "--path-format=absolute"
+            , "--git-path"
+            , "index"
+            ]
+            BS.empty
+    formatResult <-
+        runGit root ["rev-parse", "--show-object-format"] BS.empty
+    configResult <-
+        runGit
+            root
+            [ "config"
+            , "--local"
+            , "--no-includes"
+            , "--null"
+            , "--list"
+            ]
+            BS.empty
+    repositoryExcludeResult <-
+        runGit
+            root
+            [ "rev-parse"
+            , "--path-format=absolute"
+            , "--git-path"
+            , "info/exclude"
+            ]
+            BS.empty
+    configuredExcludeResult <- configuredRepositoryExclude root
+    case
+        ( headResult
+        , objectsResult
+        , indexResult
+        , formatResult
+        , configResult
+        , repositoryExcludeResult
+        , configuredExcludeResult
+        ) of
+        ( Right headOid
+            , Right objectsBytes
+            , Right indexBytes
+            , Right formatBytes
+            , Right configBytes
+            , Right repositoryExcludeBytes
+            , Right configuredExcludeBytes
+            ) -> do
+                let objects = decodePath (stripLineEnding objectsBytes)
+                    index = decodePath (stripLineEnding indexBytes)
+                    objectFormat = decodeTrimmed formatBytes
+                    repositoryExclude =
+                        decodePath (stripLineEnding repositoryExcludeBytes)
+                    configuredExcludeValue =
+                        decodePath
+                            (BS.takeWhile (/= 0) configuredExcludeBytes)
+                    configuredExclude
+                        | null configuredExcludeValue = ""
+                        | isAbsolute configuredExcludeValue =
+                            configuredExcludeValue
+                        | otherwise = root </> configuredExcludeValue
+                objectsExist <- doesDirectoryExist objects
+                if not
+                    ( isAbsolute objects
+                        && isAbsolute index
+                        && isAbsolute repositoryExclude
+                        && '\NUL' `notElem` objects
+                        && '\NUL' `notElem` index
+                        && '\NUL' `notElem` repositoryExclude
+                        && '\NUL' `notElem` configuredExclude
+                        && objectsExist
+                        && objectFormat `elem` ["sha1", "sha256"]
+                    )
+                    then pure (Left invalidStorage)
+                    else
+                        readRepositoryExcludeRules
+                            repositoryExclude
+                            configuredExclude >>= \case
+                                Left err -> pure (Left err)
+                                Right
+                                    ( repositoryExcludeContents
+                                        , configuredExcludeContents
+                                        ) -> do
+                                        installIsolatedRepositoryGit
+                                            gitDirectory
+                                            headOid
+                                            objectFormat
+                                            configBytes
+                                            repositoryExcludeContents
+                                            configuredExcludeContents
+                                        pure
+                                            (Right
+                                                ( headOid
+                                                , [ ("GIT_DIR", gitDirectory)
+                                                  , ("GIT_WORK_TREE", root)
+                                                  , ("GIT_INDEX_FILE", index)
+                                                  , ("GIT_OBJECT_DIRECTORY", objects)
+                                                  , ("GIT_CONFIG_GLOBAL", "/dev/null")
+                                                  , ("GIT_CONFIG_SYSTEM", "/dev/null")
+                                                  , ("GIT_CONFIG_NOSYSTEM", "1")
+                                                  , ("GIT_CONFIG_COUNT", "1")
+                                                  , ("GIT_CONFIG_KEY_0", "core.excludesFile")
+                                                  , ( "GIT_CONFIG_VALUE_0"
+                                                    , gitDirectory
+                                                        </> "global-excludes"
+                                                    )
+                                                  , ("GIT_ATTR_NOSYSTEM", "1")
+                                                  , ("GIT_OPTIONAL_LOCKS", "0")
+                                                  ]
+                                                ))
+        (Left err, _, _, _, _, _, _) -> pure (Left err)
+        (_, Left err, _, _, _, _, _) -> pure (Left err)
+        (_, _, Left err, _, _, _, _) -> pure (Left err)
+        (_, _, _, Left err, _, _, _) -> pure (Left err)
+        (_, _, _, _, Left err, _, _) -> pure (Left err)
+        (_, _, _, _, _, Left err, _) -> pure (Left err)
+        (_, _, _, _, _, _, Left err) -> pure (Left err)
+  where
+    invalidStorage =
+        RepositoryCommandFailed
+            "prepare isolated repository"
+            (-1)
+            "repository storage paths are invalid"
+
+configuredRepositoryExclude
+    :: FilePath
+    -> IO (Either RepositoryError BS.ByteString)
+configuredRepositoryExclude root = do
+    worktreeEnabled <-
+        runGitOptionalConfig
+            root
+            [ "config"
+            , "--local"
+            , "--no-includes"
+            , "--bool"
+            , "--get"
+            , "extensions.worktreeConfig"
+            ]
+    case worktreeEnabled of
+        Left err -> pure (Left err)
+        Right enabled -> do
+            worktree <-
+                if maybe False ((== "true") . decodeTrimmed) enabled
+                    then
+                        runGitOptionalConfig
+                            root
+                            (configPathArguments ["--worktree", "--no-includes"])
+                    else pure (Right Nothing)
+            local <-
+                runGitOptionalConfig
+                    root
+                    (configPathArguments ["--local", "--no-includes"])
+            selectHigherScope worktree local >>= \case
+                Left err -> pure (Left err)
+                Right (Just value) -> pure (Right value)
+                Right Nothing ->
+                    runGitOptionalConfig
+                        root
+                        (configPathArguments ["--global", "--includes"]) >>= \case
+                            Left err -> pure (Left err)
+                            Right (Just value) -> pure (Right value)
+                            Right Nothing ->
+                                runGitOptionalConfig
+                                    root
+                                    (configPathArguments
+                                        ["--system", "--includes"]) >>= \case
+                                            Left err -> pure (Left err)
+                                            Right value ->
+                                                pure (Right (fromMaybe "\NUL" value))
+  where
+    configPathArguments scope =
+        ["config"]
+            <> scope
+            <> [ "--path"
+               , "--null"
+               , "--get"
+               , "core.excludesFile"
+               ]
+    selectHigherScope (Left err) _ = pure (Left err)
+    selectHigherScope _ (Left err) = pure (Left err)
+    selectHigherScope (Right worktree) (Right local) =
+        pure (Right (worktree <|> local))
+
+runGitOptionalConfig
+    :: FilePath
+    -> [String]
+    -> IO (Either RepositoryError (Maybe BS.ByteString))
+runGitOptionalConfig root arguments = do
+    result <-
+        trySynchronous
+            (timeout repositoryConfigTimeoutMicros
+                (runProcessBytesWithEnvironment
+                    []
+                    root
+                    "git"
+                    (safeGitArguments <> arguments)
+                    BS.empty))
+    pure case result of
+        Left exception ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    (-1)
+                    (Text.pack (show exception)))
+        Right Nothing ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    (-1)
+                    "repository config resolution timed out")
+        Right (Just (ExitSuccess, output, _)) -> Right (Just output)
+        Right (Just (ExitFailure 1, _, _)) -> Right Nothing
+        Right (Just (ExitFailure code, _, errors)) ->
+            Left
+                (RepositoryCommandFailed
+                    (renderCommand "git" arguments)
+                    code
+                    (Text.strip
+                        (TextEncoding.decodeUtf8With lenientDecode errors)))
+
+installIsolatedRepositoryGit
+    :: FilePath
+    -> Maybe Text
+    -> Text
+    -> BS.ByteString
+    -> BS.ByteString
+    -> BS.ByteString
+    -> IO ()
+installIsolatedRepositoryGit
+    gitDirectory
+    headOid
+    objectFormat
+    configBytes
+    repositoryExcludeContents
+    configuredExcludeContents = do
+    createDirectory (gitDirectory </> "refs")
+    createDirectory (gitDirectory </> "refs" </> "heads")
+    createDirectory (gitDirectory </> "info")
+    BS.writeFile
+        (gitDirectory </> "HEAD")
+        (case headOid of
+            Nothing -> "ref: refs/heads/isolated\n"
+            Just oid -> TextEncoding.encodeUtf8 oid <> "\n")
+    BS.writeFile
+        (gitDirectory </> "info" </> "exclude")
+        repositoryExcludeContents
+    BS.writeFile
+        (gitDirectory </> "global-excludes")
+        configuredExcludeContents
+    let formatVersion =
+            if objectFormat == "sha256" then "1" else "0"
+        extension =
+            if objectFormat == "sha256"
+                then
+                    [ "[extensions]"
+                    , "\tobjectformat = sha256"
+                    ]
+                else []
+        config =
+            unlines
+                ( [ "[core]"
+                  , "\trepositoryformatversion = " <> formatVersion
+                  , "\tbare = false"
+                  , "\thooksPath = /dev/null"
+                  , "\tfsmonitor = false"
+                  , "\tattributesFile = /dev/null"
+                  ]
+                    <> safeCoreConfigLines configBytes
+                    <> extension
+                )
+    BS8.writeFile (gitDirectory </> "config") (BS8.pack config)
+    mapM_
+        (`setFileMode` 0o600)
+        [ gitDirectory </> "HEAD"
+        , gitDirectory </> "config"
+        , gitDirectory </> "info" </> "exclude"
+        , gitDirectory </> "global-excludes"
+        ]
+
+readRepositoryExcludeRules
+    :: FilePath
+    -> FilePath
+    -> IO
+        (Either
+            RepositoryError
+            (BS.ByteString, BS.ByteString))
+readRepositoryExcludeRules repositoryExclude configuredExclude =
+    trySynchronous
+        (do
+            repositoryRules <- readOptionalRegularFile repositoryExclude
+            configuredRules <- readOptionalRegularFile configuredExclude
+            when
+                ( BS.length repositoryRules
+                    + BS.length configuredRules
+                    > maxRepositoryExcludeBytes
+                )
+                (throwString "repository exclude rules exceed the size limit")
+            pure (repositoryRules, configuredRules)) >>= \case
+                Left exception ->
+                    pure
+                        (Left
+                            (RepositoryCommandFailed
+                                "read repository exclude rules"
+                                (-1)
+                                (Text.pack (show exception))))
+                Right rules -> pure (Right rules)
+
+readOptionalRegularFile :: FilePath -> IO BS.ByteString
+readOptionalRegularFile "" = pure BS.empty
+readOptionalRegularFile requested = do
+    tryIO
+        (canonicalizePath requested) >>= \case
+            Left exception
+                | isDoesNotExistError exception -> pure BS.empty
+                | otherwise -> throwIO exception
+            Right path ->
+                tryIO
+                    (openFd
+                        path
+                        ReadOnly
+                        defaultFileFlags
+                            { nofollow = True
+                            , cloexec = True
+                            , nonBlock = True
+                            }) >>= \case
+                                Left exception
+                                    | isDoesNotExistError exception ->
+                                        pure BS.empty
+                                    | otherwise -> throwIO exception
+                                Right descriptor ->
+                                    mask \restore -> do
+                                        status <- getFdStatus descriptor
+                                            `onException` closeFd descriptor
+                                        unless (isRegularFile status) do
+                                            closeFd descriptor
+                                            throwString
+                                                "repository exclude rules are not a regular file"
+                                        handle <- fdToHandle descriptor
+                                            `onException` closeFd descriptor
+                                        restore
+                                            (do
+                                                bytes <-
+                                                    BS.hGet
+                                                        handle
+                                                        ( maxRepositoryExcludeBytes
+                                                            + 1
+                                                        )
+                                                when
+                                                    (BS.length bytes
+                                                        > maxRepositoryExcludeBytes)
+                                                    (throwString
+                                                        "repository exclude rules exceed the size limit")
+                                                pure bytes)
+                                            `finally` hClose handle
+
+safeCoreConfigLines :: BS.ByteString -> [String]
+safeCoreConfigLines bytes =
+    [ "\t" <> field <> " = " <> value
+    | field <-
+        [ "filemode"
+        , "ignorecase"
+        , "symlinks"
+        , "precomposeunicode"
+        ]
+    , Just value <- [booleanValue ("core." <> field)]
+    ]
+  where
+    entries =
+        [ (key, BS.drop 1 separatorAndValue)
+        | entry <- BS.split 0 bytes
+        , not (BS.null entry)
+        , let (key, separatorAndValue) = BS8.break (== '\n') entry
+        , not (BS.null separatorAndValue)
+        ]
+    booleanValue key =
+        case
+            [ map toLower (BS8.unpack value)
+            | (entryKey, value) <- reverse entries
+            , BS8.unpack entryKey == key
+            ] of
+                value : _
+                    | value `elem` ["true", "yes", "on", "1"] ->
+                        Just "true"
+                    | value `elem` ["false", "no", "off", "0"] ->
+                        Just "false"
+                _ -> Nothing
+
+withPrivateTempDirectoryOutside
+    :: [FilePath]
+    -> String
+    -> (FilePath -> IO value)
+    -> IO value
+withPrivateTempDirectoryOutside boundaries template action = do
+    configuredBase <- getTemporaryDirectory
+    bracket
+        (acquire (nub [configuredBase, "/tmp", "/var/tmp"]))
+        removePathForcibly
+        action
+  where
+    acquire [] =
+        throwString
+            "no private temporary directory is available outside repository storage"
+    acquire (candidate : remaining) =
+        trySynchronous (outsideAllBoundaries candidate >>= \case
+            Nothing ->
+                throwString
+                    "temporary directory is inside repository storage"
+            Just safeBase -> do
+                directory <-
+                    mkdtemp (safeBase </> template <> ".XXXXXX")
+                (do
+                    setFileMode directory 0o700
+                    outsideAllBoundaries directory >>= \case
+                        Nothing ->
+                            throwString
+                                "temporary directory resolved inside repository storage"
+                        Just checkedDirectory -> pure checkedDirectory)
+                    `onException` removePathForcibly directory) >>= \case
+                    Left _ -> acquire remaining
+                    Right directory -> pure directory
+
+    outsideAllBoundaries candidate =
+        foldM
+            (\checked boundary ->
+                case checked of
+                    Nothing -> pure Nothing
+                    Just path -> canonicalPathOutside boundary path)
+            (Just candidate)
+            boundaries
+
+applyEnvironmentOverrides
+    :: [(String, String)]
+    -> [(String, String)]
+    -> [(String, String)]
+applyEnvironmentOverrides overrides inherited =
+    overrides
+        <> filter
+            (\(name, _) -> name `notElem` map fst overrides)
+            inherited
+
+stripLineEnding :: BS.ByteString -> BS.ByteString
+stripLineEnding = BS8.dropWhileEnd (`elem` ['\r', '\n'])
+
+safeGitArguments :: [String]
+safeGitArguments =
+    [ "--no-replace-objects"
+    , "-c"
+    , "core.fsmonitor=false"
+    , "-c"
+    , "credential.helper="
+    , "-c"
+    , "core.sshCommand=false"
+    , "-c"
+    , "protocol.ext.allow=never"
+    , "-c"
+    , "commit.gpgSign=false"
+    , "-c"
+    , "tag.gpgSign=false"
+    ]
+
+repositoryProcessEnvironment :: FilePath -> IO [(String, String)]
+repositoryProcessEnvironment root = do
+    inherited <- getEnvironment
+    let sanitized =
+            filter
+                (\(name, _) ->
+                    name `notElem` blocked
+                        && not ("GIT_CONFIG_KEY_" `Text.isPrefixOf` Text.pack name)
+                        && not ("GIT_CONFIG_VALUE_" `Text.isPrefixOf` Text.pack name))
+                inherited
+    safePath <- case lookup "PATH" sanitized of
+        Nothing -> pure Nothing
+        Just value -> sanitizeSearchPathOutside root value
+    let withPath =
+            case safePath of
+                Nothing -> filter ((/= "PATH") . fst) sanitized
+                Just value ->
+                    ("PATH", value) : filter ((/= "PATH") . fst) sanitized
+    pure
+        ( [ ("GIT_TERMINAL_PROMPT", "0")
+          , ("GCM_INTERACTIVE", "never")
+          , ("GIT_PAGER", "cat")
+          , ("PAGER", "cat")
+          , ("SSH_ASKPASS_REQUIRE", "never")
+          ]
+            <> withPath
+        )
+  where
+    blocked =
+        [ "GIT_TERMINAL_PROMPT"
+        , "GCM_INTERACTIVE"
+        , "GIT_PAGER"
+        , "PAGER"
+        , "SSH_ASKPASS_REQUIRE"
+        , "GIT_DIR"
+        , "GIT_WORK_TREE"
+        , "GIT_INDEX_FILE"
+        , "GIT_OBJECT_DIRECTORY"
+        , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+        , "GIT_COMMON_DIR"
+        , "GIT_CONFIG_COUNT"
+        , "GIT_CONFIG_PARAMETERS"
+        , "GIT_CONFIG"
+        , "GIT_CONFIG_GLOBAL"
+        , "GIT_CONFIG_SYSTEM"
+        , "GIT_CONFIG_NOSYSTEM"
+        , "GIT_ATTR_NOSYSTEM"
+        , "GIT_SSH"
+        , "GIT_SSH_COMMAND"
+        , "GIT_ASKPASS"
+        , "GIT_PROXY_COMMAND"
+        , "GIT_EXEC_PATH"
+        , "GIT_EXTERNAL_DIFF"
+        ]
 
 hGetBounded :: Int -> Handle -> IO BS.ByteString
 hGetBounded limit handle = go 0 False []
@@ -1275,6 +2139,24 @@ maxRepositoryProcessOutputBytes = 64 * 1024 * 1024
 
 maxRepositoryProcessErrorBytes :: Int
 maxRepositoryProcessErrorBytes = 8 * 1024 * 1024
+
+maxRepositoryExcludeBytes :: Int
+maxRepositoryExcludeBytes = 16 * 1024 * 1024
+
+maxRepositoryUntrackedFileBytes :: Int
+maxRepositoryUntrackedFileBytes = 64 * 1024 * 1024
+
+repositoryDiscoveryTimeoutMicros :: Int
+repositoryDiscoveryTimeoutMicros = 1_000_000
+
+maxRepositoryGitCommandMicros :: Int
+maxRepositoryGitCommandMicros = 60_000_000
+
+repositoryConfigTimeoutMicros :: Int
+repositoryConfigTimeoutMicros = 2_000_000
+
+maxRepositoryDiffCommandMicros :: Int
+maxRepositoryDiffCommandMicros = 15_000_000
 
 processPipeTeardownMicros :: Int
 processPipeTeardownMicros = 1_000_000
