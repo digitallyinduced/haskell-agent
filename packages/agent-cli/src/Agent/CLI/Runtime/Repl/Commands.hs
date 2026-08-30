@@ -19,8 +19,9 @@ import Agent.CLI.Command
     ( CopyRequest(..),
       formatSlashHelpWithCatalog,
       parseReplLineWithCatalog,
-      ReplAction(ReplCommandError, ReplQuit, ReplReload, ReplPrompt,
-                 ReplExpandedPrompt, ReplInvokeSkill, ReplSkills, ReplShowShell,
+      ReplAction(ReplCommandError, ReplQuit, ReplReload,
+                 ReplUpdateAndRestart, ReplPrompt, ReplExpandedPrompt,
+                 ReplInvokeSkill, ReplSkills, ReplShowShell,
                  ReplSetShell, ReplPaste, ReplShowAttachments, ReplClearAttachments,
                  ReplRemoveAttachment,
                  ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp, ReplMcpPrompt,
@@ -161,8 +162,8 @@ import Agent.CLI.Runtime.Repl.Selection
 import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
 import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunEnableCodeMode, RunRestart, RunSwitchProvider, RunReload,
-                RunQuit) )
+    ( RunResult(RunEnableCodeMode, RunRestart, RunUpdateAndRestart,
+                RunSwitchProvider, RunReload, RunQuit) )
 import Agent.CLI.Secret ( promptSecretLine )
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReplace),
@@ -448,6 +449,8 @@ handleReplLine
                 case parseReplLineWithCatalog slashCatalog promptLine of
                     ReplQuit -> pure RunQuit
                     ReplReload -> requestReload fullscreen persist
+                    ReplUpdateAndRestart ->
+                        requestUpdateAndRestart fullscreen persist
                     ReplMetaConsole request ->
                         runMetaConsoleRequest request
                     ReplPrompt text -> do
@@ -1971,6 +1974,37 @@ requestReload fullscreen persist = do
             handle <- ensureSession slotRef
             reportInfo ("reloading; session " <> handle.sessionMeta.metaId)
             pure (RunReload handle.sessionMeta.metaId)
+
+requestUpdateAndRestart
+    :: Maybe FullscreenRuntime
+    -> Persistence
+    -> IO RunResult
+requestUpdateAndRestart fullscreen persist = do
+    color <- resolveColor stderr
+    let reportInfo message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+        reportError message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr (roleError color message)
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
+    case persist of
+        PersistenceDisabled -> do
+            reportError "/update-and-restart needs a persisted session"
+            pure RunQuit
+        PersistenceEnabled slotRef -> do
+            handle <- ensureSession slotRef
+            reportInfo
+                ("updating Haskell Agent; session "
+                    <> handle.sessionMeta.metaId
+                    <> " will resume")
+            pure (RunUpdateAndRestart handle.sessionMeta.metaId)
 
 requestMcpRestart
     :: Maybe FullscreenRuntime
