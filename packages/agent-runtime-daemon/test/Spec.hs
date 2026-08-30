@@ -948,6 +948,11 @@ main = hspec $ do
                     4_000_000
                     ((processTaskRunnerForWithTimeout 1 executable).runTask task (const (pure ())))
                     `shouldReturn` Just (Left "agent-cli exceeded its 1 second runtime limit")
+                writeFile executable "#!/bin/sh\nsleep 30 &\nexit 0\n"
+                timeout
+                    5_000_000
+                    ((processTaskRunnerForWithTimeout 10 executable).runTask task (const (pure ())))
+                    `shouldReturn` Just (Right ())
 
         it "bounds task-runner output in the durable journal" $
             withSystemTempDirectory "daemon-runner-log-bound" $ \directory -> do

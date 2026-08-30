@@ -14,8 +14,11 @@ import Control.Concurrent.Async
     , cancel
     , concurrently_
     , race
+    , wait
     , waitCatch
+    , withAsync
     )
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe
@@ -48,6 +51,7 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, hClose)
 import System.Posix.Signals (sigKILL, sigTERM, signalProcessGroup)
+import System.Posix.Types (CPid)
 import System.Process
 import System.Timeout (timeout)
 
@@ -598,7 +602,8 @@ runProcessTask runtimeSeconds executable task logLine = do
     let arguments = processTaskArguments task
         configuration =
             (proc executable arguments)
-                { std_out = CreatePipe
+                { std_in = NoStream
+                , std_out = CreatePipe
                 , std_err = CreatePipe
                 , create_group = True
                 , close_fds = True
@@ -608,14 +613,27 @@ runProcessTask runtimeSeconds executable task logLine = do
             (_, Just stdoutHandle, Just stderrHandle, process) ->
                 pure (stdoutHandle, stderrHandle, process)
             _ -> fail "failed to capture agent-cli output"
-    let terminate = terminateProcessGroup process
+    processGroup <- getPid process
+    let terminate = terminateProcessGroup processGroup process
         consume = consumeBoundedOutput logLine
         closeHandles = hClose stdoutHandle `finally` hClose stderrHandle
+        runAndDrain =
+            withAsync
+                (concurrently_ (consume stdoutHandle) (consume stderrHandle))
+                $ \drainer -> do
+                    race (waitForProcess process) (wait drainer) >>= \case
+                        Right () -> waitForProcess process
+                        Left exitCode ->
+                            timeout postExitDrainMicros (wait drainer) >>= \case
+                                Just () -> pure exitCode
+                                Nothing -> do
+                                    terminate
+                                    _ <- waitCatch drainer
+                                    pure exitCode
     outcome <-
         timeout
             (max 1 runtimeSeconds * 1_000_000)
-            ( ((concurrently_ (consume stdoutHandle) (consume stderrHandle) >> waitForProcess process)
-                `onException` terminate)
+            ( (runAndDrain `onException` terminate)
                 `finally` closeHandles
             )
     case outcome of
@@ -664,17 +682,18 @@ consumeBoundedOutput logChunk handle = go 0 BS.empty
 maxTaskOutputBytes :: Int
 maxTaskOutputBytes = 64 * 1024 * 1024
 
-terminateProcessGroup :: ProcessHandle -> IO ()
-terminateProcessGroup process = do
+postExitDrainMicros :: Int
+postExitDrainMicros = 1_000_000
+
+terminateProcessGroup :: Maybe CPid -> ProcessHandle -> IO ()
+terminateProcessGroup processGroup process = do
     signalGroup sigTERM
-    timeout 2_000_000 (waitForProcess process) >>= \case
-        Just _ -> pure ()
-        Nothing -> do
-            signalGroup sigKILL
-            voidWait process
+    threadDelay 2_000_000
+    signalGroup sigKILL
+    voidWait process
   where
     signalGroup signal =
-        getPid process >>= \case
+        case processGroup of
             Just pid ->
                 signalProcessGroup signal (fromIntegral pid)
                     `catch` \(_ :: IOException) -> pure ()
