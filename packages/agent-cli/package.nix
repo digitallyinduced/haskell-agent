@@ -20,7 +20,8 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-claude agent-codex-dialect agent-core
     agent-grok-build-dialect agent-openai agent-openrouter
-    agent-process agent-responses agent-responses-types agent-store
+    agent-process agent-responses agent-responses-types
+    agent-runtime-daemon agent-store
     agent-syntax agent-tui agent-xai ansi-terminal async base
     base64-bytestring brick bytestring colour containers directory
     filelock filepath haskeline hasql-pool http-client http-client-tls
