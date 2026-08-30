@@ -7,6 +7,7 @@ import Agent.Tools.OutputArtifact
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
+    , writeOutputArtifactDetailed
     , readOutputArtifact
     , writeOutputArtifact
     )
@@ -84,6 +85,15 @@ spec = describe "Agent.Tools.OutputArtifact" do
         withTempEnv \env ->
             readOutputArtifact env "../output-secret"
                 `shouldReturn` Left "invalid tool-output artifact handle"
+
+    it "reports on-disk bytes for invalid UTF-8 artifacts" do
+        withTempEnv \env -> do
+            writeOutputArtifactDetailed env "\xc3" >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    outputArtifactMetadata env artifact.artifactHandle
+                        `shouldReturn`
+                        Right (OutputArtifactMetadata artifact.artifactHandle 1 1)
 
     it "exposes delegated analysis only when a spawner is available" do
         withTempEnv \env -> do
