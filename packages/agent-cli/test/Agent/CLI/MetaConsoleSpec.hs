@@ -165,6 +165,33 @@ spec = do
                     Left err -> "only action" `Text.isInfixOf` err
                     Right _ -> False
 
+        it "rejects multiple runtime transition actions" do
+            decodeMetaPlan
+                (Text.concat
+                    [ "{\"summary\":\"switch twice\",\"actions\":["
+                    , "{\"type\":\"session_command\",\"command\":\"/model gpt-5.6-sol\"},"
+                    , "{\"type\":\"select_account\",\"provider\":\"grok\"}"
+                    , "]}"
+                    ])
+                `shouldSatisfy` \case
+                    Left err ->
+                        "multiple session transition" `Text.isInfixOf` err
+                    Right _ -> False
+
+        it "requires interactive account selection to stand alone" do
+            decodeMetaPlan
+                (Text.concat
+                    [ "{\"summary\":\"select then change\",\"actions\":["
+                    , "{\"type\":\"select_account\",\"provider\":\"openai\"},"
+                    , "{\"type\":\"set_max_concurrent_agents\",\"limit\":2}"
+                    , "]}"
+                    ])
+                `shouldSatisfy` \case
+                    Left err ->
+                        "account selection must be the plan's only action"
+                            `Text.isInfixOf` err
+                    Right _ -> False
+
         it "decodes the restricted harness and OAuth action language" do
             let result =
                     decodeMetaPlan
@@ -230,6 +257,28 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "public-id"
             countRedactions (redactMetaContext context) `shouldBe` 4
 
+        it "hides prefixed environment maps from serialized harness config" do
+            let context =
+                    Aeson.object
+                        [ "mcpEnv" Aeson..=
+                            Aeson.object
+                                [ "INNOCENT_NAME" Aeson..=
+                                    ("mcp-secret-value" :: Text.Text)
+                                ]
+                        , "lspEnv" Aeson..=
+                            Aeson.object
+                                [ "OTHER_NAME" Aeson..=
+                                    ("lsp-secret-value" :: Text.Text)
+                                ]
+                        ]
+                redacted = redactMetaContext context
+                rendered =
+                    TextEncoding.decodeUtf8
+                        (LBS.toStrict (Aeson.encode redacted))
+            rendered `shouldNotSatisfy` Text.isInfixOf "mcp-secret-value"
+            rendered `shouldNotSatisfy` Text.isInfixOf "lsp-secret-value"
+            countRedactions redacted `shouldBe` 2
+
         it "redacts context again while building the model prompt" do
             let prompt =
                     metaConsolePrompt
@@ -243,6 +292,44 @@ spec = do
             prompt `shouldSatisfy` Text.isInfixOf "Never emit env"
             prompt `shouldSatisfy`
                 Text.isInfixOf "use clarify rather than guessing"
+
+        it "redacts URL userinfo, query parameters, and fragments" do
+            let context =
+                    Aeson.object
+                        [ "url" Aeson..=
+                            ("https://user:password@example.com/mcp?token=hidden"
+                                :: Text.Text)
+                        , "callbackUrl" Aeson..=
+                            ("https://example.com/callback#access_token=fragment-secret"
+                                :: Text.Text)
+                        ]
+                rendered =
+                    TextEncoding.decodeUtf8
+                        (LBS.toStrict
+                            (Aeson.encode (redactMetaContext context)))
+            rendered `shouldSatisfy`
+                Text.isInfixOf "https://<redacted>@example.com/mcp?<redacted>"
+            rendered `shouldNotSatisfy` Text.isInfixOf "password"
+            rendered `shouldNotSatisfy` Text.isInfixOf "hidden"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "https://example.com/callback#<redacted>"
+            rendered `shouldNotSatisfy` Text.isInfixOf "fragment-secret"
+
+        it "redacts opaque command arguments and LSP settings" do
+            let context =
+                    Aeson.object
+                        [ "args" Aeson..=
+                            (["--token", "private-argument"] :: [Text.Text])
+                        , "settings" Aeson..=
+                            Aeson.object
+                                ["custom" Aeson..= ("private-setting" :: Text.Text)]
+                        ]
+                rendered =
+                    TextEncoding.decodeUtf8
+                        (LBS.toStrict
+                            (Aeson.encode (redactMetaContext context)))
+            rendered `shouldNotSatisfy` Text.isInfixOf "private-argument"
+            rendered `shouldNotSatisfy` Text.isInfixOf "private-setting"
 
     describe "metaPlanPreviews" do
         it "describes mutations without MCP arguments or credentials" do
@@ -343,6 +430,8 @@ spec = do
             fmap (.toolChoice) captured
                 `shouldBe` Just (Just (ToolChoiceMode ToolChoiceNone))
             fmap (.store) captured `shouldBe` Just (Just False)
+            fmap (.background) captured `shouldBe` Just Nothing
+            fmap (.maxOutputTokens) captured `shouldBe` Just Nothing
             fmap (.conversation) captured `shouldBe` Just Nothing
             fmap (.instructions) captured
                 `shouldSatisfy` maybe False

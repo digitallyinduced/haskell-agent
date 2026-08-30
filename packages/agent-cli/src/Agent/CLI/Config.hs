@@ -12,6 +12,7 @@ module Agent.CLI.Config
     , harnessConfigPath
     , loadHarnessConfig
     , saveHarnessConfig
+    , updateHarnessConfig
     , useProgressiveMcp
     ) where
 
@@ -501,6 +502,24 @@ saveHarnessConfig home config =
                             <> Text.pack (displayException exception)
                         )
                 Right () -> Right ()
+
+-- | Load, transform, validate, and atomically save the machine-wide
+-- configuration. The callback keeps callers on the typed configuration path;
+-- returning 'Left' leaves the file unchanged.
+updateHarnessConfig
+    :: OsPath
+    -> (HarnessConfig -> Either Text HarnessConfig)
+    -> IO (Either Text HarnessConfig)
+updateHarnessConfig home update =
+    loadHarnessConfig home >>= \case
+        Left err -> pure (Left err)
+        Right current ->
+            case update current of
+                Left err -> pure (Left err)
+                Right next ->
+                    saveHarnessConfig home next >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> pure (Right next)
 
 validateHarnessConfig :: HarnessConfig -> Either Text HarnessConfig
 validateHarnessConfig config = do

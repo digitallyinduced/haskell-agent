@@ -74,8 +74,8 @@ data MetaAction
     = MetaSessionCommand !Text
     | MetaConnectAccount !Provider
     | MetaSelectAccount !Provider !(Maybe Text)
-      -- ^ Optional account label or id.  'Nothing' opens the provider's
-      -- account picker; the executor must not silently choose an account.
+      -- ^ Optional exact account label or id.  The executor opens a picker
+      -- restricted to matching accounts and must not silently choose one.
     | MetaUpsertMcp !MetaMcpServer
     | MetaRemoveMcp !Text
     | MetaSetMcpEnabled !Text !Bool
@@ -371,6 +371,8 @@ validateMetaPlan plan = do
     mapM_ validateAction plan.metaActions
     validateClarification plan.metaActions
     validateSingletonActions plan.metaActions
+    validateTransitionActions plan.metaActions
+    validateAccountSelection plan.metaActions
     validateMcpConflicts plan.metaActions
     validateLspConflicts plan.metaActions
     pure plan
@@ -608,6 +610,32 @@ validateSingletonActions actions =
     isAccountSelection MetaSelectAccount{} = True
     isAccountSelection _ = False
 
+-- Provider/model/code-mode changes can end the current runtime. Accepting
+-- more than one would make later actions depend on which transition happened
+-- to execute first.
+validateTransitionActions :: [MetaAction] -> Either Text ()
+validateTransitionActions actions =
+    when (length (filter isTransition actions) > 1) $
+        Left "meta plan must not contain multiple session transition actions"
+  where
+    isTransition MetaSelectAccount{} = True
+    isTransition (MetaSessionCommand command) =
+        case Text.words (Text.toLower (Text.strip command)) of
+            "/model" : _ -> True
+            ["/codemod"] -> True
+            _ -> False
+    isTransition _ = False
+
+-- Account selection is interactive and can be cancelled.  Keep it isolated so
+-- cancellation cannot occur after configuration actions have already applied.
+validateAccountSelection :: [MetaAction] -> Either Text ()
+validateAccountSelection actions =
+    when (any isAccountSelection actions && length actions /= 1) $
+        Left "account selection must be the plan's only action"
+  where
+    isAccountSelection MetaSelectAccount{} = True
+    isAccountSelection _ = False
+
 validateMcpConflicts :: [MetaAction] -> Either Text ()
 validateMcpConflicts actions =
     mapM_ validateName (nub (foldMap mcpTarget actions))
@@ -693,7 +721,7 @@ metaActionPreview = \case
             <> " ("
             <> maybe
                 ("command " <> maybe "<missing>" quote server.metaMcpCommand)
-                (\url -> "remote " <> quote url)
+                (\url -> "remote " <> quote (redactUrlCredentials url))
                 server.metaMcpUrl
             <> ")"
     MetaRemoveMcp name -> "Remove MCP server " <> quote name
@@ -775,13 +803,55 @@ redactMetaContext = go
         value -> value
     redactField key value
         | secretKey (Key.toText key) = Aeson.String "<redacted>"
+        | urlKey (Key.toText key) =
+            case value of
+                Aeson.String url ->
+                    Aeson.String (redactUrlCredentials url)
+                _ -> go value
         | otherwise = go value
+
+urlKey :: Text -> Bool
+urlKey key =
+    "url" `Text.isSuffixOf`
+        Text.filter isAlphaNum (Text.toLower key)
+
+-- Avoid leaking credentials embedded in configured URL userinfo or query
+-- parameters while retaining enough origin/path context for planning.
+redactUrlCredentials :: Text -> Text
+redactUrlCredentials url =
+    case Text.breakOn "://" url of
+        (scheme, markerAndRest)
+            | not (Text.null markerAndRest) ->
+                let rest = Text.drop 3 markerAndRest
+                    (authority, suffix) =
+                        Text.break
+                            (`elem` ("/?#" :: String))
+                            rest
+                    safeAuthority =
+                        case Text.breakOnEnd "@" authority of
+                            ("", _) -> authority
+                            (_, host) -> "<redacted>@" <> host
+                in scheme
+                    <> "://"
+                    <> safeAuthority
+                    <> redactUrlTail suffix
+        _ -> redactUrlTail url
+
+redactUrlTail :: Text -> Text
+redactUrlTail value =
+    case Text.break (`elem` ("?#" :: String)) value of
+        (_, "") -> value
+        (before, suffix) ->
+            before <> Text.take 1 suffix <> "<redacted>"
 
 secretKey :: Text -> Bool
 secretKey key =
     let normalized =
             Text.filter isAlphaNum (Text.toLower key)
-    in normalized == "env"
+    in "env" `Text.isSuffixOf` normalized
+        || normalized == "args"
+        || normalized == "settings"
+        || normalized == "initializationoptions"
         || "token" `Text.isInfixOf` normalized
         || "secret" `Text.isInfixOf` normalized
         || "password" `Text.isInfixOf` normalized
@@ -837,7 +907,8 @@ metaConsolePrompt context request =
         , ""
         , "Omit optional fields rather than guessing. Never emit env, clientSecret, token, password, apiKey, or credential fields."
         , "Secret environment actions carry only name and key; the host securely prompts for the value. Never add a value field."
-        , "For select_account, omit account to open a picker. If a requested label or id could refer to multiple accounts, use clarify rather than guessing."
+        , "select_account must be the plan's only action. Omit account to show every connected account for that provider."
+        , "A supplied account is matched exactly (case-insensitively) against its label or id. If it could refer to multiple accounts, use clarify rather than guessing."
         , "Allowed session_command forms: /model MODEL, /effort LEVEL, /fast, /shell MODE, /codemod, /always-approve, /agents limit N, /skills reload."
         ]
 
@@ -892,10 +963,13 @@ runMetaConsoleWithCancel withCancelScope makeBackend paramsRef context request =
 privateMetaParams :: ResponseCreateParams -> ResponseCreateParams
 privateMetaParams ResponseCreateParams{..} =
     ResponseCreateParams
-        { background = Just False
+        { background = Nothing
         , conversation = Nothing
         , input = Nothing
         , instructions = Just metaConsoleInstructions
+        -- Some Responses-compatible endpoints reject this otherwise optional
+        -- field.  Semantic validation still caps the accepted plan size.
+        , maxOutputTokens = Nothing
         , maxToolCalls = Nothing
         , metadata = Nothing
         , parallelToolCalls = Just False

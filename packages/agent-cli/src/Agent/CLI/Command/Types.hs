@@ -32,6 +32,9 @@ data ReplAction
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
+    | ReplMetaConsole Text
+    -- ^ Interpret a natural-language harness configuration request without
+    -- adding it to the coding conversation.
     | ReplRecap
     -- ^ Generate a display-only "where was I" recap of the current session.
     | ReplRetry

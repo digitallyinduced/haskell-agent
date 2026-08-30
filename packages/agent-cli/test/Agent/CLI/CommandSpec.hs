@@ -264,6 +264,14 @@ spec = do
             parseReplLine "/btw"
                 `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
 
+        it "opens the portable Meta Console with the full request" do
+            parseReplLine "/meta connect my Grok account"
+                `shouldBe` ReplMetaConsole "connect my Grok account"
+            parseReplLine "/CONFIGURE   add  this MCP"
+                `shouldBe` ReplMetaConsole "add  this MCP"
+            parseReplLine "/meta"
+                `shouldBe` ReplCommandError "usage: /meta <REQUEST>"
+
         it "requests a session recap" do
             parseReplLine "/recap" `shouldBe` ReplRecap
             parseReplLine "/summarize" `shouldBe` ReplRecap
@@ -304,6 +312,7 @@ spec = do
                     , "fast"
                     , "plan"
                     , "btw"
+                    , "meta"
                     , "recap"
                     , "retry"
                     , "session"
@@ -355,6 +364,8 @@ spec = do
                 `shouldBe` Just "mcp"
             fmap (.slashName) (lookupSlashCommand "/status")
                 `shouldBe` Just "session-info"
+            fmap (.slashName) (lookupSlashCommand "/configure")
+                `shouldBe` Just "meta"
             fmap (.slashName) (lookupSlashCommand "/exit")
                 `shouldBe` Just "quit"
 

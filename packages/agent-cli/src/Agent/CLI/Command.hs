@@ -229,6 +229,12 @@ parseSlash catalog raw line = case Text.words line of
                 in if Text.null question
                     then ReplCommandError "usage: /btw <QUESTION>"
                     else ReplBtw question
+            "meta" ->
+                let request =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null request
+                    then ReplCommandError "usage: /meta <REQUEST>"
+                    else ReplMetaConsole request
             "recap" ->
                 if null args
                     then ReplRecap
