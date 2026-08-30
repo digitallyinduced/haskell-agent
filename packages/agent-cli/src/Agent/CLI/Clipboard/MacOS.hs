@@ -14,9 +14,14 @@ import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (getFileSize, getTemporaryDirectory, removeFile)
+import System.Directory (getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode(..))
-import System.IO (hClose, openBinaryTempFile)
+import System.IO
+    ( IOMode(ReadMode)
+    , hClose
+    , openBinaryTempFile
+    , withBinaryFile
+    )
 import System.Process (readProcessWithExitCode)
 
 readMacClipboardImage :: IO (Either Text ImageAttachment)
@@ -103,11 +108,12 @@ readMacClipboardClass typeClass = do
                 readProcessWithExitCode "osascript" ["-e", script] ""
             case code of
                 ExitSuccess -> do
-                    size <- getFileSize path
-                    if size > maxClipboardImageBytes
+                    bytes <- withBinaryFile path ReadMode \input ->
+                        BS.hGet input (maxClipboardImageBytes + 1)
+                    if BS.length bytes > maxClipboardImageBytes
                         then pure (Left
                             "clipboard image exceeds the 20 MB limit")
-                        else Right <$> BS.readFile path
+                        else pure (Right bytes)
                 ExitFailure _ ->
                     pure (Left (clipboardErrorMessage typeClass err)))
             `finally` cleanup
@@ -115,7 +121,7 @@ readMacClipboardClass typeClass = do
         Left ex -> pure (Left (formatException ex))
         Right value -> pure value
 
-maxClipboardImageBytes :: Integer
+maxClipboardImageBytes :: Int
 maxClipboardImageBytes = 20 * 1024 * 1024
 
 clipboardErrorMessage :: String -> String -> Text
