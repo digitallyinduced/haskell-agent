@@ -3,6 +3,7 @@
 
 module Agent.CLI.MacOS.BridgeFFISpec (spec) where
 
+import qualified Agent.CLI.MacOS.Bridge as Bridge
 #ifdef darwin_HOST_OS
 import Foreign.C.Types (CInt(..))
 import Test.Hspec (Spec, describe, it, shouldReturn)
@@ -13,7 +14,7 @@ foreign import ccall "ha_image_attachment_stage_smoke"
 foreign import ccall "ha_repository_review_abi_smoke"
     repositoryReviewAbiSmoke :: IO CInt
 #else
-import Test.Hspec (Spec, describe, it, pendingWith)
+import Test.Hspec (Spec, describe, it, pendingWith, shouldReturn)
 #endif
 
 spec :: Spec
@@ -24,6 +25,9 @@ spec = describe "native image attachment staging" do
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif
+
+    it "blocks new repository workers until cancel-all returns" do
+        Bridge.repositoryCancelAllAdmissionSmoke `shouldReturn` True
 
     it "validates the typed repository-review ABI from native code" do
 #ifdef darwin_HOST_OS

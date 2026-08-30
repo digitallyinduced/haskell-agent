@@ -1,6 +1,8 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module Agent.CLI.MacOS.Bridge () where
+module Agent.CLI.MacOS.Bridge
+    ( repositoryCancelAllAdmissionSmoke
+    ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
 import Agent.CLI.NativeRuntime
@@ -119,7 +121,7 @@ import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
     )
-import Control.Concurrent (forkFinally, forkIO)
+import Control.Concurrent (forkFinally, forkIO, threadDelay)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -162,6 +164,7 @@ import Control.Exception.Safe
     , finally
     , mask
     , tryAny
+    , uninterruptibleMask_
     )
 import Control.Monad
     ( forM_
@@ -911,36 +914,119 @@ startRepositoryWorker action =
     tryAny
         (mask \_ -> do
             gate <- newEmptyMVar
-            _workerId <- modifyMVar repositoryWorkers \(nextId, workers) -> do
-                let workerId = nextId
-                worker <- asyncWithUnmask \unmask -> do
-                    readMVar gate
-                    unmask action `finally`
-                        unregisterRepositoryWorker workerId
-                pure
-                    ( (nextId + 1, Map.insert workerId worker workers)
-                    , workerId
-                    )
-            putMVar gate ())
+            admitted <- modifyMVar repositoryWorkers \state ->
+                case state.repositoryWorkerBarrier of
+                    Just _ -> pure (state, False)
+                    Nothing -> do
+                        let workerId = state.repositoryWorkerNextId
+                        worker <- asyncWithUnmask \unmask -> do
+                            readMVar gate
+                            unmask action `finally`
+                                unregisterRepositoryWorker workerId
+                        pure
+                            ( state
+                                { repositoryWorkerNextId = workerId + 1
+                                , repositoryWorkerActive =
+                                    Map.insert
+                                        workerId
+                                        worker
+                                        state.repositoryWorkerActive
+                                }
+                            , True
+                            )
+            when admitted (putMVar gate ())
+            pure admitted)
         >>= \case
             Left _ -> pure False
-            Right () -> pure True
+            Right admitted -> pure admitted
 
 unregisterRepositoryWorker :: Int -> IO ()
 unregisterRepositoryWorker workerId =
-    modifyMVar repositoryWorkers \(nextId, workers) ->
-        pure ((nextId, Map.delete workerId workers), ())
+    modifyMVar repositoryWorkers \state ->
+        pure
+            ( state
+                { repositoryWorkerActive =
+                    Map.delete workerId state.repositoryWorkerActive
+                }
+            , ()
+            )
 
 ha_repository_cancel_all :: IO ()
-ha_repository_cancel_all = do
-    workers <- modifyMVar repositoryWorkers \(nextId, active) ->
-        pure ((nextId, Map.empty), Map.elems active)
-    mapM_ cancel workers
-    mapM_ waitCatch workers
+ha_repository_cancel_all =
+    mask \restore -> do
+        admission <- modifyMVar repositoryWorkers \state ->
+            case state.repositoryWorkerBarrier of
+                Just barrier ->
+                    pure (state, Left barrier)
+                Nothing -> do
+                    barrier <- newEmptyMVar
+                    pure
+                        ( state
+                            { repositoryWorkerActive = Map.empty
+                            , repositoryWorkerBarrier = Just barrier
+                            }
+                        , Right
+                            ( barrier
+                            , Map.elems state.repositoryWorkerActive
+                            )
+                        )
+        case admission of
+            Left activeBarrier -> restore (readMVar activeBarrier)
+            Right (barrier, workers) ->
+                restore
+                    (mapM_ cancel workers >> mapM_ waitCatch workers)
+                    `finally` do
+                        modifyMVar repositoryWorkers \state ->
+                            pure
+                                ( state
+                                    { repositoryWorkerBarrier = Nothing }
+                                , ()
+                                )
+                        putMVar barrier ()
+
+-- Deterministic regression hook for the admission-barrier lifecycle. This is
+-- a Haskell test hook, not part of the C ABI.
+repositoryCancelAllAdmissionSmoke :: IO Bool
+repositoryCancelAllAdmissionSmoke = do
+    entered <- newEmptyMVar
+    firstAccepted <- startRepositoryWorker do
+        putMVar entered ()
+        uninterruptibleMask_ (threadDelay 250_000)
+    if not firstAccepted
+        then pure False
+        else do
+            readMVar entered
+            withAsync ha_repository_cancel_all \canceller -> do
+                rejectedDuringBarrier <- awaitRejection 1000
+                _ <- waitCatch canceller
+                completed <- newEmptyMVar
+                acceptedAfter <- startRepositoryWorker (putMVar completed ())
+                finishedAfter <- if acceptedAfter
+                    then readMVar completed >> pure True
+                    else pure False
+                pure (rejectedDuringBarrier && finishedAfter)
+  where
+    awaitRejection attempts
+        | attempts <= (0 :: Int) = pure False
+        | otherwise =
+            startRepositoryWorker (pure ()) >>= \case
+                False -> pure True
+                True -> threadDelay 1000 >> awaitRejection (attempts - 1)
 
 {-# NOINLINE repositoryWorkers #-}
-repositoryWorkers :: MVar (Int, Map Int (Async ()))
-repositoryWorkers = unsafePerformIO (newMVar (0, Map.empty))
+repositoryWorkers :: MVar RepositoryWorkerState
+repositoryWorkers = unsafePerformIO
+    (newMVar RepositoryWorkerState
+        { repositoryWorkerNextId = 0
+        , repositoryWorkerActive = Map.empty
+        , repositoryWorkerBarrier = Nothing
+        })
+
+data RepositoryWorkerState = RepositoryWorkerState
+    { repositoryWorkerNextId :: !Int
+    , repositoryWorkerActive :: !(Map Int (Async ()))
+    , repositoryWorkerBarrier :: !(Maybe (MVar ()))
+    }
 
 data RepositoryCheckHandle = RepositoryCheckHandle
     { repositoryCheckValue :: !(IORef (Maybe RepositoryReview.RepositoryCheck))

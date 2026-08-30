@@ -363,6 +363,8 @@ void ha_engine_destroy(void *engine);
  * their explicit handles. Cancellation does not synthesize a terminal result;
  * an operation may already have completed one before cancellation wins. No
  * callback starts after cancel_all returns, so contexts may then be released.
+ * New repository operations are rejected while cancel_all owns its admission
+ * barrier and may be retried after it returns.
  * A streaming callback failure stops that stream and is followed by one
  * failure terminal attempt; terminal callbacks are never retried.
  */
