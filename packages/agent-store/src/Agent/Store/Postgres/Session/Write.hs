@@ -10,6 +10,7 @@ module Agent.Store.Postgres.Session.Write
     , replaceSessionMetadata
     , appendSessionTurn
     , appendSessionTurnIndexed
+    , appendSessionTurns
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
@@ -158,6 +159,36 @@ appendSessionTurnIndexed pool turn metadata =
                         insertTurnStatement
                     insertResponseItems turnId turn.sessionTurnItems
                     pure (Just turnIndex)
+
+-- | Append a sequence of turns as one atomic transcript transition.
+--
+-- This is used when an immutable transcript needs to publish a reset marker
+-- and a replayed prefix together: readers observe either the entire new branch
+-- or none of it.
+appendSessionTurns
+    :: StorePool
+    -> [SessionTurn]
+    -> SessionMetadata
+    -> IO (Either StoreError Bool)
+appendSessionTurns pool turns metadata =
+    withSession pool $
+        Transactions.transaction Transactions.Serializable Transactions.Write do
+            _ <- Transaction.statement
+                metadata.sessionMetadataKey
+                blockingAdvisoryLockStatement
+            case turns of
+                [] ->
+                    Transaction.statement
+                        metadata.sessionMetadataKey
+                        sessionExistsStatement
+                _ -> appendAll turns
+  where
+    appendAll [] = pure True
+    appendAll (turn : rest) = do
+        appended <- appendTurnTransaction turn metadata
+        if appended
+            then appendAll rest
+            else Transaction.condemn >> pure False
 
 deleteSession
     :: StorePool

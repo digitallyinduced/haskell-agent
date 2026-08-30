@@ -673,6 +673,36 @@ spec = describe "Agent.CLI.Session" do
             resumeHint "it's" "id"
                 `shouldBe` "Resume this session with: 'it'\\''s' --resume id"
 
+        it "offers rewind targets from the current branch with retained prefixes" do
+            let turn effect userText responseId = SessionTurn
+                    { turnAt = fixedTime
+                    , turnUserText = userText
+                    , turnAssistantText = Just "answer"
+                    , turnError = Nothing
+                    , turnResponseId = responseId
+                    , turnItems = []
+                    , turnUsage = Nothing
+                    , turnEffect = effect
+                    , turnProviderTelemetry = []
+                    }
+                old = turn TranscriptAppend "old prompt" (Just "old")
+                reset = turn TranscriptReset "/clear" Nothing
+                first = turn TranscriptAppend "first prompt" (Just "first")
+                checkpoint =
+                    turn TranscriptReplace "/compact" Nothing
+                second = turn TranscriptAppend "second prompt" (Just "second")
+                choices =
+                    sessionRewindChoices
+                        [old, reset, first, checkpoint, second]
+            map
+                (\(prompt, retained) ->
+                    (prompt.turnUserText, map (.turnUserText) retained))
+                choices
+                `shouldBe`
+                    [ ("first prompt", [])
+                    , ("second prompt", ["first prompt", "/compact"])
+                    ]
+
         it "keeps response-item JSON codecs at the CLI storage boundary" do
             let items =
                     [ MessageItem ResponseMessage
@@ -1102,6 +1132,113 @@ spec = describe "Agent.CLI.Session" do
                     `shouldReturn`
                         Left ("session not found: " <> handle.sessionMeta.metaId)
 
+        it "publishes rewind branches while preserving checkpoints and usage" $
+            withTempStore \store root -> do
+                let
+                    pool = trustedPool store
+                    first = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "first prompt"
+                        , turnAssistantText = Just "first answer"
+                        , turnError = Nothing
+                        , turnResponseId = Just "response-first"
+                        , turnItems = []
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 10
+                            , outputTokens = 4
+                            , cachedTokens = 2
+                            }
+                        , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
+                        }
+                    checkpoint = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "/compact"
+                        , turnAssistantText = Just "Context compacted remotely."
+                        , turnError = Nothing
+                        , turnResponseId = Nothing
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        , turnEffect = TranscriptReplace
+                        , turnProviderTelemetry = []
+                        }
+                    later = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "later prompt"
+                        , turnAssistantText = Just "later answer"
+                        , turnError = Nothing
+                        , turnResponseId = Just "response-later"
+                        , turnItems = []
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 7
+                            , outputTokens = 3
+                            , cachedTokens = 1
+                            }
+                        , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
+                        }
+                initial <- createSession (testCreate pool root)
+                withFirst <- appendTurnWithMetaUpdate initial first
+                    \meta -> meta { metaTitleUserTurns = 1 }
+                withCheckpoint <-
+                    appendTurnWithMetaUpdate withFirst checkpoint
+                        \meta -> meta { metaLastResponseId = Nothing }
+                final <- appendTurnWithMetaUpdate withCheckpoint later
+                    \meta -> meta
+                        { metaTitleRefreshIndex = 2
+                        , metaTitleUserTurns = 2
+                        , metaLastRecap = Just "stale recap"
+                        , metaLastTurnSummary = Just "stale summary"
+                        , metaLastRecapMainTurns = 2
+                        }
+
+                rewound <- rewindSession final [first, checkpoint] >>= \case
+                    Left err ->
+                        expectationFailure (Text.unpack err)
+                            >> fail "rewind failed"
+                    Right handle -> pure handle
+
+                rewound.sessionMeta.metaLastResponseId `shouldBe` Nothing
+                rewound.sessionMeta.metaTitleRefreshIndex `shouldBe` 0
+                rewound.sessionMeta.metaTitleUserTurns `shouldBe` 1
+                rewound.sessionMeta.metaLastRecap `shouldBe` Nothing
+                rewound.sessionMeta.metaLastTurnSummary `shouldBe` Nothing
+                rewound.sessionMeta.metaLastRecapMainTurns `shouldBe` 0
+                rewound.sessionMeta.metaInputTokens `shouldBe` 17
+                rewound.sessionMeta.metaOutputTokens `shouldBe` 7
+                rewound.sessionMeta.metaCachedTokens `shouldBe` 3
+
+                loadSession pool root rewound.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        meta `shouldBe` rewound.sessionMeta
+                        case turns of
+                            [ originalFirst
+                                , originalCheckpoint
+                                , originalLater
+                                , marker
+                                , replayedFirst
+                                , replayedCheckpoint
+                                ] -> do
+                                    originalFirst `shouldBe` first
+                                    originalCheckpoint `shouldBe` checkpoint
+                                    originalLater `shouldBe` later
+                                    marker.turnUserText `shouldBe` "/rewind"
+                                    marker.turnAssistantText
+                                        `shouldBe` Just "Conversation rewound."
+                                    marker.turnResponseId `shouldBe` Nothing
+                                    marker.turnEffect `shouldBe` TranscriptReset
+                                    replayedFirst `shouldBe` first
+                                    replayedCheckpoint `shouldBe` checkpoint
+                            _ ->
+                                expectationFailure
+                                    ("unexpected rewind transcript: "
+                                        <> show turns)
+
+                loadActiveSession pool root rewound.sessionMeta.metaId
+                    `shouldReturn`
+                        Right (rewound.sessionMeta, [checkpoint])
+
         it "imports a legacy meta.json and JSONL transcript once" $
             withTempStore \store root -> do
                 let
@@ -1200,19 +1337,23 @@ spec = describe "Agent.CLI.Session" do
                 `shouldBe` Right meta
 
         it "infers transcript effects when importing legacy JSON turns" do
-            let legacy = Aeson.object
+            let legacy userText = Aeson.object
                     [ "at" Aeson..= fixedTime
-                    , "userText" Aeson..= ("/compact focus" :: Text.Text)
+                    , "userText" Aeson..= (userText :: Text.Text)
                     , "assistantText" Aeson..= (Nothing :: Maybe Text.Text)
                     , "error" Aeson..= (Nothing :: Maybe Text.Text)
                     , "responseId" Aeson..= (Nothing :: Maybe Text.Text)
                     , "items" Aeson..= ([] :: [ResponseItem])
                     , "usage" Aeson..= (Nothing :: Maybe TokenUsage)
                     ]
-                decoded = Hermes.decodeEither sessionTurnDecoder
-                    (LBS.toStrict (Aeson.encode legacy))
-            fmap (\turn -> turn.turnEffect) decoded
+                effect userText =
+                    fmap
+                        (.turnEffect)
+                        (Hermes.decodeEither sessionTurnDecoder
+                            (LBS.toStrict (Aeson.encode (legacy userText))))
+            effect "/compact focus"
                 `shouldBe` Right TranscriptReplace
+            effect "/rewind" `shouldBe` Right TranscriptReset
 
 testCreate :: StorePool -> OsPath -> SessionCreate
 testCreate pool root = SessionCreate

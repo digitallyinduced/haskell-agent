@@ -232,6 +232,16 @@ spec = do
             parseReplLine "/delete now"
                 `shouldBe` ReplCommandError "usage: /delete"
 
+        it "returns home or rewinds through Grok-compatible aliases" do
+            parseReplLine "/home" `shouldBe` ReplHome
+            parseReplLine "/welcome" `shouldBe` ReplHome
+            parseReplLine "/rewind" `shouldBe` ReplRewind
+            parseReplLine "/undo" `shouldBe` ReplRewind
+            parseReplLine "/home now"
+                `shouldBe` ReplCommandError "usage: /home"
+            parseReplLine "/undo now"
+                `shouldBe` ReplCommandError "usage: /rewind"
+
         it "compacts with optional focus text" do
             parseReplLine "/compact" `shouldBe` ReplCompact Nothing
             parseReplLine "/compact focus auth"
@@ -451,8 +461,10 @@ spec = do
                     , "rename"
                     , "login"
                     , "resume"
+                    , "home"
                     , "search"
                     , "compact"
+                    , "rewind"
                     , "clear"
                     , "new"
                     , "delete"
@@ -504,6 +516,10 @@ spec = do
                 `shouldBe` Just "view-plan"
             fmap (.slashName) (lookupSlashCommand "/log")
                 `shouldBe` Just "transcript"
+            fmap (.slashName) (lookupSlashCommand "/welcome")
+                `shouldBe` Just "home"
+            fmap (.slashName) (lookupSlashCommand "/undo")
+                `shouldBe` Just "rewind"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
@@ -513,7 +529,9 @@ spec = do
                         && "/m" `elem` xs
                         && "/agents" `elem` xs
                         && "/mcp" `elem` xs
-                        && "/btw" `elem` xs)
+                        && "/btw" `elem` xs
+                        && "/rewind" `elem` xs
+                        && "/undo" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
 

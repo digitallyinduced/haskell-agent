@@ -17,7 +17,7 @@ import Agent.CLI.Command
     ( currentEffort,
       currentModel,
       ForkRequest(..),
-      ReplAction(ReplRenameAuto, ReplResume, ReplSearch, ReplClear,
+      ReplAction(ReplRenameAuto, ReplResume, ReplSearch, ReplHome, ReplRewind, ReplClear,
                  ReplNew, ReplDelete, ReplShowSession, ReplShowSessionInfo, ReplAfk,
                  ReplWorktree, ReplRename, ReplFork),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
@@ -64,7 +64,8 @@ import Agent.CLI.Runtime.HistorySource
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunDeleteSession, RunForkSession, RunSwitchWorktree, RunQuit) )
+    ( RunResult(RunDeleteSession, RunForkSession, RunSwitchWorktree, RunRestart,
+                RunQuit) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReset),
@@ -72,9 +73,11 @@ import Agent.CLI.Session
       createSession,
       forkSessionAt,
       loadSession,
+      rewindSession,
       removeSessionTemp,
       resetSessionTitleToAuto,
       sessionConversationText,
+      sessionRewindChoices,
       sessionsRoot,
       setManualSessionTitle,
       writeSessionMeta,
@@ -87,7 +90,7 @@ import Agent.CLI.Session
       SessionMeta(metaTitle, metaLastResponseId, metaUpdatedAt,
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
-                  metaId, metaCwd),
+                  metaTitleUserTurns, metaId, metaCwd),
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
@@ -199,7 +202,8 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ( toAscList )
-import qualified Data.Text as Text ( intercalate, unlines )
+import qualified Data.Text as Text
+    ( intercalate, length, pack, strip, take, unlines, unwords, words )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -238,6 +242,77 @@ handleSessionAction
             databasePool fullscreen query persist >>= \case
                 Nothing -> continue
                 Just result -> pure result
+    ReplHome ->
+        handleResume databasePool fullscreen Nothing persist >>= \case
+            Nothing -> continue
+            Just result -> pure result
+    ReplRewind -> do
+        color <- resolveColor stderr
+        let unavailable message = do
+                displayError message $
+                    putTextLn stderr (roleError color message)
+                continue
+        case persist of
+            PersistenceDisabled ->
+                unavailable "/rewind requires a persisted interactive session"
+            PersistenceEnabled slotRef ->
+                readIORef slotRef >>= \case
+                    PersistencePending{} ->
+                        unavailable
+                            "/rewind is available after the first persisted turn"
+                    PersistenceActive source ->
+                        withReplActivity
+                            (\report -> do
+                                report "Loading rewind points…"
+                                loadSession
+                                    databasePool
+                                    (takeDirectory source.sessionDir)
+                                    source.sessionMeta.metaId)
+                            >>= \case
+                                Left err -> unavailable err
+                                Right (meta, turns) ->
+                                    case sessionRewindChoices turns of
+                                        [] ->
+                                            unavailable
+                                                "No prompt is available to rewind."
+                                        choices ->
+                                            chooseRewindPoint color choices >>= \case
+                                                Nothing -> continue
+                                                Just (prompt, retained) ->
+                                                    confirmRewind
+                                                        color
+                                                        prompt.turnUserText
+                                                        >>= \case
+                                                            False -> continue
+                                                            True -> mask \restore -> do
+                                                                result <-
+                                                                    restore $
+                                                                        withReplActivity \report -> do
+                                                                            report "Rewinding conversation…"
+                                                                            rewindSession
+                                                                                source
+                                                                                    { sessionMeta = meta }
+                                                                                retained
+                                                                case result of
+                                                                    Left err ->
+                                                                        restore
+                                                                            (unavailable err)
+                                                                    Right updated -> do
+                                                                        writeIORef
+                                                                            slotRef
+                                                                            (PersistenceActive updated)
+                                                                        writeIORef
+                                                                            env.sessionTitleTurnCount
+                                                                            updated.sessionMeta.metaTitleUserTurns
+                                                                        writeIORef
+                                                                            env.sessionDraft
+                                                                            prompt.turnUserText
+                                                                        invalidateSessionTitles
+                                                                            env.sessionTitleManager
+                                                                            updated.sessionMeta.metaId
+                                                                        pure
+                                                                            (RunRestart
+                                                                                updated.sessionMeta.metaId)
     ReplClear -> do
         sessionReset
         fullscreenEvent UiConversationCleared
@@ -823,6 +898,89 @@ handleSessionAction
                             Just "Use a new worktree" -> Just True
                             Just "Share current workspace" -> Just False
                             _ -> Nothing
+    chooseRewindPoint color choices =
+        let newestFirst = reverse choices
+            rows =
+                zipWith
+                    (\number (turn, _) ->
+                        ( Text.pack (show number)
+                            <> ". "
+                            <> promptPreview 72 turn.turnUserText
+                        , "Restore the conversation state before this prompt"
+                        ))
+                    [(1 :: Int) ..]
+                    newestFirst
+            labeledChoices = zip (map fst rows) newestFirst
+        in case fullscreen of
+            Just runtime ->
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Rewind conversation"
+                    ( "Choose a prompt to restore as a draft. "
+                        <> "Conversation only; files stay unchanged."
+                    )
+                    0
+                    rows
+                    >>= pure . (>>= atIndex newestFirst)
+            Nothing -> do
+                Text.hPutStrLn stderr $
+                    roleMuted color
+                        "Choose a prompt to restore as a draft. Files stay unchanged."
+                readChoiceSelectionAt
+                    0
+                    (\selected label ->
+                        if selected
+                            then rolePrompt color label
+                            else roleMuted color label)
+                    (map fst rows)
+                    >>= pure . (>>= (`lookup` labeledChoices))
+    confirmRewind color prompt =
+        case fullscreen of
+            Just runtime ->
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Rewind conversation?"
+                    ( "Restore conversation state before:\n\n"
+                        <> promptPreview 240 prompt
+                        <> "\n\nConversation only; files stay unchanged."
+                    )
+                    1
+                    [ ( "Rewind conversation"
+                      , "Remove later turns and restore this prompt as a draft"
+                      )
+                    , ( "Cancel"
+                      , "Keep the current conversation"
+                      )
+                    ]
+                    >>= pure . (== Just 0)
+            Nothing -> do
+                Text.hPutStrLn stderr $
+                    roleMuted color
+                        ( "Restore conversation state before “"
+                            <> promptPreview 120 prompt
+                            <> "”? Files stay unchanged."
+                        )
+                readChoiceSelectionAt
+                    1
+                    (\selected label ->
+                        if selected
+                            then rolePrompt color label
+                            else roleMuted color label)
+                    [ "Rewind conversation"
+                    , "Cancel"
+                    ]
+                    >>= pure . (== Just "Rewind conversation")
+    promptPreview limit prompt =
+        let oneLine = Text.unwords (Text.words (Text.strip prompt))
+        in if Text.length oneLine <= limit
+            then oneLine
+            else Text.take (max 0 (limit - 1)) oneLine <> "…"
+    atIndex values index
+        | index < 0 = Nothing
+        | otherwise =
+            case drop index values of
+                value : _ -> Just value
+                [] -> Nothing
     confirmDelete color sessionId =
         case fullscreen of
             Just runtime ->
