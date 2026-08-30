@@ -1,5 +1,6 @@
 module Agent.CLI.Auth.OpenAI
     ( loadOpenAi
+    , loadOpenAiDictationAuth
     , openAiAuthStateChanged
     , preferredOpenAiTokenProvider
     ) where
@@ -8,6 +9,9 @@ import Agent.CLI.Auth.Types
     ( LoadedAuth(..)
     , authStateToJson
     , credentialAccountLabel
+    , credentialAccountLabelWith
+    , externalAuthSelectionId
+    , managedAuthSelectionId
     , nonEmptyText
     , openAIOAuthClientId
     , openaiAuthStateFromJson
@@ -41,8 +45,9 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Monad (when)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Except (ExceptT, throwE)
+import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import qualified Data.Aeson as Aeson
+import Data.Aeson ((.:?))
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (partitionEithers)
 import Data.IORef
@@ -53,7 +58,7 @@ import Data.IORef
     )
 import Data.Containers.ListUtils (nubOrdOn)
 import Data.List (find)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -63,6 +68,21 @@ import System.Directory.OsPath
     , getHomeDirectory
     )
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
+
+data OpenAiApiKeySource = OpenAiApiKeySource
+    { apiKeyAccessToken :: !Text
+    , apiKeyAccountId :: !Text
+    , apiKeyLabel :: !Text
+    , apiKeySelectionId :: !Text
+    }
+
+newtype CodexApiKey = CodexApiKey
+    { codexOpenAiApiKey :: Maybe Text
+    }
+
+instance Aeson.FromJSON CodexApiKey where
+    parseJSON = Aeson.withObject "Codex auth" \object ->
+        CodexApiKey <$> object .:? "OPENAI_API_KEY"
 
 -- | Pin normal checkouts to one OpenAI pool account until that credential is
 -- reported as failed. A failure for the selected credential clears the pin
@@ -110,6 +130,158 @@ preferredOpenAiTokenProvider preferredAccount pool fallback =
                     }
             Left err ->
                 pure (Left err)
+
+-- | Load the best OpenAI credential for dictation. ChatGPT OAuth is preferred
+-- because the official desktop client transcribes subscription audio through
+-- the ChatGPT backend. API keys remain available for the public Realtime API.
+loadOpenAiDictationAuth :: IO (Maybe LoadedAuth)
+loadOpenAiDictationAuth =
+    runExceptT loadOpenAi >>= \case
+        Right loaded
+            | tokenProviderBillingMode loaded.loadedTokenProvider
+                == SubscriptionBilled ->
+                pure (Just loaded)
+            | otherwise ->
+                loadExternalOpenAiApiKeyDictationAuth >>= \case
+                    Just external ->
+                        pure (Just external)
+                    Nothing ->
+                        pure (Just loaded)
+        Left _ ->
+            loadOpenAiApiKeyDictationAuth
+
+loadOpenAiApiKeyDictationAuth :: IO (Maybe LoadedAuth)
+loadOpenAiApiKeyDictationAuth =
+    loadOpenAiApiKeyDictationAuthWith True
+
+loadExternalOpenAiApiKeyDictationAuth :: IO (Maybe LoadedAuth)
+loadExternalOpenAiApiKeyDictationAuth =
+    loadOpenAiApiKeyDictationAuthWith False
+
+loadOpenAiApiKeyDictationAuthWith :: Bool -> IO (Maybe LoadedAuth)
+loadOpenAiApiKeyDictationAuthWith includeManaged =
+    fmap (fmap loadedAuthForApiKey) $
+        firstJustM
+            ( [ loadEnvironmentApiKey "OPENAI_API_KEY"
+              , loadEnvironmentApiKey "CODEX_API_KEY"
+              , loadCodexEnvironmentApiKey
+              , loadCodexFileApiKey
+              ]
+                <> if includeManaged
+                    then
+                        [managedApiKeySource <$> loadManagedCredentials]
+                    else []
+            )
+  where
+    loadEnvironmentApiKey variable = do
+        key <- (>>= nonEmptyText) <$> lookupNonEmpty variable
+        pure $
+            externalApiKeySource
+                (Text.pack variable)
+                "OpenAI API key"
+                <$> key
+    loadCodexEnvironmentApiKey = do
+        value <- lookupNonEmpty "CODEX_AUTH_JSON"
+        pure $
+            externalApiKeySource
+                "CODEX_AUTH_JSON"
+                "OpenAI API key"
+                <$> (value >>= codexApiKeyFromText)
+    loadCodexFileApiKey = do
+        codexHome <- lookupNonEmpty "CODEX_HOME"
+        codexDirectory <- case codexHome of
+            Just path ->
+                pure (unsafeEncodeUtf (Text.unpack path))
+            Nothing ->
+                (</> unsafeEncodeUtf ".codex") <$> getHomeDirectory
+        let filePath = codexDirectory </> unsafeEncodeUtf "auth.json"
+        fileExists <- doesFileExist filePath
+        fileBytes <- if fileExists
+            then
+                Just
+                    <$> retryOnFileBusy
+                        (LBS.readFile (unsafeToFilePath filePath))
+            else pure Nothing
+        pure $
+            externalApiKeySource
+                (Text.pack (unsafeToFilePath filePath))
+                "OpenAI API key"
+                <$> (fileBytes >>= codexApiKeyFromJson)
+
+firstJustM :: [IO (Maybe value)] -> IO (Maybe value)
+firstJustM = \case
+    [] ->
+        pure Nothing
+    action : remaining ->
+        action >>= \case
+            Just value ->
+                pure (Just value)
+            Nothing ->
+                firstJustM remaining
+
+externalApiKeySource :: Text -> Text -> Text -> OpenAiApiKeySource
+externalApiKeySource source label accessToken =
+    OpenAiApiKeySource
+        { apiKeyAccessToken = accessToken
+        , apiKeyAccountId = ""
+        , apiKeyLabel = label
+        , apiKeySelectionId =
+            externalAuthSelectionId OpenAIProvider source
+        }
+
+managedApiKeySource
+    :: Either Text [(ManagedCredential, ManagedSecret)]
+    -> Maybe OpenAiApiKeySource
+managedApiKeySource = \case
+    Left _ ->
+        Nothing
+    Right credentials ->
+        listToMaybe
+            [ OpenAiApiKeySource
+                { apiKeyAccessToken = accessToken
+                , apiKeyAccountId = metadata.managedAccountId
+                , apiKeyLabel = metadata.managedLabel
+                , apiKeySelectionId =
+                    managedAuthSelectionId metadata.managedId
+                }
+            | (metadata, secret) <- credentials
+            , metadata.managedEnabled
+            , metadata.managedProvider == OpenAIProvider
+            , metadata.managedBilling == ApiBilled
+            , metadata.managedAuthKind == ManagedBearerToken
+            , Just accessToken <- [nonEmptyText secret.secretPayload]
+            ]
+
+codexApiKeyFromText :: Text -> Maybe Text
+codexApiKeyFromText =
+    codexApiKeyFromJson . LBS.fromStrict . TextEncoding.encodeUtf8
+
+codexApiKeyFromJson :: LBS.ByteString -> Maybe Text
+codexApiKeyFromJson bytes = do
+    CodexApiKey{codexOpenAiApiKey} <- Aeson.decode bytes
+    codexOpenAiApiKey >>= nonEmptyText
+
+loadedAuthForApiKey :: OpenAiApiKeySource -> LoadedAuth
+loadedAuthForApiKey source =
+    LoadedAuth
+        { loadedProvider = OpenAIProvider
+        , loadedTokenProvider =
+            tokenProvider ApiBilled \case
+                Nothing ->
+                    pure $ Right Credential
+                        { accessToken = source.apiKeyAccessToken
+                        , accountId = source.apiKeyAccountId
+                        , leaseId = Nothing
+                        , provider = OpenAIProvider
+                        }
+                Just _ ->
+                    pure $ Left $ CredentialError
+                        "OpenAI API-key credential was rejected"
+        , loadedAccountLabel =
+            pure . credentialAccountLabelWith source.apiKeyLabel
+        , loadedSelectionId = Just source.apiKeySelectionId
+        , loadedOpenAiPool = Nothing
+        }
 
 loadOpenAi :: ExceptT Text IO LoadedAuth
 loadOpenAi = do
@@ -160,8 +332,13 @@ loadOpenAiAccounts = do
     fromEnvToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     fromEnvJson <- lookupNonEmpty "CODEX_AUTH_JSON"
     home <- getHomeDirectory
-    let filePath =
-            home </> unsafeEncodeUtf ".codex" </> unsafeEncodeUtf "auth.json"
+    configuredCodexHome <- lookupNonEmpty "CODEX_HOME"
+    let codexDirectory =
+            maybe
+                (home </> unsafeEncodeUtf ".codex")
+                (unsafeEncodeUtf . Text.unpack)
+                configuredCodexHome
+        filePath = codexDirectory </> unsafeEncodeUtf "auth.json"
     fileExists <- doesFileExist filePath
     fileBytes <- if fileExists
         then Just <$> retryOnFileBusy (LBS.readFile (unsafeToFilePath filePath))

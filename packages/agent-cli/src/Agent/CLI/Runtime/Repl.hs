@@ -29,7 +29,7 @@ import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayBridge ()
-import Agent.CLI.Input ( readReplLineWithCatalog )
+import Agent.CLI.Input ( readReplLineWithCatalogForProvider )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -352,7 +352,8 @@ replWithDraft env@SessionEnv
                         <> if stdoutColor
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
-            result <- readReplLineWithCatalog
+            result <- readReplLineWithCatalogForProvider
+                provider
                 slashCatalog
                 interrupt chromePrompt draft
             when terminal.terminalSemanticPrompts $

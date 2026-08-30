@@ -15,6 +15,7 @@ import qualified Agent.OpenAI.ModelsManagerSpec as ModelsManagerSpec
 import qualified Agent.OpenAI.ModelsTypesSpec as ModelsTypesSpec
 import qualified Agent.OpenAI.CompactionSpec as CompactionSpec
 import qualified Agent.OpenAI.ToolDSLSpec as ToolDSLSpec
+import qualified Agent.OpenAI.TranscriptionSpec as TranscriptionSpec
 import qualified Agent.OpenAI.UsageSpec as UsageSpec
 import qualified Agent.OpenAI.WebSocketClientSpec as WebSocketClientSpec
 
@@ -33,5 +34,6 @@ main = hspec do
     ModelsTypesSpec.spec
     CompactionSpec.spec
     ToolDSLSpec.spec
+    TranscriptionSpec.spec
     UsageSpec.spec
     WebSocketClientSpec.spec

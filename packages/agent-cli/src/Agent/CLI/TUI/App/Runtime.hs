@@ -4,6 +4,7 @@ module Agent.CLI.TUI.App.Runtime where
 
 import Agent.CLI.TUI.App.Mailbox (enqueueAppEvent)
 
+import Agent.Provider (Provider)
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
@@ -253,7 +254,8 @@ newFullscreenRuntimeWithSyntaxLoader
         colorFgBg <- lookupEnv "COLORFGBG"
         windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
-            { sessionCancel = cancelAction
+            { sessionProvider = Nothing
+            , sessionCancel = cancelAction
             , sessionSteer = const (pure ())
             , sessionBtw = const (pure ())
             , sessionRecap = pure ()
@@ -318,6 +320,7 @@ newFullscreenRuntimeWithSyntaxLoader
 
 setFullscreenSessionActions
     :: FullscreenRuntime
+    -> Maybe Provider
     -> IO ()
     -> (Text -> IO ())
     -> (Text -> IO ())
@@ -329,6 +332,7 @@ setFullscreenSessionActions
     -> IO ()
 setFullscreenSessionActions
     runtime
+    provider
     cancelAction
     steerAction
     btwAction
@@ -338,7 +342,8 @@ setFullscreenSessionActions
     agentSnapshot
     agentSelect =
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
-            { sessionCancel = cancelAction
+            { sessionProvider = provider
+            , sessionCancel = cancelAction
             , sessionSteer = steerAction
             , sessionBtw = btwAction
             , sessionRecap = recapAction

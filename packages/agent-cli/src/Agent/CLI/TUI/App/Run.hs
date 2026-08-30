@@ -348,13 +348,20 @@ runFullscreen runtime workerAction = do
 
     dictationWorker = forever do
         job <- atomically (readTQueue runtime.runtimeDictationJobs)
-        result <-
-            dictateWith
-                DictationControl
-                    { dictationWaitForStop = job.dictationJobWaitForStop
-                    , dictationOnTranscript =
-                        enqueueAppEvent runtime . AppDictationPartial
-                    }
+        actions <- readIORef runtime.runtimeSessionActions
+        result <- case actions.sessionProvider of
+            Nothing ->
+                pure $ DictationFailed
+                    "Dictation is unavailable while the model is changing"
+            Just provider ->
+                dictateWith
+                    provider
+                    DictationControl
+                        { dictationWaitForStop =
+                            job.dictationJobWaitForStop
+                        , dictationOnTranscript =
+                            enqueueAppEvent runtime . AppDictationPartial
+                        }
         enqueueAppEvent runtime $
             AppDictationFinished $
                 case result of
