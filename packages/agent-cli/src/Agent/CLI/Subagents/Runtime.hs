@@ -860,6 +860,7 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
                     childApprove runtime.subagentPolicy toolRegistry call
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
+            , loopInterrupt = pure ()
             , loopCancel = env.subCancel
             }
     result <- runChild config

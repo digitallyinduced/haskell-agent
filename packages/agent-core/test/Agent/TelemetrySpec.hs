@@ -16,6 +16,31 @@ spec = describe "provider turn telemetry" do
         Json.decodeEither turnTelemetryDecoder encoded
             `shouldBe` Right telemetry
 
+    it "round-trips explicit null optional metadata" do
+        let telemetry = TurnTelemetry
+                { telemetryDurationMs = Nothing
+                , telemetryApiDurationMs = Nothing
+                , telemetryCostUsd = Nothing
+                , telemetryStopReason = Nothing
+                , telemetryProviderTurns = Nothing
+                , telemetryModels = Map.singleton "claude-test" ModelTelemetry
+                    { modelInputTokens = 0
+                    , modelOutputTokens = 0
+                    , modelCacheReadInputTokens = 0
+                    , modelCacheCreationInputTokens = 0
+                    , modelWebSearchRequests = Nothing
+                    , modelCostUsd = Nothing
+                    , modelContextWindow = Nothing
+                    , modelMaxOutputTokens = Nothing
+                    , modelCanonicalName = Nothing
+                    , modelProviderName = Nothing
+                    }
+                , telemetryStructuredOutput = Nothing
+                }
+            encoded = LazyByteString.toStrict (Aeson.encode telemetry)
+        Json.decodeEither turnTelemetryDecoder encoded
+            `shouldBe` Right telemetry
+
     it "formats a compact completion summary" do
         telemetrySummary sampleTelemetry
             `shouldBe`

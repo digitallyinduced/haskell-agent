@@ -75,6 +75,7 @@ import qualified Data.IntSet as IntSet
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
+import System.Timeout (timeout)
 
 maxEmptyContinuations :: Int
 maxEmptyContinuations = 2
@@ -391,9 +392,12 @@ data LoopConfig = LoopConfig
     -- failed submission can be retried without losing it.
     , loopReadSteering :: !(IO [TurnInput])
     , loopCommitSteering :: !(Int -> IO ())
-      -- | Soft-cancel latch. The caller owns resetting it before publishing
-      -- the turn to input/interrupt handlers. When set, the loop stops after
-      -- the current tool batch instead of asking the model for another step.
+    -- | Ask the active provider to interrupt its turn in-band. The loop calls
+    -- this before falling back to structured async teardown.
+    , loopInterrupt :: !(IO ())
+    -- | Soft-cancel latch. The caller owns resetting it before publishing
+    -- the turn to input/interrupt handlers. When set, the loop stops after
+    -- the current tool batch instead of asking the model for another step.
     , loopCancel :: !CancelFlag
     }
 
@@ -630,15 +634,44 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         config.loopOnEvent event
                                 -- Race the model call against cancel so Ctrl-C / Esc
                                 -- can stop reasoning mid-stream, not only between tools.
-                                raced <- mask \restore -> do
-                                    result <- restore $ race
-                                        (waitCancel config.loopCancel)
-                                        (config.loopBackend.submitTurn
+                                raced <- mask \restore ->
+                                  withAsync
+                                    (restore $
+                                        config.loopBackend.submitTurn
                                             cursor.cursorState
                                             cursor.cursorPreviousResponseId
                                             cursor.cursorInputs
                                             onBackendEvent)
-                                    case result of
+                                    \submission -> do
+                                    result <- restore $ race
+                                        (waitCancel config.loopCancel)
+                                        (waitCatch submission)
+                                    normalized <- case result of
+                                        Left () -> do
+                                            -- Give structured providers a
+                                            -- chance to preserve their
+                                            -- subprocess/session invariants
+                                            -- before withAsync force-cancels
+                                            -- an unresponsive submission.
+                                            _ <- restore $
+                                                timeout 2000000
+                                                    (tryAny
+                                                        config.loopInterrupt)
+                                            _ <- restore $
+                                                timeout 2000000
+                                                    (waitCatch submission)
+                                            pure (Left ())
+                                        Right (Left exception) ->
+                                            -- Preserve the provider thread's
+                                            -- asynchronous-exception identity.
+                                            -- Safe.throwIO deliberately marks
+                                            -- manually thrown exceptions as
+                                            -- synchronous, which would turn a
+                                            -- ThreadKilled into LoopUnexpected.
+                                            Exception.throwIO exception
+                                        Right (Right completed) ->
+                                            pure (Right completed)
+                                    case normalized of
                                         Right (Right backendResult@BackendResult{..})
                                             | not
                                                 (Text.null
@@ -654,7 +687,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                                             { backendState =
                                                                 committed
                                                             }))
-                                        _ -> pure result
+                                        _ -> pure normalized
                                 case raced of
                                     Left () ->
                                         finishCursor cursor

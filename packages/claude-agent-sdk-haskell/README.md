@@ -108,8 +108,10 @@ Claude-side context that the embedding application rolled back.
 
 Legacy clients use `abort` to force-close the active process and start the next
 turn on a fresh session. Handler-aware clients first use the in-band
-`interrupt` control operation, preserving the process and Claude conversation
-when it succeeds, and fall back to force-close when it fails.
+`interrupt` control operation and fall back to force-close when it fails. If
+the interrupted turn reaches the host commit boundary, its continuation is
+invalidated so a discarded result can never leave the reusable process ahead
+of authoritative host state.
 
 ## Control handlers
 

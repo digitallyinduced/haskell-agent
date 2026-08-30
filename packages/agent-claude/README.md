@@ -48,9 +48,12 @@ gateway token into Claude Code. It does not require a local Claude login. The
 token is redacted from `Show` and status output.
 
 Thinking blocks are surfaced as reasoning progress events (and are never
-copied into the persisted conversation prompt). Claude Code executes its own
-tools; tool records are emitted only as display events and are never returned
-to the harness for dispatch.
+copied into the persisted conversation prompt). Claude Code executes its
+built-in tools; their records are emitted only as display events and are never
+returned to the harness for dispatch. Interactive hosts may also install
+permission callbacks and a synthetic SDK MCP server for complementary harness
+tools. Those MCP calls are approved and dispatched by the host rather than
+duplicating Claude's shell and filesystem tools.
 
 Safe mode is enabled by default. It preserves auth, model selection,
 permissions, and built-in tools while disabling Claude-specific project and
@@ -81,4 +84,7 @@ main = do
 The long-lived backend reuses the same process across turns and restarts with
 `--resume` when the selected model or effort changes. Its response id is the
 Claude session UUID, allowing the surrounding harness to persist and resume the
-subscription-backed session.
+subscription-backed session. Each successful process turn is checkpointed
+against the authoritative host snapshot; rollback, cancellation, or host-side
+compaction invalidates the continuation and forces a fresh process so discarded
+Claude context cannot leak into the next turn.

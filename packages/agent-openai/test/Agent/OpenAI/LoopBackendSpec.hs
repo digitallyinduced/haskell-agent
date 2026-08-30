@@ -1467,6 +1467,7 @@ loopConfig backend = do
         , loopApprove = const (pure (Right True))
         , loopReadSteering = pure []
         , loopCommitSteering = const (pure ())
+        , loopInterrupt = pure ()
         , loopCancel = cancel
         }
 

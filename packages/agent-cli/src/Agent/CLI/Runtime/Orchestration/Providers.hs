@@ -1,6 +1,10 @@
 module Agent.CLI.Runtime.Orchestration.Providers (runAgentProviders) where
 
 import Agent.CLI.AccountPicker ()
+import Agent.CLI.Claude
+    ( approveClaudeRegisteredTool
+    , handleClaudePermissionRequest
+    )
 import Agent.CLI.AccountSelection ()
 import Agent.CLI.Afk ()
 import Agent.CLI.AgentSessions ()
@@ -12,9 +16,12 @@ import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
 import Agent.CLI.Command ()
 import Agent.CLI.Compaction
-    ( boundCompletedToolContinuations,
+    ( autoCompactBackendWith,
+      boundCompletedToolContinuations,
       installLiveCompactOutcome,
       runProviderCompactWith,
+      runBackendCompactHistoryWithContextWindow,
+      runBackendCompactWithContextWindow,
       runResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
 import Agent.CLI.Connectivity ( withConnectionRecovery )
@@ -83,10 +90,12 @@ import Agent.CLI.Session
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History
-    ( readLiveTranscript, writeLiveTranscript )
+    ( readLiveTranscript )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( SessionBackend(..), SessionRequest )
+    ( SessionBackend(..)
+    , SessionRequest(..)
+    )
 import Agent.CLI.Session.Selection ()
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -115,14 +124,20 @@ import Agent.CLI.Worktree ()
 import Agent.Cancel ()
 import Agent.Claude
     ( ClaudeCodeAuth(..),
+      ClaudeCodeBackendHandle(..),
       ClaudeCodeOptions(..),
       ClaudeCodePermission(..),
       claudeCodeOneShotBackend,
       defaultClaudeCodeOptions,
       loadClaudeCodeAuth,
-      withClaudeCodeBackend )
+      withClaudeCodeBackendWithHost )
+import Agent.Claude.Control
+    ( ClaudeCodeHostHandlers(..)
+    , ClaudeCodeMcpRequest(..)
+    , defaultClaudeCodeHostHandlers
+    )
 import Agent.Dialect ()
-import Agent.Error ( ApiError(..) )
+import Agent.Error ( ApiError(..), ErrorType(..) )
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task ()
@@ -130,6 +145,7 @@ import Agent.GrokBuild.Dialect.Workflow ()
 import Agent.Loop
     ( Backend(submitTurn, Backend)
     , BackendSnapshot(..)
+    , defaultLoopDispatch
     )
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ()
@@ -164,6 +180,8 @@ import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
+import Agent.Tools.OutputArtifact (finalizeToolOutput)
+import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Agent.XAI.LoopBackend ( xaiBackend )
 import Control.Applicative ()
 import Control.Concurrent.Async ( link, withAsync )
@@ -190,11 +208,12 @@ import System.Exit ()
 import System.IO ( stderr )
 import System.OsPath ()
 import qualified Data.ByteString as BS ()
+import qualified Data.Aeson as Aeson
 import qualified Agent.Responses.GenericClient as GenericResponses
     ( GenericClientOptions(model),
       createResponseWith,
       createResponseWithEvents )
-import qualified Agent.MCP as MCP ()
+import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.OpenAI.Auth as OpenAI
     ( discoverAccounts, getAccessTokenForAccount )
@@ -531,6 +550,7 @@ runAgentProviders
                                         SessionBackend
                                             { backend = activeBackend
                                             , btwBackend
+                                            , interruptBackend = pure ()
                                             , resetBackendState = do
                                                 OpenAiPersistentConnection
                                                     _credential
@@ -642,6 +662,7 @@ runAgentProviders
                             SessionBackend
                                 { backend = activeBackend
                                 , btwBackend
+                                , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
                     ClaudeCodeProvider -> do
@@ -649,9 +670,7 @@ runAgentProviders
                             loadClaudeCodeAuth
                                 >>= either (startupDie startup . Text.unpack) pure
                         let permission =
-                                if claudeBypassEnabled
-                                    then ClaudeCodeBypass
-                                    else ClaudeCodeDontAsk
+                                ClaudeCodeManual
                             claudeOptions =
                                 (defaultClaudeCodeOptions
                                     claudeAuth.executable
@@ -660,9 +679,21 @@ runAgentProviders
                                     , safeMode = True
                                     , transport = claudeAuth.transport
                                     }
-                            compactRunner _ =
-                                pure $ Left
-                                    "Claude Code manages its own context; /compact is unavailable."
+                            claudeContextWindow = do
+                                currentParams <- readIORef paramsRef
+                                pure $
+                                    contextWindowForParams
+                                        transportModel
+                                        200_000
+                                        currentParams
+                            claudeCompactThreshold = do
+                                contextWindow <- claudeContextWindow
+                                pure $
+                                    max 1 $
+                                        min contextWindow $
+                                            fromMaybe
+                                                (contextWindow * 4 `div` 5)
+                                                options.optCompactThreshold
                             btwBackend privateParams =
                                 Backend \state previous inputs onEvent -> do
                                     privateTranscript <-
@@ -680,48 +711,125 @@ runAgentProviders
                                         previous
                                         inputs
                                         onEvent
-                        if claudeBypassEnabled
-                            then pure ()
-                            else
-                                case fullscreen of
-                                    Just runtime ->
-                                        emitUiEvent runtime
-                                            (UiSystemMessage
-                                                "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
-                                    Nothing -> do
-                                        color <- resolveColor stderrHandle
-                                        putTextLn stderrHandle $
-                                            roleWarn color $
-                                                glyphWarn
-                                                    <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
+                            compactRunner focus = do
+                                contextWindow <- claudeContextWindow
+                                historyRef <-
+                                    newIORef =<< readLiveTranscript
+                                        conversationRef
+                                installLiveCompactOutcome
+                                    conversationRef
+                                    (Just contextTokensRef)
+                                    (runBackendCompactWithContextWindow
+                                        contextWindow
+                                        btwBackend
+                                        recordCompactionUsage
+                                        paramsRef
+                                        historyRef)
+                                    focus
+                            claudeRequest =
+                                sessionRequest
+                                    startupUnavailable
+                                    Nothing
+                                    Nothing
+                                    Nothing
+                                    compactRunner
+                        claudeMcpServer <-
+                            case MCP.createInProcessMcpServer
+                                "haskell-agent"
+                                "0.1.0"
+                                (defaultLoopDispatch
+                                    { toolDispatchFinalizeOutput =
+                                        \call output ->
+                                            finalizeToolOutput
+                                                claudeRequest.toolEnv
+                                                call
+                                                output
+                                    })
+                                (approveClaudeRegisteredTool
+                                    claudeRequest.claudeRuntimeSlot)
+                                claudeRequest.claudeBridgeTools of
+                                Left err -> startupDie startup (Text.unpack err)
+                                Right server -> pure server
+                        let hostHandlers =
+                                defaultClaudeCodeHostHandlers
+                                    { canUseTool =
+                                        Just
+                                            (handleClaudePermissionRequest
+                                                claudeRequest.claudeRuntimeSlot)
+                                    , handleMcpMessage =
+                                        Just \request ->
+                                            if request.serverName
+                                                    /= "haskell-agent"
+                                                then
+                                                    pure Aeson.Null
+                                                else
+                                                    MCP.handleInProcessMcpMessage
+                                                        claudeMcpServer
+                                                        request.message
+                                                        >>= pure . fromMaybe
+                                                            (Aeson.object [])
+                                    , mcpToolNames =
+                                        MCP.inProcessMcpToolNames
+                                            claudeMcpServer
+                                    }
+                        when claudeBypassEnabled $
+                            case fullscreen of
+                                Just runtime ->
+                                    emitUiEvent runtime
+                                        (UiSystemMessage
+                                            "Claude Code --yolo is active; host catastrophic-command and Plan Mode denies remain enforced.")
+                                Nothing -> do
+                                    color <- resolveColor stderrHandle
+                                    putTextLn stderrHandle $
+                                        roleWarn color $
+                                            glyphWarn
+                                                <> "Claude Code --yolo is active; host catastrophic-command and Plan Mode denies remain enforced."
                         writeIORef activeAccountRef claudeAuth.accountLabel
                         claudeTranscriptRef <-
                             newIORef =<< readLiveTranscript conversationRef
-                        withClaudeCodeBackend
+                        withClaudeCodeBackendWithHost
                             claudeOptions
+                            hostHandlers
                             initialPrevious
                             (readIORef paramsRef)
                             claudeTranscriptRef
-                            \backend -> do
+                            \handle -> do
+                                let compactHistory history _inputs = do
+                                        contextWindow <- claudeContextWindow
+                                        currentParams <- readIORef paramsRef
+                                        runBackendCompactHistoryWithContextWindow
+                                            contextWindow
+                                            btwBackend
+                                            recordCompactionUsage
+                                            currentParams
+                                            history
+                                            Nothing
+                                    compactingBackend =
+                                        autoCompactBackendWith
+                                            claudeCompactThreshold
+                                            compactHistory
+                                            (\outcome inputs ->
+                                                readIORef
+                                                    automaticCompactionHookRef
+                                                    >>= \hook ->
+                                                        hook outcome inputs)
+                                            (readIORef paramsRef)
+                                            contextTokensRef
+                                            handle.loopBackend
                                 activeBackend <-
                                     prepareTransitionBackend
                                         modelSwitchScope home projectRoot
-                                        transition persist backend
+                                        transition persist compactingBackend
                                 result <- runSession
-                                    (sessionRequest
-                                        startupUnavailable
-                                        Nothing
-                                        Nothing
-                                        Nothing
-                                        compactRunner)
+                                    claudeRequest
                                     SessionBackend
                                         { backend = activeBackend
                                         , btwBackend
+                                        , interruptBackend =
+                                            handle.interruptActiveTurn
                                         , resetBackendState =
                                             writeIORef claudeTranscriptRef []
                                         }
-                                writeLiveTranscript conversationRef
-                                    =<< readIORef claudeTranscriptRef
                                 pure result
                     OpenRouterProvider -> do
                         openRouterOccupancy <- newIORef Nothing
@@ -830,6 +938,7 @@ runAgentProviders
                             SessionBackend
                                 { backend = activeBackend
                                 , btwBackend
+                                , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
           where

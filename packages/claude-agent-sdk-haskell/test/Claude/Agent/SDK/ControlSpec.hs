@@ -300,7 +300,7 @@ spec = describe "Claude SDK control protocol" do
             _ -> False
         readIORef closed `shouldReturn` 1
 
-    it "uses in-band abort without restarting the process" do
+    it "restarts after in-band abort races a completed callback" do
         starts <- newIORef (0 :: Int)
         closes <- newIORef (0 :: Int)
         factory <-
@@ -346,9 +346,9 @@ spec = describe "Claude SDK control protocol" do
                     withTurn client \_ ->
                         pure (Right ((), pure ()))
                 second `shouldBe` Right ()
-                readIORef starts `shouldReturn` 1
-                readIORef closes `shouldReturn` 0
-        readIORef closes `shouldReturn` 1
+                readIORef starts `shouldReturn` 2
+                readIORef closes `shouldReturn` 1
+        readIORef closes `shouldReturn` 2
 
     it "bounds a blocked endInput during shutdown" do
         factory <-
@@ -387,11 +387,16 @@ fakeTransportFactory
     :: ((Aeson.Value -> IO ()) -> Aeson.Value -> IO ())
     -> IO FakeTransport
 fakeTransportFactory onWrite = do
-    output <- newChan
     writes <- newIORef []
-    exited <- newIORef False
-    let emit = writeChan output . Just . encoded
-        transportFactory _ =
+    activeOutput <- newIORef Nothing
+    let emit value =
+            readIORef activeOutput >>= \case
+                Nothing -> pure ()
+                Just output -> writeChan output (Just (encoded value))
+        transportFactory _ = do
+            output <- newChan
+            exited <- newIORef False
+            writeIORef activeOutput (Just output)
             pure Transport
                 { transportConnect = pure (Right ())
                 , transportWrite = \bytes ->
@@ -404,7 +409,9 @@ fakeTransportFactory onWrite = do
                                         (fromString (show bytes))
                         Right value -> do
                             modifyIORef' writes (<> [value])
-                            onWrite emit value
+                            onWrite
+                                (writeChan output . Just . encoded)
+                                value
                             pure (Right ())
                 , transportRead =
                     Right <$> readChan output

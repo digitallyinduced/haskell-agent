@@ -199,6 +199,7 @@ runWorkload workload eventCount sinkDelayMicros = do
             , loopApprove = \_ -> pure (Right True)
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
+            , loopInterrupt = pure ()
             , loopCancel = cancel
             }
     result <- runLoop config Nothing "benchmark"

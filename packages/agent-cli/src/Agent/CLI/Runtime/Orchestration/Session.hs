@@ -10,6 +10,7 @@ import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(loadedOpenAiPool, loadedTokenProvider) )
 import Agent.CLI.Clipboard ()
+import Agent.CLI.Claude (newClaudeSessionRuntimeSlot)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime(..),
       CodexCatalogSession(..),
@@ -97,6 +98,7 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policy, allTools,
+                     claudeRuntimeSlot, claudeBridgeTools,
                      suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
                      mcpInstructions, mcpFleet,
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
@@ -174,8 +176,10 @@ import Agent.Tools.MultiAgents
     ( MultiAgentContext(multiSendToRoot, multiRegistry) )
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
+import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.Types
-    ( AppTool(appToolName)
+    ( AppTool(..)
+    , ToolSchema(..)
     , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
     )
 import Agent.XAI.LoopBackend ()
@@ -394,6 +398,26 @@ runAgentSession
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
+        claudeRuntimeSlot <- newClaudeSessionRuntimeSlot
+        let claudeBridgeTools =
+                filter isClaudeBridgeTool $
+                    coding.codingAppTools
+                        <> mcpTools
+                        <> sessionTools
+                        <> databaseAppTools
+                        <> learnedSkillAppTools
+            isClaudeBridgeTool tool =
+                canonicalToolName tool.appToolName
+                    `notElem`
+                        [ "shell_command", "run_terminal_cmd"
+                        , "read_file", "write_file", "grep", "glob"
+                        , "search_replace", "apply_patch", "write_stdin"
+                        , "web_fetch", "web_search"
+                        ]
+                    && case tool.appToolSchema of
+                        JsonFunctionSchema{} -> True
+                        RawJsonFunctionSchema{} -> True
+                        _ -> False
         automaticCompactionRef <- newIORef Nothing
         automaticCompactionHookRef <-
             newIORef
@@ -535,6 +559,8 @@ runAgentSession
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
+                                , claudeRuntimeSlot
+                                , claudeBridgeTools
                                 , modelInfo = codexModelInfo
                                 , connectionId =
                                     inferredTarget.targetConnectionId

@@ -175,10 +175,31 @@ withClaudeSDKClientWithHandlers
     -> (ClaudeSDKClient -> IO a)
     -> IO a
 withClaudeSDKClientWithHandlers options handlers =
-    withClaudeSDKClientWithTransportAndHandlers
-        options
-        (subprocessTransportFactory options)
+    let configured = configureSubprocessHandlers options handlers
+    in withClaudeSDKClientWithTransportAndHandlers
+        configured
+        (subprocessTransportFactory configured)
         handlers
+
+-- Claude Code's print-mode permission UI has no terminal to pause. The
+-- official SDK protocol selects its stdio permission bridge with this hidden
+-- CLI option; without it, manual/dontAsk modes deny internally and never emit
+-- @can_use_tool@ control requests.
+configureSubprocessHandlers
+    :: ClaudeAgentOptions
+    -> ClaudeAgentHandlers
+    -> ClaudeAgentOptions
+configureSubprocessHandlers options handlers =
+    case handlers.canUseTool of
+        Nothing -> options
+        Just _ ->
+            options
+                { extraArgs =
+                    Map.insert
+                        "permission-prompt-tool"
+                        (Just "stdio")
+                        options.extraArgs
+                }
 
 -- | Allocate a client backed by a caller-supplied transport factory. The
 -- factory is invoked for every fresh start or resume and the SDK owns the
@@ -921,7 +942,12 @@ finishSuccessfulTurn client turnEpoch turn value commit = do
             currentEpoch <- readIORef client.clientInterruptEpoch
             if currentEpoch /= turnEpoch
                 then do
-                    markTurnCompleted client turn
+                    -- The subprocess may have accepted the completed turn
+                    -- before the interrupt won this commit boundary. The
+                    -- embedding host will discard the result, so reusing the
+                    -- process would leave Claude ahead of authoritative host
+                    -- state.
+                    invalidateContinuation client
                     pure (Left Nothing)
                 else do
                     committed <- tryAny commit

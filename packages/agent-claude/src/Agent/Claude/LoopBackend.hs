@@ -62,7 +62,6 @@ import Agent.Responses.Types
     , CustomToolCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
-    , ItemStatus(..)
     , MessageContent(..)
     , ReasoningConfig(..)
     , ResponseContentPart(..)
@@ -122,8 +121,7 @@ import Claude.Agent.SDK.Types
     , Usage(..)
     , messageHasParentToolUseId
     )
-import Control.Applicative ((<|>))
-import Control.Exception.Safe (bracket, tryAny)
+import Control.Exception.Safe (bracket, mask, tryAny)
 import Control.Monad (void)
 
 claudeProviderNamespace :: Text
@@ -140,17 +138,20 @@ withClaudeCodeBackend
     -> (Backend -> IO a)
     -> IO a
 withClaudeCodeBackend options initialPrevious getParams transcript callback =
-    toClaudeAgentOptions ClaudeCodeDefaultTools options >>= \sdkOptions ->
-    withClaudeSDKClient
-        sdkOptions
-            { resume = initialPrevious >>= canonicalClaudeSessionId }
-        \session -> do
-        callback
-            (backendForSession
-                options.transport
-                session
-                getParams
-                transcript)
+    toClaudeAgentOptions ClaudeCodeDefaultTools options >>= \sdkOptions -> do
+        processCheckpointRef <- newIORef Nothing
+        withClaudeSDKClient
+            sdkOptions
+                { resume = Nothing }
+            \session ->
+                callback
+                    (backendForSession
+                        options.transport
+                        session
+                        getParams
+                        transcript
+                        (initialPrevious >>= canonicalClaudeSessionId)
+                        processCheckpointRef)
 
 -- | Handler-aware variant used by interactive hosts. The callback receives an
 -- in-band interrupt action in addition to the provider-neutral backend.
@@ -168,20 +169,24 @@ withClaudeCodeBackendWithHost
     let sdkOptions =
             configureClaudeCodeHostTools host
                 baseOptions
-                    { resume = initialPrevious >>= canonicalClaudeSessionId }
-    in withClaudeSDKClientWithHandlers
-        sdkOptions
-        (toClaudeAgentHandlers host)
-        \session -> do
-            callback ClaudeCodeBackendHandle
-                { loopBackend =
-                    backendForSession
-                        options.transport
-                        session
-                        getParams
-                        transcript
-                , interruptActiveTurn = abort session
-                }
+                    { resume = Nothing }
+    in do
+        processCheckpointRef <- newIORef Nothing
+        withClaudeSDKClientWithHandlers
+            sdkOptions
+            (toClaudeAgentHandlers host)
+            \session -> do
+                callback ClaudeCodeBackendHandle
+                    { loopBackend =
+                        backendForSession
+                            options.transport
+                            session
+                            getParams
+                            transcript
+                            (initialPrevious >>= canonicalClaudeSessionId)
+                            processCheckpointRef
+                    , interruptActiveTurn = abort session
+                    }
 
 -- | A backend for isolated side requests. Every submission owns and cleans up
 -- its own structured Claude process, while still using subscription auth.
@@ -194,6 +199,7 @@ claudeCodeOneShotBackend options getParams transcript =
     Backend \snapshot previous inputs onEvent -> do
         sdkOptions <-
             toClaudeAgentOptions ClaudeCodeNoTools options
+        processCheckpointRef <- newIORef Nothing
         result <- withClaudeSDKClient sdkOptions \session ->
             submitClaudeCodeTurn
                 options.transport
@@ -202,6 +208,8 @@ claudeCodeOneShotBackend options getParams transcript =
                 previous
                 getParams
                 transcript
+                Nothing
+                processCheckpointRef
                 inputs
                 onEvent
         attachBackendState snapshot result
@@ -211,19 +219,36 @@ backendForSession
     -> ClaudeSDKClient
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IORef (Maybe BackendSnapshot)
     -> Backend
-backendForSession transport session getParams transcript =
-    Backend \snapshot previous inputs onEvent -> do
-        result <- submitClaudeCodeTurn
-            transport
-            session
-            snapshot
-            previous
-            getParams
-            transcript
-            inputs
-            onEvent
-        attachBackendState snapshot result
+backendForSession
+        transport session getParams transcript initialResume
+        processCheckpointRef =
+    Backend \snapshot previous inputs onEvent ->
+        mask \restore -> do
+            result <- restore $
+                submitClaudeCodeTurn
+                    transport
+                    session
+                    snapshot
+                    previous
+                    getParams
+                    transcript
+                    initialResume
+                    processCheckpointRef
+                    inputs
+                    onEvent
+            attached <- attachBackendState snapshot result
+            case attached of
+                Left _ -> pure ()
+                Right backendResult ->
+                    -- Record what the subprocess now contains before returning.
+                    -- If the host discards this successful result, its next
+                    -- older snapshot will force a fresh Claude process.
+                    writeIORef processCheckpointRef
+                        (Just backendResult.backendState)
+            pure attached
 
 attachBackendState
     :: BackendSnapshot
@@ -248,6 +273,8 @@ submitClaudeCodeTurn
     -> Maybe Text
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IORef (Maybe BackendSnapshot)
     -> [TurnInput]
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError (TurnOutput, [ResponseItem]))
@@ -258,6 +285,8 @@ submitClaudeCodeTurn
     previous
     getParams
     transcript
+    initialResume
+    processCheckpointRef
     inputs
     onEvent =
     do
@@ -266,20 +295,71 @@ submitClaudeCodeTurn
             (cleanupCollectedTurnInputs . snd3)
             \(inputText, inputImages, _inputFiles) -> do
                 params <- getParams
-                let previousSession =
-                        previous >>= \requested ->
+                expectedCheckpoint <- readIORef processCheckpointRef
+                let checkpointMatches =
+                        maybe True (== snapshot) expectedCheckpoint
+                    checkpointSession =
+                        backendContinuationToken
+                            claudeProviderNamespace
+                            snapshot
+                    requestedSession =
+                        previous >>= canonicalClaudeSessionId
+                    runningSession =
+                        expectedCheckpoint >>=
                             backendContinuationToken
                                 claudeProviderNamespace
-                                snapshot
-                                <|> canonicalClaudeSessionId requested
+                    requestedSessionSwitch =
+                        case (runningSession, requestedSession) of
+                            (Just running, Just requested) ->
+                                running /= requested
+                            _ -> False
+                    selectionsAgree =
+                        case (checkpointSession, requestedSession) of
+                            (Just checkpoint, Just requested) ->
+                                checkpoint == requested
+                            _ -> True
+                    initialSession =
+                        case initialResume of
+                            Just initial
+                                | expectedCheckpoint == Nothing
+                                , maybe True (== initial) requestedSession
+                                , maybe True (== initial) checkpointSession ->
+                                    Just initial
+                            _ -> Nothing
+                    previousSession
+                        | requestedSessionSwitch =
+                            requestedSession
+                        | not checkpointMatches || not selectionsAgree =
+                            Nothing
+                        -- A missing loop continuation is an explicit host
+                        -- reset after this process has handled a turn. On the
+                        -- first turn only, the constructor's initial resume is
+                        -- still authoritative.
+                        | previous == Nothing =
+                            initialSession
+                        | Just checkpoint <- checkpointSession =
+                            Just checkpoint
+                        | Just requested <- requestedSession =
+                            Just requested
+                        | otherwise = initialSession
+                    processMatchesHost =
+                        requestedSessionSwitch
+                            || ( checkpointMatches
+                                && selectionsAgree
+                                && isJust previousSession
+                               )
                     history = snapshot.backendItems
                 result <- withClaudeSDKTurn
                     session
-                    (pure (isJust previousSession))
+                    (pure processMatchesHost)
                     previousSession
                     params.model
                     (params.reasoning >>= (.effort))
                     \turn -> do
+                        -- The snapshot is authoritative. Keep the compatibility
+                        -- transcript reference aligned after compaction/reset
+                        -- before its successful-turn callback appends.
+                        writeIORef transcript history
                         messages <- newIORef []
                         eventState <- newIORef emptyClaudeEventState
                         let prompt =

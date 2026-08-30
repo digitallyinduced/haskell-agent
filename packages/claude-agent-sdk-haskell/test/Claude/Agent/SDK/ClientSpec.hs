@@ -28,8 +28,11 @@ import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import System.Directory (canonicalizePath, doesFileExist)
-import System.Environment (getExecutablePath)
+import System.Directory
+    ( canonicalizePath
+    , doesFileExist
+    , findExecutable
+    )
 import System.Exit (ExitCode(ExitSuccess))
 import System.FilePath ((</>))
 import System.Posix.Signals (sigKILL, signalProcess)
@@ -129,6 +132,44 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                             [ ProbeImage "image/png" "cG5nLWJ5dGVz"
                             , ProbeText "describe this image"
                             ])
+
+    it "routes subprocess permission prompts through handler stdio" do
+        withFakeClaude permissionPromptScript \directory executable -> do
+            let argumentsPath = directory </> "arguments"
+                responsePath = directory </> "permission-response"
+                options =
+                    (testOptions executable directory)
+                        { environment =
+                            Just
+                                [ ("FAKE_ARGS", argumentsPath)
+                                , ("FAKE_PERMISSION_RESPONSE", responsePath)
+                                ]
+                        }
+            observed <- newIORef []
+            let handlers =
+                    defaultClaudeAgentHandlers
+                        { canUseTool =
+                            Just \request -> do
+                                modifyIORef' observed (<> [request.toolName])
+                                pure (ToolPermissionAllow Nothing [])
+                        }
+            result <-
+                withClaudeSDKClientWithHandlers options handlers \client ->
+                    queryClient client "request permission" (const (pure ()))
+            _ <- expectRight result
+            arguments <- lines <$> readFile argumentsPath
+            arguments
+                `shouldContain`
+                    ["--permission-prompt-tool", "stdio"]
+            arguments
+                `shouldContain`
+                    ["--session-id", Text.unpack testSessionId]
+            readIORef observed `shouldReturn` ["Bash"]
+            response <- ByteString.readFile responsePath
+            response
+                `shouldSatisfy`
+                    ByteString.isInfixOf
+                        "\"behavior\":\"allow\""
 
     it "supports minimal and full Claude Code system prompts" do
         mapM_
@@ -254,7 +295,9 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                                 "Claude SDK transport was closed while reading."))
 
     it "aborts a blocked subprocess input write promptly" do
-        testExecutable <- getExecutablePath
+        setsidExecutable <- requiredExecutable "setsid"
+        ddExecutable <- requiredExecutable "dd"
+        sleepExecutable <- requiredExecutable "sleep"
         withFakeClaude blockedInputScript \directory executable -> do
             let readyPath = directory </> "detached-reader"
                 options =
@@ -265,7 +308,9 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                             30 * 1_000_000
                         , environment =
                             Just
-                                [ ("FAKE_HELPER", testExecutable)
+                                [ ("FAKE_SETSID", setsidExecutable)
+                                , ("FAKE_DD", ddExecutable)
+                                , ("FAKE_SLEEP", sleepExecutable)
                                 , ("FAKE_READY", readyPath)
                                 ]
                         }
@@ -1419,9 +1464,38 @@ blockedInputScript =
     unlines
         [ "#!/bin/sh"
         , "exec 3<&0"
-        , "\"$FAKE_HELPER\" --claude-sdk-test-hold-stdin \"$FAKE_READY\" <&3 >/dev/null 2>&1 &"
+        , "\"$FAKE_SETSID\" /bin/sh -c '\"$FAKE_DD\" bs=1 count=1 <&3 >/dev/null 2>&1; printf \"%s\\n\" \"$$\" > \"$FAKE_READY\"; \"$FAKE_SLEEP\" 60' 3<&0 >/dev/null 2>&1 &"
         , "while :; do sleep 1; done"
         ]
+
+permissionPromptScript :: String
+permissionPromptScript =
+    Text.unpack $
+        Text.unlines
+            [ "#!/bin/sh"
+            , "printf '%s\\n' \"$@\" > \"$FAKE_ARGS\""
+            , "IFS= read -r _initialize"
+            , "printf '%s\\n' "
+                <> shellQuote
+                    "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"haskell_req_1\",\"response\":{}}}"
+            , "IFS= read -r _query"
+            , "printf '%s\\n' "
+                <> shellQuote
+                    "{\"type\":\"control_request\",\"request_id\":\"permission-1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"pwd\"},\"tool_use_id\":\"tool-1\"}}"
+            , "IFS= read -r permission_response"
+            , "printf '%s\\n' \"$permission_response\" > \"$FAKE_PERMISSION_RESPONSE\""
+            , "printf '%s\\n' "
+                <> shellQuote (successResult "permission complete")
+            ]
+
+requiredExecutable :: String -> IO FilePath
+requiredExecutable name =
+    findExecutable name >>= \case
+        Just executable -> pure executable
+        Nothing -> do
+            expectationFailure
+                ("required test executable was not found: " <> name)
+            fail ("missing test executable: " <> name)
 
 persistentScript :: String
 persistentScript =

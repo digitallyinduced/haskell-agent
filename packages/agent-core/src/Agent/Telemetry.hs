@@ -87,24 +87,24 @@ modelTelemetryDecoder = Json.object $
         <*> Json.atKey "output_tokens" nonNegativeInt
         <*> Json.atKey "cache_read_input_tokens" nonNegativeInt
         <*> Json.atKey "cache_creation_input_tokens" nonNegativeInt
-        <*> Json.atKeyOptional "web_search_requests" nonNegativeInt
-        <*> Json.atKeyOptional "cost_usd" nonNegativeDouble
-        <*> Json.atKeyOptional "context_window" nonNegativeInt
-        <*> Json.atKeyOptional "max_output_tokens" nonNegativeInt
-        <*> Json.atKeyOptional "canonical_model" Json.text
-        <*> Json.atKeyOptional "provider" Json.text
+        <*> Json.optionalKey "web_search_requests" nonNegativeInt
+        <*> Json.optionalKey "cost_usd" nonNegativeDouble
+        <*> Json.optionalKey "context_window" nonNegativeInt
+        <*> Json.optionalKey "max_output_tokens" nonNegativeInt
+        <*> Json.optionalKey "canonical_model" Json.text
+        <*> Json.optionalKey "provider" Json.text
 
 turnTelemetryDecoder :: Json.Decoder TurnTelemetry
 turnTelemetryDecoder = Json.object $
     TurnTelemetry
-        <$> Json.atKeyOptional "duration_ms" nonNegativeInt
-        <*> Json.atKeyOptional "api_duration_ms" nonNegativeInt
-        <*> Json.atKeyOptional "cost_usd" nonNegativeDouble
-        <*> Json.atKeyOptional "stop_reason" Json.text
-        <*> Json.atKeyOptional "provider_turns" nonNegativeInt
+        <$> Json.optionalKey "duration_ms" nonNegativeInt
+        <*> Json.optionalKey "api_duration_ms" nonNegativeInt
+        <*> Json.optionalKey "cost_usd" nonNegativeDouble
+        <*> Json.optionalKey "stop_reason" Json.text
+        <*> Json.optionalKey "provider_turns" nonNegativeInt
         <*> Json.defaultKey Map.empty "models"
             (Json.objectAsMap pure modelTelemetryDecoder)
-        <*> Json.atKeyOptional "structured_output" rawJsonDecoder
+        <*> Json.optionalKey "structured_output" rawJsonDecoder
 
 turnTelemetryListDecoder :: Json.Decoder [TurnTelemetry]
 turnTelemetryListDecoder = Json.list turnTelemetryDecoder

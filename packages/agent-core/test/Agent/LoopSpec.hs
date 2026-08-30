@@ -961,6 +961,38 @@ spec = describe "runLoop" do
         execution.executionPendingInputs `shouldBe`
             [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
 
+    it "interrupts the provider in-band before tearing down a cancelled submission" do
+        started <- newEmptyMVar
+        interrupted <- newEmptyMVar
+        observedInterrupt <- newEmptyMVar
+        config0 <- testConfig $ Backend \state _previous _inputs _onEvent -> do
+            putMVar started ()
+            takeMVar interrupted
+            putMVar observedInterrupt ()
+            pure $ Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "must-not-commit" [] (Just "late")
+                , backendState = appendStateMarker state
+                }
+        let config = config0
+                { loopInterrupt = putMVar interrupted ()
+                }
+        _ <- forkIO do
+            takeMVar started
+            requestCancel config.loopCancel
+        execution <-
+            timeout 1000000
+                (runLoopInputsDetailed config Nothing [UserMessage "go"])
+        case execution of
+            Nothing -> expectationFailure "cancelled loop did not finish"
+            Just completed -> do
+                completed.executionResult
+                    `shouldBe` Left (LoopCancelled [])
+                completed.executionProgress `shouldBe` NoResponseCommitted
+                completed.executionState `shouldBe` []
+        timeout 100000 (takeMVar observedInterrupt)
+            `shouldReturn` Just ()
+
     it "exposes the initial inputs while nothing has committed" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions [Left (ConnectionError "down")]
@@ -1426,7 +1458,8 @@ spec = describe "runLoop" do
                 }
             ]
         config <- testConfig backend
-        execution <- runLoopDetailed config Nothing "hello"
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
         execution.executionResult `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "done"
@@ -1681,6 +1714,7 @@ testConfig backend = do
         , loopApprove = \_ -> pure (Right True)
         , loopReadSteering = pure []
         , loopCommitSteering = \_ -> pure ()
+        , loopInterrupt = pure ()
         , loopCancel = cancel
         }
 

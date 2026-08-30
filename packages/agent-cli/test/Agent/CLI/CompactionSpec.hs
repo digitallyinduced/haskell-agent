@@ -3,6 +3,7 @@ module Agent.CLI.CompactionSpec (spec) where
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , CompactionInstall(..)
+    , autoCompactBackendWith
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactOpenAiBackendWithSender
@@ -15,6 +16,7 @@ import Agent.CLI.Compaction
     , reportedOccupancy
     , runProviderCompact
     , runProviderCompactWith
+    , runBackendCompactWithContextWindow
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
     )
@@ -572,6 +574,117 @@ spec = do
                     "expected exactly one compaction" `Text.isInfixOf` message
                 Right _ -> False
             readIORef recordedUsage `shouldReturn` [compactionUsage]
+
+    describe "runBackendCompactWithContextWindow" do
+        it "uses an isolated fresh backend and records summary usage" do
+            let history = [userTextItem "old context"]
+                paramsValue =
+                    (defaultResponseCreateParams :: ResponseCreateParams)
+                        { tools =
+                            Just
+                                [ FunctionToolValue FunctionTool
+                                    { name = "must_not_run"
+                                    , description = Nothing
+                                    , parameters = Nothing
+                                    , strict = Just True
+                                    }
+                                ]
+                        , previousResponseId = Just "resp-old"
+                        }
+            params <- newIORef paramsValue
+            transcript <- newIORef history
+            requests <- newIORef []
+            recordedUsage <- newIORef []
+            let makeBackend summaryParams =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        modifyIORef' requests
+                            (<> [(summaryParams, snapshot, previous, inputs)])
+                        pure $ successful snapshot TurnOutput
+                            { responseId = "claude-summary-session"
+                            , toolCalls = []
+                            , assistantText = Just "portable summary"
+                            , tokenUsage = compactionUsage
+                            , providerTelemetry = Nothing
+                            , completion = TurnCompleted
+                            }
+            result <-
+                runBackendCompactWithContextWindow
+                    200_000
+                    makeBackend
+                    (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                    params
+                    transcript
+                    (Just "focus")
+            outcome <- case result of
+                Left err -> expectationFailure (Text.unpack err) >> undefined
+                Right value -> pure value
+            outcome.compactSummary `shouldBe` "portable summary"
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+            readIORef requests >>= \case
+                [(summaryParams, snapshot, previous, inputs)] -> do
+                    summaryParams.tools `shouldBe` Nothing
+                    summaryParams.previousResponseId `shouldBe` Nothing
+                    snapshot.backendItems `shouldBe` history
+                    snapshot.backendContinuation `shouldBe` Nothing
+                    previous `shouldBe` Nothing
+                    inputs `shouldBe`
+                        [UserMessage (summarizationPrompt (Just "focus"))]
+                _ -> expectationFailure "expected one isolated backend request"
+
+        it "clears a provider continuation before automatic continuation" do
+            let oldHistory = [userTextItem "old context"]
+                compactedHistory = [assistantSummaryItem "summary"]
+                outcome = CompactOutcome
+                    { compactBeforeTokens = 100
+                    , compactAfterTokens = 4
+                    , compactHistory = compactedHistory
+                    , compactSummary = "summary"
+                    }
+                oldSnapshot =
+                    advanceBackendSnapshot
+                        emptyBackendSnapshot
+                        oldHistory
+                        (Just BackendContinuation
+                            { continuationProvider = "test"
+                            , continuationToken = "session-old"
+                            })
+            contextState <- newIORef
+                (Just (reportedOccupancy 100 (length oldHistory)))
+            submissions <- newIORef []
+            let base =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        modifyIORef' submissions
+                            (<> [(snapshot, previous, inputs)])
+                        pure $ successful snapshot TurnOutput
+                            { responseId = "session-new"
+                            , toolCalls = []
+                            , assistantText = Just "continued"
+                            , tokenUsage = TokenUsage 5 1 0
+                            , providerTelemetry = Nothing
+                            , completion = TurnCompleted
+                            }
+                backend =
+                    autoCompactBackendWith
+                        (pure 20)
+                        (\_history _inputs -> pure (Right outcome))
+                        (\_outcome _inputs -> pure CompactionNotInstalled)
+                        (pure defaultResponseCreateParams)
+                        contextState
+                        base
+            result <-
+                backend.submitTurn
+                    oldSnapshot
+                    (Just "session-old")
+                    [UserMessage "continue"]
+                    (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef submissions >>= \case
+                [(snapshot, previous, inputs)] -> do
+                    snapshot.backendItems `shouldBe` compactedHistory
+                    snapshot.backendContinuation `shouldBe` Nothing
+                    previous `shouldBe` Nothing
+                    inputs `shouldBe` [UserMessage "continue"]
+                _ -> expectationFailure "expected one compacted continuation"
 
     describe "installCompactOutcome" do
         it "clears the previous response id with transcript and token state" do
