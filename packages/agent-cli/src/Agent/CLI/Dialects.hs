@@ -77,6 +77,7 @@ data CodingTools = CodingTools
     { codingAppTools :: ![AppTool]
     , codingPlanMode :: !PlanModeEnv
     , codingSuspendGhci :: !(IO ())
+    , codingResetSessionTemp :: !(OsPath -> IO ())
     , codingClose :: !(IO ())
     , codingAgentTypes :: !GrokSubagentSpecs
     , codingGrokRuntime :: !(Maybe GrokRuntimeControl)
@@ -138,7 +139,8 @@ codingToolsForWithTypes
                 _ -> Nothing
         secretTools = maybe [] (pure . askSecretTool) secretStore
         imageTools = maybe [] (pure . showImageTool env) imageHooks
-        finish tools includeArtifacts plan suspendGhci close agentTypes grokRuntime =
+        finish tools includeArtifacts plan suspendGhci resetSessionTemp
+                close agentTypes grokRuntime =
             CodingTools
                 { codingAppTools =
                     tools
@@ -149,6 +151,7 @@ codingToolsForWithTypes
                         <> imageTools
                 , codingPlanMode = plan
                 , codingSuspendGhci = suspendGhci
+                , codingResetSessionTemp = resetSessionTemp
                 , codingClose = close `finally` closeSecrets
                 , codingAgentTypes = agentTypes
                 , codingGrokRuntime = grokRuntime
@@ -162,6 +165,7 @@ codingToolsForWithTypes
                     True
                     coding.codexPlanMode
                     coding.codexSuspendGhci
+                    coding.codexResetSessionTemp
                     coding.codexClose
                     typesRef
                     Nothing
@@ -173,6 +177,7 @@ codingToolsForWithTypes
                     True
                     coding.grokPlanMode
                     coding.grokSuspendGhci
+                    coding.grokResetSessionTemp
                     coding.grokClose
                     coding.grokAgentTypes
                     (Just coding.grokRuntimeControl)
@@ -184,6 +189,7 @@ codingToolsForWithTypes
                     False
                     plan
                     (pure ())
+                    (\_tempDir -> pure ())
                     (pure ())
                     typesRef
                     Nothing

@@ -22,7 +22,7 @@ import Agent.Tools.Ghci.Classify
     , defaultGhciExtensions
     , typeLooksEffectful
     )
-import Agent.Tools.IO (terminateProcessGroup)
+import Agent.Tools.IO (configuredProcessEnv, terminateProcessGroup)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -530,12 +530,14 @@ ghciArgs =
 
 spawnProcess :: ToolEnv -> IO (Either Text GhciProcess)
 spawnProcess env = do
+    processEnv <- configuredProcessEnv env
     let spec = (proc "ghci" ghciArgs)
             { cwd = Just (unsafeToFilePath env.toolCwd)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
             , create_group = True
+            , env = processEnv
             }
     spawned <- try @_ @SomeException $ mask \restore -> do
         created@(_, _, _, handle) <- createProcess spec

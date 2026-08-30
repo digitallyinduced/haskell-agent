@@ -327,6 +327,30 @@ spec = describe "Agent.CLI.AgentSessions" do
                 args `shouldContain` ["--no-ghci", "--bash"]
                 closeSessionProcessManager manager
 
+    it "points managed child processes at their session temp directory" $
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
+            let envPath = toFilePath root FilePath.</> "agent-temp-env"
+            script <- writeFakeAgentBody root $
+                "printf '%s\\n%s\\n%s\\n' "
+                    <> "\"$TMPDIR\" "
+                    <> "\"$HASKELL_AGENT_TMPDIR\" "
+                    <> "\"${HASKELL_AGENT_HOST_TMPDIR-unset}\" > "
+                    <> shellQuote envPath
+                    <> "\nexit 0\n"
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt pool root root)
+                manager <- newSessionProcessManager root
+                launchSessionTurn manager False ApproveAll True False handle "one"
+                    `shouldReturn`
+                        Right ("completed session " <> handle.sessionMeta.metaId)
+                values <- lines <$> readFile envPath
+                values `shouldBe`
+                    [ toFilePath handle.sessionTempDir
+                    , toFilePath handle.sessionTempDir
+                    , "unset"
+                    ]
+                closeSessionProcessManager manager
+
     it "distinguishes managed deny from remote prompt approval" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             let argsPath = toFilePath root FilePath.</> "agent-args"

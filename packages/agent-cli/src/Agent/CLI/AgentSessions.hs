@@ -62,6 +62,7 @@ import Agent.Json.Decode (optionalKey)
 import qualified Agent.Json.Decode as Hermes
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
+import Agent.Tools.IO (sessionTempProcessEnv)
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
@@ -492,11 +493,12 @@ launchSessionTurnInput
         setFileMode readyPath 0o600
         let childEnv =
                 (managedSessionReadyEnv, readyPath)
-                    : filter
-                        (\(name, _) ->
-                            name /= managedSessionReadyEnv
-                                && name `notElem` gatewayOnlyEnv)
-                        parentEnv
+                    : sessionTempProcessEnv handle.sessionTempDir
+                        (filter
+                            (\(name, _) ->
+                                name /= managedSessionReadyEnv
+                                    && name `notElem` gatewayOnlyEnv)
+                            parentEnv)
             logPath = unsafeToFilePath handle.sessionDir FilePath.</> "agent.log"
             approvalArgs = case policy of
                 ApproveAll -> ["--yolo"]

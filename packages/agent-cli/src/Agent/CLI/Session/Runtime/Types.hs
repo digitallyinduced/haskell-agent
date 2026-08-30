@@ -114,6 +114,7 @@ data SessionRequest = SessionRequest
     , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , clearImageGenerationHistory :: !(IO ())
     , suspendGhci :: !(IO ())
+    , resetToolSessionTemp :: !(OsPath -> IO ())
     , grokRuntime :: !(Maybe GrokRuntimeControl)
     , mcpRegistrations :: ![MCP.McpToolRegistration]
     , mcpWarnings :: ![Text]

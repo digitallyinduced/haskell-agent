@@ -202,7 +202,8 @@ sessionTempGuidance = \case
             [ "Session temporary directory: " <> toText path
             , "Use this private directory for clones, downloads, extracted files, generated assets, and other scratch work."
             , "Filesystem tools may access both the workspace and this directory; relative paths still resolve against the workspace."
-            , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands."
+            , "Filesystem-tool paths under /tmp or /private/tmp are redirected into this directory."
+            , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands; use $TMPDIR instead of a literal /tmp or /private/tmp path."
             ]
 
 -- | Keep sensitive values outside model-visible text and tool arguments when

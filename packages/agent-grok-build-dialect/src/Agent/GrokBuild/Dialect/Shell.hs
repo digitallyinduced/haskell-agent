@@ -7,6 +7,7 @@ module Agent.GrokBuild.Dialect.Shell
     ( GrokSession(..)
     , PersistentShell(..)
     , newGrokSession
+    , resetGrokSessionTemp
     , closeGrokSession
     , runForegroundStreaming
     , startBackground
@@ -38,7 +39,7 @@ import Agent.Tools.IO
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (race)
+import Control.Concurrent.Async (mapConcurrently_, race)
 import Control.Concurrent.MVar
 import Control.Exception.Safe (mask, onException, throwIO, tryAny)
 import Control.Monad (void)
@@ -77,6 +78,7 @@ data BackgroundTaskStore = BackgroundTaskStore
 data GrokSession = GrokSession
     { grokEnv :: !ToolEnv
     , grokShell :: !(MVar PersistentShell)
+    , grokShellEnvResource :: !(IORef ResourceKey)
     , grokTasks :: !(MVar BackgroundTaskStore)
     , grokTodos :: !(IORef (Map Text (Text, Text)))
     , grokResources :: !ResourceScope
@@ -86,11 +88,16 @@ newGrokSession :: ToolEnv -> IO GrokSession
 newGrokSession env = do
     resources <- newResourceScope
     flip onException (closeResourceScope resources) do
-        (_, envFile) <- allocateResource resources acquireEnvFile cleanupEnvFiles
+        tempDir <- currentSessionTempDir env
+        (envResource, envFile) <-
+            allocateResource resources
+                (acquireEnvFile tempDir)
+                cleanupEnvFiles
         shell <- newMVar PersistentShell
             { shellCwd = env.toolCwd
             , shellEnvFile = envFile
             }
+        shellEnvResource <- newIORef envResource
         tasks <- newMVar BackgroundTaskStore
             { backgroundNextId = 0
             , backgroundTasks = Map.empty
@@ -99,27 +106,65 @@ newGrokSession env = do
         pure GrokSession
             { grokEnv = env
             , grokShell = shell
+            , grokShellEnvResource = shellEnvResource
             , grokTasks = tasks
             , grokTodos = todos
             , grokResources = resources
             }
-  where
-    acquireEnvFile =
-        mask \restore -> do
-            tmp <- getCanonicalTemporaryDirectory
-            (envFileRaw, handle) <- restore $
-                openTempFile tmp "agent-grok-env"
-            let envFile = unsafeEncodeUtf envFileRaw
-            let rollback = do
-                    void $ tryAny (hClose handle)
-                    removeIfExists envFile
-            flip onException rollback do
-                hClose handle
-                setFileMode envFileRaw
-                    (unionFileModes ownerReadMode ownerWriteMode)
-                Text.writeFile envFileRaw ""
-                pure envFile
-    cleanupEnvFiles envFile = do
+
+-- | Reset the persistent shell state when the host switches conversations.
+-- The previous session directory may already have been removed by the time
+-- this runs, so allocate a fresh state file under the new private temp root
+-- and reset cwd/environment state rather than retaining dead paths.
+resetGrokSessionTemp :: GrokSession -> OsPath -> IO ()
+resetGrokSessionTemp session tempDir = do
+    resetGrokBackgroundTasks session
+    mask \restore -> do
+        (nextResource, nextEnvFile) <- restore $
+            allocateResource session.grokResources
+                (acquireEnvFile tempDir)
+                cleanupEnvFiles
+        previousResource <-
+            (modifyMVar session.grokShell \shell ->
+                do
+                    previous <-
+                        readIORef session.grokShellEnvResource
+                    writeIORef session.grokShellEnvResource nextResource
+                    pure
+                        ( shell
+                            { shellCwd = session.grokEnv.toolCwd
+                            , shellEnvFile = nextEnvFile
+                            }
+                        , previous
+                        ))
+                `onException` releaseResource nextResource
+        releaseResource previousResource
+
+currentSessionTempDir :: ToolEnv -> IO OsPath
+currentSessionTempDir env =
+    readIORef env.toolSessionTmp >>= \case
+        Just sessionTmp -> pure sessionTmp
+        Nothing -> unsafeEncodeUtf <$> getCanonicalTemporaryDirectory
+
+acquireEnvFile :: OsPath -> IO OsPath
+acquireEnvFile tempDir =
+    mask \restore -> do
+        (envFileRaw, handle) <- restore $
+            openTempFile (unsafeToFilePath tempDir) "agent-grok-env"
+        let envFile = unsafeEncodeUtf envFileRaw
+        let rollback = do
+                void $ tryAny (hClose handle)
+                removeIfExists envFile
+        flip onException rollback do
+            hClose handle
+            setFileMode envFileRaw
+                (unionFileModes ownerReadMode ownerWriteMode)
+            Text.writeFile envFileRaw ""
+            pure envFile
+
+cleanupEnvFiles :: OsPath -> IO ()
+cleanupEnvFiles envFile =
+    void $ tryAny do
         removeIfExists envFile
         removeIfExists (envFile <.> unsafeEncodeUtf "cwd")
 
@@ -127,9 +172,21 @@ newGrokSession env = do
 -- Call this when the CLI/session ends, including after exceptions.
 closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
-    modifyMVar_ session.grokTasks \store ->
-        pure store { backgroundTasks = Map.empty }
+    resetGrokBackgroundTasks session
     closeResourceScope session.grokResources
+
+-- | Stop and forget background commands from the previous conversation.
+-- Preserve the id counter so stale task ids cannot alias newly started work.
+resetGrokBackgroundTasks :: GrokSession -> IO ()
+resetGrokBackgroundTasks session = do
+    tasks <- modifyMVar session.grokTasks \store ->
+        pure
+            ( store { backgroundTasks = Map.empty }
+            , Map.elems store.backgroundTasks
+            )
+    mapConcurrently_
+        (\task -> void $ tryAny $ releaseResource task.backgroundResource)
+        tasks
 
 runForegroundStreaming
     :: GrokSession

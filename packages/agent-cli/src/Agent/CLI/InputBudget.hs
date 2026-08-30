@@ -52,11 +52,6 @@ logicalFileBytes file =
         `saturatingAdd` logicalTextBytes file.fileMime
         `saturatingAdd` ByteString.length file.fileBytes
 
-logicalTurnAttachmentBytes :: TurnAttachment -> Int
-logicalTurnAttachmentBytes = \case
-    ImageAttachmentItem image -> logicalImageBytes image
-    FileAttachmentItem file -> logicalFileBytes file
-
 logicalToolResultImageBytes :: ToolResultImage -> Int
 logicalToolResultImageBytes image =
     logicalTextBytes image.imageUrl
@@ -71,8 +66,7 @@ logicalTurnInputBytes = \case
             `saturatingAdd` logicalTextBytes (interAgentMessagePayload message)
     UserMessageWithAttachments text attachments ->
         logicalTextBytes text
-            `saturatingAdd` foldBytes
-                logicalTurnAttachmentBytes
+            `saturatingAdd` foldBytes logicalAttachmentBytes
                 (NonEmpty.toList attachments)
     CompletedTool result ->
         logicalTextBytes result.callId
@@ -104,6 +98,11 @@ logicalReplLineBytes = \case
 foldBytes :: (a -> Int) -> [a] -> Int
 foldBytes measure =
     foldr (\value total -> measure value `saturatingAdd` total) 0
+
+logicalAttachmentBytes :: TurnAttachment -> Int
+logicalAttachmentBytes = \case
+    ImageAttachmentItem image -> logicalImageBytes image
+    FileAttachmentItem file -> logicalFileBytes file
 
 saturatingAdd :: Int -> Int -> Int
 saturatingAdd left right
