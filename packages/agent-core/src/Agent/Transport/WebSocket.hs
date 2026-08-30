@@ -519,11 +519,12 @@ wsConnectExceptionRetry exception
         StopException authError
     | Just (WS.MalformedResponse responseHead _reason) <-
         Exception.fromException exception =
-            let status = WS.responseCode responseHead
-                apiError = webSocketHandshakeFailure status
-            in if status `elem` retryableHandshakeStatusCodes
-                then RetryException apiError
-                else StopException apiError
+            -- This is websockets' "unexpected HTTP status" path. Like Codex,
+            -- retry every non-auth upgrade rejection before allowing the
+            -- provider layer to switch transports. No Responses payload (and
+            -- therefore no model) has been sent at this point.
+            RetryException
+                (webSocketHandshakeFailure (WS.responseCode responseHead))
     | Just WS.ConnectionTimeout <- Exception.fromException exception =
         retryConnection "WebSocket handshake timed out"
     | Just (Connection.HostNotResolved host) <-
@@ -544,7 +545,6 @@ wsConnectExceptionRetry exception
         StopException $ ConnectionError
             ("WebSocket connection failed: " <> showText exception)
   where
-    retryableHandshakeStatusCodes = [408, 425, 429, 500, 502, 503, 504]
     retryConnection = RetryException . ConnectionError
     formatNestedFailures [] = ""
     formatNestedFailures failures = " (" <> showText failures <> ")"

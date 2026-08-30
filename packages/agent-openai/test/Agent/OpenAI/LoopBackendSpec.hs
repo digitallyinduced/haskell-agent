@@ -1578,6 +1578,59 @@ spec = do
             readIORef primaryCalls `shouldReturn` 1
             readIORef fallbackCalls `shouldReturn` 1
 
+        it "falls back after an exhausted websocket upgrade rejection" do
+            fallbackActive <- newIORef False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent -> do
+                    modifyIORef' primaryCalls (+ 1)
+                    pure (Left (HttpError 403
+                        "WebSocket handshake returned HTTP 403"))
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
+            readIORef fallbackActive `shouldReturn` True
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 1
+
+        it "does not mistake a logical HTTP 403 for a websocket upgrade failure" do
+            fallbackActive <- newIORef False
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent ->
+                    pure (Left (HttpError 403 "model access denied"))
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left (HttpError 403 "model access denied")
+            readIORef fallbackActive `shouldReturn` False
+            readIORef fallbackCalls `shouldReturn` 0
+
+        it "keeps websocket handshake 401 on the credential recovery path" do
+            isOpenAiWebSocketTransportFailure
+                (HttpError 401 "WebSocket handshake returned HTTP 401")
+                `shouldBe` False
+
         it "preserves non-transport provider failures" do
             fallbackActive <- newIORef False
             fallbackCalls <- newIORef (0 :: Int)

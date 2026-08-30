@@ -180,7 +180,9 @@ wsPath = "/backend-api/codex/responses"
 -- force-refreshed even when its JWT has not expired, then the handshake is
 -- retried once with the rotated token. If refresh or the second handshake
 -- fails, the account is cooled down and the next configured account is tried.
--- HTTP 403 remains a permission/policy failure and does not rotate credentials.
+-- Other upgrade rejections (including HTTP 403) receive bounded connection
+-- retries. They are not generic bearer-authentication failures; after retries,
+-- the caller may switch to HTTPS or apply a credential-source-specific fallback.
 -- This happens before the callback starts, so retrying cannot duplicate caller
 -- side effects.
 --
