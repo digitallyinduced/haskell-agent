@@ -15,6 +15,7 @@ module Agent.CLI.MacOS.Bridge
     , repositoryCheckDestroyReentrancySmoke
     , repositoryTerminalThrowSmoke
     , TurnStart(..)
+    , nativeExceptionMessage
     , nativeTurnArguments
     , NativeInteractionResolution(..)
     , PendingInteraction(..)
@@ -36,6 +37,7 @@ import Agent.CLI.NativeRuntime
     , NativeProcessRuntime
     , NativeRunHooks(..)
     , NativeShellMode(..)
+    , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
     , restartNativeMcpRuntime
@@ -202,7 +204,7 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
-    , ToolCallKind(..)
+    , isComputerToolCallKind
     )
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -257,6 +259,7 @@ import Control.Exception.Safe
     , bracket
     , catchAsync
     , finally
+    , fromException
     , isAsyncException
     , mask
     , onException
@@ -4736,7 +4739,7 @@ runNativeTurn
         { turnOutcomeSessionId = sessionId
         , turnOutcomeError =
             case result of
-                Left exception -> Just (Text.pack (show exception))
+                Left exception -> Just (nativeExceptionMessage exception)
                 Right (Left err) -> Just err
                 Right (Right ())
                     | completed -> Nothing
@@ -4746,6 +4749,12 @@ runNativeTurn
         , turnOutcomeUsage = usage
         , turnOutcomeProviderCostUSD = Nothing
         }
+
+nativeExceptionMessage :: SomeException -> Text
+nativeExceptionMessage exception =
+    case fromException exception of
+        Just (StartupFailure message) -> Text.pack message
+        Nothing -> Text.pack (show exception)
 
 nativeTurnArguments :: TurnStart -> [String]
 nativeTurnArguments start =
@@ -5081,7 +5090,7 @@ requestApproval
 requestApproval callback context control call = do
     alreadyAllowed <- Set.member call.name
         <$> readTVarIO control.turnControlAllowedTools
-    if alreadyAllowed && call.callKind /= ComputerCallKind
+    if alreadyAllowed && not (isComputerToolCallKind call.callKind)
       then pure (Just PermissionAllowOnce)
       else requestApprovalFromClient callback context control call
 
@@ -5129,7 +5138,7 @@ requestApprovalFromClient callback context control call = do
             (Map.delete approvalId)
     case choice of
         PermissionAllowTool
-            | call.callKind /= ComputerCallKind ->
+            | not (isComputerToolCallKind call.callKind) ->
             atomically $
                 modifyTVar'
                     control.turnControlAllowedTools

@@ -19,6 +19,7 @@ module Agent.Transport.WebSocket
     , transientWsMidRunFailureLabel
     , wsHandshakeAuthFailure
     , wsHandshakeAuthFailureStatus
+    , webSocketHandshakeFailureStatus
     ) where
 
 import Agent.Error (ApiError(..))
@@ -519,8 +520,7 @@ wsConnectExceptionRetry exception
     | Just (WS.MalformedResponse responseHead _reason) <-
         Exception.fromException exception =
             let status = WS.responseCode responseHead
-                apiError = HttpError status
-                    ("WebSocket handshake returned HTTP " <> showText status)
+                apiError = webSocketHandshakeFailure status
             in if status `elem` retryableHandshakeStatusCodes
                 then RetryException apiError
                 else StopException apiError
@@ -577,19 +577,41 @@ tlsExceptionMessage = \case
         "TLS handshake failed: " <> showText tlsException
 
 -- | Extract an authentication status from a rejected WebSocket handshake.
+--
+-- HTTP 403 is a permission or policy rejection, not proof that the bearer
+-- token is invalid. Treating every 403 as authentication failure can rotate
+-- healthy credentials and quarantine an entire account pool.
 wsHandshakeAuthFailureStatus :: Exception.SomeException -> Maybe Int
 wsHandshakeAuthFailureStatus exception = case Exception.fromException exception of
     Just (WS.MalformedResponse responseHead _reason)
-        | WS.responseCode responseHead `elem` [401, 403] ->
+        | WS.responseCode responseHead == 401 ->
             Just (WS.responseCode responseHead)
     _ -> Nothing
 
--- | Convert a raw WebSocket handshake 401/403 into the shared HTTP error
+-- | Convert a raw WebSocket handshake 401 into the shared HTTP error
 -- shape. Headers are intentionally omitted because they may contain cookies.
 wsHandshakeAuthFailure :: Exception.SomeException -> Maybe ApiError
 wsHandshakeAuthFailure exception = do
     status <- wsHandshakeAuthFailureStatus exception
-    pure (HttpError status ("WebSocket handshake returned HTTP " <> showText status))
+    pure (webSocketHandshakeFailure status)
+
+-- | Recognize the exact HTTP error shape emitted when a WebSocket handshake
+-- is rejected before a connection is established. A same-status application
+-- error must not be treated as safe to replay.
+webSocketHandshakeFailureStatus :: ApiError -> Maybe Int
+webSocketHandshakeFailureStatus = \case
+    HttpError status message
+        | message == webSocketHandshakeFailureMessage status ->
+            Just status
+    _ -> Nothing
+
+webSocketHandshakeFailure :: Int -> ApiError
+webSocketHandshakeFailure status =
+    HttpError status (webSocketHandshakeFailureMessage status)
+
+webSocketHandshakeFailureMessage :: Int -> Text
+webSocketHandshakeFailureMessage status =
+    "WebSocket handshake returned HTTP " <> showText status
 
 -- | Classify transient failures that happen during a WebSocket session.
 transientWsMidRunFailureLabel :: Exception.SomeException -> Maybe Text

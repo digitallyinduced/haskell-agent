@@ -4,6 +4,8 @@ module Agent.Provider
     , TokenProvider
     , tokenProviderBillingMode
     , tokenProvider
+    , tokenProviderWithNextToken
+    , withAccountFailureClassifier
     , Credential(..)
     , Provider(..)
     , providerSlug
@@ -26,6 +28,7 @@ import Agent.Error
     , apiErrorRetryAfter
     , credentialExhaustionReasonFromApiError
     )
+import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Maybe (fromMaybe)
@@ -111,13 +114,47 @@ data TokenProvider = TokenProvider
     , runGetNextToken
         :: Maybe FailedCredential
         -> IO (Either ApiError Credential)
+    , runClassifyAccountFailure
+        :: Credential
+        -> ApiError
+        -> Maybe AccountFailure
     }
 
 tokenProvider
     :: BillingMode
     -> (Maybe FailedCredential -> IO (Either ApiError Credential))
     -> TokenProvider
-tokenProvider = TokenProvider
+tokenProvider providerBillingMode runGetNextToken = TokenProvider
+    { providerBillingMode
+    , runGetNextToken
+    , runClassifyAccountFailure =
+        \_credential -> accountFailureFromApiError
+    }
+
+-- | Replace credential acquisition while retaining the provider's billing and
+-- account-failure policy. Provider decorators should use this instead of
+-- constructing a fresh 'TokenProvider'.
+tokenProviderWithNextToken
+    :: TokenProvider
+    -> (Maybe FailedCredential -> IO (Either ApiError Credential))
+    -> TokenProvider
+tokenProviderWithNextToken provider runGetNextToken =
+    provider { runGetNextToken }
+
+-- | Add credential-source-specific failure handling while preserving the
+-- provider-neutral defaults. Classifiers added here may cause the protected
+-- action to be replayed, so they must only recognize failures that happened
+-- before the action produced externally visible effects.
+withAccountFailureClassifier
+    :: (Credential -> ApiError -> Maybe AccountFailure)
+    -> TokenProvider
+    -> TokenProvider
+withAccountFailureClassifier classifier provider =
+    provider
+        { runClassifyAccountFailure = \credential err ->
+            classifier credential err
+                <|> provider.runClassifyAccountFailure credential err
+        }
 
 tokenProviderBillingMode :: TokenProvider -> BillingMode
 tokenProviderBillingMode TokenProvider{providerBillingMode} =
@@ -132,15 +169,15 @@ getNextToken provider = provider.runGetNextToken
 seedTokenProvider :: TokenProvider -> Credential -> IO TokenProvider
 seedTokenProvider provider credential = do
     seed <- newIORef (Just credential)
-    pure TokenProvider
-        { providerBillingMode = tokenProviderBillingMode provider
-        , runGetNextToken = \failed -> case failed of
-            Just reportedFailure -> getNextToken provider (Just reportedFailure)
-            Nothing -> atomicModifyIORef'
-                seed (\current -> (Nothing, current)) >>= \case
-                    Just firstCredential -> pure (Right firstCredential)
-                    Nothing -> getNextToken provider Nothing
-        }
+    pure $
+        tokenProviderWithNextToken provider \failed ->
+            case failed of
+                Just reportedFailure ->
+                    getNextToken provider (Just reportedFailure)
+                Nothing -> atomicModifyIORef'
+                    seed (\current -> (Nothing, current)) >>= \case
+                        Just firstCredential -> pure (Right firstCredential)
+                        Nothing -> getNextToken provider Nothing
 
 runWithTokenProvider
     :: TokenProvider
@@ -169,7 +206,8 @@ runWithTokenProviderAfter provider initialFailure action =
             Left err -> pure (Left err)
             Right credential -> action credential >>= \case
                 Left err
-                    | Just failure <- accountFailureFromApiError err ->
+                    | Just failure <-
+                        provider.runClassifyAccountFailure credential err ->
                         go (attemptsLeft - 1) $ Just FailedCredential
                             { credential
                             , failure
@@ -188,9 +226,7 @@ accountFailureFromApiError err = case err of
     ProviderError UsageLimitReached _ _ -> rateLimited
     ProviderError UsageBalanceExhausted _ _ -> rateLimited
     HttpError 401 _ -> authenticationRejected
-    HttpError 403 _ -> authenticationRejected
     ProviderError AuthenticationError _ _ -> authenticationRejected
-    CredentialError{} -> authenticationRejected
     _ -> Nothing
   where
     rateLimited = Just $ AccountRateLimited (apiErrorRetryAfter err)
