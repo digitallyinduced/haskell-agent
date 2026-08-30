@@ -29,7 +29,8 @@ mkDerivation {
     warp websockets
   ];
   benchmarkHaskellDepends = [
-    agent-core agent-responses-types base bytestring text
+    agent-core agent-responses agent-responses-types base bytestring
+    text
   ];
   description = "Haskell client for the OpenAI Responses API";
   license = lib.meta.getLicenseFromSpdxId "MIT";

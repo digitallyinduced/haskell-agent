@@ -4,10 +4,15 @@ module Main (main) where
 
 import Agent.OpenAI.Client (readCodexSseChunks)
 import Agent.OpenAI.Http (decodeCodexHttpBodyBytes)
+import Agent.Responses.SSE
+    ( feedSseDecoder
+    , newSseDecoder
+    )
 import Agent.Responses.Types
     ( FunctionCall(..)
     , Response(..)
     , ResponseItem(..)
+    , ResponseStreamEvent(..)
     )
 import Control.Exception (evaluate)
 import Control.Monad (forM)
@@ -80,13 +85,19 @@ runBuffered chunks = do
     let readChunk = atomicModifyIORef' source \case
             [] -> ([], Nothing)
             chunk : rest -> (rest, Just chunk)
-        readBody reversed = do
+        readBody decoder reversed = do
             System.Timeout.timeout idleTimeoutMicros readChunk >>= \case
                 Nothing -> error "buffered benchmark source timed out"
                 Just Nothing -> pure (BS.concat (reverse reversed))
                 Just (Just chunk) ->
-                    readBody (chunk : reversed)
-    body <- readBody []
+                    case feedSseDecoder decoder chunk of
+                        Left err -> error (show err)
+                        Right (nextDecoder, events)
+                            | any isTerminalEvent events ->
+                                pure (BS.concat (reverse (chunk : reversed)))
+                            | otherwise ->
+                                readBody nextDecoder (chunk : reversed)
+    body <- readBody newSseDecoder []
     !_ <- evaluate (BS.length body)
     case decodeCodexHttpBodyBytes body of
         Left err -> error (show err)
@@ -114,6 +125,16 @@ runIncremental chunks = do
 
 idleTimeoutMicros :: Int
 idleTimeoutMicros = 300 * 1_000_000
+
+isTerminalEvent :: ResponseStreamEvent -> Bool
+isTerminalEvent = \case
+    ResponseCompletedEvent{} -> True
+    ResponseDoneEvent{} -> True
+    ResponseIncompleteEvent{} -> True
+    ResponseFailedEvent{} -> True
+    ResponseErrorEvent{} -> True
+    ResponseNestedErrorEvent{} -> True
+    _ -> False
 
 streamChunks :: Int -> Int -> Int -> [BS.ByteString]
 streamChunks eventCount payloadBytes sampleIndex =
