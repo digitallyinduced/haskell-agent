@@ -49,7 +49,7 @@ import System.Directory
     , getTemporaryDirectory
     , removeDirectoryRecursive
     )
-import System.FilePath ((</>))
+import System.FilePath (makeRelative, (</>))
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
@@ -129,6 +129,27 @@ spec = describe "Codex dialect" do
                     result.output `shouldSatisfy`
                         Text.isInfixOf "Blocked hardcoded system temp path"
                     result.output `shouldSatisfy` Text.isInfixOf "$TMPDIR"
+
+    it "rejects system temp paths relative to the shell cwd" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            let relativeTmp =
+                    Text.pack (makeRelative dir "/tmp/agent-output")
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-relative-system-tmp"
+                            "shell_command"
+                            ("{\"command\":\"cat "
+                                <> relativeTmp
+                                <> "\"}"))
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf "Blocked hardcoded system temp path"
 
     it "maps a /tmp shell workdir to the private session directory" do
         withTempDir \dir -> do

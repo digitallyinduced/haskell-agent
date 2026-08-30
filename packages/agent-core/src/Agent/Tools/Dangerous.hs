@@ -6,12 +6,15 @@
 module Agent.Tools.Dangerous
     ( shellCommandBlocked
     , blockedShellCommandReason
+    , blockedShellCommandReasonAt
     , commandLooksLikeRmRf
     , commandUsesHardcodedSystemTmp
+    , commandUsesHardcodedSystemTmpAt
     , forbiddenRmRfReason
     , hardcodedSystemTmpReason
     ) where
 
+import Agent.OsPath (toText)
 import Agent.JsonText (jsonTextField)
 import Data.Char
     ( chr
@@ -23,6 +26,7 @@ import Data.Char
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.OsPath (OsPath)
 
 -- | If @toolName@ is a shell tool and @argumentsJson@ contains a forbidden
 -- command, return a rejection message for the model. Otherwise 'Nothing'.
@@ -44,6 +48,17 @@ blockedShellCommandReason command
         Just (hardcodedSystemTmpReason command)
     | otherwise = Nothing
 
+-- | Apply shell hard-denies after resolving the command's initial working
+-- directory. This additionally catches relative spellings that reach the
+-- shared system temp namespace from that directory.
+blockedShellCommandReasonAt :: OsPath -> Text -> Maybe Text
+blockedShellCommandReasonAt cwd command
+    | commandLooksLikeRmRf command =
+        Just (forbiddenRmRfReason command)
+    | commandUsesHardcodedSystemTmpAt cwd command =
+        Just (hardcodedSystemTmpReason command)
+    | otherwise = Nothing
+
 forbiddenRmRfReason :: Text -> Text
 forbiddenRmRfReason command =
     "Blocked dangerous shell command (rm -rf / recursive force delete). "
@@ -61,9 +76,22 @@ forbiddenRmRfReason command =
 -- dot/parent components, and avoids ordinary URL path components and names
 -- such as @/tmpfile@.
 commandUsesHardcodedSystemTmp :: Text -> Bool
-commandUsesHardcodedSystemTmp command =
+commandUsesHardcodedSystemTmp =
+    commandUsesHardcodedSystemTmpWithCwd Nothing
+
+-- | Like 'commandUsesHardcodedSystemTmp', but resolve relative path-shaped
+-- tokens against the shell's initial working directory.
+commandUsesHardcodedSystemTmpAt :: OsPath -> Text -> Bool
+commandUsesHardcodedSystemTmpAt cwd =
+    commandUsesHardcodedSystemTmpWithCwd (Just cwd)
+
+commandUsesHardcodedSystemTmpWithCwd :: Maybe OsPath -> Text -> Bool
+commandUsesHardcodedSystemTmpWithCwd maybeCwd command =
     go Nothing command
         || normalizedAbsolutePathTargetsTemp command
+        || maybe False
+            (\cwd -> normalizedRelativePathTargetsTemp (toText cwd) command)
+            maybeCwd
         || localFileUrlTargetsTemp command
   where
     go previous remaining
@@ -83,12 +111,19 @@ commandUsesHardcodedSystemTmp command =
                 _ -> False
 
     tempComponentAtStart remaining =
-        case Text.stripPrefix "tmp" remaining of
+        case stripPrefixCaseFold "tmp" remaining of
             Just suffix -> pathBoundaryAfter suffix
             Nothing -> False
 
+    stripPrefixCaseFold prefix text
+        | Text.toCaseFold candidate == prefix =
+            Just (Text.drop (Text.length prefix) text)
+        | otherwise = Nothing
+      where
+        candidate = Text.take (Text.length prefix) text
+
     privateTempAtStart remaining =
-        case Text.stripPrefix "private" remaining of
+        case stripPrefixCaseFold "private" remaining of
             Just afterPrivate ->
                 case Text.span (== '/') afterPrivate of
                     (slashes, afterSlashes)
@@ -115,6 +150,21 @@ commandUsesHardcodedSystemTmp command =
                 let (candidate, _) =
                         Text.span isAbsolutePathChar remaining
                 in normalizedPathTargetsTemp candidate
+                    || advance remaining
+            | otherwise = advance remaining
+          where
+            advance text =
+                scan (Just (Text.head text)) (Text.tail text)
+
+    normalizedRelativePathTargetsTemp cwd = scan Nothing
+      where
+        scan previous remaining
+            | Text.null remaining = False
+            | pathBoundaryBefore previous
+            , isPathNameChar (Text.head remaining) =
+                let (candidate, _) =
+                        Text.span isAbsolutePathChar remaining
+                in normalizedPathTargetsTemp (cwd <> "/" <> candidate)
                     || advance remaining
             | otherwise = advance remaining
           where
@@ -154,7 +204,10 @@ commandUsesHardcodedSystemTmp command =
         char == '/' || isPathNameChar char
 
     normalizedPathTargetsTemp path =
-        case reverse (foldl normalizeComponent [] (Text.splitOn "/" path)) of
+        case
+            map Text.toCaseFold $
+                reverse (foldl normalizeComponent [] (Text.splitOn "/" path))
+        of
             "tmp" : _ -> True
             "private" : "tmp" : _ -> True
             _ -> False

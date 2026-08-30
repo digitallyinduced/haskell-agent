@@ -265,6 +265,18 @@ spec = describe "Agent.Tools.IO" do
             resolveUnderCwd env
                 (fromFilePath ("/private/tmp" </> relative))
                 `shouldReturn` expected
+            resolveUnderCwd env
+                (fromFilePath ("/usr/../tmp" </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env
+                (fromFilePath ("/var/../private/tmp" </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env
+                (fromFilePath ("/TMP" </> relative))
+                `shouldReturn` expected
+            resolveUnderCwd env
+                (fromFilePath ("/PRIVATE/TMP" </> relative))
+                `shouldReturn` expected
             readIORef requests `shouldReturn` []
 
     it "maps an existing host temp file unless its root was explicitly allowed" do
@@ -324,6 +336,13 @@ spec = describe "Agent.Tools.IO" do
             doubleSlashTraversal <- resolveUnderCwd env
                 (fromFilePath "//tmp/../outside.txt")
             doubleSlashTraversal `shouldSatisfy`
+                either
+                    (Text.isInfixOf
+                        "escapes the private session temp directory")
+                    (const False)
+            normalizedPrefixTraversal <- resolveUnderCwd env
+                (fromFilePath "/usr/../tmp/../outside.txt")
+            normalizedPrefixTraversal `shouldSatisfy`
                 either
                     (Text.isInfixOf
                         "escapes the private session temp directory")

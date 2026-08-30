@@ -3,6 +3,7 @@ module Agent.Tools.DangerousSpec (spec) where
 import Agent.Tools.Dangerous
     ( commandLooksLikeRmRf
     , commandUsesHardcodedSystemTmp
+    , commandUsesHardcodedSystemTmpAt
     , forbiddenRmRfReason
     , hardcodedSystemTmpReason
     , shellCommandBlocked
@@ -11,6 +12,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import Test.QuickCheck
@@ -180,6 +182,33 @@ spec = do
                 , "cat '/usr/local/../../private//tmp/input'"
                 ]
                 `shouldBe` replicate 4 True
+
+        it "resolves relative aliases against the shell working directory" do
+            let cwd = unsafeEncodeUtf "/workspace/haskell-agent"
+            map (commandUsesHardcodedSystemTmpAt cwd)
+                [ "cat ../../tmp/other-session"
+                , "cat ../../private/tmp/other-session"
+                , "cat src/../../../tmp/other-session"
+                ]
+                `shouldBe` replicate 3 True
+            map (commandUsesHardcodedSystemTmpAt cwd)
+                [ "cat ../tmp/project-file"
+                , "cat ../../tmpfile"
+                , "curl https://example.test/../../tmp/file"
+                ]
+                `shouldBe` replicate 3 False
+
+        it "matches shared temp components case-insensitively" do
+            map commandUsesHardcodedSystemTmp
+                [ "cat /TMP/other-session"
+                , "cat /PRIVATE/TMP/other-session"
+                , "cat /private/TmP/other-session"
+                , "curl file:///TMP/other-session"
+                , "cat /usr/../TmP/other-session"
+                ]
+                `shouldBe` replicate 5 True
+            commandUsesHardcodedSystemTmp "cat /TMPfile"
+                `shouldBe` False
 
         it "blocks local file URLs targeting shared temp" do
             map commandUsesHardcodedSystemTmp

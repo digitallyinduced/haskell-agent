@@ -36,7 +36,7 @@ import Agent.Codex.Dialect.Shell
     , startCodexShellCommand
     )
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
-import Agent.Tools.Dangerous (blockedShellCommandReason)
+import Agent.Tools.Dangerous (blockedShellCommandReasonAt)
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
@@ -179,8 +179,6 @@ runShell
     -> ShellCommandArgs
     -> IO (Either Text Text)
 runShell env session emitOutput args
-    | Just reason <- blockedShellCommandReason args.command =
-        pure (Left reason)
     | args.timeoutMs /= Nothing && args.yieldTimeMs /= Nothing =
         pure (Left "timeout_ms and yield_time_ms are mutually exclusive")
     | otherwise = do
@@ -189,30 +187,34 @@ runShell env session emitOutput args
             Just dir -> resolveUnderCwd env (fromText dir)
         case workdir of
             Left err -> pure (Left err)
-            Right dir -> case args.yieldTimeMs of
-                Just requestedYield -> do
-                    let yieldMs = clampMs requestedYield
-                    startCodexShellCommand
-                        session
-                        dir
-                        (Text.unpack args.command)
-                        yieldMs
-                        (\out err -> emitOutput (commandBody out err))
-                        >>= pure . fmap renderShellResult
-                Nothing -> do
-                    let timeoutMs = clampMs (fromMaybe 10000 args.timeoutMs)
-                    result <- runShellCommandStreaming
-                        env
-                        dir
-                        (Text.unpack args.command)
-                        timeoutMs
-                        (\out err -> emitOutput (commandBody out err))
-                    if result.commandCancelled
-                        then pure $ Left "Error: Command cancelled"
-                        else if result.commandTimedOut
-                        then pure $ Left $
-                            "Error: Command timed out after " <> Text.pack (show timeoutMs) <> "ms"
-                        else pure $ Right $ renderFinished result
+            Right dir
+                | Just reason <-
+                    blockedShellCommandReasonAt dir args.command ->
+                    pure (Left reason)
+                | otherwise -> case args.yieldTimeMs of
+                    Just requestedYield -> do
+                        let yieldMs = clampMs requestedYield
+                        startCodexShellCommand
+                            session
+                            dir
+                            (Text.unpack args.command)
+                            yieldMs
+                            (\out err -> emitOutput (commandBody out err))
+                            >>= pure . fmap renderShellResult
+                    Nothing -> do
+                        let timeoutMs = clampMs (fromMaybe 10000 args.timeoutMs)
+                        result <- runShellCommandStreaming
+                            env
+                            dir
+                            (Text.unpack args.command)
+                            timeoutMs
+                            (\out err -> emitOutput (commandBody out err))
+                        if result.commandCancelled
+                            then pure $ Left "Error: Command cancelled"
+                            else if result.commandTimedOut
+                            then pure $ Left $
+                                "Error: Command timed out after " <> Text.pack (show timeoutMs) <> "ms"
+                            else pure $ Right $ renderFinished result
 
 data WriteStdinArgs = WriteStdinArgs
     { sessionId :: Int

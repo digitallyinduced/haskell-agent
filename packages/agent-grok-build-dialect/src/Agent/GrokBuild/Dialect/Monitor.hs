@@ -6,10 +6,14 @@ module Agent.GrokBuild.Dialect.Monitor
 import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.Dangerous (blockedShellCommandReason)
+import Agent.Tools.Dangerous (blockedShellCommandReasonAt)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.GrokBuild.Dialect.Json (optionalBool, optionalIntOrString)
-import Agent.GrokBuild.Dialect.Shell (GrokSession, startMonitor)
+import Agent.GrokBuild.Dialect.Shell
+    ( GrokSession
+    , currentGrokShellCwd
+    , startMonitor
+    )
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -56,8 +60,6 @@ runMonitor :: GrokSession -> MonitorArgs -> IO (Either Text Text)
 runMonitor session args
     | Text.null (Text.strip args.description) =
         pure (Left "Missing parameter: description")
-    | Just reason <- blockedShellCommandReason args.command =
-        pure (Left reason)
     | not args.persistent
     , Just timeout <- args.timeoutMs
     , timeout > maxMonitorTimeoutMs =
@@ -66,21 +68,29 @@ runMonitor session args
                 <> Text.pack (show maxMonitorTimeoutMs)
                 <> ". Set persistent=true for a session-length monitor."
     | otherwise = do
-        let timeout
-                | args.persistent = Nothing
-                | otherwise =
-                    Just (max 1 (fromMaybe maxMonitorTimeoutMs args.timeoutMs))
-        startMonitor session args.command timeout >>= \case
-            Left err -> pure (Left err)
-            Right output ->
-                pure $ Right $
-                    output
-                        <> "\ndescription: "
-                        <> Text.strip args.description
-                        <> "\ntimeout_ms: "
-                        <> Text.pack (show (fromMaybe 0 timeout))
-                        <> "\npersistent: "
-                        <> if args.persistent then "true" else "false"
+        cwd <- currentGrokShellCwd session
+        case blockedShellCommandReasonAt cwd args.command of
+            Just reason -> pure (Left reason)
+            Nothing -> do
+                let timeout
+                        | args.persistent = Nothing
+                        | otherwise =
+                            Just
+                                (max 1
+                                    (fromMaybe
+                                        maxMonitorTimeoutMs
+                                        args.timeoutMs))
+                startMonitor session args.command timeout >>= \case
+                    Left err -> pure (Left err)
+                    Right output ->
+                        pure $ Right $
+                            output
+                                <> "\ndescription: "
+                                <> Text.strip args.description
+                                <> "\ntimeout_ms: "
+                                <> Text.pack (show (fromMaybe 0 timeout))
+                                <> "\npersistent: "
+                                <> if args.persistent then "true" else "false"
 
 maxMonitorTimeoutMs :: Int
 maxMonitorTimeoutMs = 36000000

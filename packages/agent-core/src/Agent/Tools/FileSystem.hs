@@ -19,7 +19,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
 import Data.IORef (readIORef)
-import Data.List (stripPrefix)
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory.OsPath
@@ -166,7 +165,7 @@ resolvePath path = do
 -- same way, while preserving @..@ and symlink semantics in the remapped path.
 systemTempRelative :: OsPath -> Maybe (OsPath, OsPath)
 systemTempRelative path =
-    firstMatch [systemTmpRoot, privateSystemTmpRoot]
+    findAlias [] components
   where
     components =
         normalizePosixRoot $
@@ -178,16 +177,48 @@ systemTempRelative path =
             , Text.all (== '/') display ->
                 posixRoot : rest
         other -> other
-    firstMatch [] = Nothing
-    firstMatch (alias : aliases) =
-        case
-            stripPrefix
-                (splitDirectories (dropTrailingPathSeparator alias))
-                components
-        of
-            Just [] -> Just (alias, currentDirectory)
-            Just relative -> Just (alias, joinPath relative)
-            Nothing -> firstMatch aliases
+    findAlias _ [] = Nothing
+    findAlias prefix (component : rest) =
+        let normalizedPrefix = appendNormalized prefix component
+        in case matchingAlias normalizedPrefix of
+            Just alias ->
+                Just
+                    ( alias
+                    , if null rest then currentDirectory else joinPath rest
+                    )
+            Nothing -> findAlias normalizedPrefix rest
+
+    -- Normalize only the components before the alias. Components after it
+    -- remain lexical so @/usr/../tmp/../outside@ is remapped and rejected as
+    -- an escape from the private root rather than being approved as @/outside@.
+    appendNormalized prefix component
+        | component == currentDirectory = prefix
+        | component == parentDirectory =
+            case prefix of
+                [] -> []
+                [root] | isAbsolute root -> prefix
+                _ -> init prefix
+        | otherwise = prefix <> [component]
+
+    matchingAlias prefix =
+        firstMatching
+            [ (systemTmpRoot, splitDirectories systemTmpRoot)
+            , (privateSystemTmpRoot, splitDirectories privateSystemTmpRoot)
+            ]
+      where
+        firstMatching [] = Nothing
+        firstMatching ((alias, aliasComponents) : aliases)
+            | componentsEqualCaseFold prefix aliasComponents = Just alias
+            | otherwise = firstMatching aliases
+
+    componentsEqualCaseFold left right =
+        length left == length right
+            && and
+                (zipWith
+                    (\a b -> Text.toCaseFold (toText a)
+                        == Text.toCaseFold (toText b))
+                    left
+                    right)
 
 -- | A preconfigured host-temp root is an explicit escape hatch from the
 -- private alias. Canonicalize only the alias root, not its descendants, so
@@ -214,6 +245,9 @@ privateSystemTmpRoot = unsafeEncodeUtf "/private/tmp"
 
 currentDirectory :: OsPath
 currentDirectory = unsafeEncodeUtf "."
+
+parentDirectory :: OsPath
+parentDirectory = unsafeEncodeUtf ".."
 
 posixRoot :: OsPath
 posixRoot = unsafeEncodeUtf "/"

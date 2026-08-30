@@ -9,6 +9,7 @@ module Agent.GrokBuild.Dialect.Shell
     , newGrokSession
     , resetGrokSessionTemp
     , closeGrokSession
+    , currentGrokShellCwd
     , runForegroundStreaming
     , startBackground
     , startMonitor
@@ -174,6 +175,10 @@ closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
     resetGrokBackgroundTasks session
     closeResourceScope session.grokResources
+
+currentGrokShellCwd :: GrokSession -> IO OsPath
+currentGrokShellCwd session =
+    (.shellCwd) <$> readMVar session.grokShell
 
 -- | Stop and forget background commands from the previous conversation.
 -- Preserve the id counter so stale task ids cannot alias newly started work.
