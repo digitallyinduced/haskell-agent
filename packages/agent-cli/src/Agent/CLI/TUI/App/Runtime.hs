@@ -101,6 +101,7 @@ import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPane
 import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     , nativePreviewPlacements
+    , prepareNativeTuiImagePreview
     , prepareTuiImagePreview
     , previewCountForWidth
     , previewCellSize
@@ -590,7 +591,7 @@ showFullscreenToolImage
     -> ImageAttachment
     -> IO (Either Text ())
 showFullscreenToolImage runtime callId image =
-    case prepareTuiImagePreview image of
+    case prepareForRuntime runtime image of
         Left err -> pure (Left ("cannot decode image: " <> err))
         Right preview -> do
             unless runtime.runtimeNativeImagePreviews $
@@ -606,7 +607,7 @@ prepareFullscreenImagePreviews runtime images = do
     let prepared =
             mapMaybe
                 (\image ->
-                    case prepareTuiImagePreview image of
+                    case prepareForRuntime runtime image of
                         Left _ -> Nothing
                         Right preview -> Just (image, preview))
                 images
@@ -618,6 +619,16 @@ prepareFullscreenImagePreviews runtime images = do
                 void $ pure $! pixelAt preview.previewSample 0 0)
             prepared
     pure prepared
+
+prepareForRuntime
+    :: FullscreenRuntime
+    -> ImageAttachment
+    -> Either Text TuiImagePreview
+prepareForRuntime runtime
+    | runtime.runtimeNativeImagePreviews =
+        prepareNativeTuiImagePreview
+    | otherwise =
+        prepareTuiImagePreview
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =

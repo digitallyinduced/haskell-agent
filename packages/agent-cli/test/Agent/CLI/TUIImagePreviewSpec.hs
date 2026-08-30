@@ -5,6 +5,7 @@ import Agent.CLI.TUI.ImagePreview
     , TuiImagePreview(..)
     , imageDimensions
     , nativePreviewPlacements
+    , prepareNativeTuiImagePreview
     , prepareTuiImagePreview
     , previewCountForWidth
     , previewCellSize
@@ -269,6 +270,23 @@ spec = do
                     , imageBytes = "not an image"
                     }
                 `shouldSatisfy` isLeft
+
+        it "prepares native metadata without retaining a decode thunk" do
+            let headerOnlyPng = BS.pack
+                    [ 137, 80, 78, 71, 13, 10, 26, 10
+                    , 0, 0, 0, 13
+                    , 73, 72, 68, 82
+                    , 0, 0, 6, 64
+                    , 0, 0, 3, 132
+                    ]
+            case prepareNativeTuiImagePreview
+                (ImageAttachment "image/png" headerOnlyPng) of
+                Left err -> expectationFailure (show err)
+                Right preview -> do
+                    preview.previewSourceWidth `shouldBe` 1600
+                    preview.previewSourceHeight `shouldBe` 900
+                    pixelAt preview.previewSample 0 0
+                        `shouldBe` PixelRGB8 0 43 54
 
     describe "submitted preview retention" do
         it "evicts the oldest previews above the count budget" do
