@@ -174,4 +174,3 @@ benchmark codex-http-streaming-bench
                     , agent-responses-types
                     , bytestring
                     , text
-                    , safe-exceptions

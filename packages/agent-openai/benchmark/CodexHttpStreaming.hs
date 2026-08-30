@@ -5,10 +5,9 @@ module Main (main) where
 import Agent.OpenAI.Client (readCodexSseChunks)
 import Agent.OpenAI.Http (decodeCodexHttpBodyBytes)
 import Agent.Responses.Types (Response(..))
-import Control.Exception.Safe (evaluate)
+import Control.Exception (evaluate)
 import Control.Monad (forM)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List (sort)
 import qualified Data.Text as Text
