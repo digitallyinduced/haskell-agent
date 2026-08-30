@@ -33,12 +33,16 @@ module Agent.Store.Postgres.Session
     , loadSessionMetadata
     , loadActiveSession
     , SessionTurnPage(..)
+    , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
     , loadRecentSessionTurns
     , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
     , loadSessionHistoryTurnsBefore
     , loadSessionTurnsAfter
+    , loadSessionHistoryTurnsRange
+    , loadSessionHistoryTurnsRangeBounded
+    , loadSessionHistorySnapshot
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
@@ -83,6 +87,15 @@ data SessionLegacyTarget = SessionLegacyTarget
     , sessionLegacyConnection :: !Text
     , sessionLegacyEffectiveModel :: !Text
     , sessionLegacyDialect :: !Text
+    }
+    deriving (Eq, Show)
+
+-- | Metadata and immutable raw-history bounds observed in one repeatable-read
+-- transaction. Later appends have indexes at or above start + total.
+data SessionHistorySnapshot = SessionHistorySnapshot
+    { sessionSnapshotMetadata :: !SessionMetadata
+    , sessionSnapshotStart :: !Int64
+    , sessionSnapshotTotal :: !Int64
     }
     deriving (Eq, Show)
 
@@ -685,6 +698,64 @@ loadSessionTurnsAfter pool sessionKey cursor limit =
             (sessionKey, cursor, fromIntegral (max 1 limit + 1))
             loadTurnsAfterStatement)
         (Transaction.statement sessionKey currentGenerationStatement)
+        (max 1 limit)
+        PageAfter
+
+loadSessionHistoryTurnsRangeBounded
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionHistoryTurnsRangeBounded pool sessionKey start endExclusive limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            ( sessionKey
+            , max 0 start
+            , max 0 endExclusive
+            , fromIntegral (max 1 limit + 1)
+            )
+            loadHistoryTurnsRangeBoundedStatement)
+        (Transaction.statement sessionKey fullHistoryStatement)
+        (max 1 limit)
+        PageAfter
+
+loadSessionHistorySnapshot
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe SessionHistorySnapshot))
+loadSessionHistorySnapshot pool sessionKey =
+    withSession pool
+        (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
+            metadata <- Transaction.statement sessionKey loadMetadataStatement
+            case metadata of
+                Nothing -> pure (Right Nothing)
+                Just value -> do
+                    (start, total) <-
+                        Transaction.statement sessionKey fullHistoryStatement
+                    pure (Right (Just SessionHistorySnapshot
+                        { sessionSnapshotMetadata = value
+                        , sessionSnapshotStart = start
+                        , sessionSnapshotTotal = total
+                        })))
+        >>= flattenDataResult
+
+-- | Load a forward page from an absolute durable turn index. Unlike the
+-- active-generation readers, this intentionally includes pre-compaction
+-- history for transcript navigation and transfer export.
+loadSessionHistoryTurnsRange
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionHistoryTurnsRange pool sessionKey start limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            (sessionKey, max 0 start, fromIntegral (max 1 limit + 1))
+            loadHistoryTurnsRangeStatement)
+        (Transaction.statement sessionKey fullHistoryStatement)
         (max 1 limit)
         PageAfter
 
@@ -1296,6 +1367,46 @@ loadActiveTurnsStatement = mkStatement
            \ ), 0)\
            \ ORDER BY t.turn_index ASC")
     (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowList turnRowDecoder)
+    True
+
+loadHistoryTurnsRangeBoundedStatement
+    :: Statement (Text, Int64, Int64, Int64) [TurnRow]
+loadHistoryTurnsRangeBoundedStatement = mkStatement
+    ( turnSelectSql
+        <> " WHERE s.session_key = $1"
+        <> " AND t.turn_index >= $2"
+        <> " AND t.turn_index < $3"
+        <> " ORDER BY t.turn_index ASC"
+        <> " LIMIT $4"
+    )
+    ( ((\(value, _, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList turnRowDecoder)
+    True
+
+loadHistoryTurnsRangeStatement :: Statement (Text, Int64, Int64) [TurnRow]
+loadHistoryTurnsRangeStatement = mkStatement
+    ( turnSelectSql
+        <> " WHERE s.session_key = $1"
+        <> " AND t.turn_index >= $2"
+        <> " ORDER BY t.turn_index ASC"
+        <> " LIMIT $3"
+    )
+    ( ((\(value, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
     (Decoders.rowList turnRowDecoder)
     True
 
