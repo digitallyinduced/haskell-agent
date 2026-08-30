@@ -23,6 +23,10 @@ module Agent.CLI.AgentSessions
 
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
+import Agent.CLI.PendingInteraction
+    ( ExternalInteractionResponse(..)
+    , canonicalizeExternalInteractionResponse
+    )
 import Agent.CLI.AgentSessions.Render (renderAgentSession)
 import Agent.CLI.Error (formatException)
 import Agent.Process
@@ -48,6 +52,7 @@ import Agent.Store.Postgres.Interaction
     , InteractionResolutionRequest(..)
     , InteractionResolveResult(..)
     , SessionInteraction(..)
+    , loadSessionInteraction
     , listOpenSessionInteractions
     , resolveSessionInteraction
     )
@@ -1037,7 +1042,38 @@ runRespondAgentSessionInteraction env args
         pure
             (Left
                 "respond_agent_session_interaction requires a non-empty response")
-    | otherwise = do
+    | otherwise =
+        loadSessionInteraction
+            env.toolsPool
+            args.sessionId
+            args.interactionId >>= \case
+                Left err ->
+                    pure
+                        (Left
+                            ("could not load session interaction: "
+                                <> renderStoreError err))
+                Right Nothing ->
+                    pure (Left "session interaction was not found")
+                Right (Just interaction) ->
+                    case interaction.sessionInteractionResolution of
+                        Just winner ->
+                            pure . Right $
+                                "Another responder answered first.\nWinning response: "
+                                    <> winner.interactionResolutionPayload
+                        Nothing ->
+                            case canonicalizeExternalInteractionResponse
+                                    interaction
+                                    args.response of
+                                Left err ->
+                                    pure (Left ("invalid response: " <> err))
+                                Right ExternalInteractionDefer ->
+                                    pure
+                                        (Right
+                                            "Response deferred. The interaction remains open.")
+                                Right (ExternalInteractionResolve payload) ->
+                                    resolveValidated interaction payload
+  where
+    resolveValidated interaction payload = do
         now <- getCurrentTime
         current <- env.toolsCurrentSessionId
         let responder =
@@ -1048,10 +1084,9 @@ runRespondAgentSessionInteraction env args
             InteractionResolutionRequest
                 { interactionResolutionRequestSessionKey = args.sessionId
                 , interactionResolutionRequestInteractionId =
-                    args.interactionId
+                    interaction.sessionInteractionId
                 , interactionResolutionRequestPayloadVersion = 1
-                , interactionResolutionRequestPayload =
-                    Text.strip args.response
+                , interactionResolutionRequestPayload = payload
                 , interactionResolutionRequestResponder = responder
                 , interactionResolutionRequestResolvedAt = now
                 }

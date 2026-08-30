@@ -322,6 +322,34 @@ spec = describe "Agent.CLI.PendingInteraction" do
             [PendingInteractionInvalidResolution _] -> True
             _ -> False
 
+    describe "canonicalizeExternalInteractionResponse" do
+        it "normalizes human review responses before first-wins storage" do
+            let interaction =
+                    (testInteraction Nothing)
+                        { sessionInteractionKind = "plan_mode.decide_exit"
+                        , sessionInteractionPayload =
+                            "{\"type\":\"plan_mode.decide_exit\",\"plan_markdown\":\"# Plan\"}"
+                        }
+            canonicalizeExternalInteractionResponse
+                interaction
+                "revise: add a restart test"
+                `shouldBe`
+                    Right
+                        (ExternalInteractionResolve
+                            "{\"decision\":\"request_changes\",\"feedback\":\"add a restart test\",\"type\":\"plan_mode.decide_exit\"}")
+
+        it "keeps defer open and rejects malformed answers" do
+            canonicalizeExternalInteractionResponse
+                (testInteraction Nothing)
+                "defer"
+                `shouldBe` Right ExternalInteractionDefer
+            canonicalizeExternalInteractionResponse
+                (testInteraction Nothing)
+                "perhaps"
+                `shouldSatisfy` \case
+                    Left _ -> True
+                    Right _ -> False
+
 testCoordinator :: PendingInteractionStore -> PendingInteractionCoordinator
 testCoordinator store =
     mkPendingInteractionCoordinator

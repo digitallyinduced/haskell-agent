@@ -13,6 +13,8 @@ module Agent.CLI.PendingInteraction
     , PendingInteractionError(..)
     , PlanModeInteractionRequest(..)
     , PlanModeInteractionContextProvider
+    , ExternalInteractionResponse(..)
+    , canonicalizeExternalInteractionResponse
     , mkPendingInteractionCoordinator
     , postgresPendingInteractionCoordinator
     , coordinatePlanConfirmEnter
@@ -129,6 +131,146 @@ data PlanModeInteractionRequest
 
 type PlanModeInteractionContextProvider =
     PlanModeInteractionRequest -> IO PendingInteractionContext
+
+-- | A validated response supplied by a non-local client.  Deferral is
+-- deliberately not stored as a resolution: the immutable request remains
+-- open and can still be answered by any client.
+data ExternalInteractionResponse
+    = ExternalInteractionDefer
+    | ExternalInteractionResolve !Text
+    deriving (Eq, Show)
+
+-- | Validate a human-friendly or canonical JSON response against the
+-- immutable request before it is allowed into the first-answer-wins store.
+-- This keeps a malformed early responder from permanently poisoning an
+-- otherwise valid interaction.
+canonicalizeExternalInteractionResponse
+    :: SessionInteraction
+    -> Text
+    -> Either Text ExternalInteractionResponse
+canonicalizeExternalInteractionResponse interaction raw
+    | interaction.sessionInteractionPayloadVersion /= planPayloadVersion =
+        Left "unsupported interaction request payload version"
+    | Text.null stripped =
+        Left "response must not be empty"
+    | Text.toCaseFold stripped == "defer" =
+        Right ExternalInteractionDefer
+    | otherwise =
+        case interaction.sessionInteractionKind of
+            "plan_mode.confirm_enter" -> do
+                ensureRequestType "plan_mode.confirm_enter"
+                answer <-
+                    decodeCanonical decodeConfirmAnswer
+                        <|> parseConfirmText stripped
+                pure
+                    (ExternalInteractionResolve
+                        (encodeConfirmAnswer answer))
+            "plan_mode.decide_exit" -> do
+                ensureRequestType "plan_mode.decide_exit"
+                answer <-
+                    decodeCanonical decodeDecisionAnswer
+                        <|> parseDecisionText stripped
+                pure
+                    (ExternalInteractionResolve
+                        (encodeDecisionAnswer answer))
+            "plan_mode.ask_question" -> do
+                ensureRequestType "plan_mode.ask_question"
+                options <- requestOptions
+                answer <-
+                    decodeCanonical (decodeQuestionAnswer options)
+                        <|> validateQuestionAnswer options (Just stripped)
+                case Text.strip <$> answer of
+                    Nothing ->
+                        Left "question answer must not be null"
+                    Just value | Text.null value ->
+                        Left "question answer must not be empty"
+                    _ -> do
+                        payload <- encodeQuestionAnswer options answer
+                        pure (ExternalInteractionResolve payload)
+            other ->
+                Left ("unsupported interaction kind: " <> other)
+  where
+    stripped = Text.strip raw
+    decodeCanonical decoder =
+        case Aeson.eitherDecodeStrict'
+                (Text.encodeUtf8 stripped) :: Either String Aeson.Value of
+            Left _ -> Left "response is not canonical JSON"
+            Right _ -> decoder stripped
+    ensureRequestType expected = do
+        value <-
+            case Aeson.eitherDecodeStrict'
+                    (Text.encodeUtf8 interaction.sessionInteractionPayload) of
+                Left err ->
+                    Left
+                        ("stored interaction request is invalid JSON: "
+                            <> Text.pack err)
+                Right decoded -> Right decoded
+        case AesonTypes.parseEither
+                (Aeson.withObject "interaction request"
+                    (requirePayloadType expected))
+                value of
+            Left err ->
+                Left
+                    ("stored interaction request is invalid: "
+                        <> Text.pack err)
+            Right () -> Right ()
+
+    requestOptions =
+        decodeJson "plan-mode question request"
+            (Aeson.withObject "plan-mode question request" \object -> do
+                requirePayloadType "plan_mode.ask_question" object
+                object .: "options")
+            interaction.sessionInteractionPayload
+
+    parseConfirmText value =
+        case Text.toCaseFold value of
+            "yes" -> Right True
+            "y" -> Right True
+            "enter" -> Right True
+            "approve" -> Right True
+            "no" -> Right False
+            "n" -> Right False
+            "decline" -> Right False
+            "stay" -> Right False
+            _ -> Left
+                "enter response must be yes/enter, no/stay, defer, or canonical JSON"
+
+    parseDecisionText value
+        | folded `elem` ["approve", "approved"] =
+            Right PlanApprove
+        | folded `elem` ["abandon", "cancel"] =
+            Right PlanCancel
+        | Just feedback <- revisionFeedback value =
+            Right (PlanRequestChanges feedback)
+        | otherwise =
+            Left
+                "review response must be approve, revise <feedback>, abandon, defer, or canonical JSON"
+      where
+        folded = Text.toCaseFold value
+
+    revisionFeedback value =
+        firstNonBlank
+            [ stripCommand "revise:" value
+            , stripCommand "revise " value
+            , stripCommand "request_changes:" value
+            , stripCommand "request_changes " value
+            ]
+
+    stripCommand command value
+        | command `Text.isPrefixOf` Text.toCaseFold value =
+            Just (Text.drop (Text.length command) value)
+        | otherwise = Nothing
+
+    firstNonBlank =
+        foldr
+            (\candidate rest ->
+                case Text.strip <$> candidate of
+                    Just value | not (Text.null value) -> Just value
+                    _ -> rest)
+            Nothing
+
+    Left _ <|> right = right
+    left <|> _ = left
 
 -- | Construct a coordinator with injectable store, clock, and poll interval.
 -- Poll intervals below one millisecond are clamped to avoid a busy loop.
