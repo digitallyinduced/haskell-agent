@@ -105,6 +105,25 @@ spec = describe "Agent.Transport.WebSocket" do
         wsHandshakeAuthFailure exception
             `shouldBe` Just (HttpError 401 "WebSocket handshake returned HTTP 401")
 
+    it "keeps handshake 403 as a permission failure" do
+        let exception = transientHandshakeException 403
+        wsHandshakeAuthFailureStatus exception `shouldBe` Nothing
+        wsHandshakeAuthFailure exception `shouldBe` Nothing
+        webSocketHandshakeFailureStatus
+            (HttpError 403 "WebSocket handshake returned HTTP 403")
+            `shouldBe` Just 403
+        webSocketHandshakeFailureStatus
+            (HttpError 403 "request forbidden after connection")
+            `shouldBe` Nothing
+
+        result <- retryTransientWsConnectWithPolicy
+            (constantDelay 0 <> limitRetries 3)
+            \_connected -> throwIO exception
+
+        result `shouldBe`
+            (Left (HttpError 403 "WebSocket handshake returned HTTP 403")
+                :: Either ApiError ())
+
     it "retries a transient handshake failure before the connection callback" do
         attempts <- newIORef (0 :: Int)
         let exception = TLS.HandshakeFailed $ TLS.Error_Misc

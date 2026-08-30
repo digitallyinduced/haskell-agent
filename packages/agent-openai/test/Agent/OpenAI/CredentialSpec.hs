@@ -53,12 +53,20 @@ spec = do
                 (ProviderError UsageBalanceExhausted "balance exhausted" (Just 3600))
                 `shouldBe` Just (AccountRateLimited (Just 3600))
 
-        it "classifies authentication failures but not connection errors" do
+        it "classifies explicit authentication failures only" do
             accountFailureFromApiError (HttpError 401 "rejected")
                 `shouldBe` Just AccountAuthenticationRejected
             accountFailureFromApiError
-                (CredentialError "credential file is invalid")
+                (ProviderError AuthenticationError "rejected" Nothing)
                 `shouldBe` Just AccountAuthenticationRejected
+            accountFailureFromApiError (HttpError 403 "model access denied")
+                `shouldBe` Nothing
+            accountFailureFromApiError
+                (ProviderError PermissionError "model access denied" Nothing)
+                `shouldBe` Nothing
+            accountFailureFromApiError
+                (CredentialError "credential file is invalid")
+                `shouldBe` Nothing
             accountFailureFromApiError (ConnectionError "offline")
                 `shouldBe` Nothing
 
@@ -98,6 +106,20 @@ spec = do
                 pure (Left (ConnectionError "offline") :: Either ApiError Text)
 
             result `shouldBe` Left (ConnectionError "offline")
+            readIORef acquisitions `shouldReturn` 1
+
+        it "does not rotate accounts after an untyped HTTP 403" do
+            acquisitions <- newIORef (0 :: Int)
+            let forbidden = HttpError 403 "WebSocket handshake returned HTTP 403"
+                provider = tokenProvider SubscriptionBilled \reported -> do
+                    reported `shouldBe` Nothing
+                    modifyIORef' acquisitions (+ 1)
+                    pure $ Right (credentialFor "acc-a")
+
+            result <- runWithTokenProvider provider \_ ->
+                pure (Left forbidden :: Either ApiError Text)
+
+            result `shouldBe` Left forbidden
             readIORef acquisitions `shouldReturn` 1
 
         it "reports an already-failed connection before choosing a replacement" do

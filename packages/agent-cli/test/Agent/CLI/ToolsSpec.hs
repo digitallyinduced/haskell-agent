@@ -72,7 +72,7 @@ spec = describe "schemasFromAppTools" do
         schemasFromAppTools claudeCodeDialect [computerUseTool]
             `shouldBe` []
 
-    it "does not dispatch spoofed function/custom calls to hosted computer" do
+    it "accepts only native or reserved computer calls for the hosted handler" do
         runs <- newIORef (0 :: Int)
         let hosted = AppTool
                 { appToolName = "computer"
@@ -96,9 +96,12 @@ spec = describe "schemasFromAppTools" do
             defaultLoopDispatch registry (call FunctionCallKind)
         customResult <- dispatchRegisteredToolCall
             defaultLoopDispatch registry (call CustomCallKind)
+        computerFunctionResult <- dispatchRegisteredToolCall
+            defaultLoopDispatch registry (call ComputerFunctionCallKind)
         functionResult.output `shouldBe` "Error: Unknown tool: computer"
         customResult.output `shouldBe` "Error: Unknown tool: computer"
-        readIORef runs `shouldReturn` 0
+        computerFunctionResult.output `shouldBe` "ran"
+        readIORef runs `shouldReturn` 1
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do
