@@ -153,11 +153,11 @@ legacySearch env handle = do
         | (n, line) <- zip [1 :: Int ..] (Text.lines content)
         , "needle" `Text.isInfixOf` line
         ]
-        shown = take 200 matches
+        shown = take 5 matches
         suffix
-            | length matches > 200 =
+            | length matches > 5 =
                 "\n[search truncated: "
-                    <> Text.pack (show (length matches - 200))
+                    <> Text.pack (show (length matches - 5))
                     <> " matches omitted]"
             | otherwise = ""
     pure (Text.intercalate "\n" shown <> suffix)
@@ -167,7 +167,7 @@ streamingSearch env handle =
     runArtifactTool env $
         functionToolCall "search" "search_tool_output"
             ( "{\"handle\":\"" <> handle
-                <> "\",\"pattern\":\"needle\",\"head_limit\":200}" )
+                <> "\",\"pattern\":\"needle\",\"head_limit\":5}" )
 
 runArtifactTool :: ToolEnv -> ToolCall -> IO Text.Text
 runArtifactTool env call = do
