@@ -22,7 +22,7 @@ import Agent.CLI.Login
     )
 import Agent.CLI.Auth
     ( LoadedAuth(..)
-    , gatewayAuthSelectionId
+    , isGatewayLoadedAuth
     , loadAuth
     , loadAuthForAccount
     , probeLoadedAuthCredential
@@ -65,7 +65,7 @@ providerSupportsUsageAccountSelection = \case
 -- credential source, even though it routes an OpenAI model.
 loadedAuthSupportsUsageAccountSelection :: LoadedAuth -> Bool
 loadedAuthSupportsUsageAccountSelection loaded =
-    loaded.loadedSelectionId /= Just gatewayAuthSelectionId
+    not (isGatewayLoadedAuth loaded)
         && providerSupportsUsageAccountSelection loaded.loadedProvider
 
 -- | Provider-neutral input to the pure account ranking policy. A missing

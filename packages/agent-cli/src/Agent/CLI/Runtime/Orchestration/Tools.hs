@@ -17,6 +17,7 @@ import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(loadedProvider, loadedTokenProvider),
       hasOpenAiAuth,
+      isGatewayLoadedAuth,
       loadAuth )
 import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
@@ -871,6 +872,7 @@ runAgentTools
                 imageHooks
             | provider == OpenAIProvider
             , dialectId == CodexDialect
+            , not (isGatewayLoadedAuth loaded)
             , inferredTarget.targetConnectionId
                 == builtinConnectionId OpenAIProvider
             ]

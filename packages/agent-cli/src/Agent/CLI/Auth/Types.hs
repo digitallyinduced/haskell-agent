@@ -13,6 +13,7 @@ module Agent.CLI.Auth.Types
     , grokEmailFromAuthJson
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
+    , isGatewayLoadedAuth
     , managedAuthSelectionId
     , nonEmptyText
     , openAIOAuthClientId
@@ -64,6 +65,10 @@ data LoadedAuth = LoadedAuth
 
 gatewayAuthSelectionId :: Text
 gatewayAuthSelectionId = "gateway"
+
+isGatewayLoadedAuth :: LoadedAuth -> Bool
+isGatewayLoadedAuth loaded =
+    loaded.loadedSelectionId == Just gatewayAuthSelectionId
 
 managedAuthSelectionId :: Text -> Text
 managedAuthSelectionId managedId = "managed:" <> managedId

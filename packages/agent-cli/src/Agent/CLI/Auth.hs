@@ -12,6 +12,7 @@ module Agent.CLI.Auth
     , grokNeedsRefresh
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
+    , isGatewayLoadedAuth
     , externalAuthSelectionId
     , externalGrokTokenProvider
     , hasOpenAiAuth
@@ -62,6 +63,7 @@ import Agent.CLI.Auth.Types
     , grokEmailFromAuthJson
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
+    , isGatewayLoadedAuth
     , managedAuthSelectionId
     , openAIOAuthClientId
     , openaiAuthStateFromJson
