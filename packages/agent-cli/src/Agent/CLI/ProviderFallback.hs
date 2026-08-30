@@ -95,7 +95,7 @@ rankedModels = sortOn modelRank . filter hasPriority . modelCatalog
         option.modelFallbackPriority /= Nothing
             -- Custom connections are deliberately manual-only.
             && option.modelTarget.targetConnectionId
-                `elem` ["openai", "xai", "openrouter"]
+                `elem` ["openai", "xai", "openrouter", "gemini"]
     modelRank = maybe maxBound id . (.modelFallbackPriority)
 
 -- | Return the best model for every provider that may still have a usable

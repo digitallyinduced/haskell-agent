@@ -32,10 +32,19 @@ spec = describe "Agent.CLI.ModelConfig" do
             (catalogDefaultForProvider catalog XAIProvider)
             `shouldBe` Just "grok-4.6"
         fmap (.catalogModelId)
+            (catalogDefaultForProvider catalog GeminiProvider)
+            `shouldBe` Just "gemini-3.7-flash"
+        fmap (.catalogModelId)
             (catalogDefaultForProvider catalog OpenRouterProvider)
             `shouldBe` Just "stealth/ox-alpha"
         catalogContextWindowFor catalog "xai" "grok-4.6"
             `shouldBe` Just 500_000
+        map (catalogContextWindowFor catalog "gemini")
+            [ "gemini-3.7-flash"
+            , "gemini-3.1-pro-preview"
+            , "gemini-3.5-flash-lite"
+            ]
+            `shouldBe` replicate 3 (Just 1_048_576)
         catalogContextWindowFor catalog "openrouter" "stealth/ox-alpha"
             `shouldBe` Just 1_048_576
         fmap (.catalogModelId)
@@ -44,6 +53,13 @@ spec = describe "Agent.CLI.ModelConfig" do
                 [ "gpt-5.6-sol"
                 , "gpt-5.6-terra"
                 , "gpt-5.6-luna"
+                ]
+        fmap (.catalogModelId)
+            (catalogModelsForConnection "gemini" catalog)
+            `shouldBe`
+                [ "gemini-3.7-flash"
+                , "gemini-3.1-pro-preview"
+                , "gemini-3.5-flash-lite"
                 ]
 
     it "adds a custom Responses connection and model" do

@@ -2,6 +2,8 @@
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , authErrorNeedsOnboarding
+    , geminiAuthErrorNeedsReconnect
+    , geminiStartupAuthNeedsReconnect
     , GrokAuthState(..)
     , credentialAccountLabel
     , applyGrokAuthTokens
@@ -13,6 +15,10 @@ module Agent.CLI.Auth
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
     , isGatewayLoadedAuth
+    , geminiAuthStateFromJson
+    , geminiAuthStateToJson
+    , geminiNeedsRefresh
+    , classifyGeminiRefreshFailure
     , externalAuthSelectionId
     , externalGrokTokenProvider
     , hasOpenAiAuth
@@ -21,6 +27,7 @@ module Agent.CLI.Auth
     , loadOpenAiDictationAuth
     , managedAuthSelectionId
     , managedGrokTokenProvider
+    , managedGeminiTokenProvider
     , ExternalGrokLoaded(..)
     , ExternalGrokSource(..)
     , refreshGrokLoginPayload
@@ -43,6 +50,13 @@ import Agent.CLI.Auth.Grok
     , loadExternalGrokCredentials
     , managedGrokTokenProvider
     , refreshGrokLoginPayload
+    )
+import Agent.CLI.Auth.Gemini
+    ( geminiAuthStateFromJson
+    , geminiAuthStateToJson
+    , geminiNeedsRefresh
+    , classifyGeminiRefreshFailure
+    , managedGeminiTokenProvider
     )
 import Agent.CLI.Auth.OpenAI
     ( loadOpenAi
@@ -97,7 +111,10 @@ import Agent.Provider
     , tokenProvider
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
+import qualified Agent.Gemini.Auth as GeminiAuth
+import qualified Agent.Gemini.Credential as GeminiCredential
 import qualified Agent.XAI.Auth as XAIAuth
+import Control.Applicative ((<|>))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT
@@ -132,6 +149,7 @@ loadAuth requested =
             XAIProvider -> loadXai Nothing
             OpenAIProvider -> loadOpenAi
             OpenRouterProvider -> loadOpenRouter Nothing
+            GeminiProvider -> loadGemini Nothing
             ClaudeCodeProvider -> loadClaudeCode
 
 gatewayLoadedAuth :: GatewayCredential -> Either Text LoadedAuth
@@ -167,6 +185,7 @@ loadAuthForAccount provider selectionId =
     loadProvider = runExceptT case provider of
         XAIProvider -> loadXai (Just selectionId)
         OpenRouterProvider -> loadOpenRouter (Just selectionId)
+        GeminiProvider -> loadGemini (Just selectionId)
         OpenAIProvider ->
             throwE "OpenAI account selection is handled by the live account pool"
         ClaudeCodeProvider ->
@@ -206,13 +225,16 @@ detectProvider Nothing = do
     grok <- lift hasGrokAuth
     openai <- lift hasOpenAiAuth
     openrouter <- lift hasOpenRouterAuth
+    gemini <- lift hasGeminiAuth
     if openai
         then pure OpenAIProvider
         else if grok
             then pure XAIProvider
             else if openrouter
                 then pure OpenRouterProvider
-                else throwE noAuthHint
+                else if gemini
+                    then pure GeminiProvider
+                    else throwE noAuthHint
 
 loadXai :: Maybe Text -> ExceptT Text IO LoadedAuth
 loadXai requestedSelectionId = do
@@ -260,6 +282,7 @@ loadXai requestedSelectionId = do
                     Just (managedAuthSelectionId metadata.managedId)
                 , loadedOpenAiPool = Nothing
                 }
+
         Nothing -> do
             selected <- lift $
                 selectExternalGrok
@@ -379,6 +402,114 @@ loadOpenRouter requestedSelectionId = do
                 , loadedOpenAiPool = Nothing
                 }
 
+loadGeminiCredential
+    :: Maybe Text
+    -> IO (Maybe (Text, Credential, Text))
+loadGeminiCredential requestedSelectionId = do
+    managed <- loadManagedCredential GeminiProvider requestedSelectionId
+    case managed of
+        Just (metadata, secret)
+            | metadata.managedAuthKind == ManagedBearerToken ->
+                pure $ Just
+                    ( managedAuthSelectionId metadata.managedId
+                    , (GeminiCredential.credentialFromApiKey secret.secretPayload)
+                        { accountId = metadata.managedAccountId }
+                    , metadata.managedLabel
+                    )
+        Just _ -> pure Nothing
+        Nothing -> do
+            googleKey <- lookupNonEmpty "GOOGLE_API_KEY"
+            geminiKey <- lookupNonEmpty "GEMINI_API_KEY"
+            let external = fmap
+                    (\key ->
+                        ( externalAuthSelectionId
+                            GeminiProvider
+                            "environment"
+                        , (GeminiCredential.credentialFromApiKey key)
+                            { accountId = "gemini" }
+                        , ""
+                        ))
+                    (googleKey <|> geminiKey)
+            pure $ external >>= \candidate@(selectionId, credential, _) ->
+                if matchesSelection
+                    requestedSelectionId
+                    selectionId
+                    credential
+                    then Just candidate
+                    else Nothing
+
+loadGemini :: Maybe Text -> ExceptT Text IO LoadedAuth
+loadGemini requestedSelectionId = do
+    managed <- lift
+        (loadManagedCredential GeminiProvider requestedSelectionId)
+    case managed of
+        Just (metadata, secret)
+            | metadata.managedAuthKind == ManagedGeminiAuthJson -> do
+                state <- maybe
+                    (throwE
+                        "managed Gemini OAuth credential contains invalid auth JSON; reconnect the account")
+                    pure
+                    (geminiAuthStateFromJson secret.secretPayload)
+                case state.refreshToken of
+                    Nothing ->
+                        throwE
+                            "managed Gemini OAuth credential has no refresh token; reconnect the Google account"
+                    Just _ -> pure ()
+                options <- lift GeminiAuth.oauthOptionsFromEnv
+                provider <- lift $ managedGeminiTokenProvider
+                    metadata
+                    secret
+                    state
+                    (GeminiAuth.refreshAccessToken options)
+                pure LoadedAuth
+                    { loadedProvider = GeminiProvider
+                    , loadedTokenProvider = provider
+                    , loadedAccountLabel =
+                        pure
+                            . credentialAccountLabelWith
+                                metadata.managedLabel
+                    , loadedSelectionId =
+                        Just (managedAuthSelectionId metadata.managedId)
+                    , loadedOpenAiPool = Nothing
+                    }
+            | metadata.managedAuthKind /= ManagedBearerToken ->
+                throwE "managed Gemini credential has an unsupported auth kind"
+        _ -> loadGeminiApiKey requestedSelectionId
+
+loadGeminiApiKey :: Maybe Text -> ExceptT Text IO LoadedAuth
+loadGeminiApiKey requestedSelectionId = do
+    loadedCredential <- lift (loadGeminiCredential requestedSelectionId)
+    case loadedCredential of
+        Nothing ->
+            throwE $
+                maybe noAuthHint
+                    (const
+                        (accountNotFound
+                            GeminiProvider requestedSelectionId))
+                    requestedSelectionId
+        Just (selectionId, initial, initialLabel) -> do
+            provider <- lift $ reloadableFileCredentialProvider
+                GeminiProvider
+                ApiBilled
+                initial
+                (fmap (\(_, credential, _) -> credential)
+                    <$> loadGeminiCredential (Just selectionId))
+            pure LoadedAuth
+                { loadedProvider = GeminiProvider
+                , loadedTokenProvider = provider
+                , loadedAccountLabel = \credential -> do
+                    current <- loadGeminiCredential (Just selectionId)
+                    let label = case current of
+                            Just (_, currentCredential, currentLabel)
+                                | currentCredential.accountId
+                                    == credential.accountId ->
+                                        currentLabel
+                            _ -> initialLabel
+                    pure (credentialAccountLabelWith label credential)
+                , loadedSelectionId = Just selectionId
+                , loadedOpenAiPool = Nothing
+                }
+
 loadManagedCredential
     :: Provider
     -> Maybe Text
@@ -435,6 +566,13 @@ hasOpenRouterAuth = do
     environment <- isJust <$> lookupNonEmpty "OPENROUTER_API_KEY"
     managed <- hasManagedProvider OpenRouterProvider
     pure (environment || managed)
+
+hasGeminiAuth :: IO Bool
+hasGeminiAuth = do
+    google <- isJust <$> lookupNonEmpty "GOOGLE_API_KEY"
+    gemini <- isJust <$> lookupNonEmpty "GEMINI_API_KEY"
+    managed <- hasManagedProvider GeminiProvider
+    pure (google || gemini || managed)
 
 hasManagedProvider :: Provider -> IO Bool
 hasManagedProvider provider =
@@ -499,7 +637,7 @@ reloadableFileCredentialProvider expectedProvider billing initial reload = do
                                 <> providerSlug expectedProvider)
                     | rejectedToken == Just credential.accessToken ->
                         pure $ Left $ CredentialError
-                            "reloaded credential is unchanged; refresh ~/.grok/auth.json or OPENROUTER_API_KEY and retry"
+                            "reloaded credential is unchanged; refresh the configured credential source and retry"
                     | otherwise -> do
                         writeIORef cache (Just credential)
                         pure (Right credential)
@@ -532,10 +670,37 @@ staticCredentialProvider billing credential =
 noAuthHint :: Text
 noAuthHint =
     "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, \
-    \or OPENROUTER_API_KEY, place auth at ~/.grok/auth.json / ~/.codex/auth.json, \
+    \OPENROUTER_API_KEY, GOOGLE_API_KEY, or GEMINI_API_KEY, \
+    \place auth at ~/.grok/auth.json / ~/.codex/auth.json, \
+    \connect a Google account from /model or /account, \
     \or use --provider claude-code after `claude auth login`."
 
 authErrorNeedsOnboarding :: Text -> Bool
 authErrorNeedsOnboarding message =
     "no credentials found." `Text.isPrefixOf` message
         || "no valid OpenAI credentials found:" `Text.isPrefixOf` message
+
+-- | Decide whether selecting a Gemini model should offer Google sign-in.
+-- Besides a first connection, this covers malformed or rejected managed OAuth
+-- state. Network and rate-limit failures remain ordinary switch errors rather
+-- than opening a fresh browser flow.
+geminiAuthErrorNeedsReconnect :: Text -> Bool
+geminiAuthErrorNeedsReconnect message =
+    authErrorNeedsOnboarding message
+        || any (`Text.isInfixOf` message)
+            [ "managed Gemini OAuth credential contains invalid auth JSON"
+            , "managed Gemini OAuth credential has no refresh token"
+            , "managed Gemini credential has an unsupported auth kind"
+            , "Google OAuth token request failed with HTTP 400"
+            , "Google OAuth token request failed with HTTP 401"
+            ]
+
+geminiStartupAuthNeedsReconnect :: Bool -> Text -> Bool
+geminiStartupAuthNeedsReconnect targetsGemini message =
+    (geminiAuthErrorNeedsReconnect message
+        && not (authErrorNeedsOnboarding message))
+        || (targetsGemini
+            && ( authErrorNeedsOnboarding message
+                || "no enabled gemini credential"
+                    `Text.isInfixOf` Text.toLower message
+               ))

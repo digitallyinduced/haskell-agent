@@ -50,6 +50,7 @@ cabal repl \
   agent-openai:lib:agent-openai \
   agent-xai:lib:agent-xai \
   agent-openrouter:lib:agent-openrouter \
+  agent-gemini:lib:agent-gemini \
   claude-agent-sdk-haskell:lib:claude-agent-sdk-haskell \
   agent-claude:lib:agent-claude
 ```

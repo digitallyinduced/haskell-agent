@@ -9,6 +9,10 @@
       "api": "builtin",
       "provider": "xai"
     },
+    "gemini": {
+      "api": "builtin",
+      "provider": "gemini"
+    },
     "openrouter": {
       "api": "builtin",
       "provider": "openrouter"
@@ -52,6 +56,29 @@
       "label": "default",
       "default": true,
       "fallback_priority": 10
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "connection": "gemini",
+      "dialect": "generic-responses",
+      "context_window": 1048576,
+      "label": "default · 1M context",
+      "default": true,
+      "fallback_priority": 15
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "connection": "gemini",
+      "dialect": "generic-responses",
+      "context_window": 1048576,
+      "label": "1M context"
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "connection": "gemini",
+      "dialect": "generic-responses",
+      "context_window": 1048576,
+      "label": "1M context"
     },
     {
       "id": "stealth/ox-alpha",

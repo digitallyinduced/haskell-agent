@@ -76,6 +76,17 @@
                     ];
                 };
 
+                agentGeminiSource = nix-filter.lib {
+                    root = ./packages/agent-gemini;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-gemini.cabal"
+                        "README.md"
+                        "LICENSE"
+                    ];
+                };
+
                 agentProcessSource = nix-filter.lib {
                     root = ./packages/agent-process;
                     include = [
@@ -433,6 +444,9 @@
                         agent-openrouter = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
                         });
+                        agent-gemini = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-gemini/package.nix { }) {
+                            src = agentGeminiSource;
+                        });
                         claude-agent-sdk-haskell = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
                             src = claudeAgentSdkHaskellSource;
                         });
@@ -490,6 +504,7 @@
                 agentOpenaiPackage = productionHaskellPackages.agent-openai;
                 agentXaiPackage = productionHaskellPackages.agent-xai;
                 agentOpenrouterPackage = productionHaskellPackages.agent-openrouter;
+                agentGeminiPackage = productionHaskellPackages.agent-gemini;
                 claudeAgentSdkHaskellPackage = productionHaskellPackages.claude-agent-sdk-haskell;
                 agentClaudePackage = productionHaskellPackages.agent-claude;
                 agentTuiPackage = productionHaskellPackages.agent-tui;
@@ -676,6 +691,7 @@
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
                 packages.agent-openrouter = agentOpenrouterPackage;
+                packages.agent-gemini = agentGeminiPackage;
                 packages.claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
                 packages.agent-claude = agentClaudePackage;
                 packages.agent-openai-login = agentOpenaiExecutables;
@@ -711,6 +727,7 @@
                         packages.agent-openai
                         packages.agent-xai
                         packages.agent-openrouter
+                        packages.agent-gemini
                         packages.claude-agent-sdk-haskell
                         packages.agent-claude
                     ];
@@ -762,6 +779,7 @@
                     agent-openai = haskellPackages.agent-openai;
                     agent-xai = haskellPackages.agent-xai;
                     agent-openrouter = haskellPackages.agent-openrouter;
+                    agent-gemini = haskellPackages.agent-gemini;
                     claude-agent-sdk-haskell =
                         haskellPackages.claude-agent-sdk-haskell;
                     agent-claude = haskellPackages.agent-claude;

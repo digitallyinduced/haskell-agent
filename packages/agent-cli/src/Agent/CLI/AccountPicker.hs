@@ -95,6 +95,7 @@ loadAllAccountPickerOptions currentProvider = do
                 [ OpenAIProvider
                 , XAIProvider
                 , OpenRouterProvider
+                , GeminiProvider
                 , ClaudeCodeProvider
                 ]
   where
@@ -113,7 +114,8 @@ loadAllAccountPickerOptions currentProvider = do
         OpenAIProvider -> 0 :: Int
         XAIProvider -> 1
         OpenRouterProvider -> 2
-        ClaudeCodeProvider -> 3
+        GeminiProvider -> 3
+        ClaudeCodeProvider -> 4
 
 accountBillingMode :: Provider -> AccountBilling -> BillingMode
 accountBillingMode provider = case provider of
@@ -163,10 +165,14 @@ accountPickerMatches
 accountPickerMatches currentProvider currentSelectionId currentAccountId = \case
     AccountPickerAccount optionProvider _ selectionId accountId _ _ ->
         optionProvider == currentProvider
-            && ( selectionId == currentSelectionId
-                || accountId == currentAccountId
-               )
+            && selectionMatches selectionId accountId
     AccountPickerConnect _ -> False
+  where
+    selectionMatches selectionId accountId
+        | Text.null currentSelectionId =
+            accountId == currentAccountId
+        | otherwise =
+            selectionId == currentSelectionId
 
 -- | Restrict a Meta Console account request to the requested provider and,
 -- when present, an exact case-insensitive label or id.  In particular, a
@@ -204,9 +210,7 @@ accountPickerRow currentProvider currentSelectionId currentAccountId = \case
         accountPickerLabel
         accountPickerUsage ->
             ( (if optionProvider == currentProvider
-                    && ( selectionId == currentSelectionId
-                        || accountId == currentAccountId
-                       )
+                    && selectionMatches selectionId accountId
                     then "✓ "
                     else "")
                 <> providerSlug optionProvider
@@ -216,3 +220,9 @@ accountPickerRow currentProvider currentSelectionId currentAccountId = \case
             )
     AccountPickerConnect optionProvider ->
         ("＋ Connect " <> providerSlug optionProvider <> " account", "")
+  where
+    selectionMatches selectionId accountId
+        | Text.null currentSelectionId =
+            accountId == currentAccountId
+        | otherwise =
+            selectionId == currentSelectionId

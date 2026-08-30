@@ -38,6 +38,8 @@ spec = do
                 `shouldBe` defaultModelFor catalog OpenAIProvider
             firstId (modelsForProvider catalog OpenRouterProvider)
                 `shouldBe` defaultModelFor catalog OpenRouterProvider
+            firstId (modelsForProvider catalog GeminiProvider)
+                `shouldBe` defaultModelFor catalog GeminiProvider
             firstId (modelsForProvider catalog ClaudeCodeProvider)
                 `shouldBe` defaultModelFor catalog ClaudeCodeProvider
 
@@ -45,6 +47,7 @@ spec = do
             modelIdsFor OpenAIProvider `shouldContain` ["gpt-5.6-sol"]
             modelIdsFor XAIProvider `shouldContain` ["grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
+            modelIdsFor GeminiProvider `shouldContain` ["gemini-3.7-flash"]
 
         it "ships the GPT-5.6 series and each other provider frontier model" do
             modelIdsFor OpenAIProvider
@@ -56,6 +59,12 @@ spec = do
             modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
             modelIdsFor OpenRouterProvider
                 `shouldBe` ["stealth/ox-alpha", "meta/muse-spark-1.2"]
+            modelIdsFor GeminiProvider
+                `shouldBe`
+                    [ "gemini-3.7-flash"
+                    , "gemini-3.1-pro-preview"
+                    , "gemini-3.5-flash-lite"
+                    ]
             modelIdsFor ClaudeCodeProvider
                 `shouldBe` ["sonnet", "opus", "fable"]
 
@@ -96,6 +105,7 @@ spec = do
                     [ OpenAIProvider
                     , XAIProvider
                     , OpenRouterProvider
+                    , GeminiProvider
                     , ClaudeCodeProvider
                     ]
 
@@ -304,6 +314,7 @@ spec = do
                     [ OpenAIProvider
                     , XAIProvider
                     , OpenRouterProvider
+                    , GeminiProvider
                     , ClaudeCodeProvider
                     ]
 

@@ -16,6 +16,7 @@ nix run "github:digitallyinduced/haskell-agent"
 - xAI (Subscription)
 - Claude (Subscription)
 - OpenRouter (API billing)
+- Google Gemini (Google account or AI Studio API billing)
 
 ## What is distinctive
 
@@ -58,9 +59,9 @@ have to be.
 
 ## Features
 
-- **Choice of models and billing:** use OpenAI/Codex, xAI/Grok, OpenRouter, or
-  Claude Code through subscriptions or API keys, and add local or hosted
-  Responses-compatible models through the user model catalog.
+- **Choice of models and billing:** use OpenAI/Codex, xAI/Grok, OpenRouter,
+  Google Gemini, or Claude Code through subscriptions or API keys, and add
+  local or hosted Responses-compatible models through the user model catalog.
 - **Interactive terminal workflow:** choose between fullscreen and inline
   interfaces with streaming Markdown, live todo progress, one-shot operation,
   and image attachments from files or the clipboard.
@@ -165,9 +166,23 @@ remote is selected from the current branch's configured remote, then
 fetch failure aborts worktree creation rather than falling back to a stale
 commit.
 
-Use `--provider openai`, `--provider xai`, `--provider openrouter`, or
-`--provider claude-code` to override automatic provider detection. Claude Code
-is selected explicitly rather than by auto-detection.
+Use `--provider openai`, `--provider xai`, `--provider openrouter`,
+`--provider gemini`, or `--provider claude-code` to override automatic
+provider detection. Claude Code is selected explicitly rather than by
+auto-detection.
+
+Open `/model` and choose a Gemini model such as `gemini-3.7-flash`. If no
+Gemini account is connected, the CLI opens Google sign-in in your browser and
+stores the OAuth credential in the same managed credential store used by the
+other providers:
+
+```console
+/model
+```
+
+No API key is required for this Google-account flow. For Google AI Studio API
+billing instead, set `GOOGLE_API_KEY` (preferred) or `GEMINI_API_KEY`, then run
+`agent-cli --provider gemini --model gemini-3.7-flash`.
 
 ### Telegram
 
@@ -203,7 +218,9 @@ defaults from a confirmed public GitHub profile. Invoke it with
 
 ### Authentication
 
-Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
+Works with your Codex, Grok, Google, and Claude accounts, plus provider API
+keys. Gemini can be connected interactively from `/model` or `/account`;
+`GOOGLE_API_KEY` (or `GEMINI_API_KEY`) remains an optional AI Studio fallback.
 
 ### Voice dictation
 
@@ -305,11 +322,11 @@ are discussed in [`IDEAS.md`](IDEAS.md).
                                |
                     canonical Responses model
                                |
-       +---------------+---------------+---------------+
-       |               |               |               |
- agent-openai      agent-xai    agent-openrouter  agent-claude
-       |               |               |               |
-OpenAI / ChatGPT       xAI          OpenRouter      Claude Code
+       +---------------+---------------+---------------+---------------+---------------+
+       |               |               |               |               |
+ agent-openai      agent-xai    agent-openrouter  agent-gemini    agent-claude
+       |               |               |               |               |
+OpenAI / ChatGPT       xAI          OpenRouter      Gemini         Claude Code
 ```
 
 The provider-neutral loop sees typed turns, tool calls, tool results, usage,
@@ -325,8 +342,9 @@ adapter.
 
 Model targets resolve independently to a provider transport and a model-facing
 dialect. OpenAI models use the Codex dialect, xAI models use the Grok Build
-dialect, and OpenRouter selects Codex, Grok Build, or a portable Responses
-dialect from the model family.
+dialect, Gemini uses the portable Responses dialect over Google's native Code
+Assist or GenerateContent API, and OpenRouter selects Codex, Grok Build, or a
+portable Responses dialect from the model family.
 
 ## Development
 

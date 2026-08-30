@@ -10,8 +10,9 @@ Provider-neutral infrastructure shared by the harness transports:
   `agent-grok-build-dialect`.
 - `Agent.Loop` runs the provider-neutral tool-calling agent loop. Transport
   adapters live in `agent-openai` (`Agent.OpenAI.LoopBackend`), `agent-xai`
-  (`Agent.XAI.LoopBackend`), and `agent-openrouter`
-  (`Agent.OpenRouter.LoopBackend`).
+  (`Agent.XAI.LoopBackend`), `agent-openrouter`
+  (`Agent.OpenRouter.LoopBackend`), and `agent-gemini`
+  (`Agent.Gemini.LoopBackend`).
 - `Agent.ToolArgs` parses model-supplied JSON tool arguments.
 - `Agent.ToolDSL` owns JSON Schema fragments for function-tool parameters.
 - `Agent.ToolDispatch` decodes and runs provider-neutral application tools.
@@ -28,4 +29,5 @@ Provider-neutral infrastructure shared by the harness transports:
   unfinished exchanges poison the session so abandoned frames cannot leak
   into its successor.
 
-This package does not contain OpenAI, ChatGPT, xAI, or OpenRouter transport logic.
+This package does not contain OpenAI, ChatGPT, xAI, OpenRouter, or Gemini
+transport logic.

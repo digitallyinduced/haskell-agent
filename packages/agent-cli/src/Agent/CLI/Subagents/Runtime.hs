@@ -563,7 +563,8 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                         (\config ->
                             runLoopInputs config previous [AgentMessage prompt])
 
--- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
+-- | Child xAI/OpenRouter/Gemini agent: HTTP backend, filtered tools by
+-- @subagent_type@.
 runHttpSubagent
     :: SubagentRuntime
     -> Dialect

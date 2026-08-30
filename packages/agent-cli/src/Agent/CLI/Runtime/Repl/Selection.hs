@@ -17,7 +17,7 @@ import Agent.CLI.AgentSessions ()
 import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
-import Agent.CLI.Auth ()
+import Agent.CLI.Auth ( geminiAuthErrorNeedsReconnect )
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
     ( currentEffort,
@@ -127,7 +127,7 @@ import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ()
 import Agent.Provider
-    ( Provider(ClaudeCodeProvider, OpenAIProvider),
+    ( Provider(ClaudeCodeProvider, GeminiProvider, OpenAIProvider),
       providerSlug,
       tokenProviderBillingMode )
 import Agent.ReasoningEffort (reasoningEffortText)
@@ -182,6 +182,7 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
+import qualified Data.Text as Text ( null, stripPrefix )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -445,14 +446,7 @@ handleSelection
         if modelTargetRequiresRebuild
                 connectionId provider (dialectId dialect) choice
             then
-                requestModelTargetSwitch
-                    fullscreen choice persist >>= \case
-                    Left err -> do
-                        displayError err $
-                            Text.hPutStrLn stderr
-                                (roleError color err)
-                        continue
-                    Right result -> pure result
+                switchModelTarget color choice continue
             else do
                 message <- applyModelChange
                     home projectRoot provider connectionId name
@@ -548,13 +542,43 @@ handleSelection
                                 (glyphOk <> message))
                     next
                   else
-                    requestModelTargetSwitch fullscreen choice persist >>= \case
-                        Left err -> do
-                            displayError err $
-                                Text.hPutStrLn stderr
-                                    (roleError color err)
-                            next
-                        Right result -> pure result
+                    switchModelTarget color choice next
+    switchModelTarget color choice next =
+        requestModelTargetSwitch fullscreen choice persist >>= \case
+            Left err
+                | choice.modelTarget.targetProvider == GeminiProvider
+                , modelAuthErrorNeedsConnect GeminiProvider err -> do
+                    connected <- case fullscreen of
+                        Nothing ->
+                            connectProviderAccount color GeminiProvider
+                        Just runtime ->
+                            withFullscreenSuspended runtime $
+                                connectProviderAccount color GeminiProvider
+                    case connected of
+                        Nothing -> next
+                        Just _ ->
+                            requestModelTargetSwitch
+                                fullscreen choice persist >>= \case
+                                Left retryErr -> do
+                                    displayError retryErr $
+                                        Text.hPutStrLn stderr
+                                            (roleError color retryErr)
+                                    next
+                                Right result -> pure result
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right result -> pure result
+    modelAuthErrorNeedsConnect targetProvider message =
+        geminiAuthErrorNeedsReconnect message
+            || maybe False geminiAuthErrorNeedsReconnect
+                (Text.stripPrefix
+                    ( "cannot switch to "
+                        <> providerSlug targetProvider
+                        <> ": "
+                    )
+                    message)
     chooseAccount next =
         case fullscreen of
             Just runtime -> do
@@ -600,8 +624,14 @@ handleSelection
                                             | selectedProvider == provider
                                             , selectedProvider
                                                 /= ClaudeCodeProvider
-                                            , selectedAccountId
-                                                == currentAccountId ->
+                                            , ( not (Text.null currentSelectionId)
+                                                    && selectedSelectionId
+                                                        == currentSelectionId
+                                              )
+                                                || ( Text.null currentSelectionId
+                                                    && selectedAccountId
+                                                        == currentAccountId
+                                                   ) ->
                                                 displayInfo
                                                     ("account: " <> selectedLabel)
                                                     (pure ())
@@ -622,7 +652,7 @@ handleSelection
                                                     selectedProvider
                                         case connected of
                                             Nothing -> next
-                                            Just selectedAccountId -> do
+                                            Just connectedId -> do
                                                 refreshed <-
                                                     loadAllAccountPickerOptions
                                                         provider
@@ -631,14 +661,16 @@ handleSelection
                                                         | account@(AccountPickerAccount
                                                             accountProvider
                                                             _
-                                                            _
+                                                            selectionId
                                                             accountId
                                                             _
                                                             _) <- refreshed
                                                         , accountProvider
                                                             == selectedProvider
-                                                        , accountId
-                                                            == selectedAccountId
+                                                        , selectionId
+                                                            == connectedId
+                                                            || accountId
+                                                                == connectedId
                                                         ] of
                                                     Just
                                                         (AccountPickerAccount
