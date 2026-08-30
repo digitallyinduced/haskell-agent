@@ -577,52 +577,13 @@ alterTouched
     -> (Text -> Maybe NativeAgentView -> NativeAgentView)
     -> NativeAgentStore
     -> NativeAgentStore
-alterTouched rawIdentifier update =
-    alterTouchedAccounting rawIdentifier update updateBytes
-  where
-    updateBytes previous next bytes =
-        saturatingNativeAdd
-            (max 0 (bytes - maybe 0 nativeAgentViewBytes previous))
-            (nativeAgentViewBytes next)
-
-alterNativeOutput :: Text -> Text -> NativeAgentStore -> NativeAgentStore
-alterNativeOutput rawIdentifier chunk =
-    alterTouchedAccounting rawIdentifier update updateBytes
-  where
-    update identifier maybeView =
-        let view = fromMaybe
-                (newNativeAgentView NativeAgentLive
-                    identifier Nothing identifier Nothing)
-                maybeView
-        in view
-            { nativeAgentOutput =
-                appendOutput
-                    nativeAgentSelectedOutputBytes
-                    chunk
-                    view.nativeAgentOutput
-            , nativeAgentOrigin = NativeAgentLive
-            }
-    updateBytes Nothing next bytes =
-        saturatingNativeAdd bytes (nativeAgentViewBytes next)
-    updateBytes (Just previous) next bytes =
-        saturatingNativeAdd
-            (max 0
-                (bytes - previous.nativeAgentOutput.outputBytes))
-            next.nativeAgentOutput.outputBytes
-
-alterTouchedAccounting
-    :: Text
-    -> (Text -> Maybe NativeAgentView -> NativeAgentView)
-    -> (Maybe NativeAgentView -> NativeAgentView -> Int -> Int)
-    -> NativeAgentStore
-    -> NativeAgentStore
-alterTouchedAccounting rawIdentifier update updateBytes store =
+alterTouched rawIdentifier update store =
     case Map.lookup rawIdentifier store.storeAgents of
         Just previous -> apply previous.nativeAgentId (Just previous)
-        Nothing
-            | nativeAgentIdentifierWithinLimit rawIdentifier ->
-                apply (Text.copy rawIdentifier) Nothing
-            | otherwise -> store
+        Nothing ->
+            case boundedNativeAgentIdentifier rawIdentifier of
+                Nothing -> store
+                Just identifier -> apply identifier Nothing
   where
     apply identifier previous =
         let next = update identifier previous
@@ -631,7 +592,55 @@ alterTouchedAccounting rawIdentifier update updateBytes store =
                 Map.insert identifier next store.storeAgents
             , storeOrder =
                 touchOrder identifier store.storeOrder
-            , storeBytes = updateBytes previous next store.storeBytes
+            , storeBytes =
+                saturatingNativeAdd
+                    (max 0
+                        ( store.storeBytes
+                            - maybe 0 nativeAgentViewBytes previous
+                        ))
+                    (nativeAgentViewBytes next)
+            }
+
+alterNativeOutput :: Text -> Text -> NativeAgentStore -> NativeAgentStore
+alterNativeOutput rawIdentifier chunk store =
+    case Map.lookup rawIdentifier store.storeAgents of
+        Just previous -> apply previous.nativeAgentId (Just previous)
+        Nothing ->
+            case boundedNativeAgentIdentifier rawIdentifier of
+                Nothing -> store
+                Just identifier -> apply identifier Nothing
+  where
+    apply identifier previous =
+        let view = fromMaybe
+                (newNativeAgentView NativeAgentLive
+                    identifier Nothing identifier Nothing)
+                previous
+            next = view
+                { nativeAgentOutput =
+                    appendOutput
+                        nativeAgentSelectedOutputBytes
+                        chunk
+                        view.nativeAgentOutput
+                , nativeAgentOrigin = NativeAgentLive
+                }
+        in store
+            { storeAgents =
+                Map.insert identifier next store.storeAgents
+            , storeOrder =
+                touchOrder identifier store.storeOrder
+            , storeBytes =
+                case previous of
+                    Nothing ->
+                        saturatingNativeAdd
+                            store.storeBytes
+                            (nativeAgentViewBytes next)
+                    Just prior ->
+                        saturatingNativeAdd
+                            (max 0
+                                ( store.storeBytes
+                                    - prior.nativeAgentOutput.outputBytes
+                                ))
+                            next.nativeAgentOutput.outputBytes
             }
 
 touchOrder :: Text -> Seq Text -> Seq Text
