@@ -49,7 +49,8 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
-import Data.Word (Word8)
+import Data.Word (Word8, Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import System.Exit (ExitCode(..))
 import System.Environment (getEnvironment)
 import System.IO
@@ -146,7 +147,7 @@ instance Eq ValidatedRemote where
 
 data StoredConfirmation = StoredConfirmation
     { storedRoot :: !FilePath
-    , storedExpiresAt :: !POSIXTime
+    , storedDeadlineNanos :: !Word64
     , storedConfirmation :: !Confirmation
     }
 
@@ -1109,12 +1110,14 @@ storeConfirmation
     -> Confirmation
     -> IO (Text, POSIXTime)
 storeConfirmation root confirmation = do
-    now <- getPOSIXTime
+    wallNow <- getPOSIXTime
+    monotonicNow <- getMonotonicTimeNSec
     token <- randomToken
-    let expiresAt = now + confirmationLifetimeSeconds
+    let expiresAt = wallNow + confirmationLifetimeSeconds
+        deadline = saturatingAdd monotonicNow confirmationLifetimeNanos
     stored <- modifyMVar deliveryConfirmations \confirmations ->
         let active = Map.filter
-                (\entry -> entry.storedExpiresAt > now)
+                (\entry -> entry.storedDeadlineNanos > monotonicNow)
                 confirmations
         in if Map.size active >= maxActiveConfirmations
             || Map.member token active
@@ -1125,7 +1128,7 @@ storeConfirmation root confirmation = do
                         token
                         StoredConfirmation
                             { storedRoot = root
-                            , storedExpiresAt = expiresAt
+                            , storedDeadlineNanos = deadline
                             , storedConfirmation = confirmation
                             }
                         active
@@ -1159,10 +1162,11 @@ consumeConfirmation requested token
                         (DeliveryCommandFailed
                             "repository state could not be verified"))
             Just (Right snapshot) -> do
-                now <- getPOSIXTime
+                monotonicNow <- getMonotonicTimeNSec
                 modifyMVar deliveryConfirmations \confirmations ->
                     let pruned = Map.filter
-                            (\stored -> stored.storedExpiresAt > now)
+                            (\stored ->
+                                stored.storedDeadlineNanos > monotonicNow)
                             confirmations
                     in case Map.lookup token pruned of
                         Nothing ->
@@ -1470,6 +1474,14 @@ trySynchronous action =
 confirmationLifetimeSeconds :: POSIXTime
 confirmationLifetimeSeconds = 10 * 60
 
+confirmationLifetimeNanos :: Word64
+confirmationLifetimeNanos = 10 * 60 * 1_000_000_000
+
+saturatingAdd :: Word64 -> Word64 -> Word64
+saturatingAdd left right
+    | maxBound - left < right = maxBound
+    | otherwise = left + right
+
 localTimeoutMicros :: Int
 localTimeoutMicros = 15 * 1_000_000
 
@@ -1488,7 +1500,8 @@ deliveryConfirmations = unsafePerformIO do
     confirmations <- newMVar Map.empty
     _ <- forkIO $ forever do
         threadDelay 60_000_000
-        now <- getPOSIXTime
+        monotonicNow <- getMonotonicTimeNSec
         modifyMVar_ confirmations
-            (pure . Map.filter (\stored -> stored.storedExpiresAt > now))
+            (pure . Map.filter
+                (\stored -> stored.storedDeadlineNanos > monotonicNow))
     pure confirmations

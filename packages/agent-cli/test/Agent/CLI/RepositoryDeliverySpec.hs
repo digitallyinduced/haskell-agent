@@ -45,6 +45,21 @@ spec = describe "repository delivery service" do
         validateRemoteName "-origin" `shouldBe` False
         validateRemoteName "origin\n--upload-pack=evil" `shouldBe` False
 
+    it "rejects relative paths and custom remote-helper transports" $
+        withDeliveryRepository \root _ -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            _ <- git root ["remote", "set-url", "origin", "../redirected.git"]
+            repositoryDeliveryStatus root snapshot.snapshotId
+                `shouldReturnSatisfying` isInvalid
+            _ <- git root
+                [ "remote"
+                , "set-url"
+                , "origin"
+                , "ext::sh -c 'touch should-not-run'"
+                ]
+            repositoryDeliveryStatus root snapshot.snapshotId
+                `shouldReturnSatisfying` isInvalid
+
     it "previews and confirms one exact fast-forward lease push once" $
         withDeliveryRepository \root remote -> do
             appendFile (root <> "/tracked.txt") "second\n"
