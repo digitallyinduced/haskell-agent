@@ -338,6 +338,7 @@ data AppState = AppState
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
     , appAgentHover :: !(Maybe AgentHover)
+    , appMarkdownLinkHovered :: !Bool
     , appHoveredControl :: !(Maybe Name)
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool

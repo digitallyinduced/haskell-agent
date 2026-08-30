@@ -68,7 +68,10 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
+    , osc22MousePointer
     , shiftEnterCsiBodies
+    , terminalSupportsMousePointer
+    , wrapTerminalPassthrough
     )
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
@@ -359,7 +362,13 @@ syncMotionDemand = do
             { appMotionScheduleReset = False }
 
 handleEventInner :: BrickEvent Name AppEvent -> EventM Name AppState ()
-handleEventInner event = case event of
+handleEventInner event = do
+    when (eventClearsMarkdownLinkCursor event) $
+        setMarkdownLinkCursor False
+    handleEventInner' event
+
+handleEventInner' :: BrickEvent Name AppEvent -> EventM Name AppState ()
+handleEventInner' event = case event of
     AppEvent AppMotionTick -> do
         state <- get
         liftIO $
@@ -877,6 +886,9 @@ handleEventInner event = case event of
         keepAgentHover target
     MouseUp AgentPane Nothing _ ->
         pure ()
+    MouseUp MarkdownLink{} Nothing _ -> do
+        clearAgentHover
+        setMarkdownLinkCursor True
     MouseUp link@MarkdownLink{} (Just V.BLeft) _ -> do
         clearAgentHover
         Composer.handleControlMouseUp link (activateControl link)
@@ -947,6 +959,47 @@ handleEventInner event = case event of
                             (Nothing, Nothing, Nothing, Nothing) ->
                                 handleNormalKey vtyEvent
     _ -> pure ()
+
+eventClearsMarkdownLinkCursor :: BrickEvent Name AppEvent -> Bool
+eventClearsMarkdownLinkCursor = \case
+    -- Pointer motion is represented as a buttonless MouseUp by our
+    -- vty-unix patch. Keep the hand while Brick says that motion is inside a
+    -- Markdown link extent.
+    MouseUp MarkdownLink{} Nothing _ -> False
+    MouseDown{} -> True
+    MouseUp{} -> True
+    VtyEvent V.EvMouseDown{} -> True
+    VtyEvent V.EvMouseUp{} -> True
+    VtyEvent V.EvLostFocus -> True
+    VtyEvent V.EvResize{} -> True
+    AppEvent AppSuspend{} -> True
+    AppEvent AppAskChoice{} -> True
+    AppEvent AppAskResume{} -> True
+    AppEvent AppAskText{} -> True
+    _ -> False
+
+-- | Use OSC 22 to give Markdown links a native hand cursor even while the
+-- fullscreen UI has mouse reporting enabled. In Ghostty, mouse reporting
+-- prevents its normal Command-hover OSC 8 detection; the app still receives
+-- pointer motion, so it can set the cursor precisely for the clickable link
+-- extent.
+setMarkdownLinkCursor :: Bool -> EventM Name AppState ()
+setMarkdownLinkCursor hovered = do
+    state <- get
+    when (state.appMarkdownLinkHovered /= hovered) do
+        modify' \current ->
+            current { appMarkdownLinkHovered = hovered }
+        terminal <- liftIO (detectTerminalCapabilities stdout)
+        when (terminalSupportsMousePointer terminal.terminalKind) do
+            vty <- getVtyHandle
+            let payload =
+                    wrapTerminalPassthrough
+                        terminal.terminalInsideTmux
+                        (osc22MousePointer terminal.terminalKind hovered)
+            liftIO $
+                V.outputByteBuffer
+                    (V.outputIface vty)
+                    (TextEncoding.encodeUtf8 payload)
 
 metaConsoleToggleAvailable :: AppState -> Bool
 metaConsoleToggleAvailable state =
