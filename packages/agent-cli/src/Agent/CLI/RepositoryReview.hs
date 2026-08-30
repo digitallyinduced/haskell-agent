@@ -260,12 +260,19 @@ commitRepository requested expected rawMessage =
                             (InvalidRepositoryRequest
                                 "commit message contains a NUL byte"))
                 | otherwise -> do
-                    committed <- runGit root
-                        ["commit", "--file=-"]
-                        (TextEncoding.encodeUtf8 rawMessage)
-                    case committed of
+                    -- Revalidate immediately before handing control to Git.
+                    -- The repository lock excludes other API mutations; an
+                    -- unrelated external writer remains outside that lock.
+                    latest <- requireSnapshot root expected
+                    case latest of
                         Left err -> pure (Left err)
-                        Right _ -> snapshotAtRoot root
+                        Right _ -> do
+                            committed <- runGit root
+                                ["commit", "--file=-"]
+                                (TextEncoding.encodeUtf8 rawMessage)
+                            case committed of
+                                Left err -> pure (Left err)
+                                Right _ -> snapshotAtRoot root
 
 startRepositoryCheck
     :: FilePath
@@ -430,8 +437,7 @@ createCheckProcess root executable arguments = do
 
 snapshotAtRoot :: FilePath -> IO (Either RepositoryError RepositorySnapshot)
 snapshotAtRoot root = do
-    headResult <- runGit root ["rev-parse", "--verify", "HEAD"] BS.empty
-    let headOid = either (const Nothing) (Just . decodeTrimmed) headResult
+    headResult <- repositoryHead root
     indexResult <- runGit root ["ls-files", "--stage", "-z"] BS.empty
     statusResult <- runGit root
         ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
@@ -439,8 +445,8 @@ snapshotAtRoot root = do
     diffResult <- runGit root
         ["diff", "--binary", "--no-ext-diff", "--no-color"]
         BS.empty
-    case (indexResult, statusResult, diffResult) of
-        (Right indexBytes, Right statusBytes, Right diffBytes) -> do
+    case (headResult, indexResult, statusResult, diffResult) of
+        (Right headOid, Right indexBytes, Right statusBytes, Right diffBytes) -> do
             worktreeMaterial <- appendUntrackedHashes root statusBytes diffBytes
             indexHash <- hashMaterial root indexBytes
             worktreeHash <- case worktreeMaterial of
@@ -461,9 +467,37 @@ snapshotAtRoot root = do
                     , snapshotWorktreeFingerprint = worktreeFingerprint
                     , snapshotFiles = files
                     }
-        (Left err, _, _) -> pure (Left err)
-        (_, Left err, _) -> pure (Left err)
-        (_, _, Left err) -> pure (Left err)
+        (Left err, _, _, _) -> pure (Left err)
+        (_, Left err, _, _) -> pure (Left err)
+        (_, _, Left err, _) -> pure (Left err)
+        (_, _, _, Left err) -> pure (Left err)
+
+repositoryHead
+    :: FilePath
+    -> IO (Either RepositoryError (Maybe Text))
+repositoryHead root =
+    runGit root ["rev-parse", "--verify", "HEAD"] BS.empty >>= \case
+        Right oid -> pure (Right (Just (decodeTrimmed oid)))
+        Left headError ->
+            -- A symbolic HEAD whose branch ref does not exist is the normal
+            -- unborn-repository case. Detached/corrupt HEAD and command
+            -- failures retain their original error instead of silently
+            -- becoming "unborn".
+            runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty >>= \case
+                Right reference ->
+                    runGit root
+                        [ "show-ref"
+                        , "--verify"
+                        , "--quiet"
+                        , Text.unpack (decodeTrimmed reference)
+                        ]
+                        BS.empty >>= \case
+                            Left (RepositoryCommandFailed _ 1 _) ->
+                                pure (Right Nothing)
+                            Left referenceError ->
+                                pure (Left referenceError)
+                            Right _ -> pure (Left headError)
+                Left _ -> pure (Left headError)
 
 requireSnapshot
     :: FilePath

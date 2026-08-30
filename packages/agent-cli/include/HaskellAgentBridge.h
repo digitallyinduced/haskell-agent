@@ -356,7 +356,8 @@ void ha_engine_destroy(void *engine);
  * the reviewed text hunks for that one file. Restore never deletes an
  * untracked file. The lock coordinates API callers; unrelated external git
  * writers cannot acquire it, so the fingerprint is revalidated immediately
- * before Git's single apply operation and Git still validates patch context.
+ * before Git's single apply or commit operation and Git still validates patch
+ * context. Restore by path or patch never deletes an untracked file.
  *
  * ha_repository_cancel_all cancels and joins accepted snapshot, diff, and
  * mutation operations before returning. Checks are owned and cancelled by
@@ -367,6 +368,10 @@ void ha_engine_destroy(void *engine);
  * barrier and may be retried after it returns.
  * A streaming callback failure stops that stream and is followed by one
  * failure terminal attempt; terminal callbacks are never retried.
+ *
+ * Repository callbacks must return promptly and must not call
+ * ha_repository_cancel_all reentrantly; doing so would wait for the callback's
+ * own worker. Call cancellation from another thread after the callback returns.
  */
 int32_t ha_repository_snapshot(
     const uint8_t *path,
@@ -448,8 +453,10 @@ void ha_repository_cancel_all(void);
  * Destroy waits for readers/process completion, frees the
  * handle, and must be called exactly once; no callbacks occur after it
  * returns. Cancel uses a short termination-escalation grace period; destroy
- * also assumes callbacks return promptly. Status values match the other
- * repository functions.
+ * also assumes callbacks return promptly. A check callback must not call
+ * ha_repository_check_destroy for its own handle; schedule destruction on a
+ * different thread after the callback returns. Calling check_cancel is safe.
+ * Status values match the other repository functions.
  */
 int32_t ha_repository_check_start(
     const uint8_t *path,

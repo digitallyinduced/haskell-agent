@@ -35,6 +35,17 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "repository review service" do
+    it "distinguishes an unborn HEAD from a broken HEAD" do
+        withTempDirectory "repository-review-unborn" \root -> do
+            _ <- git root ["init", "-q"]
+            unborn <- expectRight =<< repositorySnapshot root
+            unborn.snapshotHead `shouldBe` Nothing
+
+            writeFile (root <> "/.git/HEAD") "not-a-valid-head\n"
+            repositorySnapshot root `shouldReturnSatisfying` \case
+                Left _ -> True
+                Right _ -> False
+
     it "snapshots unusual paths and parses diff hunk coordinates" $
         withRepository \root -> do
             appendFile (root <> "/tracked.txt") "second\n"
@@ -133,6 +144,23 @@ spec = describe "repository review service" do
             committed.snapshotFiles `shouldBe` []
             Text.strip <$> git root ["log", "-1", "--pretty=%B"]
                 `shouldReturn` "review commit"
+
+    it "rejects commit when the reviewed index fingerprint changed" $
+        withRepository \root -> do
+            appendFile (root <> "/tracked.txt") "reviewed\n"
+            before <- expectRight =<< repositorySnapshot root
+            staged <- expectRight
+                =<< mutateRepository root before.snapshotId
+                    (StagePath "tracked.txt")
+            writeFile (root <> "/other.txt") "external\n"
+            _ <- git root ["add", "other.txt"]
+
+            commitRepository root staged.snapshotId "must not commit\n"
+                `shouldReturnSatisfying` \case
+                    Left (StaleRepositorySnapshot _ _) -> True
+                    _ -> False
+            git root ["log", "-1", "--pretty=%B"]
+                `shouldReturn` "initial\n\n"
 
     it "applies reviewed patches and refuses to delete untracked files" $
         withRepository \root -> do
