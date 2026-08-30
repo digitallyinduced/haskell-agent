@@ -5,6 +5,7 @@ import Agent.CLI.Clipboard
     , readClipboard
     , readClipboardImages
     , readClipboardImagesForPaste
+    , readClipboardImagesImageFirst
     )
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (bracket)
@@ -42,6 +43,12 @@ main = do
                 <> ", fake osascript delay=10ms")
         benchmark "old-repeat-probes" samples oldFailureProbe
         benchmark "new-single-pass" samples newFailureProbe
+        putStrLn
+            ("bitmap clipboard success path, samples=" <> show samples
+                <> ", fake file-list coercion delay=10ms")
+        setEnv "AGENT_CLIPBOARD_BENCH_IMAGE" "1"
+        benchmark "old-path-first" samples oldImagePaste
+        benchmark "new-image-first" samples newImagePaste
 
 parseSamples :: [String] -> Int
 parseSamples = \case
@@ -87,6 +94,20 @@ newFailureProbe =
         Right images -> pure (length images)
         Left err -> pure (Text.length err)
 
+oldImagePaste :: IO Int
+oldImagePaste =
+    imageResultChecksum <$> readClipboardImagesForPaste
+
+newImagePaste :: IO Int
+newImagePaste =
+    imageResultChecksum <$> readClipboardImagesImageFirst
+
+imageResultChecksum :: Either Text.Text [ImageAttachment] -> Int
+imageResultChecksum = \case
+    Left err -> Text.length err
+    Right images ->
+        sum [Text.length image.imageMime | image <- images]
+
 clipboardContentChecksum :: ClipboardContent -> Int
 clipboardContentChecksum = \case
     ClipboardImage image -> Text.length image.imageMime
@@ -105,7 +126,18 @@ withFakeClipboard action = do
             createDirectory binDir
             writeExecutable
                 (binDir </> "osascript")
-                "#!/bin/sh\n/bin/sleep 0.01\nexit 1\n"
+                "#!/bin/sh\n\
+                \case \"$2\" in\n\
+                \  *\"set theFiles\"*) /bin/sleep 0.01; exit 1 ;;\n\
+                \  *\"class PNGf\"*)\n\
+                \    if [ \"${AGENT_CLIPBOARD_BENCH_IMAGE:-}\" = 1 ]; then\n\
+                \      path=$(printf '%s\\n' \"$2\" | sed -n \
+                \'s/.*open for access POSIX file \"\\([^\"]*\\)\".*/\\1/p')\n\
+                \      printf 'benchmark-png' > \"$path\"\n\
+                \      exit 0\n\
+                \    fi ;;\n\
+                \esac\n\
+                \exit 1\n"
             writeExecutable
                 (binDir </> "pbpaste")
                 "#!/bin/sh\nprintf 'benchmark clipboard text'\n"
