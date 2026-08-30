@@ -208,7 +208,8 @@ spec = describe "provider-native agent tracking" do
         nativeAgentStoreBytes tracked
             `shouldSatisfy` (<= 8 * 1024 * 1024)
         retained `shouldSatisfy` Text.isSuffixOf suffix
-        retained `shouldContain` "[older native-agent output omitted]"
+        retained `shouldSatisfy`
+            Text.isInfixOf "[older native-agent output omitted]"
 
     it "materializes conversation state only for the selected native row" do
         let tracked =
