@@ -53,9 +53,10 @@ import Agent.Dialect
      dialectSlug, providerSupportsDialect)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
-    (Backend(..), BackendStateStore(..), LoopConfig(..), LoopError(..),
-     LoopEvent, LoopResult(..), TurnInput(..), defaultLoopDispatch, runLoop,
-     runLoopInputs)
+    (Backend(..), BackendSnapshot(..), BackendStateStore(..), LoopConfig(..),
+     LoopError(..), LoopEvent, LoopResult(..), TurnInput(..),
+     advanceBackendSnapshot, defaultLoopDispatch, emptyBackendSnapshot,
+     initialBackendSnapshot, runLoop, runLoopInputs)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import qualified Agent.OpenAI.Client as OpenAI
@@ -166,7 +167,9 @@ prepareCollaborationSpawn
     source <- readIORef sourceRef
     sourceItems <- maybe (pure []) id source
     writeIORef session.subSessionTranscript
-        (forkSubagentTranscript spawnOptions.collaborationForkTurns sourceItems)
+        (initialBackendSnapshot
+            (forkSubagentTranscript
+                spawnOptions.collaborationForkTurns sourceItems))
 
 -- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
 -- 'resume_agent' / 'resume_from' can continue the prior transcript.
@@ -305,7 +308,8 @@ restoreAgentFromDisk
                         Just (items, fields) -> do
                             recordPersistedAgentSpec typesRef agentId fields
                             unless hydrated $
-                                writeIORef session.subSessionTranscript items
+                                writeIORef session.subSessionTranscript
+                                    (initialBackendSnapshot items)
                     pure (True, Right ())
     reopenPersisted fields =
         case fields.diskTaskPath of
@@ -741,7 +745,8 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
             currentEffectiveModel
             currentDialect
             env.subId
-    nestedForkSource <- newIORef (Just (readIORef session.subSessionTranscript))
+    nestedForkSource <- newIORef
+        (Just ((.backendItems) <$> readIORef session.subSessionTranscript))
     let sessionDialect = dialectForId session.subSessionDialect
         childToolEnv = childEnv { toolCancel = env.subCancel }
         childCtx = MultiAgentContext
@@ -831,7 +836,16 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
             { loopBackend = backend
             , loopBackendState = BackendStateStore
                 { readBackendState = readIORef session.subSessionTranscript
-                , commitBackendState = writeIORef session.subSessionTranscript
+                , commitBackendState = \snapshot -> do
+                    atomicModifyIORef'
+                        session.subSessionTranscript
+                        \current ->
+                            let committed =
+                                    advanceBackendSnapshot
+                                        current
+                                        snapshot.backendItems
+                                        snapshot.backendContinuation
+                            in (committed, committed)
                 }
             , loopTools = toolRegistry
             , loopDispatch =
@@ -856,7 +870,10 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
                 env.subId
                 loopResult.finalResponseId
         Left _ ->
-            modifyIORef' session.subSessionTranscript trimDanglingToolSuffix
+            modifyIORef' session.subSessionTranscript \snapshot ->
+                advanceBackendSnapshot snapshot
+                    (trimDanglingToolSuffix snapshot.backendItems)
+                    Nothing
     status <- getStatus runtime.subagentRegistry env.subId
     persistSubagentSnapshotWithStatus
         runtime.subagentStoreRoot runtime.subagentRegistry
@@ -918,7 +935,7 @@ getOrInstallSubagentSession
     -> IO SubagentSession
 getOrInstallSubagentSession
         sessionsRef provider connection effectiveModel dialect agentId = do
-    transcript <- newIORef []
+    transcript <- newIORef emptyBackendSnapshot
     contextTokens <- newIORef Nothing
     pinned <- newIORef False
     hydrated <- newMVar False
@@ -981,7 +998,8 @@ ensureSubagentSessionHydratedLocked
                                             agentId
                                             storedTarget.targetDialect
                     Right _ -> do
-                        writeIORef session.subSessionTranscript items
+                        writeIORef session.subSessionTranscript
+                            (initialBackendSnapshot items)
                         writeIORef session.subSessionContextTokens Nothing
                         recordPersistedAgentSpec
                             typesRef

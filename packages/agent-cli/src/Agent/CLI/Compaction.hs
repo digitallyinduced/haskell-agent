@@ -41,11 +41,13 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , LoopEvent(..)
     , TokenUsage(..)
     , TurnInput(..)
     , TurnOutput(..)
     , emptyTokenUsage
+    , advanceBackendSnapshot
     )
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.Compaction
@@ -833,8 +835,8 @@ rejectOversizedInitialRequest
     -> Backend
     -> Backend
 rejectOversizedInitialRequest getParams (Backend submit) =
-    Backend \history previous inputs onEvent ->
-        if null history
+    Backend \snapshot previous inputs onEvent ->
+        if null snapshot.backendItems
             then do
                 params <- getParams
                 let requestTokens =
@@ -848,8 +850,8 @@ rejectOversizedInitialRequest getParams (Backend submit) =
                         pure $
                             Left $
                                 requestTooLargeError "initial"
-                    else submit history previous inputs onEvent
-            else submit history previous inputs onEvent
+                    else submit snapshot previous inputs onEvent
+            else submit snapshot previous inputs onEvent
 
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
@@ -901,9 +903,10 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         onCompacted
         contextTokensRef
         (Backend submit) =
-    Backend \history previous inputs onEvent -> do
+    Backend \snapshot previous inputs onEvent -> do
         contextState <- readIORef contextTokensRef
         tokenLimit <- getLimit
+        let history = snapshot.backendItems
         projectedTokens <- estimateProjected contextState history inputs
         let shouldCompact =
                 not (null history)
@@ -911,10 +914,9 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         if shouldCompact
             && (absorbCompletedTools || not (any isCompletedTool inputs))
             then compactThenSubmit
-                tokenLimit
-                contextState history inputs onEvent
+                tokenLimit contextState snapshot history inputs onEvent
             else submitAndTrack
-                contextState history previous inputs onEvent
+                contextState snapshot previous inputs onEvent
   where
     runCompaction history inputs =
         (.compactAttemptResult)
@@ -924,7 +926,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         CompletedTool{} -> True
         _ -> False
 
-    compactThenSubmit tokenLimit oldTokens oldHistory inputs onEvent = do
+    compactThenSubmit tokenLimit oldTokens oldSnapshot oldHistory inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
         -- Tool results complete protocol units that are already represented by
         -- calls in oldHistory. Put those results behind their calls before
@@ -951,6 +953,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                         installSubmitAndTrack
                             restore
                             rollback
+                            oldSnapshot
                             outcome
                             continuationInputs
                             onEvent
@@ -963,7 +966,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                     else (completed, input : pending))
             ([], [])
 
-    installSubmitAndTrack restore rollback outcome inputs onEvent = do
+    installSubmitAndTrack restore rollback oldSnapshot outcome inputs onEvent = do
         let compactedHistory = outcome.compactHistory
             pendingItems = turnInputsToItems inputs
             durableHistory = compactedHistory <> pendingItems
@@ -988,7 +991,10 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                     CompactionNotInstalled -> (compactedHistory, inputs, rollback)
         result <-
             restore
-                (submit continuationHistory Nothing continuationInputs onEvent)
+                (submit
+                    (advanceBackendSnapshot oldSnapshot
+                        continuationHistory Nothing)
+                    Nothing continuationInputs onEvent)
                 `onException` rollbackIfDeferred
         case result of
             Left _ -> rollbackIfDeferred
@@ -997,9 +1003,9 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                     occupancySnapshot backendResult <|> compactSnapshot
         pure result
 
-    submitAndTrack oldTokens history previous inputs onEvent = do
+    submitAndTrack oldTokens snapshot previous inputs onEvent = do
         result <-
-            submit history previous inputs onEvent
+            submit snapshot previous inputs onEvent
                 `onException` writeIORef contextTokensRef oldTokens
         case result of
             Left _ -> writeIORef contextTokensRef oldTokens

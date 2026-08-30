@@ -3,7 +3,10 @@
 -- hits a cap.
 module Agent.Loop
     ( Backend(..)
+    , BackendContinuation(..)
+    , BackendRevision(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , BackendStateStore(..)
     , FileAttachment(..)
     , ImageAttachment(..)
@@ -19,13 +22,18 @@ module Agent.Loop
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
+    , advanceBackendSnapshot
+    , backendContinuationToken
+    , clearBackendContinuation
     , defaultLoopMaxTurns
     , defaultLoopMaxEmptyContinuations
     , defaultLoopDispatch
     , emptyTokenUsage
+    , emptyBackendSnapshot
     , emptyTurnOutput
     , estimateTokensFromChars
     , generationTokensPerSecond
+    , initialBackendSnapshot
     , liveTokenRateMinMillis
     , liveTokensPerSecond
     , runLoop

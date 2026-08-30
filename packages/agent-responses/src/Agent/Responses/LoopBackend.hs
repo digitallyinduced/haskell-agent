@@ -32,6 +32,7 @@ import Agent.JsonText (jsonTextFieldPartial)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
@@ -40,6 +41,7 @@ import Agent.Loop
     , TurnInput(..)
     , TurnOutput(..)
     , emptyTokenUsage
+    , advanceBackendSnapshot
     )
 import Agent.Provider
     ( Credential
@@ -89,11 +91,11 @@ statelessResponsesBackendWithRawReasoning
     -> IO ResponseCreateParams
     -> Backend
 statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
-    Backend \history _previousResponseId inputs onEvent -> do
+    Backend \snapshot _legacyPreviousResponseId inputs onEvent -> do
         baseParams <- getParams
         projectEvent <- newStreamEventToLoopEvents showRawReasoning
         let newItems = turnInputsToItems inputs
-            requestItems = history <> newItems
+            requestItems = snapshot.backendItems <> newItems
             request = withRequestInput baseParams requestItems
         result <- send request \event ->
             projectEvent event >>= mapM_ onEvent
@@ -102,7 +104,10 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
             Right response ->
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
-                    , backendState = requestItems <> response.output
+                    , backendState =
+                        advanceBackendSnapshot snapshot
+                            (requestItems <> response.output)
+                            Nothing
                     }
 
 -- | Adapt a credentialed stateless Responses transport to the loop.

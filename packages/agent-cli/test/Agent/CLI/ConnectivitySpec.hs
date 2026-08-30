@@ -17,6 +17,7 @@ import Agent.Loop
     , BackendResult(..)
     , LoopEvent(..)
     , TurnInput(..)
+    , emptyBackendSnapshot
     , emptyTurnOutput
     )
 import Data.IORef
@@ -44,14 +45,14 @@ spec = describe "withConnectionRecovery" do
                                 , backendState = state
                                 })
             inputs = [UserMessage "continue"]
-        result <- backend.submitTurn [] (Just "previous") inputs
+        result <- backend.submitTurn emptyBackendSnapshot (Just "previous") inputs
             (\event -> modifyIORef' events (<> [event]))
 
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "done")
-                , backendState = []
+                , backendState = emptyBackendSnapshot
                 }
         readIORef waits `shouldReturn` [1_000_000, 2_000_000]
         readIORef seen `shouldReturn`
@@ -75,7 +76,7 @@ spec = describe "withConnectionRecovery" do
             backend = withConnectionRecoveryUsing
                 (\delay -> modifyIORef' waits (<> [delay]))
                 (Backend \_ _ _ _ -> pure (Left expected))
-        result <- backend.submitTurn [] Nothing [] (const (pure ()))
+        result <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         result `shouldBe` Left expected
         readIORef waits `shouldReturn` []
 
@@ -95,12 +96,12 @@ spec = describe "withConnectionRecovery" do
                                         "response" [] (Just "done")
                                 , backendState = state
                                 })
-        result <- backend.submitTurn [] Nothing [] (const (pure ()))
+        result <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "done")
-                , backendState = []
+                , backendState = emptyBackendSnapshot
                 }
         readIORef attempts `shouldReturn` 2
 
@@ -128,13 +129,13 @@ spec = describe "withConnectionRecovery" do
                                             (Just "complete")
                                     , backendState = state
                                     }))
-        result <- backend.submitTurn [] Nothing []
+        result <- backend.submitTurn emptyBackendSnapshot Nothing []
             (\event -> modifyIORef' events (<> [event]))
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "complete")
-                , backendState = []
+                , backendState = emptyBackendSnapshot
                 }
         readIORef attempts `shouldReturn` 2
         readIORef waits `shouldReturn` [1_000_000]
@@ -167,7 +168,7 @@ spec = describe "withConnectionRecovery" do
                                     emptyTurnOutput "response" [] (Just "done")
                                 , backendState = state
                                 }))
-        _ <- backend.submitTurn [] Nothing []
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing []
             (\event -> modifyIORef' events (<> [event]))
         readIORef attempts `shouldReturn` 2
         recorded <- readIORef events
@@ -199,13 +200,13 @@ spec = describe "withConnectionRecovery" do
                                         , backendState = state
                                         })
             expected = [UserMessage "queued", UserMessage "current"]
-        result <- backend.submitTurn [] Nothing [UserMessage "current"]
+        result <- backend.submitTurn emptyBackendSnapshot Nothing [UserMessage "current"]
             (const (pure ()))
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "done")
-                , backendState = []
+                , backendState = emptyBackendSnapshot
                 }
         readIORef seen `shouldReturn` [expected, expected]
 
@@ -235,13 +236,13 @@ spec = describe "withConnectionRecovery" do
                                             "response" [] (Just "done")
                                     , backendState = state
                                     })
-        result <- backend.submitTurn [] Nothing []
+        result <- backend.submitTurn emptyBackendSnapshot Nothing []
             (\event -> modifyIORef' events (<> [event]))
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "done")
-                , backendState = []
+                , backendState = emptyBackendSnapshot
                 }
         readIORef attempts `shouldReturn` 2
         readIORef waits `shouldReturn` [3_000_000]
@@ -265,7 +266,7 @@ spec = describe "withConnectionRecovery" do
                 (Backend \_ _ _ _ -> do
                     modifyIORef' attempts (+ 1)
                     pure (Left expected))
-        result <- backend.submitTurn [] Nothing [] (const (pure ()))
+        result <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         result `shouldBe` Left expected
         readIORef attempts `shouldReturn` 3
         readIORef waits `shouldReturn` [3_000_000, 6_000_000]

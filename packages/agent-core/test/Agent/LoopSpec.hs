@@ -210,7 +210,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 TurnStarted -> do
@@ -245,7 +245,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent = \case
                 TurnStarted -> do
@@ -286,7 +286,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent event = do
                 modifyIORef' events (event :)
@@ -331,7 +331,7 @@ spec = describe "runLoop" do
                 pure $ Right BackendResult
                     { backendOutput =
                         emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = []
+                    , backendState = emptyBackendSnapshot
                     }
             onEvent event = do
                 modifyIORef' events (event :)
@@ -1006,7 +1006,7 @@ spec = describe "runLoop" do
                     { backendOutput = emptyTurnOutput "resp-1"
                         [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                         Nothing
-                    , backendState = state <> [stateMarker]
+                    , backendState = appendStateMarker state
                     }
                 else do
                     putMVar started ()
@@ -1042,8 +1042,8 @@ spec = describe "runLoop" do
     it "retains committed state when the event pump fails during commit" do
         commitStarted <- newEmptyMVar
         sinkCanFail <- newEmptyMVar
-        state <- newIORef []
-        let committedState = [stateMarker]
+        state <- newIORef emptyBackendSnapshot
+        let committedState = appendStateMarker emptyBackendSnapshot
             backend = Backend \_state _prev _inputs _onEvent ->
                 pure $ Right BackendResult
                     { backendOutput =
@@ -1062,6 +1062,7 @@ spec = describe "runLoop" do
                             -- before the masked commit returns.
                             threadDelay 30000
                             writeIORef state newState
+                            pure newState
                     }
                 , loopOnEvent = \case
                     TurnStarted -> do
@@ -1072,7 +1073,7 @@ spec = describe "runLoop" do
                 }
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
         readIORef state `shouldReturn` committedState
-        execution.executionState `shouldBe` committedState
+        execution.executionState `shouldBe` committedState.backendItems
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionResult
             `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
@@ -1327,7 +1328,7 @@ spec = describe "runLoop" do
             pure $ Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "resp-slow" [] (Just "too late")
-                , backendState = state <> [stateMarker]
+                , backendState = appendStateMarker state
                 }
         let cancel = case config0 of
                 LoopConfig{loopCancel = c} -> c
@@ -1366,7 +1367,7 @@ spec = describe "runLoop" do
                         { backendOutput = emptyTurnOutput "resp-1"
                             [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                             (Just "committed text")
-                        , backendState = state <> [stateMarker]
+                        , backendState = appendStateMarker state
                         }
                 else do
                     onEvent (TextDelta "dropped attempt")
@@ -1661,12 +1662,14 @@ spec = describe "runLoop" do
 testConfig :: Backend -> IO LoopConfig
 testConfig backend = do
     cancel <- newCancelFlag
-    state <- newIORef []
+    state <- newIORef emptyBackendSnapshot
     pure LoopConfig
         { loopBackend = backend
         , loopBackendState = BackendStateStore
             { readBackendState = readIORef state
-            , commitBackendState = writeIORef state
+            , commitBackendState = \snapshot -> do
+                writeIORef state snapshot
+                pure snapshot
             }
         , loopTools = registryFromHandlers
             [ typedTool "echo" echoArgsDecoder $ \EchoArgs { message } ->
@@ -1748,7 +1751,7 @@ scriptedBackend submissions answers = do
                 , fmap
                     (\output -> BackendResult
                         { backendOutput = output
-                        , backendState = state <> [stateMarker]
+                        , backendState = appendStateMarker state
                         })
                     next
                 )
@@ -1763,10 +1766,16 @@ endlessToolsBackend = do
             { backendOutput = emptyTurnOutput responseId
                 [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
                 Nothing
-            , backendState = state <> [stateMarker]
+            , backendState = appendStateMarker state
             }
 
 stateMarker :: ResponseItem
 stateMarker = UnknownResponseItem TaggedObject
     { tag = "test_state"
     }
+
+appendStateMarker :: BackendSnapshot -> BackendSnapshot
+appendStateMarker snapshot =
+    advanceBackendSnapshot snapshot
+        (snapshot.backendItems <> [stateMarker])
+        snapshot.backendContinuation

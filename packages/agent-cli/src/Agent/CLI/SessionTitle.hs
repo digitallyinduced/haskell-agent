@@ -21,6 +21,7 @@ import Agent.Loop
     , BackendResult(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , emptyBackendSnapshot
     )
 import Agent.Responses.Types
     ( ResponseCreateParams(..)
@@ -227,7 +228,7 @@ generateTitle manager job = do
     let Backend submit =
             manager.titleBackendFactory params
     timeout 45000000
-        (submit [] Nothing
+        (submit emptyBackendSnapshot Nothing
             [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
         >>= \case
             Nothing -> pure (Left "timed out after 45 seconds")

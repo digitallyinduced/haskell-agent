@@ -127,7 +127,10 @@ import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task ()
 import Agent.GrokBuild.Dialect.Workflow ()
-import Agent.Loop ( Backend(submitTurn, Backend) )
+import Agent.Loop
+    ( Backend(submitTurn, Backend)
+    , BackendSnapshot(..)
+    )
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient
@@ -662,7 +665,8 @@ runAgentProviders
                                     "Claude Code manages its own context; /compact is unavailable."
                             btwBackend privateParams =
                                 Backend \state previous inputs onEvent -> do
-                                    privateTranscript <- newIORef state
+                                    privateTranscript <-
+                                        newIORef state.backendItems
                                     let privateBackend =
                                             claudeCodeOneShotBackend
                                                 claudeOptions

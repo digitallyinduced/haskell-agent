@@ -132,7 +132,7 @@ spec = do
             final.conversationUsage `shouldBe` priorUsage
             final.conversationLastAssistant `shouldBe` Just "old answer"
 
-        it "commits successful metadata while preserving backend history" do
+        it "commits successful metadata without rewriting backend state" do
             let usage = TokenUsage
                     { inputTokens = 7
                     , outputTokens = 3
@@ -145,7 +145,7 @@ spec = do
                             usage
                             (Just "new answer")))
                     runningState
-            final.conversationPreviousResponseId `shouldBe` Just "resp-new"
+            final.conversationPreviousResponseId `shouldBe` Just "resp-newer"
             final.conversationTranscript `shouldBe` mutatedTranscript
             final.conversationStartupContext `shouldBe` Just "newer skills"
             final.conversationUsage `shouldBe` TokenUsage

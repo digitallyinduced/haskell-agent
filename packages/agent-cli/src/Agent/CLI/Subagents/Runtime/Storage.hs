@@ -12,6 +12,7 @@ import Agent.CLI.SubagentStore
     , SubagentTarget(..)
     , saveSubagentState
     )
+import Agent.Loop (BackendSnapshot(..), emptyBackendSnapshot)
 import Agent.CLI.Subagents.Runtime.Types
     ( SubagentSession(..)
     , SubagentStoreRoot
@@ -95,7 +96,8 @@ persistAndEvictSubagentSessionWithStatus
                                 if pinned
                                     then pure (True, Right False)
                                     else do
-                                        writeIORef session.subSessionTranscript []
+                                        writeIORef session.subSessionTranscript
+                                            emptyBackendSnapshot
                                         writeIORef session.subSessionContextTokens Nothing
                                         pure (False, Right True)
   where
@@ -118,7 +120,9 @@ saveSubagentSnapshotWithStatus
     -> IO (Either Text ())
 saveSubagentSnapshotWithStatus
         sessionDir registry typesRef agentId status session = do
-    items <- trimDanglingToolSuffix <$> readIORef session.subSessionTranscript
+    items <-
+        trimDanglingToolSuffix . (.backendItems)
+            <$> readIORef session.subSessionTranscript
     previous <- getPreviousResponseId registry agentId
     agentType <- lookupAgentType typesRef agentId
     agentModel <- lookupAgentModel typesRef agentId

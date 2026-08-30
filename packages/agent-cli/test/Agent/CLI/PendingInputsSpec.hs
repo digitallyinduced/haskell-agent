@@ -11,6 +11,7 @@ import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
     , TurnInput(..)
+    , emptyBackendSnapshot
     , emptyTurnOutput
     )
 import Control.Concurrent
@@ -38,7 +39,7 @@ spec = describe "withPendingInputs" do
                             emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn [] Nothing
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing
             [UserMessage "parent"] (const (pure ()))
         readIORef seen `shouldReturn`
             [UserMessage "child result", UserMessage "parent"]
@@ -49,7 +50,7 @@ spec = describe "withPendingInputs" do
         mapM_ (enqueuePendingInput pending) queued
         let backend = withPendingInputs pending $ Backend
                 \_ _ _ _ -> pure (Left (ConnectionError "offline"))
-        _ <- backend.submitTurn [] Nothing
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing
             [UserMessage "parent"] (const (pure ()))
         seen <- newIORef []
         let retry = withPendingInputs pending $ Backend
@@ -59,7 +60,7 @@ spec = describe "withPendingInputs" do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` queued
 
     it "requeues inputs when submission is interrupted by an exception" do
@@ -69,7 +70,7 @@ spec = describe "withPendingInputs" do
         let backend = withPendingInputs pending $ Backend
                 \_ _ _ _ -> ioError (userError "interrupted")
         result <- tryAny $
-            backend.submitTurn [] Nothing
+            backend.submitTurn emptyBackendSnapshot Nothing
                 [UserMessage "parent"] (const (pure ()))
         result `shouldSatisfy` isLeft
         seen <- newIORef []
@@ -80,7 +81,7 @@ spec = describe "withPendingInputs" do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` queued
 
     it "prepends drained inputs ahead of concurrent enqueues when requeuing" do
@@ -94,7 +95,7 @@ spec = describe "withPendingInputs" do
                     takeMVar release
                     pure (Left (ConnectionError "offline"))
         done <- newEmptyMVar
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done
         takeMVar entered
         enqueuePendingInput pending (UserMessage "new")
         putMVar release ()
@@ -107,7 +108,7 @@ spec = describe "withPendingInputs" do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn`
             [UserMessage "old", UserMessage "new"]
 
@@ -123,7 +124,7 @@ spec = describe "withPendingInputs" do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` []
 
     it "does not resurrect a batch cleared during an in-flight failure" do
@@ -137,7 +138,7 @@ spec = describe "withPendingInputs" do
                     takeMVar release
                     pure (Left (ConnectionError "offline"))
         done <- newEmptyMVar
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done
         takeMVar entered
         clearPendingInputs pending
         putMVar release ()
@@ -150,7 +151,7 @@ spec = describe "withPendingInputs" do
                         { backendOutput = emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- retry.submitTurn [] Nothing [] (const (pure ()))
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
         readIORef seen `shouldReturn` []
 
     it "serializes concurrent submission batches" do
@@ -167,10 +168,10 @@ spec = describe "withPendingInputs" do
                     pure $ Left (ConnectionError "offline")
         done1 <- newEmptyMVar
         done2 <- newEmptyMVar
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done1
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done1
         takeMVar entered
         enqueuePendingInput pending (UserMessage "second")
-        _ <- forkIO $ backend.submitTurn [] Nothing [] (const (pure ())) >>= putMVar done2
+        _ <- forkIO $ backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >>= putMVar done2
         putMVar release ()
         _ <- takeMVar done1
         -- The second submission cannot overtake the first batch.

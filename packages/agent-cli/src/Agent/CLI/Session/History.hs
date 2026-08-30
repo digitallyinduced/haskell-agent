@@ -7,10 +7,12 @@ module Agent.CLI.Session.History
     , TranscriptCheckpoint(..)
     , TranscriptGeneration
     , currentLiveTranscriptGeneration
+    , commitLiveBackendState
     , durableTranscriptCheckpoint
     , evictLiveTranscript
     , replaceLiveConversation
     , withLiveTranscript
+    , withLiveBackendState
     , readLiveAttachments
     , readLivePreviousResponseId
     , readLiveTranscript
@@ -33,7 +35,7 @@ import Agent.CLI.Session.ConversationStore
     , TranscriptGeneration
     )
 import qualified Agent.CLI.Session.ConversationStore as ConversationStore
-import Agent.Loop (ImageAttachment)
+import Agent.Loop (BackendSnapshot, ImageAttachment)
 import Agent.OpenAI.Compaction
     ( isCompactSessionTurn
     , isTranscriptResetTurn
@@ -94,6 +96,22 @@ withLiveTranscript
 withLiveTranscript ref action =
     readIORef ref >>= \store ->
         ConversationStore.withConversationTranscript store action
+
+withLiveBackendState
+    :: IORef LiveConversation
+    -> (BackendSnapshot -> IO a)
+    -> IO a
+withLiveBackendState ref action =
+    readIORef ref >>= \store ->
+        ConversationStore.withConversationBackendState store action
+
+commitLiveBackendState
+    :: IORef LiveConversation
+    -> BackendSnapshot
+    -> IO BackendSnapshot
+commitLiveBackendState ref snapshot =
+    readIORef ref >>= \store ->
+        ConversationStore.commitConversationBackendState store snapshot
 
 readLiveAttachments :: IORef LiveConversation -> IO [ImageAttachment]
 readLiveAttachments ref =

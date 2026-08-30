@@ -676,7 +676,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -733,7 +733,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old") pending
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old") pending
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -751,7 +751,7 @@ spec = do
             let sender _request =
                     pure (Right remoteCompactionResponse)
                 base = Backend \state _ _ _ -> do
-                    writeIORef seenHistory state
+                    writeIORef seenHistory state.backendItems
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
@@ -768,7 +768,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             compacted <- readIORef seenHistory
@@ -792,7 +792,7 @@ spec = do
                     writeIORef continuationTokens $
                         estimateRequestTokensWithItems
                             params
-                            (state <> [pendingItem])
+                            (state.backendItems <> [pendingItem])
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
@@ -809,7 +809,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage pendingText] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             tokens <- readIORef continuationTokens
@@ -843,7 +843,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` \case
                 Left (ProviderError InvalidRequestError message _) ->
@@ -882,7 +882,7 @@ spec = do
                         contextState
                         base
             result <- try $
-                backend.submitTurn history Nothing
+                backend.submitTurn (initialBackendSnapshot history) Nothing
                     [UserMessage "new"] (const (pure ()))
                 :: IO
                     (Either ErrorCall (Either ApiError BackendResult))
@@ -923,7 +923,7 @@ spec = do
                             pure CompactionInstalled)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef hookCalls `shouldReturn` 1
@@ -1104,7 +1104,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            backend.submitTurn history Nothing
+            backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
                 `shouldReturn`
                     Left (ConnectionError
@@ -1150,12 +1150,13 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage pendingText] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef seenHistory >>= \case
-                [compacted] -> hasCompactionCheckpoint compacted
+                [compacted] ->
+                    hasCompactionCheckpoint compacted.backendItems
                     `shouldBe` True
                 seen ->
                     expectationFailure
@@ -1197,7 +1198,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn [] Nothing
+            result <- backend.submitTurn emptyBackendSnapshot Nothing
                 [UserMessage prompt] (const (pure ()))
             result `shouldSatisfy` \case
                 Left (ProviderError InvalidRequestError message _) ->
@@ -1256,7 +1257,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn [] Nothing inputs (const (pure ()))
+            result <- backend.submitTurn emptyBackendSnapshot Nothing inputs (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
             readIORef submitCalls `shouldReturn` 1
@@ -1291,11 +1292,12 @@ spec = do
                 backend =
                     autoCompactOpenAiBackendWith
                         compactAction contextState base
-            result <- backend.submitTurn oldHistory (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-old")
                 [UserMessage "new"]
                 (\event -> modifyIORef' events (<> [event]))
             result `shouldSatisfy` either (const False) (const True)
-            fmap (.backendState) result `shouldBe` Right compactedHistory
+            fmap (.backendState.backendItems) result
+                `shouldBe` Right compactedHistory
             readIORef compactCalls `shouldReturn` 1
             readIORef seenPrevious `shouldReturn` [Nothing]
             readIORef contextState `shouldReturn`
@@ -1329,7 +1331,7 @@ spec = do
                             pure CompactionInstalled)
                         contextState
                         base
-            backend.submitTurn history Nothing
+            backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
                 `shouldReturn` Left (ConnectionError "continuation failed")
             map requestItems <$> readIORef requests
@@ -1360,7 +1362,7 @@ spec = do
                         contextState
                         base
                 submit =
-                    backend.submitTurn history Nothing
+                    backend.submitTurn (initialBackendSnapshot history) Nothing
                         [UserMessage "new"]
                         (const (pure ()))
             result <- try submit
@@ -1412,7 +1414,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         contextState
                         reconnectingContinuation
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -1478,7 +1480,7 @@ spec = do
                         base
                 inputs = [CompletedTool toolResult, UserMessage "steer"]
                 completedInputs = [CompletedTool toolResult]
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -1492,7 +1494,7 @@ spec = do
             readIORef seenInputs `shouldReturn` [[]]
             compacted <- readIORef installedHistory
             compacted `shouldSatisfy` hasCompactionCheckpoint
-            fmap (.backendState) result `shouldBe` Right compacted
+            fmap (.backendState.backendItems) result `shouldBe` Right compacted
             readIORef contextState `shouldReturn`
                 Just (reportedOccupancy 25 (length compacted))
             readIORef recordedUsage `shouldReturn` [compactionUsage]
@@ -1550,7 +1552,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
@@ -1597,7 +1599,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef contextState `shouldReturn`
@@ -1640,7 +1642,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old") pending
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old") pending
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
@@ -1682,7 +1684,7 @@ spec = do
             seenInputs <- newIORef []
             let base = Backend \_state _previous submitted _ -> do
                     modifyIORef' seenInputs (<> [submitted])
-                    pure $ successful oldHistory TurnOutput
+                    pure $ successful (initialBackendSnapshot oldHistory) TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
@@ -1698,7 +1700,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef seenInputs `shouldReturn` [inputs]
@@ -1739,7 +1741,7 @@ spec = do
                     pure (Right remoteCompactionResponse)
                 base = Backend \_state _previous submitted _ -> do
                     modifyIORef' seenInputs (<> [submitted])
-                    pure $ successful oldHistory TurnOutput
+                    pure $ successful (initialBackendSnapshot oldHistory) TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
@@ -1755,7 +1757,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef seenInputs `shouldReturn` [[]]
@@ -1797,7 +1799,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         contextState
                         base
-            result <- backend.submitTurn history (Just "resp-old")
+            result <- backend.submitTurn (initialBackendSnapshot history) (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef contextState `shouldReturn` Nothing
@@ -1857,7 +1859,7 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -1917,13 +1919,14 @@ spec = do
                         (pure params)
                         contextState
                         base
-            result <- backend.submitTurn oldHistory Nothing inputs
+            result <- backend.submitTurn (initialBackendSnapshot oldHistory) Nothing inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef seenHistory >>= \case
                 [fitted] ->
-                    fitted `shouldSatisfy` hasCompactionCheckpoint
+                    fitted.backendItems
+                        `shouldSatisfy` hasCompactionCheckpoint
                 seen ->
                     expectationFailure
                         ("expected one compacted continuation, got "
@@ -1943,7 +1946,7 @@ spec = do
                 backend =
                     autoCompactOpenAiBackendWithApi
                         compactAction contextState base
-            backend.submitTurn history Nothing
+            backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
                 `shouldReturn`
                     Left (ProviderError UsageLimitReached
@@ -1978,7 +1981,7 @@ spec = do
                 backend =
                     autoCompactOpenAiBackendWith
                         compactAction contextState base
-            result <- backend.submitTurn history Nothing
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` \case
                 Left (ProviderError InvalidRequestError message _) ->
@@ -2016,13 +2019,13 @@ spec = do
                 backend =
                     autoCompactOpenAiBackendWith
                         compactAction contextState base
-            result <- backend.submitTurn history Nothing [UserMessage "new"]
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing [UserMessage "new"]
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
 
 successful
-    :: [ResponseItem]
+    :: BackendSnapshot
     -> TurnOutput
     -> Either ApiError BackendResult
 successful state output =

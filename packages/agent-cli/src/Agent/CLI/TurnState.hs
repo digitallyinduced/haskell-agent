@@ -304,10 +304,9 @@ finishConversation prepared = \case
     ConversationInterrupted -> restoreStartup
     ConversationProviderUnavailable ->
         restoreStartup
-    ConversationCompleted responseId usage assistant ->
+    ConversationCompleted _responseId usage assistant ->
         basePatch
-            { patchPreviousResponseId = SetField (Just responseId)
-            , patchUsageDelta = usage
+            { patchUsageDelta = usage
             , patchLastAssistant = SetField assistant
             }
   where

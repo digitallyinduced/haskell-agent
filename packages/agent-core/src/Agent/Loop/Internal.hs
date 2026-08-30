@@ -74,6 +74,7 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word64)
 
 maxEmptyContinuations :: Int
 maxEmptyContinuations = 2
@@ -246,12 +247,75 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
 
 data BackendResult = BackendResult
     { backendOutput :: !TurnOutput
-    , backendState :: ![ResponseItem]
+    -- | The provider candidate checkpoint. The state store assigns the
+    -- authoritative revision when this response is committed.
+    , backendState :: !BackendSnapshot
     } deriving (Eq, Show)
+
+newtype BackendRevision = BackendRevision Word64
+    deriving (Eq, Ord, Show)
+
+-- | An opaque provider continuation. Namespacing prevents a session token
+-- minted by one backend from accidentally being sent to another backend.
+data BackendContinuation = BackendContinuation
+    { continuationProvider :: !Text
+    , continuationToken :: !Text
+    } deriving (Eq, Show)
+
+-- | An immutable, atomically publishable backend checkpoint.
+data BackendSnapshot = BackendSnapshot
+    { backendItems :: ![ResponseItem]
+    , backendRevision :: !BackendRevision
+    , backendContinuation :: !(Maybe BackendContinuation)
+    } deriving (Eq, Show)
+
+emptyBackendSnapshot :: BackendSnapshot
+emptyBackendSnapshot = initialBackendSnapshot []
+
+initialBackendSnapshot :: [ResponseItem] -> BackendSnapshot
+initialBackendSnapshot items = BackendSnapshot
+    { backendItems = items
+    , backendRevision = BackendRevision 0
+    , backendContinuation = Nothing
+    }
+
+-- | Build a provider result from the checkpoint it consumed. State stores
+-- still normalize the revision at commit time, so concurrent writers cannot
+-- publish duplicate or stale revisions.
+advanceBackendSnapshot
+    :: BackendSnapshot
+    -> [ResponseItem]
+    -> Maybe BackendContinuation
+    -> BackendSnapshot
+advanceBackendSnapshot snapshot items continuation = BackendSnapshot
+    { backendItems = items
+    , backendRevision = nextBackendRevision snapshot.backendRevision
+    , backendContinuation = continuation
+    }
+
+clearBackendContinuation :: BackendSnapshot -> BackendSnapshot
+clearBackendContinuation snapshot =
+    snapshot { backendContinuation = Nothing }
+
+backendContinuationToken :: Text -> BackendSnapshot -> Maybe Text
+backendContinuationToken provider snapshot =
+    case snapshot.backendContinuation of
+        Just BackendContinuation
+            { continuationProvider
+            , continuationToken
+            }
+            | continuationProvider == provider -> Just continuationToken
+        _ -> Nothing
+
+nextBackendRevision :: BackendRevision -> BackendRevision
+nextBackendRevision (BackendRevision revision) =
+    BackendRevision (revision + 1)
 
 newtype Backend = Backend
     { submitTurn
-        :: [ResponseItem]
+        :: BackendSnapshot
+        -- | Legacy unnamespaced continuation for persisted sessions. New
+        -- backends should prefer the namespaced token in 'BackendSnapshot'.
         -> Maybe Text
         -> [TurnInput]
         -> (LoopEvent -> IO ())
@@ -259,11 +323,14 @@ newtype Backend = Backend
     }
 
 data BackendStateStore = BackendStateStore
-    { readBackendState :: !(IO [ResponseItem])
+    { readBackendState :: !(IO BackendSnapshot)
       -- | Publish a completed provider response for live observers and later
       -- tool continuations. Higher-level turn policy may still deliberately
       -- roll this state back after cancellation or terminal failure.
-    , commitBackendState :: !([ResponseItem] -> IO ())
+      --
+      -- The returned snapshot is the authoritative committed value, including
+      -- the store-assigned monotonic revision.
+    , commitBackendState :: !(BackendSnapshot -> IO BackendSnapshot)
     }
 
 data LoopEvent
@@ -365,7 +432,7 @@ emptyContinuationWarning =
     "The model produced no assistant text or tool calls after reasoning; stopping."
 
 data LoopCursor = LoopCursor
-    { cursorState :: ![ResponseItem]
+    { cursorState :: !BackendSnapshot
     , cursorProgress :: !LoopProgress
     , cursorPreviousResponseId :: !(Maybe Text)
     , cursorTurnsUsed :: !Int
@@ -461,7 +528,7 @@ exceptionSummary =
 
 runLoopInputsUnsafe
     :: LoopConfig
-    -> [ResponseItem]
+    -> BackendSnapshot
     -> Maybe Text
     -> [TurnInput]
     -> IO LoopExecution
@@ -491,7 +558,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     emitLoopEvent eventPump event
                 }
             finish
-                :: [ResponseItem]
+                :: BackendSnapshot
                 -> LoopProgress
                 -> Either LoopError LoopResult
                 -> IO LoopExecution
@@ -506,7 +573,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                             map (Text.concat . reverse)
                                 (reverse finishedChunks <> [currentChunks])
                 pure LoopExecution
-                    { executionState = state
+                    { executionState = state.backendItems
                     , executionPendingInputs = pending
                     , executionProgress = progress
                     , executionUncommittedAssistantText =
@@ -523,7 +590,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             finishCursor cursor =
                 finish cursor.cursorState cursor.cursorProgress
             unexpected
-                :: [ResponseItem]
+                :: BackendSnapshot
                 -> LoopProgress
                 -> SomeException
                 -> IO LoopExecution
@@ -572,16 +639,22 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                             cursor.cursorInputs
                                             onBackendEvent)
                                     case result of
-                                        Right (Right BackendResult{..})
+                                        Right (Right backendResult@BackendResult{..})
                                             | not
                                                 (Text.null
                                                     backendOutput.responseId) -> do
-                                                config.loopBackendState.commitBackendState
-                                                    backendState
+                                                committed <-
+                                                    config.loopBackendState.commitBackendState
+                                                        backendState
                                                 writeIORef progressRef
-                                                    (backendState, ResponseCommitted)
-                                        _ -> pure ()
-                                    pure result
+                                                    (committed, ResponseCommitted)
+                                                pure
+                                                    (Right
+                                                        (Right backendResult
+                                                            { backendState =
+                                                                committed
+                                                            }))
+                                        _ -> pure result
                                 case raced of
                                     Left () ->
                                         finishCursor cursor
@@ -689,11 +762,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
             Right completed -> pure completed
         flushLoopEvents eventPump >>= \case
             Left failure ->
-                handleLoopEventFailure
-                    unexpected
-                    execution.executionState
-                    execution.executionProgress
-                    failure
+                readIORef progressRef >>= \(state, progress) ->
+                    handleLoopEventFailure unexpected state progress failure
             Right () -> pure execution
 
 data LoopEventCommand
@@ -908,8 +978,8 @@ throwLoopEventFailure = \case
     LoopEventAsyncFailure exception -> Exception.throwIO exception
 
 handleLoopEventFailure
-    :: ([ResponseItem] -> LoopProgress -> SomeException -> IO LoopExecution)
-    -> [ResponseItem]
+    :: (BackendSnapshot -> LoopProgress -> SomeException -> IO LoopExecution)
+    -> BackendSnapshot
     -> LoopProgress
     -> LoopEventFailure
     -> IO LoopExecution

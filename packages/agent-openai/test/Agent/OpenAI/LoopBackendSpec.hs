@@ -1440,22 +1440,25 @@ submitWithState
     -> IO (Either ApiError TurnOutput)
 submitWithState stateRef backend previous inputs onEvent = do
     state <- readIORef stateRef
-    result <- backend.submitTurn state previous inputs onEvent
+    result <- backend.submitTurn
+        (initialBackendSnapshot state) previous inputs onEvent
     case result of
         Left err -> pure (Left err)
         Right BackendResult{..} -> do
-            writeIORef stateRef backendState
+            writeIORef stateRef backendState.backendItems
             pure (Right backendOutput)
 
 loopConfig :: Backend -> IO LoopConfig
 loopConfig backend = do
-    state <- newIORef []
+    state <- newIORef emptyBackendSnapshot
     cancel <- newCancelFlag
     pure LoopConfig
         { loopBackend = backend
         , loopBackendState = BackendStateStore
             { readBackendState = readIORef state
-            , commitBackendState = writeIORef state
+            , commitBackendState = \snapshot -> do
+                writeIORef state snapshot
+                pure snapshot
             }
         , loopTools = emptyRegistry
         , loopDispatch = defaultLoopDispatch

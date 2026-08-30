@@ -11,6 +11,7 @@ import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
     , TurnInput(..)
+    , emptyBackendSnapshot
     , emptyTurnOutput
     )
 import Agent.Error (ApiError(..))
@@ -145,10 +146,10 @@ runLegacy pending failFirst = do
                         { backendOutput = emptyTurnOutput "benchmark" [] Nothing
                         , backendState = state
                         }
-    first <- backend.submitTurn [] Nothing [] (const (pure ()))
+    first <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
     case first of
         Left _ | failFirst -> do
-            _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+            _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
             pure ()
         _ -> pure ()
     checksumInputs . concat <$> readIORef seen
@@ -167,10 +168,10 @@ runSequence pending failFirst = do
                         { backendOutput = emptyTurnOutput "benchmark" [] Nothing
                         , backendState = state
                         }
-    first <- backend.submitTurn [] Nothing [] (const (pure ()))
+    first <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
     case first of
         Left _ | failFirst -> do
-            _ <- backend.submitTurn [] Nothing [] (const (pure ()))
+            _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
             pure ()
         _ -> pure ()
     checksumInputs . concat <$> readIORef seen

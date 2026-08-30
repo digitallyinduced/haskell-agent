@@ -4,6 +4,11 @@ import Agent.CLI.Compaction (estimatedOccupancy)
 import Agent.CLI.SubagentStore
 import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.Dialect (DialectId(..))
+import Agent.Loop
+    ( BackendSnapshot(..)
+    , emptyBackendSnapshot
+    , initialBackendSnapshot
+    )
 import Agent.Provider (Provider(..))
 import Agent.CLI.Subagents.Runtime
     ( SubagentSession(..)
@@ -511,9 +516,11 @@ spec = describe "Agent.CLI.SubagentStore" do
                         [] -> expectationFailure "expected hydrated sessions"
                         first : _ -> do
                             let marker = [messageItem RoleAssistant "shared"]
-                            writeIORef first.subSessionTranscript marker
+                            writeIORef first.subSessionTranscript
+                                (initialBackendSnapshot marker)
                             forM_ sessions \session ->
-                                readIORef session.subSessionTranscript
+                                (.backendItems)
+                                    <$> readIORef session.subSessionTranscript
                                     `shouldReturn` marker
 
     it "keeps the installed session across concurrent registry restores" do
@@ -539,7 +546,8 @@ spec = describe "Agent.CLI.SubagentStore" do
             installed <-
                 lookupTestSession
                     sessionsRef storeRootRef typesRef agentId
-            writeIORef installed.subSessionTranscript inMemory
+            writeIORef installed.subSessionTranscript
+                (initialBackendSnapshot inMemory)
             bracket
                 (newSubagentRegistry defaultSubagentConfig dir
                     (\_ _ _ _ -> fail "unexpected subagent runner invocation")
@@ -564,11 +572,14 @@ spec = describe "Agent.CLI.SubagentStore" do
                     case Map.lookup agentId sessions of
                         Nothing -> expectationFailure "expected restored session"
                         Just current -> do
-                            readIORef current.subSessionTranscript
+                            (.backendItems)
+                                <$> readIORef current.subSessionTranscript
                                 `shouldReturn` inMemory
                             let marker = [messageItem RoleAssistant "same-ref"]
-                            writeIORef current.subSessionTranscript marker
-                            readIORef installed.subSessionTranscript
+                            writeIORef current.subSessionTranscript
+                                (initialBackendSnapshot marker)
+                            (.backendItems)
+                                <$> readIORef installed.subSessionTranscript
                                 `shouldReturn` marker
 
     it "evicts only after a successful save and rehydrates the same session" do
@@ -584,7 +595,8 @@ spec = describe "Agent.CLI.SubagentStore" do
             session <-
                 lookupTestSession
                     sessionsRef storeRootRef typesRef agentId
-            writeIORef session.subSessionTranscript items
+            writeIORef session.subSessionTranscript
+                (initialBackendSnapshot items)
             writeIORef session.subSessionContextTokens
                 (Just (estimatedOccupancy 100 200))
             bracket
@@ -598,7 +610,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                         storeRootRef registry typesRef agentId
                         (Completed (Just "answer")) session
                         `shouldReturn` Right False
-                    readIORef session.subSessionTranscript
+                    (.backendItems)
+                        <$> readIORef session.subSessionTranscript
                         `shouldReturn` items
                     readMVar session.subSessionHydrated `shouldReturn` True
 
@@ -607,7 +620,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                         storeRootRef registry typesRef agentId
                         (Completed (Just "answer")) session
                         `shouldReturn` Right True
-                    readIORef session.subSessionTranscript `shouldReturn` []
+                    readIORef session.subSessionTranscript
+                        `shouldReturn` emptyBackendSnapshot
                     readIORef session.subSessionContextTokens
                         `shouldReturn` Nothing
                     readMVar session.subSessionHydrated `shouldReturn` False
@@ -615,18 +629,21 @@ spec = describe "Agent.CLI.SubagentStore" do
                     rehydrated <-
                         lookupTestSession
                             sessionsRef storeRootRef typesRef agentId
-                    readIORef rehydrated.subSessionTranscript
+                    (.backendItems)
+                        <$> readIORef rehydrated.subSessionTranscript
                         `shouldReturn` items
                     readMVar rehydrated.subSessionHydrated
                         `shouldReturn` True
                     writeIORef rehydrated.subSessionTranscript
-                        [messageItem RoleAssistant "poison"]
+                        (initialBackendSnapshot
+                            [messageItem RoleAssistant "poison"])
                     persistAndEvictSubagentSessionWithStatus
                         storeRootRef registry typesRef agentId
                         (Completed (Just "answer")) rehydrated
                         `shouldReturn` Right True
                     writeIORef rehydrated.subSessionTranscript
-                        [messageItem RoleAssistant "must-not-flush"]
+                        (initialBackendSnapshot
+                            [messageItem RoleAssistant "must-not-flush"])
                     flushAllSubagentSnapshots
                         storeRootRef registry sessionsRef typesRef
                     loadSubagentState dir agentId >>= \case
@@ -655,24 +672,28 @@ spec = describe "Agent.CLI.SubagentStore" do
                     noStore <-
                         lookupTestSession
                             sessionsRef noStoreRef typesRef validId
-                    writeIORef noStore.subSessionTranscript items
+                    writeIORef noStore.subSessionTranscript
+                        (initialBackendSnapshot items)
                     persistAndEvictSubagentSessionWithStatus
                         noStoreRef registry typesRef validId Interrupted noStore
                         `shouldReturn` Right False
-                    readIORef noStore.subSessionTranscript `shouldReturn` items
+                    (.backendItems) <$> readIORef noStore.subSessionTranscript
+                        `shouldReturn` items
                     readMVar noStore.subSessionHydrated `shouldReturn` True
 
                     failed <-
                         lookupTestSession
                             sessionsRef failingStoreRef typesRef invalidId
-                    writeIORef failed.subSessionTranscript items
+                    writeIORef failed.subSessionTranscript
+                        (initialBackendSnapshot items)
                     writeIORef failingStoreRef (Just dir)
                     persistAndEvictSubagentSessionWithStatus
                         failingStoreRef registry typesRef invalidId Interrupted failed
                         >>= (`shouldSatisfy` \case
                             Left _ -> True
                             Right _ -> False)
-                    readIORef failed.subSessionTranscript `shouldReturn` items
+                    (.backendItems) <$> readIORef failed.subSessionTranscript
+                        `shouldReturn` items
                     readMVar failed.subSessionHydrated `shouldReturn` True
 
 lookupTestSession sessionsRef storeRootRef typesRef agentId =

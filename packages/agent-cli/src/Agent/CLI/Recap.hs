@@ -40,6 +40,7 @@ import Agent.Loop
     , BackendResult(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , initialBackendSnapshot
     )
 import Agent.Responses.Types
     ( MessageContent(..)
@@ -311,7 +312,7 @@ runSideCallWithCancel withCancelScope makeBackend paramsRef transcriptRef instru
     cancel <- newCancelFlag
     let Backend submit = makeBackend params
         request =
-            submit transcript Nothing
+            submit (initialBackendSnapshot transcript) Nothing
                 [UserMessage instruction] (\_ -> pure ())
         action = do
             result <- race (waitCancel cancel) request

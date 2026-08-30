@@ -10,8 +10,9 @@ import Agent.CLI.Compaction (OccupancySnapshot)
 import Agent.CLI.Options (ApprovalPolicy, CliOptions)
 import Agent.CLI.Session (LegacySubagentTarget)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
+import Agent.Loop (BackendSnapshot)
 import Agent.Provider (Provider, TokenProvider)
-import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
+import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Subagents (SubagentId, SubagentRegistry)
 import Agent.Tools.MultiAgents (MultiAgentContext, SubagentWorktree)
 import Agent.Tools.PlanMode (PlanModeHooks)
@@ -24,7 +25,7 @@ import Data.Text (Text)
 import System.OsPath (OsPath)
 
 data SubagentSession = SubagentSession
-    { subSessionTranscript :: !(IORef [ResponseItem])
+    { subSessionTranscript :: !(IORef BackendSnapshot)
     , subSessionContextTokens :: !(IORef (Maybe OccupancySnapshot))
     , subSessionProvider :: !Provider
     , subSessionConnection :: !Text

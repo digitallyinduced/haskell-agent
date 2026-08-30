@@ -7,6 +7,7 @@ module Agent.CLI.Session.ConversationStore
     , ConversationResidency(..)
     , TranscriptCheckpoint(..)
     , TranscriptGeneration
+    , commitConversationBackendState
     , commitConversationTranscript
     , conversationResidency
     , currentTranscriptGeneration
@@ -19,10 +20,16 @@ module Agent.CLI.Session.ConversationStore
     , replaceConversationTranscript
     , resetConversationStore
     , withConversationTranscript
+    , withConversationBackendState
     , writeConversationPreviousResponseId
     ) where
 
-import Agent.Loop (ImageAttachment)
+import Agent.Loop
+    ( BackendContinuation(..)
+    , BackendRevision(..)
+    , BackendSnapshot(..)
+    , ImageAttachment
+    )
 import Agent.Responses.Types (ResponseItem)
 import Control.Concurrent.MVar
     ( MVar
@@ -63,7 +70,7 @@ data ResidentSource
 data ConversationState = ConversationState
     { stateGeneration :: !TranscriptGeneration
     , stateTranscript :: !TranscriptState
-    , statePreviousResponseId :: !(Maybe Text)
+    , stateContinuation :: !(Maybe BackendContinuation)
     , stateAttachments :: ![ImageAttachment]
     }
 
@@ -78,7 +85,7 @@ newConversationStore previousResponseId transcript attachments =
     ConversationStore <$> newMVar ConversationState
         { stateGeneration = TranscriptGeneration 0
         , stateTranscript = ResidentTranscript transcript CommittedResident
-        , statePreviousResponseId = previousResponseId
+        , stateContinuation = openAiContinuation previousResponseId
         , stateAttachments = attachments
         }
 
@@ -91,7 +98,7 @@ newColdConversationStore previousResponseId checkpoint attachments =
     ConversationStore <$> newMVar ConversationState
         { stateGeneration = TranscriptGeneration 0
         , stateTranscript = ColdTranscript checkpoint
-        , statePreviousResponseId = previousResponseId
+        , stateContinuation = openAiContinuation previousResponseId
         , stateAttachments = attachments
         }
 
@@ -117,14 +124,31 @@ withConversationTranscript
     -> ([ResponseItem] -> IO a)
     -> IO a
 withConversationTranscript
+        store
+        action =
+    withConversationBackendState store (action . (.backendItems))
+
+-- | Read one immutable backend checkpoint. Transcript hydration and
+-- continuation/revision lookup happen under the same store lock.
+withConversationBackendState
+    :: ConversationStore
+    -> (BackendSnapshot -> IO a)
+    -> IO a
+withConversationBackendState
         store@(ConversationStore stateVar)
         action =
     mask \restore -> do
-        (generation, releaseHydration, transcript) <-
+        (generation, releaseHydration, snapshot) <-
             modifyMVar stateVar \state ->
                 case state.stateTranscript of
                     ResidentTranscript items CommittedResident ->
-                        pure (state, (state.stateGeneration, False, items))
+                        pure
+                            ( state
+                            , ( state.stateGeneration
+                              , False
+                              , snapshotFromState state items
+                              )
+                            )
                     ResidentTranscript items
                             (HydratedResident checkpoint readers) ->
                         pure
@@ -136,7 +160,10 @@ withConversationTranscript
                                             checkpoint
                                             (readers + 1))
                                 }
-                            , (state.stateGeneration, True, items)
+                            , ( state.stateGeneration
+                              , True
+                              , snapshotFromState state items
+                              )
                             )
                     ColdTranscript cold -> do
                         items <- cold.checkpointLoad
@@ -149,9 +176,12 @@ withConversationTranscript
                                     }
                         pure
                             ( resident
-                            , (state.stateGeneration, True, items)
+                            , ( state.stateGeneration
+                              , True
+                              , snapshotFromState state items
+                              )
                             )
-        restore (action transcript)
+        restore (action snapshot)
             `finally`
                 if releaseHydration
                     then releaseHydratedTranscript store generation
@@ -170,11 +200,14 @@ commitConversationTranscript (ConversationStore stateVar) transcript =
                 { stateGeneration = generation
                 , stateTranscript =
                     ResidentTranscript transcript CommittedResident
+                , stateContinuation = Nothing
                 }
             , generation
             )
 
--- | Install provider/session startup state without disturbing queued images.
+-- | Replace transcript state outside a backend commit without disturbing
+-- queued images. The legacy response-id argument is ignored: replacement
+-- invalidates every provider continuation.
 replaceConversationTranscript
     :: ConversationStore
     -> Maybe Text
@@ -182,7 +215,7 @@ replaceConversationTranscript
     -> IO TranscriptGeneration
 replaceConversationTranscript
         (ConversationStore stateVar)
-        previousResponseId
+        _previousResponseId
         transcript =
     modifyMVar stateVar \state -> do
         let generation = nextGeneration state.stateGeneration
@@ -191,7 +224,7 @@ replaceConversationTranscript
                 { stateGeneration = generation
                 , stateTranscript =
                     ResidentTranscript transcript CommittedResident
-                , statePreviousResponseId = previousResponseId
+                , stateContinuation = Nothing
                 }
             , generation
             )
@@ -239,7 +272,7 @@ readConversationPreviousResponseId
     :: ConversationStore
     -> IO (Maybe Text)
 readConversationPreviousResponseId (ConversationStore stateVar) =
-    (.statePreviousResponseId) <$> readMVar stateVar
+    continuationResponseId . (.stateContinuation) <$> readMVar stateVar
 
 writeConversationPreviousResponseId
     :: ConversationStore
@@ -247,7 +280,30 @@ writeConversationPreviousResponseId
     -> IO ()
 writeConversationPreviousResponseId (ConversationStore stateVar) value =
     modifyMVar_ stateVar \state ->
-        pure state { statePreviousResponseId = value }
+        pure state { stateContinuation = openAiContinuation value }
+
+-- | Atomically install a provider-produced checkpoint. The store, rather than
+-- the provider, assigns the next authoritative monotonic revision.
+commitConversationBackendState
+    :: ConversationStore
+    -> BackendSnapshot
+    -> IO BackendSnapshot
+commitConversationBackendState (ConversationStore stateVar) candidate =
+    modifyMVar stateVar \state -> do
+        let generation = nextGeneration state.stateGeneration
+            committed = candidate
+                { backendRevision = generationRevision generation }
+        pure
+            ( state
+                { stateGeneration = generation
+                , stateTranscript =
+                    ResidentTranscript
+                        committed.backendItems
+                        CommittedResident
+                , stateContinuation = committed.backendContinuation
+                }
+            , committed
+            )
 
 readConversationAttachments
     :: ConversationStore
@@ -271,13 +327,32 @@ resetConversationStore (ConversationStore stateVar) =
             { stateGeneration = nextGeneration state.stateGeneration
             , stateTranscript =
                 ResidentTranscript [] CommittedResident
-            , statePreviousResponseId = Nothing
+            , stateContinuation = Nothing
             , stateAttachments = []
             }
 
 nextGeneration :: TranscriptGeneration -> TranscriptGeneration
 nextGeneration (TranscriptGeneration generation) =
     TranscriptGeneration (generation + 1)
+
+generationRevision :: TranscriptGeneration -> BackendRevision
+generationRevision (TranscriptGeneration generation) =
+    BackendRevision generation
+
+openAiContinuation :: Maybe Text -> Maybe BackendContinuation
+openAiContinuation =
+    fmap (BackendContinuation "openai.responses")
+
+continuationResponseId :: Maybe BackendContinuation -> Maybe Text
+continuationResponseId =
+    fmap (.continuationToken)
+
+snapshotFromState :: ConversationState -> [ResponseItem] -> BackendSnapshot
+snapshotFromState state items = BackendSnapshot
+    { backendItems = items
+    , backendRevision = generationRevision state.stateGeneration
+    , backendContinuation = state.stateContinuation
+    }
 
 releaseHydratedTranscript
     :: ConversationStore

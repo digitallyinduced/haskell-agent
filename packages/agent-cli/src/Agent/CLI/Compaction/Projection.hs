@@ -16,6 +16,7 @@ import Agent.CLI.Compaction.Types
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( BackendResult(..)
+    , BackendSnapshot(..)
     , TokenUsage(..)
     , TurnInput
     , TurnOutput(..)
@@ -45,7 +46,9 @@ occupancySnapshot result
     | Text.null result.backendOutput.responseId = Nothing
     | otherwise =
         reportedContextTokens result.backendOutput.tokenUsage >>= \tokens ->
-            Just (reportedOccupancy tokens (length result.backendState))
+            Just
+                (reportedOccupancy tokens
+                    (length result.backendState.backendItems))
 
 -- | Project the next request from last occupancy when that snapshot still
 -- describes @history@. Provider-reported occupancy already includes

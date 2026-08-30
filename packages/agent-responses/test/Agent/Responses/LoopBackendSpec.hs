@@ -7,6 +7,7 @@ import Agent.Loop
     , ImageAttachment(..)
     , LoopEvent(..)
     , TurnInput(..)
+    , emptyBackendSnapshot
     )
 import Agent.Provider
     ( Credential(..)
@@ -137,7 +138,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 tokenProviderStatelessResponsesBackend provider send
                     (pure defaultResponseCreateParams)
 
-        result <- backend.submitTurn [] Nothing [UserMessage "hello"]
+        result <- backend.submitTurn emptyBackendSnapshot Nothing [UserMessage "hello"]
             (const (pure ()))
 
         result `shouldBe` Left (ConnectionError "stopped after failover")
@@ -160,7 +161,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 statelessResponsesBackend send
                     (pure defaultResponseCreateParams)
 
-        result <- backend.submitTurn [] Nothing [UserMessage "hello"]
+        result <- backend.submitTurn emptyBackendSnapshot Nothing [UserMessage "hello"]
             (\event -> modifyIORef' events (<> [event]))
 
         result `shouldBe` Left (ConnectionError "stop after reasoning")
@@ -193,7 +194,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 statelessResponsesBackendWithRawReasoning False send
                     (pure defaultResponseCreateParams)
 
-        _ <- backend.submitTurn [] Nothing [UserMessage "hello"]
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [UserMessage "hello"]
             (\event -> modifyIORef' events (<> [event]))
 
         readIORef events `shouldReturn` [ReasoningDelta "summary"]
@@ -240,7 +241,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 statelessResponsesBackendWithRawReasoning False send
                     (pure defaultResponseCreateParams)
 
-        _ <- backend.submitTurn [] Nothing [UserMessage "hello"]
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [UserMessage "hello"]
             (\event -> modifyIORef' events (<> [event]))
 
         readIORef events `shouldReturn`

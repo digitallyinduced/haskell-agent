@@ -346,7 +346,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 let target = AgentChild agentId
                 items <- case Map.lookup agentId sessions of
                     Nothing -> pure []
-                    Just session -> readIORef session.subSessionTranscript
+                    Just session ->
+                        (.backendItems)
+                            <$> readIORef session.subSessionTranscript
                 steps <- cachedAgentSteps
                     target
                     (Just status)
@@ -671,8 +673,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
-                { readBackendState = readLiveTranscript conversationRef
-                , commitBackendState = writeLiveTranscript conversationRef
+                { readBackendState =
+                    withLiveBackendState conversationRef pure
+                , commitBackendState =
+                    commitLiveBackendState conversationRef
                 }
             , loopTools = toolRegistry
             , loopDispatch =
