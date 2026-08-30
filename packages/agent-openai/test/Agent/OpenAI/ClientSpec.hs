@@ -538,6 +538,21 @@ spec = do
                         (helloRequest "hi")
                 extractAssistantText response `shouldBe` Just "mislabeled-sse"
 
+        it "sniffs mislabeled SSE whose first line is an id field" do
+            recorded <- newIORef []
+            let handler _request =
+                    pure $ sseCompletedWithPrefix
+                        "application/json"
+                        "id: stream-1\n"
+                        "id-prefixed-sse"
+            withMockResponses recorded handler \baseUrl -> do
+                response <- expectRight =<<
+                    createCodexMessageWithProviderAt
+                        baseUrl
+                        (staticBearerProvider "router-key")
+                        (helloRequest "hi")
+                extractAssistantText response `shouldBe` Just "id-prefixed-sse"
+
         it "returns typed terminal SSE errors" do
             recorded <- newIORef []
             let handler _request = pure sseInvalidRequest
@@ -697,6 +712,10 @@ sseCompleted = sseCompletedWithContentType "text/event-stream"
 
 sseCompletedWithContentType :: BS.ByteString -> Text -> Wai.Response
 sseCompletedWithContentType contentType text =
+    sseCompletedWithPrefix contentType "" text
+
+sseCompletedWithPrefix :: BS.ByteString -> Text -> Text -> Wai.Response
+sseCompletedWithPrefix contentType prefix text =
     let payload = Aeson.object
             [ "type" .= ("response.completed" :: Text)
             , "response" .= Aeson.object
@@ -707,7 +726,7 @@ sseCompletedWithContentType contentType text =
                 , "output" .= [assistantMessage text]
                 ]
             ]
-        body = "event: response.completed\ndata: "
+        body = prefix <> "event: response.completed\ndata: "
             <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode payload))
             <> "\n\n"
     in Wai.responseLBS HTTP.status200

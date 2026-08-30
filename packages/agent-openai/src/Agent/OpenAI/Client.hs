@@ -602,10 +602,14 @@ classifyResponseProbe probe =
         Just (byte, _)
             | byte == 0x7b || byte == 0x5b -> Just ResponseBodyJson
             | byte == 0x3a -> Just ResponseBodySse
-            | probe == "event:" || probe == "data:" -> Just ResponseBodySse
-            | probe `BS.isPrefixOf` "event:"
-                || probe `BS.isPrefixOf` "data:" -> Nothing
+            | any (`BS.isPrefixOf` probe) sseFieldPrefixes ->
+                Just ResponseBodySse
+            | any (probe `BS.isPrefixOf`) sseFieldPrefixes -> Nothing
             | otherwise -> Just ResponseBodyJson
+  where
+    -- Content-Type is absent or wrong on some compatible proxies. All four
+    -- standard SSE fields may legally be the first line of a stream.
+    sseFieldPrefixes = ["event:", "data:", "id:", "retry:"]
 
 dropAsciiSpace :: BS.ByteString -> BS.ByteString
 dropAsciiSpace = BS.dropWhile (`elem` [0x20, 0x09, 0x0a, 0x0d])
