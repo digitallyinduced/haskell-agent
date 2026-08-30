@@ -51,7 +51,10 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Test.Hspec
 
+fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
+
+toFilePath :: OsPath -> FilePath
 toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
@@ -90,6 +93,109 @@ spec = do
                         Left err -> expectationFailure (Text.unpack err)
                         Right loaded ->
                             loaded.loadedProvider `shouldBe` OpenAIProvider
+
+    describe "loadOpenAiDictationAuth" do
+        it "loads ChatGPT OAuth as subscription-billed OpenAI auth" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withEnv
+                    "CODEX_AUTH_JSON"
+                    (Just
+                        "{\"auth_mode\":\"chatgpt\",\
+                        \\"tokens\":{\"access_token\":\"e30.eyJleHAiOjQxMDI0NDQ4MDB9.\",\
+                        \\"refresh_token\":\"oauth-refresh\",\
+                        \\"account_id\":\"account-oauth\"}}") do
+                    shouldLoadOpenAiDictationCredential
+                        SubscriptionBilled
+                        "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
+                        "account-oauth"
+
+        it "prefers ChatGPT OAuth over an API key" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withEnv "OPENAI_API_KEY" (Just "sk-openai") $
+                withEnv
+                    "CODEX_AUTH_JSON"
+                    (Just
+                        "{\"auth_mode\":\"chatgpt\",\
+                        \\"tokens\":{\"access_token\":\"e30.eyJleHAiOjQxMDI0NDQ4MDB9.\",\
+                        \\"refresh_token\":\"oauth-refresh\",\
+                        \\"account_id\":\"account-oauth\"}}") do
+                    shouldLoadOpenAiDictationCredential
+                        SubscriptionBilled
+                        "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
+                        "account-oauth"
+
+        it "loads OPENAI_API_KEY as API-billed OpenAI auth" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withEnv "OPENAI_API_KEY" (Just "sk-openai") do
+                    shouldLoadOpenAiDictationToken "sk-openai"
+
+        it "loads Codex's API-key environment variable" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withEnv "CODEX_API_KEY" (Just "sk-codex-env") do
+                    shouldLoadOpenAiDictationToken "sk-codex-env"
+
+        it "prefers OPENAI_API_KEY over CODEX_API_KEY" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withEnv "CODEX_API_KEY" (Just "sk-codex-env") $
+                withEnv "OPENAI_API_KEY" (Just "sk-openai") do
+                    shouldLoadOpenAiDictationToken "sk-openai"
+
+        it "prefers an explicit API key over a managed API account" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withEnv "OPENAI_API_KEY" (Just "sk-openai") do
+                    storeManagedAccount
+                        ApiBilled
+                        OpenAIProvider
+                        "managed-openai"
+                        "managed-account"
+                        "Managed OpenAI"
+                        True
+                        "managed-key"
+                    shouldLoadOpenAiDictationToken "sk-openai"
+
+        it "loads Codex's OPENAI_API_KEY auth JSON field" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withEnv
+                    "CODEX_AUTH_JSON"
+                    (Just
+                        "{\"auth_mode\":\"apikey\",\
+                        \\"OPENAI_API_KEY\":\"sk-codex\"}") do
+                    shouldLoadOpenAiDictationToken "sk-codex"
+
+        it "honors CODEX_HOME when reading Codex auth JSON" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    let codexHome = toFilePath home </> "custom-codex"
+                    createDirectory codexHome
+                    LBS.writeFile
+                        (codexHome </> "auth.json")
+                        "{\"OPENAI_API_KEY\":\"sk-codex-home\"}"
+                    withEnv "CODEX_HOME" (Just codexHome) do
+                        shouldLoadOpenAiDictationToken "sk-codex-home"
+
+        it "honors CODEX_HOME for ChatGPT OAuth auth JSON" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    let codexHome = toFilePath home </> "custom-codex"
+                    createDirectory codexHome
+                    LBS.writeFile
+                        (codexHome </> "auth.json")
+                        "{\"auth_mode\":\"chatgpt\",\
+                        \\"tokens\":{\"access_token\":\"e30.eyJleHAiOjQxMDI0NDQ4MDB9.\",\
+                        \\"refresh_token\":\"oauth-refresh\",\
+                        \\"account_id\":\"account-home\"}}"
+                    withEnv "CODEX_HOME" (Just codexHome) do
+                        shouldLoadOpenAiDictationCredential
+                            SubscriptionBilled
+                            "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
+                            "account-home"
 
     describe "probeLoadedAuth" do
         it "rejects auth whose accounts are currently cooling down" do
@@ -1334,12 +1440,40 @@ withCleanOpenAiEnv action =
     foldr
         (\name next -> withEnv name Nothing next)
         action
-        [ "CODEX_ACCESS_TOKEN"
+        [ "OPENAI_API_KEY"
+        , "CODEX_API_KEY"
+        , "CODEX_ACCESS_TOKEN"
         , "CODEX_AUTH_JSON"
+        , "CODEX_HOME"
         , "CODEX_ACCOUNT_ID"
         , "CODEX_ID_TOKEN"
         , "OPENAI_OAUTH_CLIENT_ID"
         ]
+
+shouldLoadOpenAiDictationToken :: Text -> Expectation
+shouldLoadOpenAiDictationToken expected =
+    shouldLoadOpenAiDictationCredential ApiBilled expected ""
+
+shouldLoadOpenAiDictationCredential
+    :: BillingMode
+    -> Text
+    -> Text
+    -> Expectation
+shouldLoadOpenAiDictationCredential billing expected expectedAccount =
+    loadOpenAiDictationAuth >>= \case
+        Nothing ->
+            expectationFailure "expected an OpenAI dictation credential"
+        Just loaded -> do
+            loaded.loadedProvider `shouldBe` OpenAIProvider
+            tokenProviderBillingMode loaded.loadedTokenProvider
+                `shouldBe` billing
+            getNextToken loaded.loadedTokenProvider Nothing >>= \case
+                Left err ->
+                    expectationFailure (show err)
+                Right credential -> do
+                    credential.provider `shouldBe` OpenAIProvider
+                    credential.accessToken `shouldBe` expected
+                    credential.accountId `shouldBe` expectedAccount
 
 withCleanGrokEnv :: IO a -> IO a
 withCleanGrokEnv action =

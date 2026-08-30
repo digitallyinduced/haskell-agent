@@ -1,8 +1,11 @@
 -- | Grok Build's model-facing @lsp@ contract.
 module Agent.GrokBuild.Dialect.Lsp
     ( LspOperation(..)
+    , LspPosition(..)
+    , LspPositionOperation(..)
     , LspRequest(..)
     , lspOperationName
+    , lspPositionOperation
     , lspTool
     ) where
 
@@ -14,6 +17,7 @@ import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Numeric.Natural (Natural)
 
 data LspOperation
     = GoToDefinition
@@ -23,6 +27,27 @@ data LspOperation
     | DocumentSymbol
     | WorkspaceSymbol
     deriving (Eq, Show)
+
+-- | An LSP operation that requires a source position.
+data LspPositionOperation
+    = LspGoToDefinition
+    | LspFindReferences
+    | LspHover
+    | LspGoToImplementation
+    deriving (Eq, Show)
+
+data LspPosition = LspPosition
+    { positionLine :: !Natural
+    , positionCharacter :: !Natural
+    }
+    deriving (Eq, Show)
+
+lspPositionOperation :: LspPositionOperation -> LspOperation
+lspPositionOperation = \case
+    LspGoToDefinition -> GoToDefinition
+    LspFindReferences -> FindReferences
+    LspHover -> Hover
+    LspGoToImplementation -> GoToImplementation
 
 lspOperationName :: LspOperation -> Text
 lspOperationName = \case
@@ -48,23 +73,59 @@ lspOperationDecoder = Json.withText \value ->
                         <> Text.unpack value
                     )
 
-data LspRequest = LspRequest
-    { lspOperation :: !LspOperation
-    , lspFilePath :: !(Maybe Text)
-    , lspLine :: !(Maybe Int)
-    , lspCharacter :: !(Maybe Int)
-    , lspQuery :: !(Maybe Text)
-    }
+-- | A structurally valid request decoded from the flat model-facing schema.
+data LspRequest
+    = LspAtPosition !LspPositionOperation !Text !LspPosition
+    | LspDocumentSymbols !Text
+    | LspWorkspaceSymbols !Text
     deriving (Eq, Show)
 
 lspRequestDecoder :: Json.Decoder LspRequest
-lspRequestDecoder = Json.object $
-        LspRequest
-            <$> Json.atKey "operation" lspOperationDecoder
-            <*> optionalTextValue "file_path"
-            <*> optionalInt "line"
-            <*> optionalInt "character"
-            <*> optionalTextValue "query"
+lspRequestDecoder = Json.object do
+    operation <- Json.atKey "operation" lspOperationDecoder
+    case operation of
+        GoToDefinition ->
+            positionRequest LspGoToDefinition operation
+        FindReferences ->
+            positionRequest LspFindReferences operation
+        Hover ->
+            positionRequest LspHover operation
+        GoToImplementation ->
+            positionRequest LspGoToImplementation operation
+        DocumentSymbol ->
+            LspDocumentSymbols <$> requiredFilePath operation
+        WorkspaceSymbol ->
+            workspaceSymbolsRequest
+  where
+    positionRequest positionOperation operation =
+        LspAtPosition positionOperation
+            <$> requiredFilePath operation
+            <*> (LspPosition
+                <$> coordinate operation "line"
+                <*> coordinate operation "character")
+    coordinate operation key =
+        optionalInt key >>= \case
+            Just value | value >= 0 ->
+                pure (fromIntegral value)
+            _ ->
+                fail . Text.unpack $
+                    lspOperationName operation
+                        <> " requires non-negative line and character"
+    requiredFilePath operation =
+        optionalTextValue "file_path" >>= \case
+            Just filePath -> pure filePath
+            Nothing ->
+                fail . Text.unpack $
+                    lspOperationName operation <> " requires file_path"
+    workspaceSymbolsRequest =
+        optionalTextValue "query" >>= \case
+            Nothing ->
+                fail "workspaceSymbol requires query"
+            Just rawQuery
+                | Text.null (Text.strip rawQuery) ->
+                    fail "workspaceSymbol requires a non-empty query"
+                | otherwise ->
+                    pure (LspWorkspaceSymbols (Text.strip rawQuery))
 
 lspTool
     :: (LspRequest -> IO (Either Text Text))

@@ -4,8 +4,10 @@
 module Agent.CLI.Input
     ( ReplLine(..)
     , readReplLine
+    , readReplLineForProvider
     , readReplLineWithInitial
     , readReplLineWithCatalog
+    , readReplLineWithCatalogForProvider
     , readReplLineWithSkills
     , readReplLineWithSkillsAndModels
     , readApprovalLine
@@ -35,7 +37,11 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
-import Agent.CLI.Dictation (dictate, insertDictation)
+import Agent.CLI.Dictation
+    ( dictate
+    , dictateForProvider
+    , insertDictation
+    )
 import Agent.CLI.Command
     ( SkillCommand
     , SlashCatalog(..)
@@ -57,6 +63,7 @@ import Agent.CLI.Interrupt
     , InterruptState
     , noteIdleCtrlC
     )
+import Agent.Provider (Provider)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
@@ -128,12 +135,20 @@ import System.Posix.Terminal
 readReplLine :: InterruptState -> Text -> IO ReplLine
 readReplLine interrupt prompt =
     readReplLineConfigured
+        Nothing
+        defaultSlashCatalog False interrupt prompt ""
+
+-- | Read a prompt whose dictation backend follows the active model provider.
+readReplLineForProvider :: Provider -> InterruptState -> Text -> IO ReplLine
+readReplLineForProvider provider interrupt prompt =
+    readReplLineConfigured
+        (Just provider)
         defaultSlashCatalog False interrupt prompt ""
 
 -- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
 readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
 readReplLineWithInitial =
-    readReplLineConfigured defaultSlashCatalog True
+    readReplLineConfigured Nothing defaultSlashCatalog True
 
 readReplLineWithCatalog
     :: SlashCatalog
@@ -142,7 +157,17 @@ readReplLineWithCatalog
     -> Text
     -> IO ReplLine
 readReplLineWithCatalog catalog =
-    readReplLineConfigured catalog True
+    readReplLineConfigured Nothing catalog True
+
+readReplLineWithCatalogForProvider
+    :: Provider
+    -> SlashCatalog
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO ReplLine
+readReplLineWithCatalogForProvider provider catalog =
+    readReplLineConfigured (Just provider) catalog True
 
 readReplLineWithSkills
     :: [SkillCommand]
@@ -152,6 +177,7 @@ readReplLineWithSkills
     -> IO ReplLine
 readReplLineWithSkills skills =
     readReplLineConfigured
+        Nothing
         (slashCatalogWithSkills skills defaultSlashCatalog)
         True
 
@@ -164,19 +190,22 @@ readReplLineWithSkillsAndModels
     -> IO ReplLine
 readReplLineWithSkillsAndModels skills modelIds =
     readReplLineConfigured
+        Nothing
         ((slashCatalogWithSkills skills defaultSlashCatalog)
             { slashCatalogModelIds = modelIds
             })
         True
 
 readReplLineConfigured
-    :: SlashCatalog
+    :: Maybe Provider
+    -> SlashCatalog
     -> Bool
     -> InterruptState
     -> Text
     -> Text
     -> IO ReplLine
-readReplLineConfigured catalog slashEnabled interrupt prompt initial = do
+readReplLineConfigured
+        dictationProvider catalog slashEnabled interrupt prompt initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
@@ -185,7 +214,13 @@ readReplLineConfigured catalog slashEnabled interrupt prompt initial = do
             ensureHistoryParent path
             classifyLine <$>
                 readInlineEditor
-                    catalog slashEnabled interrupt path prompt initial
+                    dictationProvider
+                    catalog
+                    slashEnabled
+                    interrupt
+                    path
+                    prompt
+                    initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
@@ -201,7 +236,8 @@ readReplLineConfigured catalog slashEnabled interrupt prompt initial = do
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
-    :: SlashCatalog
+    :: Maybe Provider
+    -> SlashCatalog
     -> Bool
     -> InterruptState
     -> FilePath
@@ -209,7 +245,13 @@ readInlineEditor
     -> Text
     -> IO ReplLine
 readInlineEditor
-        catalog slashEnabled interrupt historyPath prompt initial = do
+        dictationProvider
+        catalog
+        slashEnabled
+        interrupt
+        historyPath
+        prompt
+        initial = do
     withBracketedPaste $
         withEditorKittyKeyboard $
             withEditorRawStdin $
@@ -255,7 +297,8 @@ readInlineEditor
                 editorLoop history entries next
             DictateIntoEditor -> do
                 finishEditorLine prompt next
-                result <- tryAny dictate
+                result <- tryAny $
+                    maybe dictate dictateForProvider dictationProvider
                 case result of
                     Left err ->
                         Text.putStrLn

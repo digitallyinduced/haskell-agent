@@ -344,7 +344,8 @@ runAgentTools
                     , planAskQuestion = \_ _ -> pure Nothing
                     }
             | otherwise =
-                cliPlanHooks interrupt escPaused (resolveColor stderrHandle)
+                cliPlanHooks
+                    provider interrupt escPaused (resolveColor stderrHandle)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
         baseSecretHooks = SecretPromptHooks \request ->
             Right <$> promptSecretLine

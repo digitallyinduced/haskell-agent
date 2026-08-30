@@ -23,7 +23,7 @@ import Agent.CLI.CancelWatch (withStdinPaused)
 import Agent.CLI.Input
     ( ReplLine(..)
     , readChoiceSelection
-    , readReplLine
+    , readReplLineForProvider
     )
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.Markdown (renderMarkdown)
@@ -48,6 +48,7 @@ import Agent.Tools.PlanMode
     , PlanModeHooks(..)
     , planApprovedContinuation
     )
+import Agent.Provider (Provider)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
 import Data.Char (toLower)
@@ -65,12 +66,14 @@ import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin)
 
 -- | Build plan-mode prompts. @escPaused@ pauses the Esc cancel watcher so
 -- arrow keys / single-key answers are not stolen mid-turn.
-cliPlanHooks :: InterruptState -> IORef Bool -> IO Bool -> PlanModeHooks
-cliPlanHooks interrupt escPaused resolveColor = PlanModeHooks
+cliPlanHooks :: Provider -> InterruptState -> IORef Bool -> IO Bool -> PlanModeHooks
+cliPlanHooks provider interrupt escPaused resolveColor = PlanModeHooks
     { planConfirmEnter = withStdinPaused escPaused . confirmEnter resolveColor
-    , planDecideExit = withStdinPaused escPaused . decideExit interrupt resolveColor
+    , planDecideExit =
+        withStdinPaused escPaused . decideExit provider interrupt resolveColor
     , planAskQuestion = \q opts ->
-        withStdinPaused escPaused (askQuestion interrupt resolveColor q opts)
+        withStdinPaused escPaused
+            (askQuestion provider interrupt resolveColor q opts)
     }
 
 data PlanEnterChoice = PlanEnter | PlanStayNormal
@@ -133,8 +136,8 @@ enterChoiceFromIndex :: Int -> PlanEnterChoice
 enterChoiceFromIndex 0 = PlanEnter
 enterChoiceFromIndex _ = PlanStayNormal
 
-decideExit :: InterruptState -> IO Bool -> Text -> IO PlanDecision
-decideExit interrupt resolveColor planBody = do
+decideExit :: Provider -> InterruptState -> IO Bool -> Text -> IO PlanDecision
+decideExit provider interrupt resolveColor planBody = do
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr ""
@@ -146,10 +149,10 @@ decideExit interrupt resolveColor planBody = do
         then pure PlanCancel
         else do
             notifyAttention stderr InputRequested
-            promptDecision interrupt color
+            promptDecision provider interrupt color
 
-promptDecision :: InterruptState -> Bool -> IO PlanDecision
-promptDecision interrupt color = do
+promptDecision :: Provider -> InterruptState -> Bool -> IO PlanDecision
+promptDecision provider interrupt color = do
     result <-
         runOverlay
             (renderPlanExitFrame color)
@@ -163,7 +166,7 @@ promptDecision interrupt color = do
             putTextLn stderr (roleMuted color "plan cancelled")
             pure PlanCancel
         PlanRequestChanges _ -> do
-            notes <- readChangeNotes interrupt color
+            notes <- readChangeNotes provider interrupt color
             pure (PlanRequestChanges notes)
 
 applyPlanExitKey
@@ -205,46 +208,52 @@ renderPlanRow color selected label =
         body = if selected then roleSuccess color label else roleMuted color label
     in cursor <> body
 
-readChangeNotes :: InterruptState -> Bool -> IO Text
-readChangeNotes interrupt color = do
+readChangeNotes :: Provider -> InterruptState -> Bool -> IO Text
+readChangeNotes provider interrupt color = do
     notifyAttention stderr InputRequested
     let chrome =
             rolePrompt color "changes> "
                 <> if color
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
-    readReplLine interrupt chrome >>= \case
+    readReplLineForProvider provider interrupt chrome >>= \case
         ReplEof -> pure "(no notes)"
         ReplQuitInterrupt -> throwIO UserInterrupt
         ReplPasted text ->
             if Text.null (Text.strip text) then pure "(no notes)" else pure (Text.strip text)
         ReplClipboardPaste text _ ->
             if Text.null (Text.strip text)
-                then readChangeNotes interrupt color
+                then readChangeNotes provider interrupt color
                 else pure (Text.strip text)
         ReplClipboardPasteOrText _ _ text ->
             if Text.null (Text.strip text)
-                then readChangeNotes interrupt color
+                then readChangeNotes provider interrupt color
                 else pure (Text.strip text)
         ReplCycleMode _ ->
             -- Shift+Tab is idle-prompt only; keep asking for notes.
-            readChangeNotes interrupt color
+            readChangeNotes provider interrupt color
         ReplChooseModel _ ->
-            readChangeNotes interrupt color
+            readChangeNotes provider interrupt color
         ReplChooseEffort _ ->
-            readChangeNotes interrupt color
+            readChangeNotes provider interrupt color
         ReplChooseAccount _ ->
-            readChangeNotes interrupt color
+            readChangeNotes provider interrupt color
         ReplRemovePendingImage _ _ ->
-            readChangeNotes interrupt color
+            readChangeNotes provider interrupt color
         ReplMeta _ ->
-            readChangeNotes interrupt color
+            readChangeNotes provider interrupt color
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
 
-askQuestion :: InterruptState -> IO Bool -> Text -> [Text] -> IO (Maybe Text)
-askQuestion interrupt resolveColor question options = do
+askQuestion
+    :: Provider
+    -> InterruptState
+    -> IO Bool
+    -> Text
+    -> [Text]
+    -> IO (Maybe Text)
+askQuestion provider interrupt resolveColor question options = do
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr (roleMuted color question)
@@ -259,7 +268,7 @@ askQuestion interrupt resolveColor question options = do
                                 <> if color
                                     then Text.pack clearFromCursorToLineEndCode
                                     else mempty
-                    readReplLine interrupt chrome >>= \case
+                    readReplLineForProvider provider interrupt chrome >>= \case
                         ReplEof -> pure Nothing
                         ReplQuitInterrupt -> throwIO UserInterrupt
                         ReplPasted text ->
@@ -268,24 +277,32 @@ askQuestion interrupt resolveColor question options = do
                                 else pure (Just (Text.strip text))
                         ReplClipboardPaste text _ ->
                             if Text.null (Text.strip text)
-                                then askQuestion interrupt resolveColor question []
+                                then askQuestion
+                                    provider interrupt resolveColor question []
                                 else pure (Just (Text.strip text))
                         ReplClipboardPasteOrText _ _ text ->
                             if Text.null (Text.strip text)
-                                then askQuestion interrupt resolveColor question []
+                                then askQuestion
+                                    provider interrupt resolveColor question []
                                 else pure (Just (Text.strip text))
                         ReplCycleMode _ ->
-                            askQuestion interrupt resolveColor question []
+                            askQuestion
+                                provider interrupt resolveColor question []
                         ReplChooseModel _ ->
-                            askQuestion interrupt resolveColor question []
+                            askQuestion
+                                provider interrupt resolveColor question []
                         ReplChooseEffort _ ->
-                            askQuestion interrupt resolveColor question []
+                            askQuestion
+                                provider interrupt resolveColor question []
                         ReplChooseAccount _ ->
-                            askQuestion interrupt resolveColor question []
+                            askQuestion
+                                provider interrupt resolveColor question []
                         ReplRemovePendingImage _ _ ->
-                            askQuestion interrupt resolveColor question []
+                            askQuestion
+                                provider interrupt resolveColor question []
                         ReplMeta _ ->
-                            askQuestion interrupt resolveColor question []
+                            askQuestion
+                                provider interrupt resolveColor question []
                         ReplText text
                             | Text.null (Text.strip text) -> pure Nothing
                             | otherwise -> pure (Just (Text.strip text))

@@ -46,6 +46,7 @@ import Agent.CLI.TUI.History
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
+import Agent.Provider (Provider)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
 import Agent.Syntax (SyntaxHighlighter)
 import Agent.TUI.Motion (MotionDemand, MotionMode)
@@ -274,7 +275,8 @@ data DictationSession = DictationSession
 -- Replacing the record atomically prevents the retained UI from calling into
 -- resources belonging to a backend that has already shut down.
 data FullscreenSessionActions = FullscreenSessionActions
-    { sessionCancel :: !(IO ())
+    { sessionProvider :: !(Maybe Provider)
+    , sessionCancel :: !(IO ())
     , sessionSteer :: !(Text -> IO ())
     , sessionBtw :: !(Text -> IO ())
     , sessionRecap :: !(IO ())
