@@ -117,6 +117,26 @@ main = hspec $ do
                 third <- appendEvent secondProcess "three" Null
                 third.sequenceNumber `shouldBe` 3
 
+        it "reopens a compacted replay suffix without requiring sequence one" $
+            withSystemTempDirectory "daemon-reopen-compaction" $ \directory -> do
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumEvents = 2
+                            , maximumJournalBytes = 1_048_576
+                            }
+                firstProcess <- openJournal config
+                _ <- appendEvent firstProcess "one" Null
+                second <- appendEvent firstProcess "two" Null
+                third <- appendEvent firstProcess "three" Null
+                secondProcess <- openJournal config
+                replayAfter secondProcess 1 `shouldReturn` ReplayEvents [second, third]
+                snapshot secondProcess >>= \saved ->
+                    saved.lastSequence `shouldBe` 3
+                thirdProcess <- openJournal config
+                replayAfter thirdProcess 1 `shouldReturn` ReplayEvents [second, third]
+                fourth <- appendEvent thirdProcess "four" Null
+                fourth.sequenceNumber `shouldBe` 4
+
         it "redacts sensitive fields and bounds retained task logs" $
             withSystemTempDirectory "daemon-redaction" $ \directory -> do
                 now <- getCurrentTime
