@@ -76,6 +76,7 @@ module Agent.CLI.TUI.App
     , fullscreenSurface
     , fullscreenApp
     , wrapFullscreenKeyboardVty
+    , wrapMarkdownLinkCursorVty
     , withTrackedVtyBuilder
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle

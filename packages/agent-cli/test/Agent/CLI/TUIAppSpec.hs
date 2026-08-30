@@ -36,6 +36,7 @@ import Agent.CLI.TUI.App
     , newFullscreenRuntime
     , withTrackedVtyBuilder
     , wrapFullscreenKeyboardVty
+    , wrapMarkdownLinkCursorVty
     , motionDemandFor
     , motionDemandForTerminalFocus
     , motionModeForTerminalFocus
@@ -91,7 +92,9 @@ import Agent.CLI.TUI.ImagePreview
     , TuiImagePreview(..)
     )
 import Agent.CLI.Terminal
-    ( kittyKeyboardDisambiguatePush
+    ( TerminalCapabilities(..)
+    , TerminalKind(..)
+    , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
@@ -652,6 +655,36 @@ spec = do
 
             V.shutdown wrapped
             readIORef events `shouldReturn` [Right ()]
+
+    describe "fullscreen link cursor lifecycle" do
+        it "restores the Ghostty cursor before Vty shutdown" do
+            events <- newIORef
+                ([] :: [Either ByteString.ByteString ()])
+            (_, output) <- VMock.mockTerminal (80, 24)
+            vty <- mockVty
+                output
+                    { V.outputByteBuffer =
+                        \bytes ->
+                            modifyIORef' events (<> [Left bytes])
+                    }
+                (modifyIORef' events (<> [Right ()]))
+                ((Right () `elem`) <$> readIORef events)
+            let terminal = TerminalCapabilities
+                    { terminalKind = TerminalGhostty
+                    , terminalIsTty = True
+                    , terminalInsideTmux = False
+                    , terminalInlineImages = True
+                    , terminalNativeProgress = True
+                    , terminalNotifications = True
+                    , terminalSemanticPrompts = True
+                    , terminalOsc52Clipboard = True
+                    , terminalSynchronizedOutput = True
+                    , terminalKittyKeyboard = True
+                    }
+                reset = TextEncoding.encodeUtf8 "\ESC]22;default\ESC\\"
+            wrapped <- wrapMarkdownLinkCursorVty terminal vty
+            V.shutdown wrapped
+            readIORef events `shouldReturn` [Left reset, Right ()]
 
     describe "fullscreen window title" do
         it "replays the stored session title as UTF-8 OSC bytes" do
