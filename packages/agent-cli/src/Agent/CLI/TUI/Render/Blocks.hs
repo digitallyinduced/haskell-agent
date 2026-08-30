@@ -220,7 +220,7 @@ import qualified Brick.Types as B
       Size(Greedy),
       Widget(render, Widget) )
 import qualified Brick.Widgets.Border as Border
-    ( borderAttr, hBorder )
+    ( border, borderAttr, hBorder )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
     ( draftCursorLocation,
@@ -263,7 +263,6 @@ import qualified Agent.TUI.Theme as Theme
       headerAttr,
       headingAttr,
       mutedAttr,
-      selectedAttr,
       strongAttr,
       successAttr,
       thinkingAttr,
@@ -420,7 +419,10 @@ drawBlock state target ui block =
                     (terminalTxtWrap block.blockBody)
         framed =
             if highlighted
-                then withAttr Theme.selectedAttr content
+                then
+                    withBorderStyle unicodeRounded $
+                        overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                            Border.border content
                 else content
         rendered =
             clickable (ConversationBlock target block.blockId) $
