@@ -189,6 +189,7 @@ library
                     , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
                     , Agent.CLI.Options
+                    , Agent.CLI.PendingInteraction
                     , Agent.CLI.Permission
                     , Agent.CLI.PendingInputs
                     , Agent.CLI.Picker
@@ -423,6 +424,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
+                    , Agent.CLI.PendingInteractionSpec
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
                     , Agent.CLI.PermissionSpec

@@ -36,6 +36,7 @@ import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
+import qualified Agent.CLI.PendingInteractionSpec as PendingInteractionSpec
 import qualified Agent.CLI.PendingInputsSpec as PendingInputsSpec
 import qualified Agent.CLI.PermissionSpec as PermissionSpec
 import qualified Agent.CLI.PickerSpec as PickerSpec
@@ -112,6 +113,7 @@ main = hspec do
     ModelsSpec.spec
     NotificationSpec.spec
     OptionsSpec.spec
+    PendingInteractionSpec.spec
     PendingInputsSpec.spec
     PermissionSpec.spec
     PickerSpec.spec
