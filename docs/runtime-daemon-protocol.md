@@ -85,7 +85,8 @@ and every process task has a six-hour wall-clock deadline. Stdin is closed.
 After the process leader exits, pipe draining has its own deadline; descendants
 that retained stdout or stderr are terminated with the same TERM/KILL
 process-group escalation rather than hanging task completion. Log publication is
-best-effort when the bounded scheduler queue is full; terminal completion uses
+best-effort when the bounded scheduler queue is full; dropped chunks produce a
+durable `[output truncated: scheduler log queue was full]` marker. Terminal completion uses
 a separate control queue so noisy output cannot deadlock completion or daemon
 shutdown. Embedders can supply
 a typed `TaskRunner` while retaining the same scheduler, persistence, and wire

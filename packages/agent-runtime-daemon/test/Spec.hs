@@ -959,7 +959,7 @@ main = hspec $ do
                 let journalConfig =
                         (defaultJournalConfig directory)
                             { maximumTaskLogLines = 3
-                            , maximumTaskLogCharacters = 10
+                            , maximumTaskLogCharacters = 200
                             }
                     runner =
                         TaskRunner
@@ -977,7 +977,9 @@ main = hspec $ do
                 saved <- snapshot journal
                 let retained = (.logTail) (saved.tasks Map.! TaskId "bounded-log")
                 length retained `shouldSatisfy` (<= 3)
-                sum (map Text.length retained) `shouldSatisfy` (<= 10)
+                sum (map Text.length retained) `shouldSatisfy` (<= 200)
+                retained `shouldSatisfy`
+                    any (Text.isInfixOf "output truncated")
 
         it "rejects full command queues and skips requests cancelled before execution" $
             withSystemTempDirectory "daemon-command-admission" $ \directory -> do

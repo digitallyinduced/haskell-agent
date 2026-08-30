@@ -109,6 +109,7 @@ data SubmitCommand = SubmitCommand
 data AdapterMessage
     = Execute !TaskCommand !(TMVar (Either Text Value)) !(TVar Bool)
     | TaskLogged !TaskId !Int !Text
+    | TaskLogTruncated !TaskId !Int
     | TaskFinished !TaskId !Int !(Either Text ())
 
 data RunningTask = RunningTask
@@ -159,14 +160,10 @@ withTaskAdapterQueueSize rawQueueSize journal runner action = do
                         Left message -> pure (Left message)
                         Right command -> do
                             active <- newTVarIO True
-                            admitted <-
-                                atomically $ do
-                                    full <- isFullTBQueue commands
-                                    if full
-                                        then pure False
-                                        else do
-                                            writeTBQueue commands (Execute command reply active)
-                                            pure True
+                            admitted <- atomically $
+                                tryWriteTBQueueCompat
+                                    commands
+                                    (Execute command reply active)
                             if admitted
                                 then
                                     atomically (takeTMVar reply)
@@ -219,6 +216,25 @@ schedulerLoopWithRegistry journal runner commands completions registry = go
                                 task
                                     { updatedAt = now
                                     , logTail = task.logTail <> [line]
+                                    }
+                        persisted <- persistBounded journal updated
+                        pure state
+                            { adapterTasks =
+                                Map.insert taskId persisted state.adapterTasks
+                            }
+                _ -> pure state
+        TaskLogTruncated taskId taskAttempt ->
+            case Map.lookup taskId state.adapterTasks of
+                Just task
+                    | task.status == TaskRunning
+                    , task.attempt == taskAttempt -> do
+                        now <- getCurrentTime
+                        let updated =
+                                task
+                                    { updatedAt = now
+                                    , logTail =
+                                        task.logTail
+                                            <> ["[output truncated: scheduler log queue was full]"]
                                     }
                         persisted <- persistBounded journal updated
                         pure state
@@ -466,18 +482,24 @@ launchWorker ::
 launchWorker commands completions runner task =
     mask $ \_ -> do
         gate <- newEmptyMVar
+        logTruncated <- newTVarIO False
         worker <- asyncWithUnmask $ \unmask -> do
             takeMVar gate
             let finished outcome =
-                    atomically $
+                    atomically $ do
+                        dropped <- readTVar logTruncated
+                        when dropped $
+                            writeTQueue completions
+                                (TaskLogTruncated task.taskId task.attempt)
                         writeTQueue completions
                             (TaskFinished task.taskId task.attempt outcome)
                 logged line =
                     atomically $ do
-                        full <- isFullTBQueue commands
-                        unless full $
-                            writeTBQueue commands
+                        accepted <-
+                            tryWriteTBQueueCompat
+                                commands
                                 (TaskLogged task.taskId task.attempt line)
+                        unless accepted (writeTVar logTruncated True)
             result <-
                 tryAny
                     ( unmask $
@@ -491,6 +513,16 @@ launchWorker commands completions runner task =
                 Right value -> finished value
         putMVar gate ()
         pure worker
+
+-- Equivalent to @tryWriteTBQueue@ for the pinned STM version, which does not
+-- export that helper. The fullness check and write are one transaction, so
+-- callers never block or enqueue after observing a full queue.
+tryWriteTBQueueCompat :: TBQueue value -> value -> STM Bool
+tryWriteTBQueueCompat queue value = do
+    full <- isFullTBQueue queue
+    if full
+        then pure False
+        else writeTBQueue queue value >> pure True
 
 shutdownRegistry :: TVar (Map TaskId RunningTask) -> IO ()
 shutdownRegistry registry = do
