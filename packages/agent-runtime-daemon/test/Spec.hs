@@ -2,10 +2,21 @@ module Main (main) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel, concurrently, waitCatch, withAsync)
-import Control.Concurrent.STM (readTVarIO)
+import Control.Concurrent.STM
+    ( TQueue
+    , TMVar
+    , atomically
+    , newEmptyTMVarIO
+    , newTQueueIO
+    , readTQueue
+    , readTVarIO
+    , takeTMVar
+    , writeTQueue
+    )
 import Control.Exception.Safe (bracket, isAsyncException)
-import Data.Aeson (Value (..), encode, object, toJSON, (.=))
+import Data.Aeson (Result (..), Value (..), encode, fromJSON, object, toJSON, (.=))
 import Data.Bits ((.&.))
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
@@ -37,6 +48,7 @@ import Agent.Runtime.Daemon.Server
 import Agent.Runtime.Daemon.Socket
 import Agent.Runtime.Daemon.Supervisor
 import Agent.Runtime.Daemon.Task
+import Agent.Runtime.Daemon.TaskAdapter
 
 main :: IO ()
 main = hspec $ do
@@ -128,8 +140,15 @@ main = hspec $ do
                     task =
                         DurableTask
                             { taskId = TaskId "task"
+                            , sessionId = Nothing
                             , status = TaskRunning
                             , description = "test"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
                             , updatedAt = now
                             , logTail = ["old", "authorization: bearer private", "safe"]
                             }
@@ -150,8 +169,15 @@ main = hspec $ do
                     running =
                         DurableTask
                             { taskId = TaskId "active"
+                            , sessionId = Nothing
                             , status = TaskRunning
                             , description = "active before crash"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
                             , updatedAt = now
                             , logTail = []
                             }
@@ -216,8 +242,15 @@ main = hspec $ do
                     persistTask original $
                         DurableTask
                             { taskId = TaskId "snapshot-anchor"
+                            , sessionId = Nothing
                             , status = TaskCompleted
                             , description = "anchor"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
                             , updatedAt = now
                             , logTail = []
                             }
@@ -260,8 +293,15 @@ main = hspec $ do
                     task name description =
                         DurableTask
                             { taskId = TaskId name
+                            , sessionId = Nothing
                             , status = TaskCompleted
                             , description
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
                             , updatedAt = now
                             , logTail = []
                             }
@@ -285,8 +325,15 @@ main = hspec $ do
                 let task =
                         DurableTask
                             { taskId = TaskId "recovered"
+                            , sessionId = Nothing
                             , status = TaskCompleted
                             , description = "password=private"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
                             , updatedAt = now
                             , logTail = ["token=private"]
                             }
@@ -541,8 +588,15 @@ main = hspec $ do
                     persistTask journal $
                         DurableTask
                             { taskId = TaskId "large"
+                            , sessionId = Nothing
                             , status = TaskCompleted
                             , description = "large snapshot"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
                             , updatedAt = now
                             , logTail = [Text.replicate 2_000 "x"]
                             }
@@ -618,8 +672,260 @@ main = hspec $ do
                                 [1 .. chunkCount - 1]
                         indices `shouldBe` [1 .. chunkCount - 1]
 
+    describe "task adapter IPC" $ do
+        it "submits, queues, cancels, lists, and replays durable task changes" $
+            withSystemTempDirectory "daemon-task-adapter" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                firstGate <- newEmptyTMVarIO
+                secondGate <- newEmptyTMVarIO
+                started <- newTQueueIO
+                let runner =
+                        blockingRunner
+                            started
+                            (Map.fromList
+                                [ (TaskId "first", firstGate)
+                                , (TaskId "second", secondGate)
+                                ])
+                    config =
+                        defaultServerConfig
+                            { heartbeatSeconds = 60
+                            , maximumFrameBytes = 16_384
+                            }
+                withTaskAdapter journal runner $ \supervisor ->
+                    withSocketPair $ \(serverPeer, clientPeer) ->
+                        withAsync (serveConnection config journal supervisor serverPeer) $ \_ -> do
+                            handshake config clientPeer Nothing
+                            sendTaskCommand config clientPeer "limit"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("set_limit" :: Text)
+                                    , "limit" .= (1 :: Int)
+                                    ])
+                                `shouldReturn` Right
+                                    (object ["version" .= (1 :: Int), "limit" .= (1 :: Int)])
+                            sendTaskCommand config clientPeer "submit-first"
+                                (submitCommand "first" "session-a")
+                                >>= shouldSucceed
+                            timeout 1_000_000 (atomically (readTQueue started))
+                                `shouldReturn` Just (TaskId "first")
+                            sendTaskCommand config clientPeer "submit-second"
+                                (submitCommand "second" "session-b")
+                                >>= shouldSucceed
+                            timeout 100_000 (atomically (readTQueue started))
+                                `shouldReturn` Nothing
+                            sendTaskCommand config clientPeer "cancel-second"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("cancel" :: Text)
+                                    , "task_id" .= ("second" :: Text)
+                                    ])
+                                >>= shouldSucceed
+                            sendTaskCommand config clientPeer "list"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("list" :: Text)
+                                    ])
+                                >>= \case
+                                    Right value ->
+                                        value `shouldSatisfy` listContains
+                                            (TaskId "second") TaskCancelled
+                                    Left message ->
+                                        expectationFailure (Text.unpack message)
+                            sendTaskCommand config clientPeer "cancel-first"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("cancel" :: Text)
+                                    , "task_id" .= ("first" :: Text)
+                                    ])
+                                >>= shouldSucceed
+                            waitForStatus journal (TaskId "first") TaskCancelled
+                saved <- snapshot journal
+                let eventCount =
+                        fromIntegral saved.lastSequence.unSequence :: Int
+                withSocketPair $ \(serverPeer, clientPeer) ->
+                    withAsync
+                        (serveConnection config journal unavailableSupervisor serverPeer)
+                        $ \_ -> do
+                            handshake config clientPeer (Just 0)
+                            replayed <- traverse
+                                (const (receiveJSONFrame config.maximumFrameBytes clientPeer))
+                                [1 .. eventCount]
+                            replayed `shouldSatisfy`
+                                any (messageHasStatus (TaskId "second") TaskCancelled)
+
+        it "interrupts in-flight work on restart and starts it only after explicit retry" $
+            withSystemTempDirectory "daemon-task-restart" $ \directory -> do
+                let journalConfig = defaultJournalConfig directory
+                    serverConfig =
+                        defaultServerConfig
+                            { heartbeatSeconds = 60
+                            , maximumFrameBytes = 16_384
+                            }
+                firstJournal <- openJournal journalConfig
+                firstGate <- newEmptyTMVarIO
+                firstStarted <- newTQueueIO
+                let firstRunner =
+                        blockingRunner firstStarted
+                            (Map.singleton (TaskId "restart-task") firstGate)
+                withTaskAdapter firstJournal firstRunner $ \supervisor ->
+                    withSocketPair $ \(serverPeer, clientPeer) ->
+                        withAsync
+                            (serveConnection serverConfig firstJournal supervisor serverPeer)
+                            $ \_ -> do
+                                handshake serverConfig clientPeer Nothing
+                                _ <- sendTaskCommand serverConfig clientPeer "submit"
+                                    (submitCommand "restart-task" "restart-session")
+                                timeout 1_000_000 (atomically (readTQueue firstStarted))
+                                    `shouldReturn` Just (TaskId "restart-task")
+                restartedJournal <- openJournal journalConfig
+                recovered <- snapshot restartedJournal
+                (.status) (recovered.tasks Map.! TaskId "restart-task")
+                    `shouldBe` TaskInterrupted
+                retryGate <- newEmptyTMVarIO
+                retryStarted <- newTQueueIO
+                let retryRunner =
+                        blockingRunner retryStarted
+                            (Map.singleton (TaskId "restart-task") retryGate)
+                withTaskAdapter restartedJournal retryRunner $ \supervisor ->
+                    withSocketPair $ \(serverPeer, clientPeer) ->
+                        withAsync
+                            (serveConnection serverConfig restartedJournal supervisor serverPeer)
+                            $ \_ -> do
+                                handshake serverConfig clientPeer Nothing
+                                timeout 100_000 (atomically (readTQueue retryStarted))
+                                    `shouldReturn` Nothing
+                                _ <- sendTaskCommand serverConfig clientPeer "retry" $
+                                    object
+                                        [ "version" .= (1 :: Int)
+                                        , "type" .= ("retry" :: Text)
+                                        , "task_id" .= ("restart-task" :: Text)
+                                        ]
+                                timeout 1_000_000 (atomically (readTQueue retryStarted))
+                                    `shouldReturn` Just (TaskId "restart-task")
+                                sendTaskCommand serverConfig clientPeer "approval"
+                                    (object
+                                        [ "version" .= (1 :: Int)
+                                        , "type" .= ("approval" :: Text)
+                                        , "task_id" .= ("restart-task" :: Text)
+                                        , "approval_id" .= ("approval-1" :: Text)
+                                        , "decision" .= ("approve" :: Text)
+                                        ])
+                                    >>= shouldSucceed
+                                running <- snapshot restartedJournal
+                                let retried =
+                                        running.tasks Map.! TaskId "restart-task"
+                                retried.status `shouldBe` TaskRunning
+                                retried.attempt `shouldBe` 2
+
 withSocketPair :: ((Socket, Socket) -> IO value) -> IO value
 withSocketPair =
     bracket
         (socketPair AF_UNIX Stream defaultProtocol)
         (\(left, right) -> close left >> close right)
+
+blockingRunner
+    :: TQueue TaskId
+    -> Map.Map TaskId (TMVar ())
+    -> TaskRunner
+blockingRunner started gates =
+    TaskRunner
+        { runTask = \task logLine -> do
+            atomically (writeTQueue started task.taskId)
+            logLine "started"
+            case Map.lookup task.taskId gates of
+                Nothing -> pure (Left "missing test gate")
+                Just gate -> atomically (takeTMVar gate) >> pure (Right ())
+        , resolveApproval = \_ _ _ -> pure (Right ())
+        }
+
+handshake :: ServerConfig -> Socket -> Maybe Sequence -> IO ()
+handshake config peer resumeAfter = do
+    sendJSONFrame config.maximumFrameBytes peer $
+        ClientHello
+            Hello
+                { clientId = ClientId "task-adapter-test"
+                , versions = [currentProtocolVersion]
+                , resumeAfter
+                }
+    receiveJSONFrame config.maximumFrameBytes peer >>= \case
+        ServerWelcome _ -> pure ()
+        other -> expectationFailure ("unexpected handshake: " <> show other)
+    case resumeAfter of
+        Nothing ->
+            receiveJSONFrame config.maximumFrameBytes peer >>= \case
+                ServerSnapshotChunk _ _ _ _ -> pure ()
+                other -> expectationFailure ("unexpected snapshot: " <> show other)
+        Just _ -> pure ()
+
+sendTaskCommand
+    :: ServerConfig
+    -> Socket
+    -> Text
+    -> Value
+    -> IO (Either Text Value)
+sendTaskCommand config peer rawId command = do
+    let commandId = CommandId rawId
+    sendJSONFrame config.maximumFrameBytes peer (ClientCommand commandId command)
+    await commandId
+  where
+    await commandId =
+        receiveJSONFrame config.maximumFrameBytes peer >>= \case
+            ServerCommandResult received result
+                | received == commandId -> pure result
+            ServerEvent _ -> await commandId
+            ServerEventChunk _ _ _ _ -> await commandId
+            ServerHeartbeat sequenceNumber -> do
+                sendJSONFrame config.maximumFrameBytes peer (ClientPong sequenceNumber)
+                await commandId
+            other ->
+                expectationFailure ("unexpected command response: " <> show other)
+                    >> pure (Left "unexpected command response")
+
+shouldSucceed :: Either Text Value -> IO ()
+shouldSucceed = \case
+    Right _ -> pure ()
+    Left message -> expectationFailure (Text.unpack message)
+
+submitCommand :: Text -> Text -> Value
+submitCommand taskId sessionId =
+    object
+        [ "version" .= (1 :: Int)
+        , "type" .= ("submit" :: Text)
+        , "task_id" .= taskId
+        , "session_id" .= sessionId
+        , "prompt" .= ("test prompt" :: Text)
+        , "cwd" .= ("/tmp" :: Text)
+        ]
+
+listContains :: TaskId -> TaskStatus -> Value -> Bool
+listContains taskId status = \case
+    Object value ->
+        case KeyMap.lookup "tasks" value of
+            Just tasksValue ->
+                case fromJSON tasksValue of
+                    Success tasks ->
+                        any
+                            (\task -> task.taskId == taskId && task.status == status)
+                            (tasks :: [DurableTask])
+                    Error _ -> False
+            Nothing -> False
+    _ -> False
+
+messageHasStatus :: TaskId -> TaskStatus -> ServerMessage -> Bool
+messageHasStatus taskId status = \case
+    ServerEvent event
+        | event.eventType == "task_changed" ->
+            case (fromJSON event.payload :: Result DurableTask) of
+                Success task -> task.taskId == taskId && task.status == status
+                Error _ -> False
+    _ -> False
+
+waitForStatus :: Journal -> TaskId -> TaskStatus -> IO ()
+waitForStatus journal taskId status =
+    timeout 2_000_000 loop >>= (`shouldBe` Just ())
+  where
+    loop = do
+        saved <- snapshot journal
+        case Map.lookup taskId saved.tasks of
+            Just task | task.status == status -> pure ()
+            _ -> threadDelay 10_000 >> loop

@@ -30,7 +30,7 @@ import Agent.Store.Postgres.Skill
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     )
-import Agent.CLI.MacOS.TaskScheduler
+import Agent.Runtime.Daemon.TaskScheduler
     ( TaskIdentity(..)
     , selectRunnableTasks
     )

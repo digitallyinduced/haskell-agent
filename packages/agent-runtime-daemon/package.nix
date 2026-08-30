@@ -1,6 +1,6 @@
 { mkDerivation, aeson, async, base, base64-bytestring, bytestring
 , containers, directory, filelock, filepath, hspec, lib, network
-, safe-exceptions, stm, temporary, text, time, unix
+, process, safe-exceptions, stm, temporary, text, time, unix
 }:
 mkDerivation {
   pname = "agent-runtime-daemon";
@@ -10,7 +10,8 @@ mkDerivation {
   isExecutable = true;
   libraryHaskellDepends = [
     aeson async base base64-bytestring bytestring containers directory
-    filelock filepath network safe-exceptions stm text time unix
+    filelock filepath network process safe-exceptions stm text time
+    unix
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [

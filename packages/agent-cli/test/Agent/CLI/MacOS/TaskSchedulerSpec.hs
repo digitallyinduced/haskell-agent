@@ -1,6 +1,6 @@
 module Agent.CLI.MacOS.TaskSchedulerSpec (spec) where
 
-import Agent.CLI.MacOS.TaskScheduler
+import Agent.Runtime.Daemon.TaskScheduler
     ( TaskIdentity(..)
     , selectRunnableTasks
     )

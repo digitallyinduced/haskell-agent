@@ -1,13 +1,13 @@
 { mkDerivation, aeson, agent-claude, agent-codex-dialect
 , agent-core, agent-grok-build-dialect, agent-openai
 , agent-openrouter, agent-process, agent-responses
-, agent-responses-types, agent-store, agent-syntax, agent-tui
-, agent-xai, ansi-terminal, async, base, base64-bytestring, brick
-, bytestring, colour, containers, deepseq, directory, filelock
-, filepath, haskeline, hasql-pool, hspec, http-client
-, http-client-tls, http-types, JuicyPixels, lib, mtl, network
-, network-uri, optparse-applicative, process, QuickCheck, retry
-, safe-exceptions, scientific, stm, tagsoup, text, time
+, agent-responses-types, agent-runtime-daemon, agent-store
+, agent-syntax, agent-tui, agent-xai, ansi-terminal, async, base
+, base64-bytestring, brick, bytestring, colour, containers, deepseq
+, directory, filelock, filepath, haskeline, hasql-pool, hspec
+, http-client, http-client-tls, http-types, JuicyPixels, lib, mtl
+, network, network-uri, optparse-applicative, process, QuickCheck
+, retry, safe-exceptions, scientific, stm, tagsoup, text, time
 , transformers, unix, vector, vty, vty-crossplatform
 }:
 mkDerivation {
@@ -36,10 +36,11 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-claude agent-codex-dialect agent-core
     agent-grok-build-dialect agent-openai agent-openrouter
-    agent-responses agent-responses-types agent-store agent-tui
-    agent-xai ansi-terminal async base brick bytestring colour
-    containers directory filepath haskeline hspec JuicyPixels process
-    QuickCheck safe-exceptions stm text time transformers unix vty
+    agent-responses agent-responses-types agent-runtime-daemon
+    agent-store agent-tui agent-xai ansi-terminal async base brick
+    bytestring colour containers directory filepath haskeline hspec
+    JuicyPixels process QuickCheck safe-exceptions stm text time
+    transformers unix vty
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-responses agent-store base brick bytestring
