@@ -32,9 +32,40 @@ same scheme in `event_chunk` messages: clients concatenate decoded slices and
 then decode the resulting event envelope. This keeps persisted events
 deliverable without increasing the transport frame bound.
 
-Commands and command results carry client-generated command IDs. Their JSON
-payload is deliberately opaque to this package so the task supervisor can
-evolve independently of the transport.
+Commands and command results carry client-generated command IDs. The public
+task adapter accepts the following versioned command payloads. Unknown versions,
+types, invalid combinations, empty identifiers, and values beyond the
+documented bounds are rejected without changing scheduler state.
+
+```json
+{"version":1,"type":"submit","task_id":"stable-client-id","session_id":"optional-existing-session","prompt":"...","cwd":"/absolute/or/relative/path","provider":"openai","model":"gpt-5.6","effort":"high","worktree":false}
+{"version":1,"type":"cancel","task_id":"stable-client-id"}
+{"version":1,"type":"list"}
+{"version":1,"type":"set_limit","limit":4}
+{"version":1,"type":"approval","task_id":"stable-client-id","approval_id":"request-id","decision":"approve"}
+{"version":1,"type":"retry","task_id":"stable-client-id"}
+```
+
+`task_id` is a caller-generated stable identifier and cannot be reused.
+`session_id` is the stable persisted session to resume; tasks for one session
+are serialized. A missing session identifies a fresh session and does not
+conflict with other fresh tasks. `provider` and `model` must either both be
+present or both absent, and `worktree` is valid only for a fresh session.
+Task/session/approval IDs are at most 256 characters, prompts 8,192
+characters, paths 4,096 characters, and the concurrency limit is 1 through 32.
+Approval decisions are `approve`, `deny`, or `approve_session`.
+
+Successful results contain `"version": 1`; submit, cancel, and retry results
+also contain the durable task. `list` returns every retained durable task.
+Task transitions are journaled as `task_changed` events before the mutating
+command reports success. A failed, cancelled, or interrupted task is rerun
+only by an explicit `retry` command, which retains its task ID and increments
+its attempt number. A completed or active task cannot be retried.
+
+The shipped daemon runner executes `agent-cli` directly without a shell
+(`HASKELL_AGENT_CLI` can override its path). Embedders can supply a native
+`TaskRunner`, including an approval resolver, while retaining the same
+scheduler, persistence, and wire protocol.
 
 ## Local security
 

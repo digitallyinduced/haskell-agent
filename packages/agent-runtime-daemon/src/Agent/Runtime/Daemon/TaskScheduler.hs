@@ -1,4 +1,4 @@
-module Agent.CLI.MacOS.TaskScheduler
+module Agent.Runtime.Daemon.TaskScheduler
     ( TaskIdentity(..)
     , selectRunnableTasks
     ) where
@@ -7,17 +7,16 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 
--- | Stable scheduling identity for one native task. A missing session id is a
--- fresh session and therefore does not conflict with another queued task.
+-- | Stable scheduling identity. Tasks belonging to the same persisted session
+-- are serialized; fresh sessions do not conflict with one another.
 data TaskIdentity = TaskIdentity
     { taskIdentityId :: !Text
     , taskIdentitySessionId :: !(Maybe Text)
     } deriving (Eq, Show)
 
--- | Select at most @capacity@ tasks in queue order while leaving tasks for an
--- already-active (or newly-selected) session queued. Skipping a blocked task
--- lets unrelated sessions make progress without allowing a later turn for the
--- same session to overtake it.
+-- | Select at most @capacity@ tasks in queue order. A task blocked by its
+-- session does not prevent an unrelated session later in the queue from
+-- running, while later work for the same session cannot overtake it.
 selectRunnableTasks
     :: Int
     -> Set Text
