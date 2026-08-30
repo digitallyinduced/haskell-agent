@@ -105,7 +105,6 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Session ( runAgentSession )
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
-import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..))
 import Agent.CLI.Runtime.Persistence ( preparePersistence )
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -253,7 +252,7 @@ import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe
     ( SomeException, finally, onException, throwIO, try )
-import Control.Monad ( join, when, forM_, unless )
+import Control.Monad ( forM_, join, unless, when )
 import Data.Functor ()
 import Data.IORef
     ( atomicModifyIORef', newIORef, readIORef, writeIORef )
@@ -691,13 +690,9 @@ runAgentTools
             useProgressiveMcp
                 harnessConfig.configMcpInitStrategy
                 (isOneShot options)
-    let AgentProcessRuntime
-            { processCleanupStarted = cleanupStarted
-            } = processRuntime
-    runCleanup <- atomicModifyIORef'
-        cleanupStarted
-        (\started -> (True, not started))
-    when runCleanup do
+    -- Housekeeping may inspect hundreds of worktrees and invoke Git for each
+    -- candidate. It must never delay interactive startup.
+    _ <- processRuntime.processStartCleanup do
         cleanupResult <- try @_ @SomeException do
             (sessions, sessionWarnings) <-
                 listSessions
