@@ -633,6 +633,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             refreshShellParams ghciEnabled bashEnabled
             pure ("shell tools: " <> shellModeLabel mode)
         setSessionTempDir tempDir = do
+            -- Persistent tool runtimes capture temp-backed state at startup.
+            -- Reset them before publishing the new root so no process or
+            -- state file remains attached to the previous session.
+            resetToolSessionTemp tempDir
             setToolSessionTmp toolEnv (Just tempDir)
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef

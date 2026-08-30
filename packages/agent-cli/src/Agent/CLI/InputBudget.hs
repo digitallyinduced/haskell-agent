@@ -15,11 +15,13 @@ import Agent.InterAgentMessage
 import Agent.Loop
     ( FileAttachment(..)
     , ImageAttachment(..)
+    , TurnAttachment(..)
     , TurnInput(..)
     )
 import Agent.ToolDispatch (ToolCallResult(..))
 import qualified Data.ByteString as ByteString
 import Data.Char (ord)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -53,13 +55,10 @@ logicalTurnInputBytes = \case
         logicalTextBytes message.messageAuthor
             `saturatingAdd` logicalTextBytes message.messageRecipient
             `saturatingAdd` logicalTextBytes (interAgentMessagePayload message)
-    UserMultimodal text images ->
+    UserMessageWithAttachments text attachments ->
         logicalTextBytes text
-            `saturatingAdd` foldBytes logicalImageBytes images
-    UserMultimodalFiles text images files ->
-        logicalTextBytes text
-            `saturatingAdd` foldBytes logicalImageBytes images
-            `saturatingAdd` foldBytes logicalFileBytes files
+            `saturatingAdd` foldBytes logicalAttachmentBytes
+                (NonEmpty.toList attachments)
     CompletedTool result ->
         logicalTextBytes result.callId
             `saturatingAdd` logicalTextBytes result.output
@@ -87,6 +86,11 @@ logicalReplLineBytes = \case
 foldBytes :: (a -> Int) -> [a] -> Int
 foldBytes measure =
     foldr (\value total -> measure value `saturatingAdd` total) 0
+
+logicalAttachmentBytes :: TurnAttachment -> Int
+logicalAttachmentBytes = \case
+    ImageAttachmentItem image -> logicalImageBytes image
+    FileAttachmentItem file -> logicalFileBytes file
 
 saturatingAdd :: Int -> Int -> Int
 saturatingAdd left right

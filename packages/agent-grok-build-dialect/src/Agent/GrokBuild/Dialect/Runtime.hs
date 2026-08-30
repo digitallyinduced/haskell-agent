@@ -19,6 +19,7 @@ import Agent.GrokBuild.Dialect.Tools
     , grokTools
     , newGrokSession
     )
+import Agent.GrokBuild.Dialect.Shell (resetGrokSessionTemp)
 import Agent.GrokBuild.Dialect.Workflow
     ( WorkflowRuntime
     , newWorkflowRuntime
@@ -39,11 +40,13 @@ import Agent.Tools.Types (AppTool, ToolEnv(..))
 import Control.Exception.Safe (onException)
 import Control.Monad (forM)
 import Data.Maybe (isNothing)
+import System.OsPath (OsPath)
 
 data GrokCodingTools = GrokCodingTools
     { grokAppTools :: ![AppTool]
     , grokPlanMode :: !PlanModeEnv
     , grokSuspendGhci :: !(IO ())
+    , grokResetSessionTemp :: !(OsPath -> IO ())
     , grokClose :: !(IO ())
     , grokAgentTypes :: !GrokSubagentSpecs
     , grokRuntimeControl :: !GrokRuntimeControl
@@ -102,6 +105,9 @@ newGrokCodingTools env hooks multi typesRef = do
                     typesRef
             , grokPlanMode = plan
             , grokSuspendGhci = suspendGhciSession ghci
+            , grokResetSessionTemp = \tempDir -> do
+                suspendGhciSession ghci
+                resetGrokSessionTemp session tempDir
             , grokClose = closeResourceScope resources
             , grokAgentTypes = typesRef
             , grokRuntimeControl = runtimeControl

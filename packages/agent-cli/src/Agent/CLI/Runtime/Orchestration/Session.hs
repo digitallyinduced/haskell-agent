@@ -99,7 +99,8 @@ import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policy, allTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
-                     suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
+                     suspendGhci, resetToolSessionTemp, grokRuntime,
+                     mcpRegistrations, mcpWarnings,
                      mcpInstructions, mcpFleet,
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
@@ -570,6 +571,8 @@ runAgentSession
                                 , recordImageGenerationInputs
                                 , clearImageGenerationHistory
                                 , suspendGhci = coding.codingSuspendGhci
+                                , resetToolSessionTemp =
+                                    coding.codingResetSessionTemp
                                 , grokRuntime = coding.codingGrokRuntime
                                 , mcpRegistrations =
                                     mcpFleet.mcpFleetRegistrations

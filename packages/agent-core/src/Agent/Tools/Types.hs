@@ -115,7 +115,8 @@ data ToolEnv = ToolEnv
     { toolCwd :: !OsPath
     , toolAllowedRoots :: !(IORef [OsPath])
       -- | Additional non-session filesystem roots. The current
-      -- 'toolSessionTmp' is always allowed implicitly.
+      -- 'toolSessionTmp' is always allowed implicitly and receives absolute
+      -- @/tmp@ and @/private/tmp@ filesystem-tool paths by default.
     , toolRootAccessRequest :: !(IORef (Maybe (OsPath -> IO Bool)))
       -- | Optional session-local callback used when a path falls outside
       -- the configured roots. An approved path is added to
@@ -171,8 +172,9 @@ setToolSkillRoots :: ToolEnv -> [OsPath] -> IO ()
 setToolSkillRoots env = writeIORef env.toolSkillRoots
 
 -- | Change the private scratch directory used by subsequent filesystem and
--- shell calls. The resolver treats this value as an allowed root directly, so
--- changing it cannot get out of sync with a separately maintained roots list.
+-- shell calls. The resolver treats this value as an allowed root and the
+-- target of the system-temp aliases directly, so changing it cannot get out of
+-- sync with a separately maintained roots list.
 setToolSessionTmp :: ToolEnv -> Maybe OsPath -> IO ()
 setToolSessionTmp env = writeIORef env.toolSessionTmp
 
