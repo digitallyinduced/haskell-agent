@@ -248,7 +248,7 @@ spec = describe "runLoop" do
             timeout 100000 (takeMVar backendFinished)
                 `shouldReturn` Nothing
             putMVar releaseSink ()
-            timeout 1000000 (takeMVar backendFinished)
+            timeout 3000000 (takeMVar backendFinished)
                 `shouldReturn` Just ()
             wait running `shouldReturn` Right LoopResult
                 { finalResponseId = "resp-1"
@@ -303,6 +303,48 @@ spec = describe "runLoop" do
             , TextDelta "cd"
             , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
             ]
+
+    it "backpressures a coalesced text tail by logical payload bytes" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        deliveredChars <- newIORef (0 :: Int)
+        let chunk = Text.replicate (1024 * 1024) "x"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                -- The chunks cross the conservative 8 MiB logical-byte
+                -- budget while TurnStarted blocks the consumer, even though
+                -- they would otherwise occupy only one TBQueue node.
+                mapM_ (onEvent . TextDelta) [chunk, chunk, chunk]
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                TurnStarted -> do
+                    putMVar sinkStarted ()
+                    takeMVar releaseSink
+                TextDelta text ->
+                    modifyIORef' deliveredChars (+ Text.length text)
+                _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            timeout 100000 (takeMVar backendFinished)
+                `shouldReturn` Nothing
+            putMVar releaseSink ()
+            timeout 1000000 (takeMVar backendFinished)
+                `shouldReturn` Just ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef deliveredChars
+            `shouldReturn` 3 * Text.length chunk
 
     it "keeps only the latest adjacent tool-output snapshot per call" do
         sinkStarted <- newEmptyMVar

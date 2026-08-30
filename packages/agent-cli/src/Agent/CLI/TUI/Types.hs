@@ -2,6 +2,7 @@
 module Agent.CLI.TUI.Types
     ( AppEvent(..)
     , AppEventMailbox(..)
+    , AppEventMailboxState(..)
     , AppState(..)
     , AgentHover(..)
     , DictationJob(..)
@@ -173,8 +174,16 @@ data PendingUiEvent
     | PendingTextDeltas !(Seq Text)
     | PendingReasoningDeltas !(Seq Text)
 
+data AppEventMailboxState = AppEventMailboxState
+    { mailboxPendingEvents :: !(Seq PendingAppEvent)
+    , mailboxPendingCount :: !Int
+    , mailboxPendingBytes :: !Int
+    , mailboxHighWaterCount :: !Int
+    , mailboxHighWaterBytes :: !Int
+    }
+
 newtype AppEventMailbox =
-    AppEventMailbox (TVar (Seq PendingAppEvent))
+    AppEventMailbox (TVar AppEventMailboxState)
 
 data FullscreenInput = FullscreenInput
     { fullscreenInputLine :: !ReplLine

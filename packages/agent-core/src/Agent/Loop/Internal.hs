@@ -9,6 +9,8 @@ import Agent.TextBuffer
     ( TextBuffer
     , appendTextBuffer
     , emptyTextBuffer
+    , textBufferChunkCount
+    , textBufferLength
     , textBufferToText
     )
 import Agent.ToolDispatch
@@ -38,10 +40,10 @@ import Control.Concurrent.STM
     , STM
     , TVar
     , atomically
+    , check
     , newEmptyTMVarIO
     , newTVar
     , newTBQueueIO
-    , modifyTVar'
     , orElse
     , putTMVar
     , readTBQueue
@@ -695,21 +697,36 @@ data LoopEventPump = LoopEventPump
     { eventPumpQueue :: !(TBQueue LoopEventCommand)
     , eventPumpFailure :: !(TMVar LoopEventFailure)
     , eventPumpTail :: !(TVar (Maybe CoalescedLoopEvent))
+    , eventPumpTailBytes :: !(TVar Int)
+    , eventPumpQueuedPayloadBytes :: !(TVar Int)
+    , eventPumpPayloadHighWater :: !(TVar Int)
     , eventPumpSink :: !(LoopEvent -> IO ())
     }
 
 loopEventQueueCapacity :: Int
 loopEventQueueCapacity = 256
 
+-- | Bound mutable payload hidden behind the final queue node. Queue capacity
+-- alone is insufficient because adjacent streaming events update that node's
+-- TVar without consuming another 'TBQueue' slot.
+loopEventTailPayloadBudgetBytes :: Int
+loopEventTailPayloadBudgetBytes = 8 * 1024 * 1024
+
 newLoopEventPump :: (LoopEvent -> IO ()) -> IO LoopEventPump
 newLoopEventPump sink = do
     queue <- newTBQueueIO (fromIntegral loopEventQueueCapacity)
     failure <- newEmptyTMVarIO
     tailEvent <- atomically (newTVar Nothing)
+    tailBytes <- atomically (newTVar 0)
+    queuedPayloadBytes <- atomically (newTVar 0)
+    payloadHighWater <- atomically (newTVar 0)
     pure LoopEventPump
         { eventPumpQueue = queue
         , eventPumpFailure = failure
         , eventPumpTail = tailEvent
+        , eventPumpTailBytes = tailBytes
+        , eventPumpQueuedPayloadBytes = queuedPayloadBytes
+        , eventPumpPayloadHighWater = payloadHighWater
         , eventPumpSink = sink
         }
 
@@ -723,9 +740,15 @@ runLoopEventPump pump = go
             DeliverCoalescedLoopEvent pending -> do
                 event <- atomically do
                     current <- readTVar pump.eventPumpTail
-                    whenSTM (sameCoalescedEvent current pending) $
+                    whenSTM (sameCoalescedEvent current pending) do
                         writeTVar pump.eventPumpTail Nothing
-                    materializeCoalescedEvent pending
+                        writeTVar pump.eventPumpTailBytes 0
+                    payloadBytes <- coalescedPayloadBytes pending
+                    event <- materializeCoalescedEvent pending
+                    releaseQueuedPayloadBytes
+                        pump
+                        payloadBytes
+                    pure event
                 deliver event
             FlushLoopEvents flushed -> do
                 atomically (putTMVar flushed ())
@@ -784,33 +807,64 @@ enqueueLoopEventCommand pump command =
         ) >>= either throwLoopEventFailure pure
 
 enqueueTextDelta :: LoopEventPump -> Bool -> Text -> IO ()
-enqueueTextDelta pump reasoning text =
-    atomically
-        ( (Left <$> readTMVar pump.eventPumpFailure)
-            `orElse`
-          (do
-            current <- readTVar pump.eventPumpTail
-            case current of
-                Just (CoalescedTextDelta buffer)
-                    | not reasoning -> do
-                        modifyTVar' buffer (appendTextBuffer text)
-                        pure (Right ())
-                Just (CoalescedReasoningDelta buffer)
-                    | reasoning -> do
-                        modifyTVar' buffer (appendTextBuffer text)
-                        pure (Right ())
-                _ -> do
-                    buffer <- newTVar
-                        (appendTextBuffer text emptyTextBuffer)
-                    let pending =
-                            if reasoning
-                                then CoalescedReasoningDelta buffer
-                                else CoalescedTextDelta buffer
-                    writeTVar pump.eventPumpTail (Just pending)
-                    writeTBQueue pump.eventPumpQueue
-                        (DeliverCoalescedLoopEvent pending)
-                    pure (Right ()))
-        ) >>= either throwLoopEventFailure pure
+enqueueTextDelta pump reasoning = go
+  where
+    -- Splitting also makes a single provider delta larger than the budget
+    -- progress instead of retrying forever. Each slice is copied when it is
+    -- retained so it cannot keep the original oversized backing array alive.
+    go text
+        | Text.null text = enqueueChunk text
+        | Text.length text <= loopEventTailPayloadBudgetCodeUnits =
+            enqueueChunk text
+        | otherwise = do
+            let (chunk0, rest) =
+                    Text.splitAt loopEventTailPayloadBudgetCodeUnits text
+                chunk = Text.copy chunk0
+            enqueueChunk chunk
+            if Text.null rest then pure () else go rest
+
+    enqueueChunk text =
+        atomically
+            ( (Left <$> readTMVar pump.eventPumpFailure)
+                `orElse`
+              (do
+                current <- readTVar pump.eventPumpTail
+                case current of
+                    Just (CoalescedTextDelta buffer)
+                        | not reasoning -> do
+                            appendBuffered buffer text
+                            pure (Right ())
+                    Just (CoalescedReasoningDelta buffer)
+                        | reasoning -> do
+                            appendBuffered buffer text
+                            pure (Right ())
+                    _ -> do
+                        buffer <- newTVar
+                            (appendTextBuffer text emptyTextBuffer)
+                        let pending =
+                                if reasoning
+                                    then CoalescedReasoningDelta buffer
+                                    else CoalescedTextDelta buffer
+                        writeTVar pump.eventPumpTail (Just pending)
+                        reserveTailPayloadBytes
+                            pump
+                            False
+                            (logicalTextBufferBytes
+                                (Text.length text)
+                                (if Text.null text then 0 else 1))
+                        writeTBQueue pump.eventPumpQueue
+                            (DeliverCoalescedLoopEvent pending)
+                        pure (Right ()))
+            ) >>= either throwLoopEventFailure pure
+      where
+        appendBuffered buffer chunk = do
+            buffered <- readTVar buffer
+            let payloadBytes =
+                    logicalTextBufferBytes
+                        (textBufferLength buffered + Text.length chunk)
+                        (textBufferChunkCount buffered + 1)
+            reserveTailPayloadBytes pump False payloadBytes
+            writeTVar buffer (appendTextBuffer chunk buffered)
 
 enqueueToolOutput :: LoopEventPump -> Text -> Text -> IO ()
 enqueueToolOutput pump callId output =
@@ -823,11 +877,19 @@ enqueueToolOutput pump callId output =
                 Just (CoalescedToolOutput currentId snapshot)
                     | currentId == callId -> do
                         writeTVar snapshot output
+                        reserveTailPayloadBytes
+                            pump
+                            True
+                            (logicalTextBytes output)
                         pure (Right ())
                 _ -> do
                     snapshot <- newTVar output
                     let pending = CoalescedToolOutput callId snapshot
                     writeTVar pump.eventPumpTail (Just pending)
+                    reserveTailPayloadBytes
+                        pump
+                        True
+                        (logicalTextBytes output)
                     writeTBQueue pump.eventPumpQueue
                         (DeliverCoalescedLoopEvent pending)
                     pure (Right ()))
@@ -858,11 +920,87 @@ materializeCoalescedEvent = \case
     CoalescedToolOutput callId snapshot ->
         ToolOutputUpdated callId <$> readTVar snapshot
 
+coalescedPayloadBytes :: CoalescedLoopEvent -> STM Int
+coalescedPayloadBytes = \case
+    CoalescedTextDelta buffer -> do
+        buffered <- readTVar buffer
+        pure
+            (logicalTextBufferBytes
+                (textBufferLength buffered)
+                (textBufferChunkCount buffered))
+    CoalescedReasoningDelta buffer -> do
+        buffered <- readTVar buffer
+        pure
+            (logicalTextBufferBytes
+                (textBufferLength buffered)
+                (textBufferChunkCount buffered))
+    CoalescedToolOutput _ snapshot ->
+        logicalTextBytes <$> readTVar snapshot
+
 clearEventPumpTail :: LoopEventPump -> STM ()
 clearEventPumpTail pump =
     readTVar pump.eventPumpTail >>= \case
         Nothing -> pure ()
-        Just _ -> writeTVar pump.eventPumpTail Nothing
+        Just _ -> do
+            writeTVar pump.eventPumpTail Nothing
+            writeTVar pump.eventPumpTailBytes 0
+
+reserveTailPayloadBytes :: LoopEventPump -> Bool -> Int -> STM ()
+reserveTailPayloadBytes pump allowInitialOversize bytes = do
+    oldTailBytes <- readTVar pump.eventPumpTailBytes
+    queuedBytes <- readTVar pump.eventPumpQueuedPayloadBytes
+    let newQueuedBytes = queuedBytes - oldTailBytes + bytes
+        initialOversize =
+            allowInitialOversize
+                && queuedBytes == 0
+                && oldTailBytes == 0
+    check
+        ( newQueuedBytes <= loopEventTailPayloadBudgetBytes
+            || initialOversize
+        )
+    writeTVar pump.eventPumpTailBytes bytes
+    writeTVar pump.eventPumpQueuedPayloadBytes newQueuedBytes
+    highWater <- readTVar pump.eventPumpPayloadHighWater
+    whenSTM (newQueuedBytes > highWater) $
+        writeTVar pump.eventPumpPayloadHighWater newQueuedBytes
+
+releaseQueuedPayloadBytes :: LoopEventPump -> Int -> STM ()
+releaseQueuedPayloadBytes pump bytes = do
+    queuedBytes <- readTVar pump.eventPumpQueuedPayloadBytes
+    writeTVar pump.eventPumpQueuedPayloadBytes
+        (max 0 (queuedBytes - bytes))
+
+-- A four-byte estimate is conservative for UTF-8 while remaining constant
+-- time for buffers whose code-unit count is already tracked.
+logicalTextBytes :: Text -> Int
+logicalTextBytes = logicalTextBytesFromLength . Text.length
+
+logicalTextBufferBytes :: Int -> Int -> Int
+logicalTextBufferBytes size chunks =
+    saturatingPayloadAdd
+        (logicalTextBytesFromLength size)
+        (saturatingPayloadMultiply chunks 64)
+
+logicalTextBytesFromLength :: Int -> Int
+logicalTextBytesFromLength size
+    | size >= maxBound `div` 4 = maxBound
+    | otherwise = size * 4
+
+saturatingPayloadMultiply :: Int -> Int -> Int
+saturatingPayloadMultiply left right
+    | left <= 0 || right <= 0 = 0
+    | left > maxBound `div` right = maxBound
+    | otherwise = left * right
+
+saturatingPayloadAdd :: Int -> Int -> Int
+saturatingPayloadAdd left right
+    | right > maxBound - left = maxBound
+    | otherwise = left + right
+
+loopEventTailPayloadBudgetCodeUnits :: Int
+loopEventTailPayloadBudgetCodeUnits =
+    (loopEventTailPayloadBudgetBytes - 64) `div` 4
+
 
 whenSTM :: Bool -> STM () -> STM ()
 whenSTM True action = action

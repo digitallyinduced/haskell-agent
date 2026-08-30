@@ -232,7 +232,13 @@ newFullscreenRuntimeWithSyntaxLoader
     color
     initial = do
         events <- newBChan 512
-        mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
+        mailbox <- AppEventMailbox <$> newTVarIO AppEventMailboxState
+            { mailboxPendingEvents = Seq.empty
+            , mailboxPendingCount = 0
+            , mailboxPendingBytes = 0
+            , mailboxHighWaterCount = 0
+            , mailboxHighWaterBytes = 0
+            }
         motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
         motionTickQueued <- newTVarIO False
         historyRequests <- newTQueueIO

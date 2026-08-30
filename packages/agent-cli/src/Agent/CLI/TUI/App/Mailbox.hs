@@ -146,11 +146,11 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
-import Data.List ( find , findIndex , intersperse , nub , sort , sortOn )
+import Data.List ( find , findIndex , foldl' , intersperse , nub , sort , sortOn )
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
-import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
+import Data.Sequence (Seq, ViewL(..), ViewR(..), (<|), (><), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -199,11 +199,36 @@ uiFrameBatchLimit :: Int
 uiFrameBatchLimit = 256
 
 enqueueAppEvent :: FullscreenRuntime -> AppEvent -> IO ()
-enqueueAppEvent runtime event =
-    atomically do
-        let AppEventMailbox pendingRef = runtime.runtimeMailbox
-        pending <- readTVar pendingRef
-        writeTVar pendingRef (appendAppEvent event pending)
+enqueueAppEvent runtime = \case
+    AppUi (UiLoop (TextDelta text)) ->
+        enqueueStreamingText runtime False text
+    AppUi (UiLoop (ReasoningDelta text)) ->
+        enqueueStreamingText runtime True text
+    event ->
+        atomically (enqueueMailboxEvent runtime.runtimeMailbox event)
+
+enqueueStreamingText :: FullscreenRuntime -> Bool -> Text -> IO ()
+enqueueStreamingText runtime reasoning = go
+  where
+    go text
+        | Text.null text =
+            enqueueChunk text
+        | Text.length text <= appEventMailboxTextChunkCodeUnits =
+            enqueueChunk text
+        | otherwise = do
+            let (chunk0, rest) =
+                    Text.splitAt appEventMailboxTextChunkCodeUnits text
+            enqueueChunk (Text.copy chunk0)
+            if Text.null rest then pure () else go rest
+    enqueueChunk text =
+        atomically
+            (enqueueMailboxEvent
+                runtime.runtimeMailbox
+                (AppUi
+                    (UiLoop
+                        (if reasoning
+                            then ReasoningDelta text
+                            else TextDelta text))))
 
 enqueueMotionTick :: FullscreenRuntime -> IO ()
 enqueueMotionTick runtime =
@@ -211,9 +236,82 @@ enqueueMotionTick runtime =
         queued <- readTVar runtime.runtimeMotionTickQueued
         unless queued do
             writeTVar runtime.runtimeMotionTickQueued True
-            let AppEventMailbox pendingRef = runtime.runtimeMailbox
-            pending <- readTVar pendingRef
-            writeTVar pendingRef (appendAppEvent AppMotionTick pending)
+            enqueueMailboxEvent runtime.runtimeMailbox AppMotionTick
+
+-- These budgets cover retained producer-side events. The Brick channel may
+-- additionally hold its fixed 512 entries and the pump may hold one event
+-- while its sink is blocked.
+appEventMailboxCapacity :: Int
+appEventMailboxCapacity = 4096
+
+appEventMailboxPayloadBudgetBytes :: Int
+appEventMailboxPayloadBudgetBytes = 16 * 1024 * 1024
+
+-- Structural events are lossless and receive a small reserve so a stream
+-- which fills the normal budget cannot prevent its finish/retraction/stop
+-- event from being published. The reserve itself is bounded.
+appEventMailboxControlReserve :: Int
+appEventMailboxControlReserve = 256
+
+appEventMailboxControlReserveBytes :: Int
+appEventMailboxControlReserveBytes = 2 * 1024 * 1024
+
+appEventMailboxTextChunkCodeUnits :: Int
+appEventMailboxTextChunkCodeUnits =
+    (appEventMailboxPayloadBudgetBytes - 64) `div` 4
+
+enqueueMailboxEvent :: AppEventMailbox -> AppEvent -> STM ()
+enqueueMailboxEvent (AppEventMailbox stateRef) event = do
+    state <- readTVar stateRef
+    let (pending, payloadBytes) =
+            appendAppEventAccounted
+                event
+                state.mailboxPendingEvents
+                state.mailboxPendingBytes
+        count = Seq.length pending
+        control = isControlAppEvent event
+        countLimit =
+            appEventMailboxCapacity
+                + if control then appEventMailboxControlReserve else 0
+        byteLimit =
+            appEventMailboxPayloadBudgetBytes
+                + if control then appEventMailboxControlReserveBytes else 0
+        firstOversizedControl =
+            control
+                && Seq.null state.mailboxPendingEvents
+                && count == 1
+    check
+        ( count <= countLimit
+            && (payloadBytes <= byteLimit || firstOversizedControl)
+        )
+    writeTVar stateRef state
+        { mailboxPendingEvents = pending
+        , mailboxPendingCount = count
+        , mailboxPendingBytes = payloadBytes
+        , mailboxHighWaterCount =
+            max state.mailboxHighWaterCount count
+        , mailboxHighWaterBytes =
+            max state.mailboxHighWaterBytes payloadBytes
+        }
+
+appendAppEventAccounted
+    :: AppEvent
+    -> Seq PendingAppEvent
+    -> Int
+    -> (Seq PendingAppEvent, Int)
+appendAppEventAccounted event pending oldBytes =
+    let updated = appendAppEvent event pending
+        -- Appending normally only adds the new event. Coalescing may replace
+        -- an older keyed value; find the exact delta without rescanning every
+        -- retained text chunk on the common adjacent-streaming path.
+        bytes = case event of
+            AppUi (UiLoop (TextDelta delta)) ->
+                saturatingAdd oldBytes (logicalTextChunkBytes delta)
+            AppUi (UiLoop (ReasoningDelta delta)) ->
+                saturatingAdd oldBytes (logicalTextChunkBytes delta)
+            _ ->
+                pendingAppEventsLogicalBytes updated
+    in (updated, bytes)
 
 appendAppEvent :: AppEvent -> Seq PendingAppEvent -> Seq PendingAppEvent
 appendAppEvent event pending = case event of
@@ -247,49 +345,146 @@ appendExactUiEvent event pending =
             | Just merged <- Bridge.mergeUiEvents previous event ->
                 rest |> PendingUi (PendingExactUi merged)
         _ ->
-            pending |> PendingUi (PendingExactUi event)
+            appendLatestPendingEvent
+                (PendingUi (PendingExactUi event))
+                pending
 
 appendExactAppEvent
     :: AppEvent
     -> Seq PendingAppEvent
     -> Seq PendingAppEvent
-appendExactAppEvent AppMotionTick pending
-    | any isPendingMotionTick pending =
-        pending
-  where
-    isPendingMotionTick = \case
-        PendingEvent AppMotionTick -> True
-        _ -> False
 appendExactAppEvent event pending =
-    case (Seq.viewr pending, event) of
-        ( rest :> PendingEvent (AppAgentSnapshot _ _)
-            , AppAgentSnapshot selected entries
-            ) ->
-                rest |> PendingEvent (AppAgentSnapshot selected entries)
-        (rest :> PendingEvent (AppSetWindowTitle _), AppSetWindowTitle title) ->
-            rest |> PendingEvent (AppSetWindowTitle title)
-        (rest :> PendingEvent (AppDictationPartial _), AppDictationPartial text) ->
-            rest |> PendingEvent (AppDictationPartial text)
-        _ ->
-            pending |> PendingEvent event
+    appendLatestPendingEvent (PendingEvent event) pending
+
+appendLatestPendingEvent
+    :: PendingAppEvent
+    -> Seq PendingAppEvent
+    -> Seq PendingAppEvent
+appendLatestPendingEvent event pending =
+    case pendingEventCoalesceKey event of
+        Nothing -> pending |> event
+        Just key ->
+            removeLatestAfterBarrier
+                ((== Just key) . pendingEventCoalesceKey)
+                pending
+                |> event
+
+removeLatestAfterBarrier
+    :: (PendingAppEvent -> Bool)
+    -> Seq PendingAppEvent
+    -> Seq PendingAppEvent
+removeLatestAfterBarrier matches = go Seq.empty
+  where
+    go suffix remaining =
+        case Seq.viewr remaining of
+            EmptyR -> suffix
+            rest :> event
+                | pendingEventBarrier event ->
+                    remaining >< suffix
+                | matches event ->
+                    rest >< suffix
+                | otherwise ->
+                    go (event <| suffix) rest
+
+data PendingEventCoalesceKey
+    = CoalesceActivity
+    | CoalesceToolUpdate !Text
+    | CoalesceToolOutput !Text
+    | CoalesceAgentSnapshot
+    | CoalesceWindowTitle
+    | CoalesceDictationPartial
+    | CoalesceConversationReflow
+    | CoalesceImagePlacements
+    | CoalesceMotionTick
+    | CoalesceRecapPoll
+    | CoalesceSyntaxHighlighter
+    deriving (Eq)
+
+pendingEventCoalesceKey
+    :: PendingAppEvent
+    -> Maybe PendingEventCoalesceKey
+pendingEventCoalesceKey = \case
+    PendingUi (PendingExactUi (UiLoop loopEvent)) ->
+        case loopEvent of
+            ActivityUpdated _ -> Just CoalesceActivity
+            ToolUpdated call -> Just (CoalesceToolUpdate call.callId)
+            ToolOutputUpdated callId _ ->
+                Just (CoalesceToolOutput callId)
+            _ -> Nothing
+    PendingEvent appEvent ->
+        case appEvent of
+            AppAgentSnapshot _ _ -> Just CoalesceAgentSnapshot
+            AppSetWindowTitle _ -> Just CoalesceWindowTitle
+            AppDictationPartial _ -> Just CoalesceDictationPartial
+            AppConversationReflow -> Just CoalesceConversationReflow
+            AppSyncSubmittedImagePlacements ->
+                Just CoalesceImagePlacements
+            AppMotionTick -> Just CoalesceMotionTick
+            AppRecapPoll -> Just CoalesceRecapPoll
+            AppSyntaxHighlighterChanged ->
+                Just CoalesceSyntaxHighlighter
+            _ -> Nothing
+    _ -> Nothing
+
+-- Latest-value updates may move across one another and text/reasoning deltas,
+-- but never across lifecycle, history, modal, input, or stop boundaries.
+pendingEventBarrier :: PendingAppEvent -> Bool
+pendingEventBarrier event =
+    case event of
+        PendingUi (PendingTextDeltas _) -> False
+        PendingUi (PendingReasoningDeltas _) -> False
+        PendingUi (PendingExactUi (UiLoop loopEvent)) ->
+            case loopEvent of
+                TextDelta _ -> False
+                ReasoningDelta _ -> False
+                ActivityUpdated _ -> False
+                ToolUpdated _ -> False
+                ToolOutputUpdated _ _ -> False
+                _ -> True
+        PendingUi (PendingExactUi _) -> True
+        PendingEvent _ ->
+            case pendingEventCoalesceKey event of
+                Just _ -> False
+                Nothing -> True
 
 takePendingAppEvent :: AppEventMailbox -> STM PendingAppEvent
-takePendingAppEvent (AppEventMailbox pendingRef) = do
-    pending <- readTVar pendingRef
-    case Seq.viewl pending of
+takePendingAppEvent (AppEventMailbox stateRef) = do
+    state <- readTVar stateRef
+    case Seq.viewl state.mailboxPendingEvents of
         EmptyL -> retry
         event :< rest -> do
-            writeTVar pendingRef rest
+            writeTVar stateRef state
+                { mailboxPendingEvents = rest
+                , mailboxPendingCount =
+                    max 0 (state.mailboxPendingCount - 1)
+                , mailboxPendingBytes =
+                    max 0
+                        ( state.mailboxPendingBytes
+                            - pendingAppEventLogicalBytes event
+                        )
+                }
             pure event
 
 takePendingUiEventPrefix
     :: Int
     -> AppEventMailbox
     -> STM [PendingUiEvent]
-takePendingUiEventPrefix limit (AppEventMailbox pendingRef) = do
-    pending <- readTVar pendingRef
-    let (events, rest) = go limit [] pending
-    writeTVar pendingRef rest
+takePendingUiEventPrefix limit (AppEventMailbox stateRef) = do
+    state <- readTVar stateRef
+    let (events, rest) =
+            go limit [] state.mailboxPendingEvents
+        removedBytes =
+            sum
+                (map
+                    (pendingAppEventLogicalBytes . PendingUi)
+                    events)
+    writeTVar stateRef state
+        { mailboxPendingEvents = rest
+        , mailboxPendingCount =
+            max 0 (state.mailboxPendingCount - length events)
+        , mailboxPendingBytes =
+            max 0 (state.mailboxPendingBytes - removedBytes)
+        }
     pure events
   where
     go remaining acc pending
@@ -308,3 +503,133 @@ pendingUiEvent = \case
         UiLoop (TextDelta (Text.concat (toList deltas)))
     PendingReasoningDeltas deltas ->
         UiLoop (ReasoningDelta (Text.concat (toList deltas)))
+
+pendingAppEventsLogicalBytes :: Seq PendingAppEvent -> Int
+pendingAppEventsLogicalBytes =
+    foldl'
+        (\total event ->
+            saturatingAdd total (pendingAppEventLogicalBytes event))
+        0
+
+pendingAppEventLogicalBytes :: PendingAppEvent -> Int
+pendingAppEventLogicalBytes = \case
+    PendingUi event -> pendingUiEventLogicalBytes event
+    PendingEvent event -> appEventLogicalBytes event
+
+pendingUiEventLogicalBytes :: PendingUiEvent -> Int
+pendingUiEventLogicalBytes = \case
+    PendingTextDeltas deltas ->
+        foldl' (\size text -> saturatingAdd size (logicalTextChunkBytes text)) 0 deltas
+    PendingReasoningDeltas deltas ->
+        foldl' (\size text -> saturatingAdd size (logicalTextChunkBytes text)) 0 deltas
+    PendingExactUi event ->
+        uiEventLogicalBytes event
+
+uiEventLogicalBytes :: UiEvent -> Int
+uiEventLogicalBytes = \case
+    UiLoop event ->
+        case event of
+            TextDelta text -> logicalTextBytes text
+            ReasoningDelta text -> logicalTextBytes text
+            ActivityUpdated text -> logicalTextBytes text
+            WarningRaised text -> logicalTextBytes text
+            ResponseRestarted text -> logicalTextBytes text
+            ToolUpdated call ->
+                logicalTextsBytes
+                    [call.callId, call.name, call.arguments]
+            ToolOutputUpdated callId output ->
+                logicalTextsBytes [callId, output]
+            NativeAgentStarted agent parent prompt model ->
+                logicalTextsBytes
+                    ([agent, prompt] <> maybeToList parent <> maybeToList model)
+            NativeAgentOutput agent output ->
+                logicalTextsBytes [agent, output]
+            NativeAgentFinished agent _ -> logicalTextBytes agent
+            _ -> 128
+    UiUserSubmitted text -> logicalTextBytes text
+    UiInputSteered text -> logicalTextBytes text
+    UiInputQueued text -> logicalTextBytes text
+    UiInputPromoted text -> logicalTextBytes text
+    UiSetDraft text _ -> logicalTextBytes text
+    UiSetPromptEffort text -> logicalTextBytes text
+    UiSetRepository branch cwd root ->
+        logicalTextsBytes [branch, cwd, root]
+    UiPermissionShown text -> logicalTextBytes text
+    UiHistory text -> logicalTextBytes text
+    UiAssistantHistory text -> logicalTextBytes text
+    UiSystemMessage text -> logicalTextBytes text
+    UiRecapReady text -> logicalTextBytes text
+    UiRecapUnavailable text -> logicalTextBytes text
+    UiErrorMessage text -> logicalTextBytes text
+    UiRetryCountdown prefix _ suffix ->
+        logicalTextsBytes [prefix, suffix]
+    _ -> 128
+
+appEventLogicalBytes :: AppEvent -> Int
+appEventLogicalBytes = \case
+    AppUi event -> uiEventLogicalBytes event
+    AppUiBatch events ->
+        foldl'
+            (\size event -> saturatingAdd size (uiEventLogicalBytes event))
+            0
+            events
+    AppAgentSnapshot _ entries ->
+        foldl'
+            (\size entry ->
+                saturatingAdd size
+                    ( 512
+                        + logicalTextsBytes
+                            ( entry.agentPath
+                                : entry.agentStatus
+                                : entry.agentTranscript
+                            )
+                        + maybe 0 logicalTextBytes entry.agentModel
+                    ))
+            0
+            entries
+    AppSetWindowTitle text -> logicalTextBytes text
+    AppDictationPartial text -> logicalTextBytes text
+    AppDictationFinished result ->
+        either logicalTextBytes logicalTextBytes result
+    AppToolImage callId _ -> logicalTextBytes callId
+    _ -> 256
+
+logicalTextsBytes :: Foldable f => f Text -> Int
+logicalTextsBytes =
+    foldl'
+        (\size text -> saturatingAdd size (logicalTextBytes text))
+        0
+
+logicalTextBytes :: Text -> Int
+logicalTextBytes text
+    | Text.length text >= maxBound `div` 4 = maxBound
+    | otherwise = Text.length text * 4
+
+logicalTextChunkBytes :: Text -> Int
+logicalTextChunkBytes text =
+    saturatingAdd 64 (logicalTextBytes text)
+
+saturatingAdd :: Int -> Int -> Int
+saturatingAdd left right
+    | right > maxBound - left = maxBound
+    | otherwise = left + right
+
+isControlAppEvent :: AppEvent -> Bool
+isControlAppEvent = \case
+    AppUi (UiLoop event) ->
+        case event of
+            TextDelta _ -> False
+            ReasoningDelta _ -> False
+            ActivityUpdated _ -> False
+            ToolUpdated _ -> False
+            ToolOutputUpdated _ _ -> False
+            _ -> True
+    AppAgentSnapshot _ _ -> False
+    AppSetWindowTitle _ -> False
+    AppDictationPartial _ -> False
+    AppConversationReflow -> False
+    AppSyncSubmittedImagePlacements -> False
+    AppMotionTick -> False
+    AppRecapPoll -> False
+    AppSyntaxHighlighterChanged -> False
+    _ -> True

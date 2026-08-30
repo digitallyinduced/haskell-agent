@@ -14,8 +14,10 @@ import Agent.CLI.TUI.Bridge
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
     , AppEventMailbox(..)
+    , AppEventMailboxState(..)
     , FullscreenRuntime(..)
     , PendingAppEvent(..)
+    , PendingUiEvent(..)
     , SyntaxHighlighterState(..)
     )
 import Agent.TUI.Model
@@ -23,6 +25,7 @@ import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (readTVarIO)
 import Control.Exception.Safe (throwString)
 import Control.Monad (replicateM_)
@@ -135,6 +138,47 @@ spec = describe "fullscreen TUI bridge" do
                 emitUiEvent runtime (UiLoop (TextDelta "x"))
                 emitUiEvent runtime (UiLoop TurnStarted)
         completed `shouldBe` Just ()
+
+    it "coalesces keyed snapshots without crossing lifecycle barriers" do
+        runtime <- newBridgeTestRuntime
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "old"))
+        emitUiEvent runtime (UiLoop (TextDelta "text"))
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "latest"))
+        emitUiEvent runtime (UiLoop TurnStarted)
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "next"))
+        emitUiEvent runtime (UiLoop (ToolOutputUpdated "c1" "newest"))
+        let AppEventMailbox stateRef = runtime.runtimeMailbox
+        pending <- mailboxPendingEvents <$> readTVarIO stateRef
+        [ output
+            | PendingUi
+                (PendingExactUi
+                    (UiLoop (ToolOutputUpdated "c1" output))) <-
+                toList pending
+            ]
+            `shouldBe` ["latest", "newest"]
+        toList pending `shouldSatisfy` \events ->
+            case dropWhile (not . isTurnStarted) events of
+                PendingUi (PendingExactUi (UiLoop TurnStarted)) : rest ->
+                    any isNewestOutput rest
+                _ -> False
+
+    it "backpressures a single streaming mailbox node by payload bytes" do
+        runtime <- newBridgeTestRuntime
+        let exactBudgetText =
+                Text.replicate
+                    ((16 * 1024 * 1024 - 64) `div` 4)
+                    "x"
+        emitUiEvent runtime (UiLoop (TextDelta exactBudgetText))
+        withAsync
+            (emitUiEvent runtime (UiLoop (TextDelta "blocked")))
+            \publishing -> do
+                timeout 100000 (wait publishing)
+                    `shouldReturn` Nothing
+                let AppEventMailbox stateRef = runtime.runtimeMailbox
+                state <- readTVarIO stateRef
+                state.mailboxPendingBytes
+                    `shouldBe` 16 * 1024 * 1024
+                state.mailboxHighWaterCount `shouldBe` 1
 
     it "rebinds provider-specific actions without replacing the runtime" do
         calls <- newIORef ([] :: [String])
@@ -264,10 +308,41 @@ spec = describe "fullscreen TUI bridge" do
 hasPendingUnavailableSyntax :: FullscreenRuntime -> IO Bool
 hasPendingUnavailableSyntax runtime = do
     let AppEventMailbox pendingRef = runtime.runtimeMailbox
-    pending <- readTVarIO pendingRef
+    pending <- mailboxPendingEvents <$> readTVarIO pendingRef
     syntaxState <- readIORef runtime.runtimeSyntaxHighlighter
     pure case (toList pending, syntaxState) of
         ( [PendingEvent AppSyntaxHighlighterChanged]
             , SyntaxHighlighterActive _ Nothing
             ) -> True
         _ -> False
+
+newBridgeTestRuntime :: IO FullscreenRuntime
+newBridgeTestRuntime = do
+    input <- newFullscreenInputBuffer
+    newFullscreenRuntime
+        input
+        (pure ())
+        (const (pure ()))
+        (pure WarnExit)
+        (const (pure True))
+        (const (pure ()))
+        (const (pure ()))
+        (pure (AgentRoot, []))
+        (const (pure ()))
+        (pure ())
+        (const (pure ()))
+        MotionFull
+        False
+        initialUiState
+
+isTurnStarted :: PendingAppEvent -> Bool
+isTurnStarted = \case
+    PendingUi (PendingExactUi (UiLoop TurnStarted)) -> True
+    _ -> False
+
+isNewestOutput :: PendingAppEvent -> Bool
+isNewestOutput = \case
+    PendingUi
+        (PendingExactUi
+            (UiLoop (ToolOutputUpdated "c1" "newest"))) -> True
+    _ -> False
