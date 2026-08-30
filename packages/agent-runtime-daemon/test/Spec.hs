@@ -362,8 +362,15 @@ main = hspec $ do
                 let oldTask taskId =
                         DurableTask
                             { taskId
+                            , sessionId = Nothing
                             , status = TaskCompleted
                             , description = "password=private"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
                             , updatedAt = now
                             , logTail = ["old", "token=private", "new"]
                             }
