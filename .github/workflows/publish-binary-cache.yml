@@ -22,15 +22,17 @@ jobs:
           - system: x86_64-linux
             runner: '["self-hosted", "haskell-agent", "office-builder", "x86_64-linux"]'
             install-nix: false
+            trusted-rebuild: false
           - system: aarch64-darwin
             runner: '"macos-15"'
             install-nix: true
+            trusted-rebuild: true
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 90
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
-      ATTIC_FLAKE: github:zhaofengli/attic/7a19204df10d606c5070e6bb72615c3461900c05#attic
+      ATTIC_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#attic-client
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -47,6 +49,8 @@ jobs:
       - name: Build install closure
         id: build
         shell: bash
+        env:
+          TRUSTED_REBUILD: ${{ matrix.trusted-rebuild }}
         run: |
           set -euo pipefail
 
@@ -59,12 +63,22 @@ jobs:
             exit 1
           fi
 
-          out_path=$(
-            "$nix_bin" build .#default \
-              --accept-flake-config \
-              --no-link \
-              --print-out-paths
+          build_args=(
+            build .#default
+            --accept-flake-config
+            --no-link
+            --print-out-paths
           )
+          if [[ "$TRUSTED_REBUILD" == true ]]; then
+            # Never restore the Darwin output from the cache previously populated
+            # by the affected Mac. Dependencies still come from cache.nixos.org.
+            build_args+=(
+              --option substituters https://cache.nixos.org/
+              --option extra-substituters ""
+            )
+          fi
+
+          out_path=$("$nix_bin" "${build_args[@]}")
           printf 'out-path=%s\n' "$out_path" >> "$GITHUB_OUTPUT"
 
       - name: Push install closure to the public IHP cache
@@ -94,7 +108,7 @@ jobs:
           chmod 700 "$HOME" "$XDG_CONFIG_HOME"
           trap 'rm -rf "$HOME"' EXIT
 
-          "$nix_bin" run "$ATTIC_FLAKE" -- login di \
+          "$nix_bin" run "$ATTIC_PACKAGE" -- login di \
             https://cache.digitallyinduced.com \
             "$ATTIC_TOKEN"
-          "$nix_bin" run "$ATTIC_FLAKE" -- push --jobs 4 di:public "$OUT_PATH"
+          "$nix_bin" run "$ATTIC_PACKAGE" -- push --jobs 4 di:public "$OUT_PATH"
