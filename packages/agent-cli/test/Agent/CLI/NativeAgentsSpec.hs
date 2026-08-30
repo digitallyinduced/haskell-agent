@@ -3,7 +3,11 @@ module Agent.CLI.NativeAgentsSpec (spec) where
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.NativeAgents
 import Agent.Json (rawJsonFromEncoding)
-import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
+import Agent.Loop
+    ( LoopEvent(..)
+    , NativeAgentStatus(..)
+    , emptyTurnOutput
+    )
 import Agent.Responses.Types
     ( FunctionCall(..)
     , FunctionCallOutput(..)
@@ -69,6 +73,44 @@ spec = describe "provider-native agent tracking" do
                         (nativeAgentConversation view).uiBlocks)
         view.nativeAgentStatus `shouldBe` "cancelled"
         states `shouldSatisfy` all (/= BlockRunning)
+
+    it "does not carry reused child output across response-attempt boundaries" do
+        let beforeRetry =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ TurnStarted
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "old live"
+                        Nothing
+                    , NativeAgentOutput "reused" "old result"
+                    ]
+            reuseAfter boundary =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    beforeRetry
+                    [ boundary
+                    , NativeAgentOutput "reused" "new result"
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing
+                    ]
+            views =
+                map
+                    (lookupView "reused" . reuseAfter)
+                    [ ResponseRestarted "retrying"
+                    , ResponseAttemptDiscarded
+                    ]
+        map nativeAgentTranscript views
+            `shouldBe` [["new result"], ["new result"]]
+        map (.nativeAgentLabel) views
+            `shouldBe` ["new live", "new live"]
+        map (.nativeAgentStatus) views
+            `shouldBe` ["running", "running"]
 
     it "settles stale running children before the next turn starts" do
         let tracked =
@@ -363,6 +405,90 @@ spec = describe "provider-native agent tracking" do
             view = lookupView "reused" restored
         view.nativeAgentLabel `shouldBe` "new live"
         view.nativeAgentStatus `shouldBe` "running"
+
+    it "keeps current-turn live reuse ahead of older canonical history until turn finishes" do
+        let oldCall = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "reused"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments = "{\"description\":\"old canonical\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            oldOutput = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "reused"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding $
+                        Aeson.toEncoding ("old result" :: String)
+                , status = Just ItemCompleted
+                }
+            persisted =
+                restoreNativeAgents
+                    AgentRoot
+                    [oldCall, oldOutput]
+                    emptyNativeAgentStore
+            live =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    persisted
+                    [ TurnStarted
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing
+                    , NativeAgentOutput "reused" "new result"
+                    ]
+            outputBeforeStart =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    persisted
+                    [ TurnStarted
+                    , NativeAgentOutput "reused" "new result"
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing
+                    ]
+            outputFirstView = lookupView "reused" outputBeforeStart
+            finishedBeforeStart =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    persisted
+                    [ TurnStarted
+                    , NativeAgentFinished "reused" NativeAgentCompleted
+                    ]
+            finishedBeforeStartView =
+                lookupView "reused" finishedBeforeStart
+            restored =
+                restoreNativeAgents AgentRoot [oldCall, oldOutput] live
+            view = lookupView "reused" restored
+            afterFinish =
+                restoreNativeAgents
+                    AgentRoot
+                    [oldCall, oldOutput]
+                    (applyNativeAgentEvent
+                        (TurnFinished
+                            (emptyTurnOutput "root" [] Nothing))
+                        restored)
+            finishedView = lookupView "reused" afterFinish
+        view.nativeAgentLabel `shouldBe` "new live"
+        view.nativeAgentStatus `shouldBe` "running"
+        nativeAgentTranscript view `shouldBe` ["new result"]
+        outputFirstView.nativeAgentLabel `shouldBe` "new live"
+        outputFirstView.nativeAgentStatus `shouldBe` "running"
+        nativeAgentTranscript outputFirstView `shouldBe` ["new result"]
+        finishedBeforeStartView.nativeAgentStatus `shouldBe` "done"
+        nativeAgentTranscript finishedBeforeStartView `shouldBe` []
+        finishedView.nativeAgentLabel `shouldBe` "old canonical"
+        finishedView.nativeAgentStatus `shouldBe` "done"
 
     it "does not decode oversized canonical call arguments for metadata" do
         let call = FunctionCallItem FunctionCall

@@ -100,6 +100,11 @@ data NativeAgentView = NativeAgentView
     , nativeAgentOutput :: !NativeOutput
     , nativeAgentTerminal :: !(Maybe BlockState)
     , nativeAgentOrigin :: !NativeAgentOrigin
+    -- | The backend attempt that most recently produced live state for this
+    -- row. Canonical transcript items are committed only after a turn
+    -- completes, so a row from the current attempt must win over an older
+    -- canonical record when a provider reuses an identifier.
+    , nativeAgentGeneration :: !Int
     }
     deriving (Eq, Show)
 
@@ -110,11 +115,20 @@ data NativeAgentStore = NativeAgentStore
     , storeOrder :: !(Seq Text)
     , storeSelected :: !(Maybe Text)
     , storeBytes :: !Int
+    -- | Increments at each backend-attempt boundary. Native lifecycle events
+    -- use this to distinguish current live state from a previously committed
+    -- or discarded row.
+    , storeGeneration :: !Int
+    -- | Canonical transcripts commit only after their backend turn completes.
+    -- While that turn is active, its live row takes precedence over older
+    -- canonical history with the same provider-controlled identifier.
+    , storeTurnActive :: !Bool
     }
     deriving (Eq, Show)
 
 emptyNativeAgentStore :: NativeAgentStore
-emptyNativeAgentStore = NativeAgentStore Map.empty Seq.empty Nothing 0
+emptyNativeAgentStore =
+    NativeAgentStore Map.empty Seq.empty Nothing 0 0 False
 
 nativeAgentStoreSize :: NativeAgentStore -> Int
 nativeAgentStoreSize = Map.size . (.storeAgents)
@@ -139,12 +153,10 @@ applyNativeAgentEvent :: LoopEvent -> NativeAgentStore -> NativeAgentStore
 applyNativeAgentEvent event current =
     normalizeStore $
         case event of
-            TurnStarted ->
-                settleRunningNativeAgents NativeAgentCancelled current
-            ResponseRestarted _ ->
-                settleRunningNativeAgents NativeAgentCancelled current
-            ResponseAttemptDiscarded ->
-                settleRunningNativeAgents NativeAgentCancelled current
+            TurnStarted -> beginNativeAttempt current
+            TurnFinished _ -> current { storeTurnActive = False }
+            ResponseRestarted _ -> beginNativeAttempt current
+            ResponseAttemptDiscarded -> beginNativeAttempt current
             NativeAgentStarted rawIdentifier rawParent rawLabel rawModel ->
                 let parent =
                         rawParent >>= boundedNativeAgentIdentifier
@@ -158,13 +170,16 @@ applyNativeAgentEvent event current =
                 in alterTouched rawIdentifier
                     (\identifier -> \case
                         Nothing ->
-                            newNativeAgentView
-                                NativeAgentLive
+                            newLiveNativeAgentView
+                                current.storeGeneration
                                 identifier
                                 parent
                                 label
                                 model
-                        Just view ->
+                        Just view
+                            | isCurrentRunningLiveView
+                                current.storeGeneration
+                                view ->
                             view
                                 { nativeAgentParent = parent
                                 , nativeAgentLabel = label
@@ -172,22 +187,46 @@ applyNativeAgentEvent event current =
                                 , nativeAgentStatus = "running"
                                 , nativeAgentTerminal = Nothing
                                 , nativeAgentOrigin = NativeAgentLive
-                                })
+                                , nativeAgentGeneration =
+                                    current.storeGeneration
+                                }
+                            | otherwise ->
+                                newLiveNativeAgentView
+                                    current.storeGeneration
+                                    identifier
+                                    parent
+                                    label
+                                    model)
                     current
             NativeAgentOutput rawIdentifier output ->
-                alterNativeOutput rawIdentifier output current
+                alterNativeOutput
+                    current.storeGeneration
+                    rawIdentifier
+                    output
+                    current
             NativeAgentFinished rawIdentifier status ->
                 alterTouched rawIdentifier
                     (\identifier maybeView ->
-                        (fromMaybe
-                            (newNativeAgentView NativeAgentLive
-                                identifier Nothing identifier Nothing)
-                            maybeView)
+                        (case maybeView of
+                            Just view
+                                | isCurrentLiveView
+                                    current.storeGeneration
+                                    view ->
+                                    view
+                            _ ->
+                                newLiveNativeAgentView
+                                    current.storeGeneration
+                                    identifier
+                                    Nothing
+                                    identifier
+                                    Nothing)
                             { nativeAgentStatus =
                                 nativeAgentStatusText status
                             , nativeAgentTerminal =
                                 Just (nativeAgentBlockState status)
                             , nativeAgentOrigin = NativeAgentLive
+                            , nativeAgentGeneration =
+                                current.storeGeneration
                             })
                     current
             _ -> current
@@ -220,6 +259,8 @@ restoreNativeAgents selected items current =
         , storeSelected = selectedIdentifier
         , storeBytes =
             retainedBytes (Map.union liveUnpersisted canonicalAgents)
+        , storeGeneration = current.storeGeneration
+        , storeTurnActive = current.storeTurnActive
         }
   where
     selectedIdentifier = case selected of
@@ -238,7 +279,12 @@ restoreNativeAgents selected items current =
             Map.filterWithKey
                 (\identifier view ->
                     view.nativeAgentOrigin == NativeAgentLive
-                        && Map.notMember identifier canonicalAgents)
+                        && ( Map.notMember identifier canonicalAgents
+                                || ( current.storeTurnActive
+                                        && view.nativeAgentGeneration
+                                            == current.storeGeneration
+                                   )
+                           ))
                 current.storeAgents
     closeParents ids =
         let withParents =
@@ -485,6 +531,18 @@ settleRunningNativeAgents status store =
         , storeBytes = retainedBytes agents
         }
 
+-- | A retried response remains within the same loop turn, but all streamed
+-- provider activity belongs to a fresh attempt. Advancing the generation
+-- prevents a reused child identifier from inheriting output or terminal state
+-- from the discarded attempt.
+beginNativeAttempt :: NativeAgentStore -> NativeAgentStore
+beginNativeAttempt store =
+    (settleRunningNativeAgents NativeAgentCancelled store)
+        { storeGeneration =
+            saturatingNativeAdd store.storeGeneration 1
+        , storeTurnActive = True
+        }
+
 nativeAgentBlockState :: NativeAgentStatus -> BlockState
 nativeAgentBlockState = \case
     NativeAgentRunning -> BlockRunning
@@ -509,7 +567,29 @@ newNativeAgentView origin identifier parent label model =
         , nativeAgentOutput = NativeOutput Seq.empty 0 False
         , nativeAgentTerminal = Nothing
         , nativeAgentOrigin = origin
+        , nativeAgentGeneration = 0
         }
+
+newLiveNativeAgentView
+    :: Int
+    -> Text
+    -> Maybe Text
+    -> Text
+    -> Maybe Text
+    -> NativeAgentView
+newLiveNativeAgentView generation identifier parent label model =
+    (newNativeAgentView NativeAgentLive identifier parent label model)
+        { nativeAgentGeneration = generation }
+
+isCurrentLiveView :: Int -> NativeAgentView -> Bool
+isCurrentLiveView generation view =
+    view.nativeAgentOrigin == NativeAgentLive
+        && view.nativeAgentGeneration == generation
+
+isCurrentRunningLiveView :: Int -> NativeAgentView -> Bool
+isCurrentRunningLiveView generation view =
+    isCurrentLiveView generation view
+        && view.nativeAgentStatus == "running"
 
 nativeAgentStatusText :: NativeAgentStatus -> Text
 nativeAgentStatusText = \case
@@ -601,8 +681,13 @@ alterTouched rawIdentifier update store =
                     (nativeAgentViewBytes next)
             }
 
-alterNativeOutput :: Text -> Text -> NativeAgentStore -> NativeAgentStore
-alterNativeOutput rawIdentifier chunk store =
+alterNativeOutput
+    :: Int
+    -> Text
+    -> Text
+    -> NativeAgentStore
+    -> NativeAgentStore
+alterNativeOutput generation rawIdentifier chunk store =
     case Map.lookup rawIdentifier store.storeAgents of
         Just previous -> apply previous.nativeAgentId (Just previous)
         Nothing ->
@@ -611,10 +696,17 @@ alterNativeOutput rawIdentifier chunk store =
                 Just identifier -> apply identifier Nothing
   where
     apply identifier previous =
-        let view = fromMaybe
-                (newNativeAgentView NativeAgentLive
-                    identifier Nothing identifier Nothing)
-                previous
+        let view = case previous of
+                Just previousView
+                    | isCurrentLiveView generation previousView ->
+                        previousView
+                _ ->
+                    newLiveNativeAgentView
+                        generation
+                        identifier
+                        Nothing
+                        identifier
+                        Nothing
             next = view
                 { nativeAgentOutput =
                     appendOutput
@@ -622,6 +714,7 @@ alterNativeOutput rawIdentifier chunk store =
                         chunk
                         view.nativeAgentOutput
                 , nativeAgentOrigin = NativeAgentLive
+                , nativeAgentGeneration = generation
                 }
         in store
             { storeAgents =
@@ -635,12 +728,21 @@ alterNativeOutput rawIdentifier chunk store =
                             store.storeBytes
                             (nativeAgentViewBytes next)
                     Just prior ->
-                        saturatingNativeAdd
-                            (max 0
-                                ( store.storeBytes
-                                    - prior.nativeAgentOutput.outputBytes
-                                ))
-                            next.nativeAgentOutput.outputBytes
+                        if isCurrentLiveView generation prior
+                            then
+                                saturatingNativeAdd
+                                    (max 0
+                                        ( store.storeBytes
+                                            - prior.nativeAgentOutput.outputBytes
+                                        ))
+                                    next.nativeAgentOutput.outputBytes
+                            else
+                                saturatingNativeAdd
+                                    (max 0
+                                        ( store.storeBytes
+                                            - nativeAgentViewBytes prior
+                                        ))
+                                    (nativeAgentViewBytes next)
             }
 
 touchOrder :: Text -> Seq Text -> Seq Text
