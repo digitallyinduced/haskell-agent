@@ -11,6 +11,7 @@ module Agent.CLI.SessionTitle
     , takeSessionTitleResults
     , titleRefreshIndex
     , waitForSessionTitleResults
+    , withSessionTitleForeground
     , withSessionTitleManager
     ) where
 
@@ -27,9 +28,14 @@ import Agent.Responses.Types
     , ToolChoice(..)
     , ToolChoiceMode(..)
     )
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (race, withAsync)
 import Control.Concurrent.STM
-import Control.Exception.Safe (SomeException, displayException, tryAny)
+import Control.Exception.Safe
+    ( SomeException
+    , bracket_
+    , displayException
+    , tryAny
+    )
 import Control.Monad (forever, void)
 import Control.Retry (limitRetries, retrying)
 import Data.Map.Strict (Map)
@@ -71,6 +77,7 @@ data SessionTitleManager = SessionTitleManager
     , titleResults :: !(TQueue SessionTitleResult)
     , titleRequested :: !(TVar (Set (Text, Int, Int)))
     , titleGenerations :: !(TVar (Map Text Int))
+    , titleForegroundTurns :: !(TVar Int)
     , titleBackendFactory :: !BtwBackendFactory
     , titleParams :: !(IO ResponseCreateParams)
     }
@@ -86,15 +93,26 @@ withSessionTitleManager backendFactory paramsRef onEvent action = do
     results <- newTQueueIO
     requested <- newTVarIO Set.empty
     generations <- newTVarIO Map.empty
+    foregroundTurns <- newTVarIO 0
     let manager = SessionTitleManager
             { titleJobs = jobs
             , titleResults = results
             , titleRequested = requested
             , titleGenerations = generations
+            , titleForegroundTurns = foregroundTurns
             , titleBackendFactory = backendFactory
             , titleParams = paramsRef
             }
     withAsync (titleWorker onEvent manager) \_ -> action manager
+
+-- | Give foreground model turns priority over best-effort title generation.
+-- Starting a foreground turn cancels an in-flight title request; the worker
+-- retries that job once the foreground scope is idle again.
+withSessionTitleForeground :: SessionTitleManager -> IO a -> IO a
+withSessionTitleForeground manager =
+    bracket_
+        (atomically $ modifyTVar' manager.titleForegroundTurns (+ 1))
+        (atomically $ modifyTVar' manager.titleForegroundTurns (subtract 1))
 
 requestSessionTitle
     :: SessionTitleManager
@@ -169,9 +187,27 @@ shouldRequestSessionTitle milestone refreshIndex
 
 titleWorker :: (SessionTitleEvent -> IO ()) -> SessionTitleManager -> IO ()
 titleWorker onEvent manager = forever do
-    job <- atomically (readTQueue manager.titleJobs)
-    generated <- generateTitleWithRetry manager job
-    accepted <- atomically do
+    job <- atomically do
+        readTVar manager.titleForegroundTurns >>= check . (== 0)
+        readTQueue manager.titleJobs
+    race
+        (atomically do
+            readTVar manager.titleForegroundTurns >>= check . (> 0))
+        (generateTitleWithRetry manager job)
+        >>= \case
+            Left () ->
+                atomically (unGetTQueue manager.titleJobs job)
+            Right generated -> do
+                accepted <- acceptTitleResult manager job generated
+                mapM_ (void . tryAny . onEvent) accepted
+
+acceptTitleResult
+    :: SessionTitleManager
+    -> SessionTitleJob
+    -> Either SomeException (Either Text Text)
+    -> IO (Maybe SessionTitleEvent)
+acceptTitleResult manager job generated =
+    atomically do
         modifyTVar' manager.titleRequested
             (Set.delete
                 (job.jobSessionId, job.jobMilestone, job.jobGeneration))
@@ -206,7 +242,6 @@ titleWorker onEvent manager = forever do
                                 <> Text.pack (displayException err)
                         , failureGeneration = job.jobGeneration
                         }))
-    mapM_ (void . tryAny . onEvent) accepted
 
 generateTitleWithRetry
     :: SessionTitleManager
