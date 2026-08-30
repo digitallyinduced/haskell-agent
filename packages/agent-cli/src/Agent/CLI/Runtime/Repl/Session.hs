@@ -18,7 +18,7 @@ import Agent.CLI.Command
       currentModel,
       ForkRequest(..),
       ReplAction(ReplRenameAuto, ReplResume, ReplSearch, ReplClear,
-                 ReplNew, ReplShowSession, ReplShowSessionInfo, ReplAfk,
+                 ReplNew, ReplDelete, ReplShowSession, ReplShowSessionInfo, ReplAfk,
                  ReplWorktree, ReplRename, ReplFork),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
       SlashCatalog(slashCatalogToolNames) )
@@ -30,7 +30,7 @@ import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayBridge ()
-import Agent.CLI.Input ( readChoiceSelection )
+import Agent.CLI.Input ( readChoiceSelection, readChoiceSelectionAt )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -64,7 +64,7 @@ import Agent.CLI.Runtime.HistorySource
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunForkSession, RunSwitchWorktree, RunQuit) )
+    ( RunResult(RunDeleteSession, RunForkSession, RunSwitchWorktree, RunQuit) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReset),
@@ -390,6 +390,35 @@ handleSessionAction
                         (roleMuted color
                             (glyphOk <> message))
                 continue
+    ReplDelete -> do
+        color <- resolveColor stderr
+        let unavailable message = do
+                displayError message $
+                    putTextLn stderr (roleError color message)
+                continue
+        case persist of
+            PersistenceDisabled ->
+                unavailable "/delete requires a persisted interactive session"
+            PersistenceEnabled slotRef ->
+                readIORef slotRef >>= \case
+                    PersistencePending{} ->
+                        unavailable
+                            "/delete is available after the first persisted turn"
+                    PersistenceActive handle ->
+                        confirmDelete color handle.sessionMeta.metaId >>= \case
+                            False -> continue
+                            True -> do
+                                let message =
+                                        "deleting session "
+                                            <> handle.sessionMeta.metaId
+                                            <> " after shutdown…"
+                                displayInfo message $
+                                    putTextLn stderr
+                                        (roleMuted color message)
+                                pure
+                                    (RunDeleteSession
+                                        handle.sessionMeta.metaId
+                                        cwd)
     ReplFork request -> do
         color <- resolveColor stderr
         let failFork message = do
@@ -794,5 +823,35 @@ handleSessionAction
                             Just "Use a new worktree" -> Just True
                             Just "Share current workspace" -> Just False
                             _ -> Nothing
+    confirmDelete color sessionId =
+        case fullscreen of
+            Just runtime ->
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Delete current session?"
+                    ( "This permanently removes session "
+                        <> sessionId
+                        <> " and its local artifacts, then starts a fresh conversation."
+                    )
+                    1
+                    [ ( "Delete session"
+                      , "Permanently remove its transcript and artifacts"
+                      )
+                    , ( "Cancel"
+                      , "Keep the current session"
+                      )
+                    ]
+                    >>= pure . (== Just 0)
+            Nothing ->
+                readChoiceSelectionAt
+                    1
+                    (\selected label ->
+                        if selected
+                            then rolePrompt color label
+                            else roleMuted color label)
+                    [ "Delete session permanently"
+                    , "Cancel"
+                    ]
+                    >>= pure . (== Just "Delete session permanently")
     cleanupForkWorktree source =
         mapM_ \path -> void (removeWorktree source path)

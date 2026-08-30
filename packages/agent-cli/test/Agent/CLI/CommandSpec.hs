@@ -207,13 +207,16 @@ spec = do
             parseReplLine "/login openai"
                 `shouldBe` ReplCommandError "usage: /login"
 
-        it "clears or starts a new session" do
+        it "clears, starts, or deletes a session" do
             parseReplLine "/clear" `shouldBe` ReplClear
             parseReplLine "/new" `shouldBe` ReplNew
+            parseReplLine "/delete" `shouldBe` ReplDelete
             parseReplLine "/clear now"
                 `shouldBe` ReplCommandError "usage: /clear"
             parseReplLine "/new now"
                 `shouldBe` ReplCommandError "usage: /new"
+            parseReplLine "/delete now"
+                `shouldBe` ReplCommandError "usage: /delete"
 
         it "compacts with optional focus text" do
             parseReplLine "/compact" `shouldBe` ReplCompact Nothing
@@ -242,8 +245,22 @@ spec = do
             parseReplLine "/clear-attachments" `shouldBe` ReplClearAttachments
 
         it "parses terminal clipboard commands" do
-            parseReplLine "/copy" `shouldBe` ReplCopyLast
-            parseReplLine "/copy-last" `shouldBe` ReplCopyLast
+            parseReplLine "/copy"
+                `shouldBe` ReplCopy (CopyRequest 1 Nothing)
+            parseReplLine "/copy-last"
+                `shouldBe` ReplCopy (CopyRequest 1 Nothing)
+            parseReplLine "/copy 3"
+                `shouldBe` ReplCopy (CopyRequest 3 Nothing)
+            parseReplLine "/copy out.txt"
+                `shouldBe` ReplCopy (CopyRequest 1 (Just "out.txt"))
+            parseReplLine "/copy 2 ~/exports/my note.md"
+                `shouldBe`
+                    ReplCopy
+                        (CopyRequest 2 (Just "~/exports/my note.md"))
+            parseReplLine "/copy 0"
+                `shouldBe`
+                    ReplCommandError
+                        "usage: /copy [N] [PATH] where N is 1 (latest), 2, 3, ..."
             parseReplLine "/copy-code" `shouldBe` ReplCopyCode 1
             parseReplLine "/copy-code 3" `shouldBe` ReplCopyCode 3
             parseReplLine "/copy-diff" `shouldBe` ReplCopyDiff
@@ -424,6 +441,7 @@ spec = do
                     , "compact"
                     , "clear"
                     , "new"
+                    , "delete"
                     , "usage"
                     , "reload-auth"
                     , "paste"

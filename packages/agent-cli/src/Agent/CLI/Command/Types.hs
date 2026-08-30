@@ -1,6 +1,7 @@
 -- | Data types shared by slash-command parsing and presentation.
 module Agent.CLI.Command.Types
-    ( ForkRequest(..)
+    ( CopyRequest(..)
+    , ForkRequest(..)
     , ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
@@ -20,6 +21,13 @@ import Data.Text (Text)
 data ForkRequest = ForkRequest
     { forkWorktree :: !(Maybe Bool)
     , forkDirective :: !(Maybe Text)
+    }
+    deriving (Eq, Show)
+
+-- | Parsed @/copy@ selection. Responses are numbered newest-first.
+data CopyRequest = CopyRequest
+    { copyResponseIndex :: !Int
+    , copyDestination :: !(Maybe Text)
     }
     deriving (Eq, Show)
 
@@ -75,7 +83,7 @@ data ReplAction
     | ReplClearAttachments
     | ReplShowAttachments
     | ReplRemoveAttachment !Int
-    | ReplCopyLast
+    | ReplCopy !CopyRequest
     | ReplCopyCode Int
     | ReplCopyDiff
     | ReplCopyPath
@@ -111,6 +119,8 @@ data ReplAction
       -- ^ Soft-reset live transcript; keep the same session id.
     | ReplNew
       -- ^ Start a fresh persisted session id with empty history.
+    | ReplDelete
+      -- ^ Confirm deletion, then remove the current session after shutdown.
     | ReplUsage
     | ReplCommandError Text
     deriving (Eq, Show)

@@ -40,6 +40,9 @@ data RunResult
       -- backend shuts down before starting the selected session.
     | RunForkSession Text (Maybe Text)
       -- ^ A newly forked session plus an optional first interactive prompt.
+    | RunDeleteSession Text OsPath
+      -- ^ Delete this session only after its backend and lock have shut down,
+      -- then return to a fresh conversation in the same working directory.
     | RunSwitchWorktree OsPath Provider Text ReasoningEffort
       -- ^ Fresh worktree path. Starts a new session after the current backend
       -- and fullscreen UI have shut down, retaining provider, model, and effort.
