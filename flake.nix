@@ -292,8 +292,8 @@
                 skylightingSyntaxDirectory =
                     "${skylightingSyntaxes}/share/skylighting/xml";
 
-                mkHaskellPackages = checkLocalPackages:
-                    pkgs.haskellPackages.extend (
+                mkHaskellPackages = baseHaskellPackages: checkLocalPackages:
+                    baseHaskellPackages.extend (
                     final: previous:
                     let
                         # User-facing builds only need the statically linked
@@ -490,8 +490,14 @@
                     }
                 );
 
-                haskellPackages = mkHaskellPackages true;
-                productionHaskellPackages = mkHaskellPackages false;
+                haskellPackages = mkHaskellPackages pkgs.haskellPackages true;
+                productionHaskellPackages =
+                    mkHaskellPackages pkgs.haskellPackages false;
+                staticHaskellPackages =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        mkHaskellPackages pkgs.pkgsStatic.haskellPackages false
+                    else
+                        null;
                 agentCorePackage = productionHaskellPackages.agent-core;
                 agentMcpPackage = productionHaskellPackages.agent-mcp;
                 agentJsonPackage = productionHaskellPackages.agent-json;
@@ -511,6 +517,12 @@
                 agentStorePackage = productionHaskellPackages.agent-store;
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
+                agentCliStaticExecutable =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        pkgs.haskell.lib.justStaticExecutables
+                            staticHaskellPackages.agent-cli
+                    else
+                        agentCliExecutable;
                 agentCliExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
                         (old: {
@@ -674,7 +686,11 @@
                 '';
             in
             {
-                packages.default = agentCliExecutable;
+                # Linux users get fully static musl executables rather than
+                # the tool-bundled package's multi-gigabyte runtime closure.
+                # The native wrapped build remains available as `agent-cli`.
+                packages.default = agentCliStaticExecutable;
+                packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-core = agentCorePackage;
