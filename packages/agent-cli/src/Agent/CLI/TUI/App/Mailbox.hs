@@ -238,9 +238,15 @@ enqueueMotionTick runtime =
             writeTVar runtime.runtimeMotionTickQueued True
             enqueueMailboxEvent runtime.runtimeMailbox AppMotionTick
 
+-- Keep Brick's downstream queue shallow: it is count-bounded rather than
+-- byte-bounded, so a large capacity would let the pump move many heavyweight
+-- events outside the accounted mailbox before rendering catches up.
+appEventChannelCapacity :: Int
+appEventChannelCapacity = 1
+
 -- These budgets cover retained producer-side events. The Brick channel may
--- additionally hold its fixed 512 entries and the pump may hold one event
--- while its sink is blocked.
+-- additionally hold 'appEventChannelCapacity' entries and the pump may hold
+-- one event while its sink is blocked.
 appEventMailboxCapacity :: Int
 appEventMailboxCapacity = 4096
 

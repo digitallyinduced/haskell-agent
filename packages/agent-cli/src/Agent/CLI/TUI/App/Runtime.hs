@@ -232,7 +232,7 @@ newFullscreenRuntimeWithSyntaxLoader
     motionMode
     color
     initial = do
-        events <- newBChan 512
+        events <- newBChan appEventChannelCapacity
         mailbox <- AppEventMailbox <$> newTVarIO AppEventMailboxState
             { mailboxPendingEvents = Seq.empty
             , mailboxPendingCount = 0
