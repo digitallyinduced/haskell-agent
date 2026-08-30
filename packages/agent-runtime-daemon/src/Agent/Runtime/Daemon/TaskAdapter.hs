@@ -131,6 +131,9 @@ defaultTaskLimit = 4
 maximumTaskLimit :: Int
 maximumTaskLimit = 32
 
+redactedTaskDescription :: Text
+redactedTaskDescription = "[task input redacted]"
+
 withTaskAdapter :: Journal -> TaskRunner -> (Supervisor -> IO value) -> IO value
 withTaskAdapter = withTaskAdapterQueueSize 1_024
 
@@ -285,12 +288,12 @@ executeCommand journal registry state = \case
             pure (state, Left "task id already exists")
         | otherwise -> do
             now <- getCurrentTime
-            let task =
+            let durableTask =
                     DurableTask
                         { taskId = submitted.submittedId
                         , sessionId = submitted.submittedSessionId
                         , status = TaskQueued
-                        , description = submitted.submittedPrompt
+                        , description = redactedTaskDescription
                         , workingDirectory = submitted.submittedWorkingDirectory
                         , provider = submitted.submittedProvider
                         , model = submitted.submittedModel
@@ -300,14 +303,16 @@ executeCommand journal registry state = \case
                         , updatedAt = now
                         , logTail = []
                         }
-            persisted <- persistBounded journal task
+                executionTask =
+                    durableTask {description = submitted.submittedPrompt}
+            persisted <- persistBounded journal durableTask
             let next =
                     state
                         { adapterPending = state.adapterPending Seq.|> persisted.taskId
                         , adapterTasks =
                             Map.insert persisted.taskId persisted state.adapterTasks
                         , adapterInputs =
-                            Map.insert persisted.taskId task state.adapterInputs
+                            Map.insert persisted.taskId executionTask state.adapterInputs
                         }
             pure (next, Right (taskResult "submitted" persisted))
     Cancel taskId ->
@@ -492,13 +497,17 @@ launchWorker commands completions runner task =
                             writeTQueue completions
                                 (TaskLogTruncated task.taskId task.attempt)
                         writeTQueue completions
-                            (TaskFinished task.taskId task.attempt outcome)
+                            (TaskFinished task.taskId task.attempt (redactFailure outcome))
                 logged line =
                     atomically $ do
                         accepted <-
                             tryWriteTBQueueCompat
                                 commands
-                                (TaskLogged task.taskId task.attempt line)
+                                ( TaskLogged
+                                    task.taskId
+                                    task.attempt
+                                    (redactTaskInput task.description line)
+                                )
                         unless accepted (writeTVar logTruncated True)
             result <-
                 tryAny
@@ -513,6 +522,14 @@ launchWorker commands completions runner task =
                 Right value -> finished value
         putMVar gate ()
         pure worker
+  where
+    redactFailure = \case
+        Left message -> Left (redactTaskInput task.description message)
+        Right () -> Right ()
+
+redactTaskInput :: Text -> Text -> Text
+redactTaskInput rawInput =
+    Text.replace rawInput redactedTaskDescription
 
 -- Equivalent to @tryWriteTBQueue@ for the pinned STM version, which does not
 -- export that helper. The fullness check and write are one transaction, so

@@ -24,6 +24,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (getCurrentTime)
 import Network.Socket
 import qualified Network.Socket.ByteString as Socket
@@ -889,6 +890,61 @@ main = hspec $ do
                                         unchanged.tasks Map.! TaskId "restart-task"
                                 interrupted.status `shouldBe` TaskInterrupted
                                 interrupted.attempt `shouldBe` 1
+
+        it "keeps submitted prompts out of every durable and public task representation" $
+            withSystemTempDirectory "daemon-task-input-redaction" $ \directory -> do
+                receivedPrompts <- newTQueueIO
+                let rawPrompt = "opaque-violet-7Q9-content"
+                    rawBytes = TextEncoding.encodeUtf8 rawPrompt
+                    command =
+                        object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("submit" :: Text)
+                            , "task_id" .= ("redacted-input" :: Text)
+                            , "session_id" .= ("redacted-session" :: Text)
+                            , "prompt" .= rawPrompt
+                            , "cwd" .= ("/tmp" :: Text)
+                            ]
+                    runner =
+                        TaskRunner
+                            { runTask = \task logLine -> do
+                                atomically (writeTQueue receivedPrompts task.description)
+                                logLine ("runner echoed " <> task.description)
+                                pure (Left ("failed for " <> task.description))
+                            }
+                journal <- openJournal (defaultJournalConfig directory)
+                withTaskAdapter journal runner $ \supervisor -> do
+                    submitted <-
+                        supervisor.handleCommand (CommandId "submit-redacted") command
+                    case submitted of
+                        Left message -> expectationFailure (Text.unpack message)
+                        Right value ->
+                            LBS.toStrict (encode value)
+                                `shouldSatisfy` (not . BS.isInfixOf rawBytes)
+                    timeout 1_000_000 (atomically (readTQueue receivedPrompts))
+                        `shouldReturn` Just rawPrompt
+                    waitForStatus journal (TaskId "redacted-input") TaskFailed
+                    listed <-
+                        supervisor.handleCommand
+                            (CommandId "list-redacted")
+                            (object
+                                [ "version" .= (1 :: Int)
+                                , "type" .= ("list" :: Text)
+                                ])
+                    case listed of
+                        Left message -> expectationFailure (Text.unpack message)
+                        Right value ->
+                            LBS.toStrict (encode value)
+                                `shouldSatisfy` (not . BS.isInfixOf rawBytes)
+                saved <- snapshot journal
+                let durableTask = saved.tasks Map.! TaskId "redacted-input"
+                durableTask.description `shouldBe` "[task input redacted]"
+                Text.concat durableTask.logTail
+                    `shouldSatisfy` (not . Text.isInfixOf rawPrompt)
+                BS.readFile (directory </> "snapshot.json")
+                    >>= (`shouldSatisfy` (not . BS.isInfixOf rawBytes))
+                BS.readFile (directory </> "events.jsonl")
+                    >>= (`shouldSatisfy` (not . BS.isInfixOf rawBytes))
 
         it "uses the actual agent-cli argv shape and bounds process output chunks" $
             withSystemTempDirectory "daemon-process-runner" $ \directory -> do
