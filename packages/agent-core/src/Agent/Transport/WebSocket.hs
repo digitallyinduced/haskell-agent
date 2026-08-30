@@ -19,6 +19,7 @@ module Agent.Transport.WebSocket
     , transientWsMidRunFailureLabel
     , wsHandshakeAuthFailure
     , wsHandshakeAuthFailureStatus
+    , webSocketHandshakeFailureStatus
     ) where
 
 import Agent.Error (ApiError(..))
@@ -519,8 +520,7 @@ wsConnectExceptionRetry exception
     | Just (WS.MalformedResponse responseHead _reason) <-
         Exception.fromException exception =
             let status = WS.responseCode responseHead
-                apiError = HttpError status
-                    ("WebSocket handshake returned HTTP " <> showText status)
+                apiError = webSocketHandshakeFailure status
             in if status `elem` retryableHandshakeStatusCodes
                 then RetryException apiError
                 else StopException apiError
@@ -593,7 +593,25 @@ wsHandshakeAuthFailureStatus exception = case Exception.fromException exception 
 wsHandshakeAuthFailure :: Exception.SomeException -> Maybe ApiError
 wsHandshakeAuthFailure exception = do
     status <- wsHandshakeAuthFailureStatus exception
-    pure (HttpError status ("WebSocket handshake returned HTTP " <> showText status))
+    pure (webSocketHandshakeFailure status)
+
+-- | Recognize the exact HTTP error shape emitted when a WebSocket handshake
+-- is rejected before a connection is established. A same-status application
+-- error must not be treated as safe to replay.
+webSocketHandshakeFailureStatus :: ApiError -> Maybe Int
+webSocketHandshakeFailureStatus = \case
+    HttpError status message
+        | message == webSocketHandshakeFailureMessage status ->
+            Just status
+    _ -> Nothing
+
+webSocketHandshakeFailure :: Int -> ApiError
+webSocketHandshakeFailure status =
+    HttpError status (webSocketHandshakeFailureMessage status)
+
+webSocketHandshakeFailureMessage :: Int -> Text
+webSocketHandshakeFailureMessage status =
+    "WebSocket handshake returned HTTP " <> showText status
 
 -- | Classify transient failures that happen during a WebSocket session.
 transientWsMidRunFailureLabel :: Exception.SomeException -> Maybe Text

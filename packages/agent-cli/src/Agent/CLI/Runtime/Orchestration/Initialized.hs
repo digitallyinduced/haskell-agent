@@ -162,8 +162,8 @@ import Agent.Provider
       Credential(..),
       getNextToken,
       providerSlug,
-      tokenProvider,
       tokenProviderBillingMode,
+      tokenProviderWithNextToken,
       BillingMode(ApiBilled),
       FailedCredential(credential) )
 import Agent.ReasoningEffort ()
@@ -816,7 +816,7 @@ trackCredentialAccount
     -> TokenProvider
     -> TokenProvider
 trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provider =
-    tokenProvider (tokenProviderBillingMode provider) \failed ->
+    tokenProviderWithNextToken provider \failed ->
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do
