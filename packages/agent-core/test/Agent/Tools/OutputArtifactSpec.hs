@@ -7,6 +7,10 @@ import Agent.Tools.OutputArtifact
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
+    , readToolOutput
+    , ReadArgs(..)
+    , searchToolOutput
+    , SearchArgs(..)
     , writeOutputArtifactDetailed
     , readOutputArtifact
     , writeOutputArtifact
@@ -18,6 +22,7 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent.Async (mapConcurrently)
+import qualified Data.ByteString as ByteString
 import Data.List (nub)
 import qualified Data.Text as Text
 import System.Directory
@@ -94,6 +99,43 @@ spec = describe "Agent.Tools.OutputArtifact" do
                     outputArtifactMetadata env artifact.artifactHandle
                         `shouldReturn`
                         Right (OutputArtifactMetadata artifact.artifactHandle 1 1)
+
+    it "reads bounded ranges without retaining giant lines" do
+        withTempEnv \env -> do
+            let bytes =
+                    ByteString.concat
+                        [ "first\n"
+                        , ByteString.replicate (2 * 1024 * 1024) 120
+                        , "\nlast\n"
+                        ]
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- readToolOutput env
+                        (ReadArgs artifact.artifactHandle (Just 2) (Just 1))
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value ->
+                            Text.length value < 50 * 1024
+                                && Text.isInfixOf "line omitted" value
+
+    it "searches giant lines while returning a bounded preview" do
+        withTempEnv \env -> do
+            let bytes =
+                    ByteString.concat
+                        [ ByteString.replicate (2 * 1024 * 1024) 97
+                        , "needle\n"
+                        ]
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- searchToolOutput env
+                        (SearchArgs artifact.artifactHandle "needle" False (Just 5))
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value ->
+                            Text.length value < 50 * 1024
+                                && Text.isInfixOf "2:needle" value
 
     it "exposes delegated analysis only when a spawner is available" do
         withTempEnv \env -> do
