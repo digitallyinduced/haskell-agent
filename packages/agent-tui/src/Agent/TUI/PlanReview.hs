@@ -290,7 +290,7 @@ planReviewActionLabel state = \case
         | otherwise -> "Approve anyway"
     PlanReviewRevise -> "Revise"
     PlanReviewAbandon -> "Abandon"
-    PlanReviewDefer -> "Close"
+    PlanReviewDefer -> "Defer"
 
 planSourceLines :: Text -> [Text]
 planSourceLines source
@@ -354,10 +354,12 @@ planReviewCommandForEvent state = \case
     V.EvKey V.KLeft []
         | state.reviewFocus == PlanReviewActions ->
             Just (ReviewMoveAction (-1))
+        | reviewEditing state -> Nothing
         | otherwise -> Just (ReviewSetMode PlanReviewPreview)
     V.EvKey V.KRight []
         | state.reviewFocus == PlanReviewActions ->
             Just (ReviewMoveAction 1)
+        | reviewEditing state -> Nothing
         | otherwise -> Just (ReviewSetMode PlanReviewSource)
     V.EvKey V.KEnter [] ->
         case state.reviewFocus of
@@ -561,13 +563,20 @@ chooseAction action state =
                         not (null request.requestWarnings)
                     }
         PlanReviewRevise ->
-            PlanReviewComplete $
-                PlanRevisionRequested PlanRevision
-                    { revisionRequestId = request.requestId
-                    , revisionDigest = request.requestDigest
-                    , revisionFeedback = Text.strip state.reviewFeedbackDraft
-                    , revisionComments = state.reviewComments
+            let feedback = Text.strip state.reviewFeedbackDraft
+            in if Text.null feedback && null state.reviewComments
+                then PlanReviewContinue state
+                    { reviewFocus = PlanReviewFeedback
+                    , reviewNotice =
+                        Just "Add feedback or a line comment before requesting revision."
                     }
+                else PlanReviewComplete $
+                    PlanRevisionRequested PlanRevision
+                        { revisionRequestId = request.requestId
+                        , revisionDigest = request.requestDigest
+                        , revisionFeedback = feedback
+                        , revisionComments = state.reviewComments
+                        }
         PlanReviewAbandon ->
             PlanReviewComplete $
                 PlanAbandoned request.requestId request.requestDigest

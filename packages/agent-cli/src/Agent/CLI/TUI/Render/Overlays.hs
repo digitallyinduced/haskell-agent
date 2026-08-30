@@ -6,6 +6,8 @@ module Agent.CLI.TUI.Render.Overlays
     , drawPermission
     , drawResume
     , drawChoice
+    , drawPlanReview
+    , drawQuestionnaire
     , drawTextPrompt
     , choiceRowColumns
     , onboardingVisibleRowIndices
@@ -74,7 +76,9 @@ import Agent.CLI.TUI.Motion
       motionModeForTerminalFocus )
 import Agent.TUI.Accent ( accentRail, waveHeader )
 import Agent.CLI.TUI.Types
-    ( TextInputMode(..),
+    ( PlanReviewOverlay(planReviewModel),
+      QuestionnaireOverlay(questionnaireModel),
+      TextInputMode(..),
       TextOverlay(textBody, textCursor, textInputMode, textDraft,
                   textTitle),
       ResumeOverlay(resumeOverlayBrowser),
@@ -92,7 +96,8 @@ import Agent.CLI.TUI.Types
                appTerminalFocus),
       FullscreenRuntime(runtimeMotionMode, runtimeNativeImagePreviews,
                        runtimeColor, runtimeWaveTrough),
-      Name(ChoiceRow, ConversationViewport, ConversationViewportExtent,
+      Name(ChoiceRow, PlanReviewControlName, QuestionnaireControlName,
+           ConversationViewport, ConversationViewportExtent,
            ConversationImage, AgentRow, AgentPane,
            AgentPopover, ConversationChunkCache, ConversationReserve,
            QuickStartWorktree, QuickStartResume, QuickStartCommands,
@@ -108,6 +113,8 @@ import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting,
       markdownWidgetWithLinks,
       markdownWidgetWithSyntaxHighlightingAndLinks )
+import Agent.TUI.PlanReview (planReviewWidget)
+import Agent.TUI.Questionnaire (questionnaireWidget)
 import Agent.TUI.Model
     ( conversationIsEmpty,
       reduceUi,
@@ -607,6 +614,34 @@ drawChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawChoice appState choice = case choice.choicePresentation of
     ChoiceDialog -> drawDialogChoice appState choice
     ChoiceOnboarding -> drawOnboardingChoice appState choice
+
+drawPlanReview :: AppState -> PlanReviewOverlay -> Widget Name
+drawPlanReview state overlay =
+    centerLayer $
+        hLimitPercent 92 $
+            vLimitPercent 90 $
+                overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                    withBorderStyle unicodeRounded $
+                        borderWithLabel
+                            (waitingOverlayLabel state "Review plan") $
+                            padAll 1 $
+                                planReviewWidget
+                                    PlanReviewControlName
+                                    overlay.planReviewModel
+
+drawQuestionnaire :: AppState -> QuestionnaireOverlay -> Widget Name
+drawQuestionnaire state overlay =
+    centerLayer $
+        hLimitPercent 88 $
+            vLimitPercent 86 $
+                overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                    withBorderStyle unicodeRounded $
+                        borderWithLabel
+                            (waitingOverlayLabel state "Questions") $
+                            padAll 1 $
+                                questionnaireWidget
+                                    QuestionnaireControlName
+                                    overlay.questionnaireModel
 
 drawDialogChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawDialogChoice appState choice =

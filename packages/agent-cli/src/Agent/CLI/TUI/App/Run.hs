@@ -388,6 +388,10 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appSlashIndex = 0
         , appChoice = Nothing
         , appChoiceReply = Nothing
+        , appPlanReview = Nothing
+        , appPlanReviewReply = Nothing
+        , appQuestionnaire = Nothing
+        , appQuestionnaireReply = Nothing
         , appResume = Nothing
         , appResumeReply = Nothing
         , appResumeLoad = Nothing

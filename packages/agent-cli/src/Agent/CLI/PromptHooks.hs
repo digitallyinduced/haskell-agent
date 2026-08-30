@@ -10,9 +10,28 @@ import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , requestFullscreenChoiceWithBody
+    , requestFullscreenPlanReview
+    , requestFullscreenQuestionnaire
     , requestFullscreenSecret
-    , requestFullscreenText
     , showFullscreenToolImage
+    )
+import Agent.TUI.PlanReview
+    ( PlanLineRange(..)
+    , PlanRevision(..)
+    , PlanReviewComment(..)
+    , PlanReviewId(..)
+    , PlanReviewOutcome(..)
+    , PlanReviewRequest(..)
+    , PlanReviewWarning(..)
+    )
+import Agent.TUI.Questionnaire
+    ( QuestionnaireAnswer(..)
+    , QuestionnaireId(..)
+    , QuestionnaireOption(..)
+    , QuestionnaireOutcome(..)
+    , QuestionnaireQuestion(..)
+    , QuestionnaireRequest(..)
+    , QuestionnaireSubmission(..)
     )
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -26,10 +45,13 @@ import Agent.Tools.ShowImage
     ( ImageDisplayHooks(..)
     , ImageDisplayRequest(..)
     )
+import Control.Applicative ((<|>))
 import Data.IORef (IORef, readIORef)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Crypto.Hash (Digest, SHA256, hash)
 
 fullscreenAwarePlanHooks
     :: IORef (Maybe FullscreenRuntime)
@@ -53,46 +75,18 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
         withCurrentFullscreen runtimeRef
             (hooks.planDecideExit planBody)
             \runtime ->
-                requestFullscreenChoiceWithBody
-                    runtime
-                    "Ready to implement this plan?"
-                    planBody
-                    0
-                    [ ("Approve and implement", "Leave plan mode and start implementation")
-                    , ("Request changes", "Send feedback and keep planning")
-                    , ("Cancel plan", "Leave plan mode without implementing")
-                    ]
-                    >>= \case
-                        Just 0 -> pure PlanApprove
-                        Just 1 ->
-                            requestFullscreenText
-                                runtime
-                                "Request changes"
-                                "What should be changed in the plan?"
-                                ""
-                                >>= pure
-                                    . PlanRequestChanges
-                                    . normalizePlanNotes
-                        _ -> pure PlanCancel
+                planReviewDecision
+                    <$> requestFullscreenPlanReview
+                        runtime
+                        (planReviewRequest planBody)
     , planAskQuestion = \question options ->
         withCurrentFullscreen runtimeRef
             (hooks.planAskQuestion question options)
-            \runtime -> case options of
-                [] ->
-                    requestFullscreenText
+            \runtime ->
+                questionnaireResult
+                    <$> requestFullscreenQuestionnaire
                         runtime
-                        "Planning question"
-                        question
-                        ""
-                        >>= pure . nonBlank
-                choices ->
-                    requestFullscreenChoiceWithBody
-                        runtime
-                        "Planning question"
-                        question
-                        0
-                        [(choice, "") | choice <- choices]
-                        >>= pure . (>>= (`atMay` choices))
+                        (planningQuestionnaire question options)
     }
 
 fullscreenAwareSecretHooks
@@ -150,19 +144,102 @@ withCurrentFullscreen runtimeRef fallback fullscreenAction = do
         Nothing -> fallback
         Just active -> fullscreenAction active
 
-normalizePlanNotes :: Maybe Text -> Text
-normalizePlanNotes =
-    fromMaybe "(no notes)" . nonBlank
-
 nonBlank :: Maybe Text -> Maybe Text
 nonBlank =
     (>>= \text ->
         let stripped = Text.strip text
         in if Text.null stripped then Nothing else Just stripped)
 
-atMay :: Int -> [a] -> Maybe a
-atMay index values
-    | index < 0 = Nothing
-    | otherwise = case drop index values of
-        value : _ -> Just value
-        [] -> Nothing
+planReviewRequest :: Text -> PlanReviewRequest
+planReviewRequest planBody =
+    PlanReviewRequest
+        { requestId = PlanReviewId ("plan-review:" <> digest)
+        , requestTitle = "Ready to implement this plan?"
+        , requestMarkdown = planBody
+        , requestDigest = digest
+        , requestWarnings =
+            [ PlanReviewWarning
+                { warningCode = "empty-plan"
+                , warningMessage = "The proposed plan is empty."
+                }
+            | Text.null (Text.strip planBody)
+            ]
+        }
+  where
+    digest = sha256Text planBody
+
+planReviewDecision :: PlanReviewOutcome -> PlanDecision
+planReviewDecision = \case
+    PlanApproved _ -> PlanApprove
+    PlanRevisionRequested revision ->
+        PlanRequestChanges (revisionNotes revision)
+    PlanAbandoned _ _ -> PlanCancel
+    -- The current PlanMode hook predates a durable defer decision. Closing the
+    -- fullscreen review therefore takes the same safe, non-implementation
+    -- path as cancellation; callers of requestFullscreenPlanReview retain the
+    -- distinct typed outcome.
+    PlanDeferred _ -> PlanCancel
+    PlanReviewExternallyResolved _ -> PlanCancel
+
+revisionNotes :: PlanRevision -> Text
+revisionNotes revision =
+    Text.intercalate "\n" $
+        filter (not . Text.null)
+            (Text.strip revision.revisionFeedback
+                : map renderComment revision.revisionComments)
+  where
+    renderComment comment =
+        renderRange comment.commentRange <> ": " <> comment.commentBody
+    renderRange range
+        | range.rangeStart == range.rangeEnd =
+            "Line " <> Text.pack (show range.rangeStart)
+        | otherwise =
+            "Lines "
+                <> Text.pack (show range.rangeStart)
+                <> "-"
+                <> Text.pack (show range.rangeEnd)
+
+planningQuestionnaire :: Text -> [Text] -> QuestionnaireRequest
+planningQuestionnaire question choices =
+    QuestionnaireRequest
+        { requestId =
+            QuestionnaireId
+                ("planning-question:" <> sha256Text payload)
+        , requestQuestions =
+            [ QuestionnaireQuestion
+                { questionText = question
+                , questionOptions =
+                    [ QuestionnaireOption
+                        { optionLabel = choice
+                        , optionDescription = ""
+                        , optionPreview = Nothing
+                        }
+                    | choice <- choices
+                    ]
+                , questionMultiSelect = False
+                }
+            ]
+        }
+  where
+    payload = Text.intercalate "\NUL" (question : choices)
+
+questionnaireResult :: QuestionnaireOutcome -> Maybe Text
+questionnaireResult = \case
+    QuestionnaireSubmitted submission ->
+        listToMaybe submission.submissionAnswers >>= answerText
+    QuestionnaireClarificationRequested _ clarification ->
+        nonBlank (Just clarification)
+    QuestionnaireFinished _ -> Nothing
+    QuestionnaireCancelled _ -> Nothing
+    QuestionnaireTimeout _ -> Nothing
+    QuestionnaireExternallyResolved _ -> Nothing
+  where
+    answerText answer =
+        nonBlank $
+            answer.answerOther
+                <|> listToMaybe answer.answerLabels
+
+sha256Text :: Text -> Text
+sha256Text value =
+    Text.pack $
+        show (hash (TextEncoding.encodeUtf8 value) :: Digest SHA256)

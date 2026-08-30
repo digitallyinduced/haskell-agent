@@ -49,6 +49,10 @@ module Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenPlanReview
+    , dismissFullscreenPlanReview
+    , requestFullscreenQuestionnaire
+    , dismissFullscreenQuestionnaire
     , requestFullscreenOnboarding
     , requestFullscreenResume
     , requestFullscreenSecret

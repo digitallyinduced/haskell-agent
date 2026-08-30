@@ -17,6 +17,8 @@ module Agent.CLI.TUI.Types
     , Name(..)
     , PendingAppEvent(..)
     , PendingUiEvent(..)
+    , PlanReviewOverlay(..)
+    , QuestionnaireOverlay(..)
     , ResumeOverlay(..)
     , SyntaxHighlighterState(..)
     , TerminalFocus(..)
@@ -44,6 +46,20 @@ import Agent.CLI.TUI.History
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
+import Agent.TUI.PlanReview
+    ( PlanReviewControl
+    , PlanReviewId
+    , PlanReviewOutcome
+    , PlanReviewRequest
+    , PlanReviewState
+    )
+import Agent.TUI.Questionnaire
+    ( QuestionnaireControl
+    , QuestionnaireId
+    , QuestionnaireOutcome
+    , QuestionnaireRequest
+    , QuestionnaireState
+    )
 import Agent.Syntax (SyntaxHighlighter)
 import Agent.TUI.Motion (MotionDemand, MotionMode)
 import Brick (Location)
@@ -98,6 +114,8 @@ data Name
     | QuickStartCommands
     | QuickStartModel
     | ChoiceRow !Int
+    | PlanReviewControlName !PlanReviewControl
+    | QuestionnaireControlName !QuestionnaireControl
     | ResumeViewport
     | ResumeRow !Text
     | ResumeSearchCursor
@@ -126,6 +144,14 @@ data AppEvent
         !Text
         !Text
         !(TMVar (Maybe Text))
+    | AppAskPlanReview
+        !PlanReviewRequest
+        !(TMVar PlanReviewOutcome)
+    | AppDismissPlanReview !PlanReviewId
+    | AppAskQuestionnaire
+        !QuestionnaireRequest
+        !(TMVar QuestionnaireOutcome)
+    | AppDismissQuestionnaire !QuestionnaireId
     | AppAskResume
         !ResumeBrowser
         !(Text -> IO (Either Text ResumeEntry))
@@ -285,6 +311,10 @@ data AppState = AppState
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
     , appChoiceReply :: !(Maybe (Maybe Int -> IO ()))
+    , appPlanReview :: !(Maybe PlanReviewOverlay)
+    , appPlanReviewReply :: !(Maybe (TMVar PlanReviewOutcome))
+    , appQuestionnaire :: !(Maybe QuestionnaireOverlay)
+    , appQuestionnaireReply :: !(Maybe (TMVar QuestionnaireOutcome))
     , appResume :: !(Maybe ResumeOverlay)
     , appResumeReply :: !(Maybe (TMVar (Maybe ResumeEntry)))
     , appResumeLoad :: !(Maybe (Text -> IO (Either Text ResumeEntry)))
@@ -361,6 +391,22 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceIndex :: !Int
     , choiceRows :: ![(Text, Text)]
     , choiceCloseOnTurnEnd :: !Bool
+    }
+
+-- | CLI-owned editing cursors wrapped around the transport-independent
+-- plan-review model. Draft text itself remains in 'PlanReviewState'.
+data PlanReviewOverlay = PlanReviewOverlay
+    { planReviewModel :: !PlanReviewState
+    , planFeedbackCursor :: !Int
+    , planCommentCursor :: !Int
+    }
+
+-- | CLI-owned editing cursors wrapped around the transport-independent
+-- questionnaire model. Other-answer cursors are keyed by question index.
+data QuestionnaireOverlay = QuestionnaireOverlay
+    { questionnaireModel :: !QuestionnaireState
+    , questionnaireOtherCursors :: !(Map.Map Int Int)
+    , questionnaireChatCursor :: !Int
     }
 
 data ResumeOverlay = ResumeOverlay

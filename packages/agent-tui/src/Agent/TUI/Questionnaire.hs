@@ -334,10 +334,12 @@ questionnaireCommandForEvent state = \case
     V.EvKey V.KLeft []
         | state.questionnaireFocus == QuestionnaireActions ->
             Just (QuestionsMoveAction (-1))
+        | questionnaireEditing state -> Nothing
         | otherwise -> Just (QuestionsMoveTab (-1))
     V.EvKey V.KRight []
         | state.questionnaireFocus == QuestionnaireActions ->
             Just (QuestionsMoveAction 1)
+        | questionnaireEditing state -> Nothing
         | otherwise -> Just (QuestionsMoveTab 1)
     V.EvKey V.KUp []
         | state.questionnaireFocus == QuestionnaireOptions ->

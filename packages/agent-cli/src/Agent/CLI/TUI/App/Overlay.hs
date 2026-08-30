@@ -114,6 +114,34 @@ import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
+import Agent.TUI.PlanReview
+    ( PlanReviewCommand(..)
+    , PlanReviewControl(..)
+    , PlanReviewFocus(..)
+    , PlanReviewId
+    , PlanReviewOutcome(..)
+    , PlanReviewRequest(..)
+    , PlanReviewState(..)
+    , PlanReviewTransition(..)
+    , initialPlanReview
+    , planReviewCommandForControl
+    , planReviewCommandForEvent
+    , stepPlanReview
+    )
+import Agent.TUI.Questionnaire
+    ( QuestionnaireCommand(..)
+    , QuestionnaireControl(..)
+    , QuestionnaireFocus(..)
+    , QuestionnaireId
+    , QuestionnaireOutcome(..)
+    , QuestionnaireRequest(..)
+    , QuestionnaireState(..)
+    , QuestionnaireTransition(..)
+    , initialQuestionnaire
+    , questionnaireCommandForControl
+    , questionnaireCommandForEvent
+    , stepQuestionnaire
+    )
 import Agent.TUI.Motion ( MotionDemand(..)
     , MotionMode(..)
     , backgroundIndicator
@@ -137,7 +165,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
-import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , tryPutTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -393,6 +421,395 @@ confirmResumeId sessionId = do
                             }
                     resolveResume True
 
+handlePlanReviewKey :: V.Event -> EventM Name AppState ()
+handlePlanReviewKey event = do
+    state <- get
+    case state.appPlanReview of
+        Nothing -> pure ()
+        Just overlay
+            | isPageUp event ->
+                vScrollPage
+                    (viewportScroll
+                        (PlanReviewControlName ReviewViewport))
+                    Up
+            | isPageDown event ->
+                vScrollPage
+                    (viewportScroll
+                        (PlanReviewControlName ReviewViewport))
+                    Down
+            | Just amount <- mouseScrollAmount event ->
+                vScrollBy
+                    (viewportScroll
+                        (PlanReviewControlName ReviewViewport))
+                    amount
+            | eventEditsPlanReview overlay event ->
+                modify' \current ->
+                    current
+                        { appPlanReview =
+                            editPlanReviewOverlay event overlay
+                                <|> current.appPlanReview
+                        }
+            | otherwise ->
+                mapM_
+                    applyPlanReviewCommand
+                    (planReviewCommandForEvent
+                        overlay.planReviewModel
+                        event)
+
+openQuestionnaireOverlay
+    :: QuestionnaireRequest
+    -> TMVar QuestionnaireOutcome
+    -> EventM Name AppState ()
+openQuestionnaireOverlay request reply = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    case (state.appQuestionnaire, state.appQuestionnaireReply) of
+        (Just previous, Just previousReply) ->
+            liftIO $ atomically $ void $
+                tryPutTMVar
+                    previousReply
+                    (QuestionnaireExternallyResolved
+                        previous.questionnaireModel.questionnaireRequest.requestId)
+        _ -> pure ()
+    modify' \current ->
+        current
+            { appQuestionnaire =
+                Just QuestionnaireOverlay
+                    { questionnaireModel = initialQuestionnaire request
+                    , questionnaireOtherCursors = Map.empty
+                    , questionnaireChatCursor = 0
+                    }
+            , appQuestionnaireReply = Just reply
+            , appAgentHover = Nothing
+            }
+    vScrollToBeginning $
+        viewportScroll (QuestionnaireControlName QuestionsViewport)
+
+dismissQuestionnaireOverlay
+    :: QuestionnaireId
+    -> EventM Name AppState ()
+dismissQuestionnaireOverlay =
+    applyQuestionnaireCommand . QuestionsDismissExternal
+
+openPlanReviewOverlay
+    :: PlanReviewRequest
+    -> TMVar PlanReviewOutcome
+    -> EventM Name AppState ()
+openPlanReviewOverlay request reply = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    case (state.appPlanReview, state.appPlanReviewReply) of
+        (Just previous, Just previousReply) ->
+            liftIO $ atomically $ void $
+                tryPutTMVar
+                    previousReply
+                    (PlanReviewExternallyResolved
+                        previous.planReviewModel.reviewRequest.requestId)
+        _ -> pure ()
+    modify' \current ->
+        current
+            { appPlanReview =
+                Just PlanReviewOverlay
+                    { planReviewModel = initialPlanReview request
+                    , planFeedbackCursor = 0
+                    , planCommentCursor = 0
+                    }
+            , appPlanReviewReply = Just reply
+            , appAgentHover = Nothing
+            }
+    vScrollToBeginning $
+        viewportScroll (PlanReviewControlName ReviewViewport)
+
+dismissPlanReviewOverlay
+    :: PlanReviewId
+    -> EventM Name AppState ()
+dismissPlanReviewOverlay =
+    applyPlanReviewCommand . ReviewDismissExternal
+
+handleQuestionnaireKey :: V.Event -> EventM Name AppState ()
+handleQuestionnaireKey event = do
+    state <- get
+    case state.appQuestionnaire of
+        Nothing -> pure ()
+        Just overlay
+            | isPageUp event ->
+                vScrollPage
+                    (viewportScroll
+                        (QuestionnaireControlName QuestionsViewport))
+                    Up
+            | isPageDown event ->
+                vScrollPage
+                    (viewportScroll
+                        (QuestionnaireControlName QuestionsViewport))
+                    Down
+            | Just amount <- mouseScrollAmount event ->
+                vScrollBy
+                    (viewportScroll
+                        (QuestionnaireControlName QuestionsViewport))
+                    amount
+            | eventEditsQuestionnaire overlay event ->
+                modify' \current ->
+                    current
+                        { appQuestionnaire =
+                            editQuestionnaireOverlay event overlay
+                                <|> current.appQuestionnaire
+                        }
+            | otherwise ->
+                mapM_
+                    applyQuestionnaireCommand
+                    (questionnaireCommandForEvent
+                        overlay.questionnaireModel
+                        event)
+
+applyPlanReviewControl
+    :: PlanReviewControl
+    -> EventM Name AppState ()
+applyPlanReviewControl =
+    applyPlanReviewCommand . planReviewCommandForControl
+
+applyQuestionnaireControl
+    :: QuestionnaireControl
+    -> EventM Name AppState ()
+applyQuestionnaireControl =
+    applyQuestionnaireCommand . questionnaireCommandForControl
+
+applyPlanReviewCommand
+    :: PlanReviewCommand
+    -> EventM Name AppState ()
+applyPlanReviewCommand command = do
+    state <- get
+    case state.appPlanReview of
+        Nothing -> pure ()
+        Just overlay ->
+            case stepPlanReview command overlay.planReviewModel of
+                PlanReviewContinue model ->
+                    modify' \current ->
+                        current
+                            { appPlanReview =
+                                Just $
+                                    resetPlanCommentCursorIfCleared
+                                        overlay
+                                            { planReviewModel = model
+                                            }
+                            }
+                PlanReviewComplete outcome ->
+                    resolvePlanReview outcome
+
+applyQuestionnaireCommand
+    :: QuestionnaireCommand
+    -> EventM Name AppState ()
+applyQuestionnaireCommand command = do
+    state <- get
+    case state.appQuestionnaire of
+        Nothing -> pure ()
+        Just overlay ->
+            case stepQuestionnaire command overlay.questionnaireModel of
+                QuestionnaireContinue model ->
+                    modify' \current ->
+                        current
+                            { appQuestionnaire =
+                                Just overlay
+                                    { questionnaireModel = model
+                                    }
+                            }
+                QuestionnaireComplete outcome ->
+                    resolveQuestionnaire outcome
+
+resolvePlanReview
+    :: PlanReviewOutcome
+    -> EventM Name AppState ()
+resolvePlanReview outcome = do
+    state <- get
+    liftIO $
+        mapM_
+            (\reply -> atomically (void (tryPutTMVar reply outcome)))
+            state.appPlanReviewReply
+    modify' \current ->
+        current
+            { appPlanReview = Nothing
+            , appPlanReviewReply = Nothing
+            }
+    resumeNativeProgressIfRunning
+
+resolveQuestionnaire
+    :: QuestionnaireOutcome
+    -> EventM Name AppState ()
+resolveQuestionnaire outcome = do
+    state <- get
+    liftIO $
+        mapM_
+            (\reply -> atomically (void (tryPutTMVar reply outcome)))
+            state.appQuestionnaireReply
+    modify' \current ->
+        current
+            { appQuestionnaire = Nothing
+            , appQuestionnaireReply = Nothing
+            }
+    resumeNativeProgressIfRunning
+
+eventEditsPlanReview :: PlanReviewOverlay -> V.Event -> Bool
+eventEditsPlanReview overlay event =
+    overlay.planReviewModel.reviewFocus
+        `elem` [PlanReviewFeedback, PlanReviewCommentEditor]
+        && isTextEditEvent event
+
+eventEditsQuestionnaire :: QuestionnaireOverlay -> V.Event -> Bool
+eventEditsQuestionnaire overlay event =
+    overlay.questionnaireModel.questionnaireFocus
+        `elem` [QuestionnaireOther, QuestionnaireChat]
+        && isTextEditEvent event
+
+-- Enter and Esc belong to the overlay reducer. Shift-Enter remains a text
+-- edit, allowing multiline feedback without making dismissal ambiguous.
+isTextEditEvent :: V.Event -> Bool
+isTextEditEvent = \case
+    V.EvKey V.KEnter [] -> False
+    V.EvKey V.KEsc [] -> False
+    V.EvKey (V.KChar '\t') [] -> False
+    V.EvKey V.KBackTab [] -> False
+    event -> isJust (applyTextPromptEdit event emptyTextOverlay)
+
+editPlanReviewOverlay
+    :: V.Event
+    -> PlanReviewOverlay
+    -> Maybe PlanReviewOverlay
+editPlanReviewOverlay event overlay =
+    case overlay.planReviewModel.reviewFocus of
+        PlanReviewFeedback -> do
+            (draft, cursor) <-
+                editDraft
+                    event
+                    overlay.planReviewModel.reviewFeedbackDraft
+                    overlay.planFeedbackCursor
+            model <- continuingPlanReview $
+                stepPlanReview
+                    (ReviewSetFeedbackDraft draft)
+                    overlay.planReviewModel
+            pure overlay
+                { planReviewModel = model
+                , planFeedbackCursor = cursor
+                }
+        PlanReviewCommentEditor -> do
+            (draft, cursor) <-
+                editDraft
+                    event
+                    overlay.planReviewModel.reviewCommentDraft
+                    overlay.planCommentCursor
+            model <- continuingPlanReview $
+                stepPlanReview
+                    (ReviewSetCommentDraft draft)
+                    overlay.planReviewModel
+            pure overlay
+                { planReviewModel = model
+                , planCommentCursor = cursor
+                }
+        _ -> Nothing
+
+editQuestionnaireOverlay
+    :: V.Event
+    -> QuestionnaireOverlay
+    -> Maybe QuestionnaireOverlay
+editQuestionnaireOverlay event overlay =
+    case model.questionnaireFocus of
+        QuestionnaireOther -> do
+            let questionIndex = model.questionnaireQuestionIndex
+                draft =
+                    Map.findWithDefault
+                        ""
+                        questionIndex
+                        model.questionnaireOtherDrafts
+                cursor =
+                    Map.findWithDefault
+                        (Text.length draft)
+                        questionIndex
+                        overlay.questionnaireOtherCursors
+            (nextDraft, nextCursor) <- editDraft event draft cursor
+            nextModel <- continuingQuestionnaire $
+                stepQuestionnaire
+                    (QuestionsSetOtherDraft nextDraft)
+                    model
+            pure overlay
+                { questionnaireModel = nextModel
+                , questionnaireOtherCursors =
+                    Map.insert
+                        questionIndex
+                        nextCursor
+                        overlay.questionnaireOtherCursors
+                }
+        QuestionnaireChat -> do
+            (draft, cursor) <-
+                editDraft
+                    event
+                    model.questionnaireChatDraft
+                    overlay.questionnaireChatCursor
+            nextModel <- continuingQuestionnaire $
+                stepQuestionnaire
+                    (QuestionsSetChatDraft draft)
+                    model
+            pure overlay
+                { questionnaireModel = nextModel
+                , questionnaireChatCursor = cursor
+                }
+        _ -> Nothing
+  where
+    model = overlay.questionnaireModel
+
+editDraft :: V.Event -> Text -> Int -> Maybe (Text, Int)
+editDraft event draft cursor = do
+    edited <-
+        applyTextPromptEdit
+            event
+            emptyTextOverlay
+                { textDraft = draft
+                , textCursor = cursor
+                }
+    pure (edited.textDraft, edited.textCursor)
+
+emptyTextOverlay :: TextOverlay
+emptyTextOverlay = TextOverlay
+    { textTitle = ""
+    , textBody = ""
+    , textDraft = ""
+    , textCursor = 0
+    , textInputMode = TextInputPlain
+    }
+
+continuingPlanReview
+    :: PlanReviewTransition
+    -> Maybe PlanReviewState
+continuingPlanReview = \case
+    PlanReviewContinue state -> Just state
+    PlanReviewComplete _ -> Nothing
+
+continuingQuestionnaire
+    :: QuestionnaireTransition
+    -> Maybe QuestionnaireState
+continuingQuestionnaire = \case
+    QuestionnaireContinue state -> Just state
+    QuestionnaireComplete _ -> Nothing
+
+resetPlanCommentCursorIfCleared
+    :: PlanReviewOverlay
+    -> PlanReviewOverlay
+resetPlanCommentCursorIfCleared overlay
+    | Text.null overlay.planReviewModel.reviewCommentDraft =
+        overlay { planCommentCursor = 0 }
+    | otherwise = overlay
+
+isPageUp :: V.Event -> Bool
+isPageUp (V.EvKey V.KPageUp []) = True
+isPageUp _ = False
+
+isPageDown :: V.Event -> Bool
+isPageDown (V.EvKey V.KPageDown []) = True
+isPageDown _ = False
+
+mouseScrollAmount :: V.Event -> Maybe Int
+mouseScrollAmount = \case
+    V.EvMouseDown _ _ V.BScrollUp _ -> Just (-mouseScrollLines)
+    V.EvMouseDown _ _ V.BScrollDown _ -> Just mouseScrollLines
+    _ -> Nothing
+
 handleChoiceKey :: V.Event -> EventM Name AppState ()
 handleChoiceKey = \case
     V.EvKey V.KUp [] -> moveChoice (-1)
@@ -482,6 +899,10 @@ activateControl = \case
             ReplChooseModel
     ChoiceRow index ->
         confirmChoiceAt index
+    PlanReviewControlName control ->
+        applyPlanReviewControl control
+    QuestionnaireControlName control ->
+        applyQuestionnaireControl control
     ResumeRow sessionId ->
         confirmResumeId sessionId
     CodeCopy target blockId codeIndex ->
@@ -509,6 +930,8 @@ isInteractiveControl = \case
     QuickStartCommands -> True
     QuickStartModel -> True
     ChoiceRow _ -> True
+    PlanReviewControlName _ -> True
+    QuestionnaireControlName _ -> True
     ResumeRow _ -> True
     CodeCopy _ _ _ -> True
     _ -> False

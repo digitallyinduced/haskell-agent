@@ -212,7 +212,9 @@ handleEvent event = do
     when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
     state <- get
     let visible =
-            isNothing state.appTextPrompt
+            isNothing state.appPlanReview
+                && isNothing state.appQuestionnaire
+                && isNothing state.appTextPrompt
                 && isNothing state.appChoice
                 && isNothing state.appResume
                 && isNothing state.appUi.uiPermission
@@ -683,6 +685,14 @@ handleEventInner event = case event of
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
+    AppEvent (AppAskPlanReview request reply) ->
+        openPlanReviewOverlay request reply
+    AppEvent (AppDismissPlanReview requestId) ->
+        dismissPlanReviewOverlay requestId
+    AppEvent (AppAskQuestionnaire request reply) ->
+        openQuestionnaireOverlay request reply
+    AppEvent (AppDismissQuestionnaire requestId) ->
+        dismissQuestionnaireOverlay requestId
     AppEvent
         (AppAskResume browser loadEntry deleteEntry searchEntries reply) -> do
         state <- get
@@ -731,8 +741,33 @@ handleEventInner event = case event of
     MouseDown name button _ _ -> do
         unless (isAgentHoverSurface name) clearAgentHover
         state <- get
-        case state.appResume of
-            Just _ ->
+        case ( state.appPlanReview
+            , state.appQuestionnaire
+            , state.appResume
+             ) of
+            (Just _, _, _) ->
+                case (name, button) of
+                    (control@(PlanReviewControlName _), V.BLeft) ->
+                        Composer.handleControlMouseDown control
+                    (_, V.BScrollUp) ->
+                        handlePlanReviewKey
+                            (V.EvMouseDown 0 0 V.BScrollUp [])
+                    (_, V.BScrollDown) ->
+                        handlePlanReviewKey
+                            (V.EvMouseDown 0 0 V.BScrollDown [])
+                    _ -> pure ()
+            (Nothing, Just _, _) ->
+                case (name, button) of
+                    (control@(QuestionnaireControlName _), V.BLeft) ->
+                        Composer.handleControlMouseDown control
+                    (_, V.BScrollUp) ->
+                        handleQuestionnaireKey
+                            (V.EvMouseDown 0 0 V.BScrollUp [])
+                    (_, V.BScrollDown) ->
+                        handleQuestionnaireKey
+                            (V.EvMouseDown 0 0 V.BScrollDown [])
+                    _ -> pure ()
+            (Nothing, Nothing, Just _) ->
                 case (name, button) of
                     (ResumeRow sessionId, V.BLeft) ->
                         Composer.handleControlMouseDown
@@ -744,7 +779,7 @@ handleEventInner event = case event of
                         handleResumeKey
                             (V.EvMouseDown 0 0 V.BScrollDown [])
                     _ -> pure ()
-            Nothing ->
+            (Nothing, Nothing, Nothing) ->
                 case ( state.appTextPrompt
                      , state.appChoice
                      , state.appUi.uiPermission
@@ -880,9 +915,11 @@ handleEventInner event = case event of
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
-        case state.appResume of
-            Just _ -> handleResumeKey vtyEvent
-            Nothing ->
+        case (state.appPlanReview, state.appQuestionnaire, state.appResume) of
+            (Just _, _, _) -> handlePlanReviewKey vtyEvent
+            (Nothing, Just _, _) -> handleQuestionnaireKey vtyEvent
+            (Nothing, Nothing, Just _) -> handleResumeKey vtyEvent
+            (Nothing, Nothing, Nothing) ->
                 case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
                     (Just _, _, _) -> handleTextPromptKey vtyEvent
                     (Nothing, Just _, _) -> handleChoiceKey vtyEvent

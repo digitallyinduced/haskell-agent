@@ -82,7 +82,9 @@ import Agent.CLI.TUI.Motion
       motionModeForTerminalFocus )
 import Agent.TUI.Accent ( accentRail, waveHeader )
 import Agent.CLI.TUI.Types
-    ( TextInputMode(..),
+    ( PlanReviewOverlay,
+      QuestionnaireOverlay,
+      TextInputMode(..),
       TextOverlay(textBody, textCursor, textInputMode, textDraft,
                   textTitle),
       ResumeOverlay(resumeOverlayBrowser),
@@ -93,6 +95,7 @@ import Agent.CLI.TUI.Types
                  agentHoverPaneWidth, agentHoverUpperLeft),
       AppState(appRuntime, appHistorySelectedBlock, appSyntaxHighlighter,
                appImagePreviews, appSubmittedImagePreviews, appResume,
+               appPlanReview, appQuestionnaire,
                appDictation, appTextPrompt, appChoice,
                appMotionElapsedMillis, appCompletionFlashes, appHoveredControl,
                appPressedControl, appAgentSelected, appConversationAnchor,
@@ -312,7 +315,8 @@ import qualified Graphics.Vty.CrossPlatform as Vty ()
 import Agent.CLI.TUI.Render.Blocks (todoStatusAttr)
 import Agent.CLI.TUI.Render.Overlays
     ( drawNotice, drawFollowStatus, drawFooter, drawPermission, drawResume
-    , drawChoice, drawTextPrompt, choiceRowColumns, onboardingVisibleRowIndices
+    , drawChoice, drawPlanReview, drawQuestionnaire, drawTextPrompt
+    , choiceRowColumns, onboardingVisibleRowIndices
     , normalizeTextOverlayInsertion, maskedSecretText, textOverlayDisplayText
     , resumeSearchCursorColumn )
 import Agent.CLI.TUI.Render.Transcript
@@ -327,18 +331,26 @@ import Agent.CLI.TUI.Render.Workspace
 drawApp :: AppState -> [Widget Name]
 drawApp state =
     map fullscreenBounds $
-        case state.appResume of
-            Just resume ->
-                drawResume state resume : dimmedMainLayers
+        case state.appPlanReview of
+            Just review ->
+                drawPlanReview state review : dimmedMainLayers
             Nothing ->
-                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-                    (Just prompt, _, _) ->
-                        drawTextPrompt state prompt : dimmedMainLayers
-                    (Nothing, Just choice, _) ->
-                        drawChoice state choice : dimmedMainLayers
-                    (Nothing, Nothing, Just permission) ->
-                        drawPermission state permission : dimmedMainLayers
-                    (Nothing, Nothing, Nothing) -> interactiveLayers
+                case state.appQuestionnaire of
+                    Just questionnaire ->
+                        drawQuestionnaire state questionnaire : dimmedMainLayers
+                    Nothing ->
+                        case state.appResume of
+                            Just resume ->
+                                drawResume state resume : dimmedMainLayers
+                            Nothing ->
+                                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+                                    (Just prompt, _, _) ->
+                                        drawTextPrompt state prompt : dimmedMainLayers
+                                    (Nothing, Just choice, _) ->
+                                        drawChoice state choice : dimmedMainLayers
+                                    (Nothing, Nothing, Just permission) ->
+                                        drawPermission state permission : dimmedMainLayers
+                                    (Nothing, Nothing, Nothing) -> interactiveLayers
   where
     mainLayers = stickyPromptLayers state <> [drawMain state]
     interactiveLayers =

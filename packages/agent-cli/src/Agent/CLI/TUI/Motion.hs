@@ -169,7 +169,9 @@ appNextDeadlineMillis state =
 
 userActionPending :: AppState -> Bool
 userActionPending state =
-    isJust state.appTextPrompt
+    isJust state.appPlanReview
+        || isJust state.appQuestionnaire
+        || isJust state.appTextPrompt
         || isJust state.appChoice
         || isJust state.appResume
         || isJust state.appUi.uiPermission

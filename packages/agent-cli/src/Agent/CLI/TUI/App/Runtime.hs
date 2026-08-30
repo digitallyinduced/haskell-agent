@@ -117,6 +117,16 @@ import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
+import Agent.TUI.PlanReview
+    ( PlanReviewId
+    , PlanReviewOutcome
+    , PlanReviewRequest
+    )
+import Agent.TUI.Questionnaire
+    ( QuestionnaireId
+    , QuestionnaireOutcome
+    , QuestionnaireRequest
+    )
 import Agent.TUI.Motion ( MotionDemand(..)
     , MotionMode(..)
     , backgroundIndicator
@@ -142,7 +152,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Notification
-    ( AttentionRequest(PermissionRequested)
+    ( AttentionRequest(InputRequested, PermissionRequested)
     , notifyAttention
     )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
@@ -849,6 +859,47 @@ requestFullscreenChoiceWithBody runtime title body initial rows = do
     enqueueAppEvent runtime
         (AppAskChoice ChoiceDialog title body initial rows reply)
     atomically (readTMVar reply)
+
+-- | Present a correlated, structured plan review in the retained fullscreen
+-- application. The request remains transport-independent and every terminal
+-- action is returned as a typed outcome.
+requestFullscreenPlanReview
+    :: FullscreenRuntime
+    -> PlanReviewRequest
+    -> IO PlanReviewOutcome
+requestFullscreenPlanReview runtime request = do
+    reply <- newEmptyTMVarIO
+    notifyAttention stderr InputRequested
+    enqueueAppEvent runtime (AppAskPlanReview request reply)
+    atomically (readTMVar reply)
+
+-- | Dismiss only the matching plan-review request. This is safe to call after
+-- another actor has already resolved a request.
+dismissFullscreenPlanReview
+    :: FullscreenRuntime
+    -> PlanReviewId
+    -> IO ()
+dismissFullscreenPlanReview runtime =
+    enqueueAppEvent runtime . AppDismissPlanReview
+
+-- | Present a complete structured question batch in one fullscreen overlay.
+requestFullscreenQuestionnaire
+    :: FullscreenRuntime
+    -> QuestionnaireRequest
+    -> IO QuestionnaireOutcome
+requestFullscreenQuestionnaire runtime request = do
+    reply <- newEmptyTMVarIO
+    notifyAttention stderr InputRequested
+    enqueueAppEvent runtime (AppAskQuestionnaire request reply)
+    atomically (readTMVar reply)
+
+-- | Dismiss only the matching questionnaire request.
+dismissFullscreenQuestionnaire
+    :: FullscreenRuntime
+    -> QuestionnaireId
+    -> IO ()
+dismissFullscreenQuestionnaire runtime =
+    enqueueAppEvent runtime . AppDismissQuestionnaire
 
 requestFullscreenOnboarding
     :: FullscreenRuntime
