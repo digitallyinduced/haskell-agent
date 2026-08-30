@@ -1016,7 +1016,9 @@ spec = do
             [() | ToolStarted started <- recorded, started.callId == "fc-1"]
                 `shouldBe` [()]
             filter (not . isToolStartedEvent) recorded `shouldBe`
-                [ActivityUpdated "Writing shell call…"]
+                [ shellArgumentsStarted
+                , ActivityUpdated "Writing shell call…"
+                ]
 
         it "resubmits after a mid-response socket drop behind a restart boundary" do
             attempts <- newIORef (0 :: Int)
@@ -1089,7 +1091,8 @@ spec = do
             [() | ToolStarted started <- recorded, started.callId == "fc-1"]
                 `shouldBe` [()]
             filter (not . isToolStartedEvent) recorded `shouldBe`
-                [ ActivityUpdated "Writing shell call…"
+                [ shellArgumentsStarted
+                , ActivityUpdated "Writing shell call…"
                 , ActivityUpdated
                     "Connection lost mid-response (Codex connection limit reached); reconnecting in 0s (attempt 1)…"
                 , ResponseAttemptDiscarded
@@ -1791,6 +1794,15 @@ isToolStartedEvent :: LoopEvent -> Bool
 isToolStartedEvent = \case
     ToolStarted _ -> True
     _ -> False
+
+shellArgumentsStarted :: LoopEvent
+shellArgumentsStarted =
+    ToolArgumentEvent ToolArgumentsStarted
+        { argumentStreamRefs = [ToolCallStreamOutput 0]
+        , argumentStreamCallId = "fc-1"
+        , argumentStreamName = Just "shell"
+        , argumentStreamArguments = "{}"
+        }
 
 submitWithState
     :: IORef [ResponseItem]
