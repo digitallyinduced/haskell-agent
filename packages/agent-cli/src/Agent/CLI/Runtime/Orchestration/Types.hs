@@ -11,12 +11,12 @@ import Agent.CLI.AgentSessions ( SessionThreadManager )
 import Agent.Error ( ApiError )
 import Agent.Provider ( Credential, TokenProvider )
 import Control.Concurrent.MVar ( MVar )
+import Data.IORef ( IORef )
 import Data.Text ( Text )
 import System.IO ( Handle, stderr, stdout )
 import System.OsPath ( OsPath )
 
 import qualified Agent.MCP as MCP
-import Data.IORef (IORef)
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -31,7 +31,9 @@ data AccountSwitchRequest
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
     , processSessionThreads :: !SessionThreadManager
-    , processCleanupStarted :: !(IORef Bool)
+    -- | Starts the process-scoped stale-resource cleanup exactly once. Its
+    -- owner joins it when the process runtime closes.
+    , processStartCleanup :: !(IO () -> IO ())
     , processMcpElicitation
         :: !(IORef (Maybe (MCP.McpElicitRequest -> IO MCP.McpElicitResult)))
     -- ^ Interactive elicitation UI installed by the active session, shared by

@@ -100,7 +100,8 @@ import Agent.CLI.Runtime.Orchestration.Tools ( runAgentTools )
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(activeHttpGeneration, ActiveHttpAuth,
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
-      AgentProcessRuntime(processSessionThreads, processMcpSupervisor, processMcpElicitation),
+      AgentProcessRuntime(processSessionThreads, processMcpSupervisor,
+                          processStartCleanup, processMcpElicitation),
       AgentRunMode )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
