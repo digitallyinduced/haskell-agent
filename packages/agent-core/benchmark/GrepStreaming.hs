@@ -7,10 +7,11 @@
 module Main (main) where
 
 import Control.Concurrent.Async (withAsync, wait)
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (evaluate, finally)
 import Control.Monad (forM_, replicateM)
 import qualified Data.ByteString as BS
 import Data.List (sort)
+import Data.IORef (newIORef, writeIORef)
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
 import System.CPUTime (getCPUTime)
@@ -58,13 +59,12 @@ main = do
                     before <- getRTSStats
                     t0 <- getMonotonicTimeNSec
                     c0 <- getCPUTime
-                    !output <- if mode == "buffered-old"
+                    (!output, !retainedLive) <- if mode == "buffered-old"
                         then buffered rg path
                         else streaming rg path
                     -- Both implementations return the same first 128 lines;
                     -- forcing this length keeps the benchmark honest.
                     output `seq` pure ()
-                    during <- getRTSStats
                     performGC
                     after <- getRTSStats
                     t1 <- getMonotonicTimeNSec
@@ -75,10 +75,11 @@ main = do
                         , cpuSeconds =
                             fromIntegral (c1 - c0) / 1.0e12
                         , allocatedBytes =
-                            after.allocated_bytes - before.allocated_bytes
-                        , liveBytes =
-                            max during.gc.gcdetails_live_bytes
-                                after.gc.gcdetails_live_bytes
+                            fromIntegral
+                                ( after.allocated_bytes
+                                    - before.allocated_bytes
+                                )
+                        , liveBytes = retainedLive
                         }
                 let median field = medianOf (map field measurements)
                 printf "%d,%s,%d,%.3f,%.3f,%d,%d\n"
@@ -103,12 +104,21 @@ command :: FilePath -> FilePath -> CreateProcess
 command rg path =
     proc rg ["--no-config", "--color=never", "--regexp", "needle", "--", path]
 
-buffered :: FilePath -> FilePath -> IO Int
+buffered :: FilePath -> FilePath -> IO (Int, Integer)
 buffered rg path = do
     (_, output, _) <- readCreateProcessWithExitCode (command rg path) ""
-    pure (length (concat (take outputLineLimit (lines output))))
+    -- Force and retain the whole historical capture across a major GC so the
+    -- reported live figure includes the representation this path replaces.
+    !_ <- evaluate (length output)
+    retained <- newIORef output
+    let !selectedLength =
+            length (concat (take outputLineLimit (lines output)))
+    performGC
+    live <- (.gc.gcdetails_live_bytes) <$> getRTSStats
+    writeIORef retained ""
+    pure (selectedLength, fromIntegral live)
 
-streaming :: FilePath -> FilePath -> IO Int
+streaming :: FilePath -> FilePath -> IO (Int, Integer)
 streaming rg path = do
     (mIn, mOut, mErr, ph) <- createProcess (command rg path)
         { std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
@@ -121,7 +131,9 @@ streaming rg path = do
         _ <- wait stderr
         _ <- waitForProcess ph
         hClose out `finally` hClose err
-        pure result
+        performGC
+        live <- (.gc.gcdetails_live_bytes) <$> getRTSStats
+        pure (result, fromIntegral live)
   where
     readLines :: Handle -> Int -> IO Int
     readLines handle count = go count 0

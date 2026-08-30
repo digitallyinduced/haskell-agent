@@ -13,7 +13,9 @@ import Agent.Tools.IO (readTextFile)
 import Control.Exception (bracket, evaluate)
 import Control.Monad (forM, forM_)
 import qualified Data.ByteString as BS
+import qualified Data.Text as Text
 import Data.List (sort)
+import Data.IORef (newIORef, writeIORef)
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
     ( GCDetails(..)
@@ -35,7 +37,7 @@ data Sample = Sample
     { elapsedMillis :: !Double
     , cpuMillis :: !Double
     , allocatedBytes :: !Integer
-    , liveDeltaBytes :: !Integer
+    , liveBytes :: !Integer
     }
 
 data Workload = Buffered | Streaming
@@ -68,7 +70,7 @@ main = do
                     sample.elapsedMillis
                     sample.cpuMillis
                     sample.allocatedBytes
-                    sample.liveDeltaBytes
+                    sample.liveBytes
 
 workloadName :: Workload -> String
 workloadName Buffered = "buffered"
@@ -90,11 +92,24 @@ measure workload path args = do
     before <- getRTSStats
     t0 <- getMonotonicTimeNSec
     c0 <- getCPUTime
-    result <- case workload of
+    (result, retainedLive) <- case workload of
         Buffered -> readTextFile path >>= \case
             Left err -> die (show err)
-            Right text -> evaluate (formatReadFile text args)
-        Streaming -> evaluate =<< streamReadFile path args
+            Right text -> do
+                !_ <- evaluate (Text.length text)
+                retained <- newIORef text
+                result <- evaluate (formatReadFile text args)
+                !_ <- evaluate (either Text.length Text.length result)
+                performGC
+                live <- (.gc.gcdetails_live_bytes) <$> getRTSStats
+                writeIORef retained ""
+                pure (result, fromIntegral live)
+        Streaming -> do
+            result <- evaluate =<< streamReadFile path args
+            !_ <- evaluate (either Text.length Text.length result)
+            performGC
+            live <- (.gc.gcdetails_live_bytes) <$> getRTSStats
+            pure (result, fromIntegral live)
     -- Force the returned text so the measurement includes materialisation.
     !_ <- evaluate (length (show result))
     performGC
@@ -106,9 +121,7 @@ measure workload path args = do
         , cpuMillis = fromIntegral (c1 - c0) / 1.0e9
         , allocatedBytes =
             fromIntegral (after.allocated_bytes - before.allocated_bytes)
-        , liveDeltaBytes =
-            fromIntegral after.gc.gcdetails_live_bytes
-                - fromIntegral before.gc.gcdetails_live_bytes
+        , liveBytes = retainedLive
         }
 
 median :: [Sample] -> Sample
@@ -117,7 +130,7 @@ median values =
         { elapsedMillis = middle (map elapsedMillis values)
         , cpuMillis = middle (map cpuMillis values)
         , allocatedBytes = middle (map allocatedBytes values)
-        , liveDeltaBytes = middle (map liveDeltaBytes values)
+        , liveBytes = middle (map liveBytes values)
         }
   where
     middle xs = sort xs !! (length xs `div` 2)

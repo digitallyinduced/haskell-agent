@@ -189,6 +189,16 @@ spec = describe "fullscreen TUI bridge" do
                 runtime
                 (UiLoop (ToolOutputUpdated "oversized" oversizedOutput)))
             `shouldReturn` Just ()
+        -- Replacing that sole keyed snapshot must not compare the new
+        -- oversized value against the ordinary byte budget and deadlock.
+        timeout 2000000
+            (emitUiEvent
+                runtime
+                (UiLoop (ToolOutputUpdated "oversized" oversizedOutput)))
+            `shouldReturn` Just ()
+        let AppEventMailbox stateRef = runtime.runtimeMailbox
+        state <- readTVarIO stateRef
+        state.mailboxPendingCount `shouldBe` 1
 
     it "rebinds provider-specific actions without replacing the runtime" do
         calls <- newIORef ([] :: [String])

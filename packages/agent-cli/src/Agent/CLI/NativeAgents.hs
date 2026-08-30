@@ -303,7 +303,8 @@ canonicalNativeAgents selected =
 restoredView :: Bool -> FunctionCall -> FunctionCallOutput -> NativeAgentView
 restoredView selected call output =
     let outputBody
-            | selected = renderOutput output.output
+            | selected =
+                renderOutputBounded nativeAgentSelectedBytes output.output
             | otherwise = renderOutputPreview output.output
         terminal = case output.status of
             Just ItemIncomplete -> BlockFailed
@@ -351,18 +352,23 @@ renderOutput value =
                 (rawJsonBytes value)
 
 renderOutputPreview :: RawJson -> Text
-renderOutputPreview value
-    | BS.length bytes <= nativeAgentPreviewBytes `div` 4 =
+renderOutputPreview =
+    renderOutputBounded nativeAgentPreviewBytes
+
+renderOutputBounded :: Int -> RawJson -> Text
+renderOutputBounded budget value
+    | BS.length bytes <= retainedRawBytes =
         renderOutput value
     | otherwise =
         "[older native-agent output omitted]\n"
             <> Text.dropAround (== '"')
                 (TextEncoding.decodeUtf8With lenientDecode
                     (BS.drop
-                        (BS.length bytes - nativeAgentPreviewBytes `div` 4)
+                        (BS.length bytes - retainedRawBytes)
                         bytes))
   where
     bytes = rawJsonBytes value
+    retainedRawBytes = max 0 (budget `div` 4)
 
 settleRunningNativeAgents
     :: NativeAgentStatus

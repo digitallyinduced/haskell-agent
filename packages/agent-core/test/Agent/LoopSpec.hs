@@ -390,6 +390,35 @@ spec = describe "runLoop" do
             , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
             ]
 
+    it "bounds a single oversized live tool-output snapshot" do
+        delivered <- newIORef Nothing
+        let oversized = Text.replicate (3 * 1024 * 1024) "x"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (ToolOutputUpdated "large" oversized)
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                ToolOutputUpdated "large" output ->
+                    writeIORef delivered (Just output)
+                _ -> pure ()
+        config0 <- testConfig backend
+        result <- runLoop config0 { loopOnEvent = onEvent } Nothing "go"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-1"
+            , finalText = Just "done"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+        readIORef delivered >>= \case
+            Nothing -> expectationFailure "missing tool-output update"
+            Just output -> do
+                Text.length output `shouldSatisfy` (<= 2 * 1024 * 1024)
+                output `shouldSatisfy`
+                    Text.isSuffixOf "[tool output truncated]"
+
     it "dispatches consecutive parallel-safe tool calls concurrently" do
         firstStarted <- newEmptyMVar
         secondStarted <- newEmptyMVar
