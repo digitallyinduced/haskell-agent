@@ -65,6 +65,7 @@ slashCommands =
     , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
     , cmd "codemod" ["code-mode"] "/codemod" "Enable JavaScript code mode for this session" False
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
+    , cmd "update-and-restart" [] "/update-and-restart" "Install the latest Haskell Agent and resume this session" False
     , cmd "quit" ["exit"] "/quit" "Exit the current session" False
     ]
   where

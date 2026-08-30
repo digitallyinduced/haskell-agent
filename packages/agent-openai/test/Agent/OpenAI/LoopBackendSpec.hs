@@ -895,6 +895,41 @@ spec = do
                     [CompletedTool (functionResult "c1" "tool output")]
                 ]
 
+        it "replays a call and output when continuation tool state is lost" do
+            seen <- newIORef []
+            let callId = "call_lost"
+                seed =
+                    turnInputsToItems [UserMessage "old"]
+                        <> [functionCallItem callId "read_file" "{}"]
+                chainError = ProviderError
+                    InvalidRequestError
+                    "No tool output found for function call call_lost."
+                    Nothing
+                resultInput =
+                    [CompletedTool (functionResult callId "file contents")]
+            transcript <- newIORef seed
+            let send request previous onEvent = do
+                    modifyIORef' seen (++ [(request, previous)])
+                    case previous of
+                        Just _ -> pure (Left chainError)
+                        Nothing -> do
+                            onEvent (deltaEvent EventOutputTextDelta "ok")
+                            pure $ Right
+                                (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWith send (pure baseParams)
+            result <- submitWithState transcript backend (Just "resp-call")
+                resultInput
+                (const (pure ()))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            requests <- readIORef seen
+            map snd requests `shouldBe` [Just "resp-call", Nothing]
+            map (inputItems . fst) requests `shouldBe`
+                [ turnInputsToItems resultInput
+                , map stripReplayedItemStatus
+                    (seed <> turnInputsToItems resultInput)
+                ]
+
         it "strips explicitly requested cache retention and starts a fresh chain" do
             seen <- newIORef []
             let seed = turnInputsToItems [UserMessage "old"]

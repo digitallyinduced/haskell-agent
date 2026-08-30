@@ -37,6 +37,13 @@ spec = do
             parseReplLine ":reload" `shouldBe` ReplReload
             parseReplLine "  :reload  " `shouldBe` ReplReload
 
+        it "parses update-and-restart without arguments" do
+            parseReplLine "/update-and-restart"
+                `shouldBe` ReplUpdateAndRestart
+            parseReplLine "/update-and-restart now"
+                `shouldBe`
+                    ReplCommandError "usage: /update-and-restart"
+
         it "parses exact-turn retry" do
             parseReplLine "/retry" `shouldBe` ReplRetry
             parseReplLine "/retry now"
@@ -489,6 +496,7 @@ spec = do
                     , "shell"
                     , "codemod"
                     , "always-approve"
+                    , "update-and-restart"
                     , "quit"
                     ]
 

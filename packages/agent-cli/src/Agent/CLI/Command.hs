@@ -443,6 +443,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplToggleAlwaysApprove
                     else ReplCommandError "usage: /always-approve"
+            "update-and-restart" ->
+                if null args
+                    then ReplUpdateAndRestart
+                    else ReplCommandError "usage: /update-and-restart"
             "quit" ->
                 if null args
                     then ReplQuit

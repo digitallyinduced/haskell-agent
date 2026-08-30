@@ -197,7 +197,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe
-    ( finally, onException, throwIO, try )
+    ( displayException, finally, onException, throwIO, try, tryAny )
 import Control.Monad ( when, forM_, void, unless )
 import Data.Functor ()
 import Data.IORef
@@ -218,6 +218,8 @@ import System.Environment ()
 import System.Exit ( die )
 import System.IO ( hIsTerminalDevice, stderr, stdin )
 import System.OsPath ( decodeFS, takeDirectory, takeFileName )
+import System.Posix.Process ( executeFile )
+import System.Process ( callProcess )
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
@@ -230,7 +232,7 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ( empty )
-import qualified Data.Text as Text ( unpack )
+import qualified Data.Text as Text ( pack, unpack )
 import qualified Data.Text.IO as Text ( hPutStr )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Client as XAIClient ()
@@ -346,6 +348,21 @@ runAgentWithRuntime processRuntime runMode options = do
                 go fullscreenInputs sessionState
                     (restartSessionOptions current sessionId)
                     Nothing
+            RunUpdateAndRestart sessionId -> do
+                color <- resolveColor runMode.runStderr
+                putTextLn runMode.runStderr
+                    (roleMuted color
+                        (glyphSession <> "installing the latest Haskell Agent…"))
+                tryAny (updateAndResume sessionId) >>= \case
+                    Left err -> do
+                        putTextLn runMode.runStderr
+                            (roleError color
+                                ("update failed: "
+                                    <> Text.pack (displayException err)))
+                        go fullscreenInputs sessionState
+                            (restartSessionOptions current sessionId)
+                            Nothing
+                    Right result -> pure result
             RunEnableCodeMode sessionId ->
                 let nextOptions =
                         (restartSessionOptions current sessionId)
@@ -387,6 +404,24 @@ runAgentWithRuntime processRuntime runMode options = do
                         | otherwise -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
+
+    updateAndResume sessionId = do
+        callProcess "nix"
+            [ "profile"
+            , "remove"
+            , "haskell-agent"
+            ]
+        callProcess "nix"
+            [ "profile"
+            , "add"
+            , "--accept-flake-config"
+            , "github:digitallyinduced/haskell-agent"
+            ]
+        executeFile
+            "agent-cli"
+            True
+            ["--resume", Text.unpack sessionId]
+            Nothing
 
 -- | Restore the process cwd after an action succeeds or throws. Cabal gives
 -- GHCi relative source paths, so returning from an agent session in its cwd
