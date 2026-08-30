@@ -267,7 +267,7 @@ telegramUsage = unlines
     , "       agent-telegram users list|add ID|remove ID"
     , ""
     , "Setup options:"
-    , "  --provider NAME       openai, xai, or openrouter"
+    , "  --provider NAME       openai, xai, openrouter, gemini, or claude-code"
     , "  --model NAME          optional model override"
     , "  --cwd PATH            agent working directory"
     , "  --effort LEVEL        optional reasoning effort"

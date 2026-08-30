@@ -684,7 +684,7 @@ validateProviderTarget :: ModelOption -> IO (Either Text ())
 validateProviderTarget choice =
     if choice.modelTarget.targetConnectionId
         `notElem` map builtinConnectionId
-            [OpenAIProvider, XAIProvider, OpenRouterProvider]
+            [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider]
     then pure (Right ())
     else fmap (() <$) $
         loadValidatedProviderTarget probeLoadedAvailability choice

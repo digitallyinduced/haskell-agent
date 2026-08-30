@@ -14,6 +14,7 @@ packages:
     packages/agent-openai
     packages/agent-xai
     packages/agent-openrouter
+    packages/agent-gemini
     packages/agent-store
     packages/claude-agent-sdk-haskell
     packages/agent-claude

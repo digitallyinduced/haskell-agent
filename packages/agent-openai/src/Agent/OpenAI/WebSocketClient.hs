@@ -313,6 +313,10 @@ runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
         "OpenRouter credentials must be used through agent-openrouter"
         Nothing
 runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
+    | credential.provider == GeminiProvider = pure $ Left $ ProviderError ApiErrorType
+        "Gemini credentials must be used through agent-gemini"
+        Nothing
+runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
     | credential.provider == ClaudeCodeProvider = pure $ Left $ ProviderError ApiErrorType
         "Claude Code subscription sessions must use agent-claude"
         Nothing

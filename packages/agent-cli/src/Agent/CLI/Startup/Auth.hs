@@ -9,9 +9,12 @@ module Agent.CLI.Startup.Auth
     ) where
 
 import Agent.CLI.Auth
-    ( LoadedAuth
+    ( LoadedAuth(..)
     , authErrorNeedsOnboarding
+    , geminiStartupAuthNeedsReconnect
     , loadAuth
+    , loadAuthForAccount
+    , probeLoadedAuth
     )
 import Agent.CLI.Login (connectProviderAccount)
 import Agent.CLI.Models (ModelTarget(..))
@@ -32,6 +35,7 @@ import Agent.CLI.TUI.App
 import Agent.Provider
     ( Provider(..)
     )
+import Agent.Error (ApiError(CredentialError))
 import Agent.Store.Postgres.Skill (LearnedSkill(..))
 import Agent.TUI.Model
     ( UiEvent(..)
@@ -95,8 +99,19 @@ loadStartupAuth
     -> IO (LoadedAuth, Bool)
 loadStartupAuth startup transition requestedProvider =
     loadTransitionAuth transition requestedProvider >>= \case
-        Right loaded -> pure (loaded, False)
+        Right loaded
+            | loaded.loadedProvider == GeminiProvider
+            , Just runtime <- startup.startupFullscreen ->
+                probeLoadedAuth loaded >>= \case
+                    Left CredentialError{} ->
+                        reconnectGeminiAtStartup startup runtime
+                    Left _ -> pure (loaded, False)
+                    Right usable -> pure (usable, False)
+            | otherwise -> pure (loaded, False)
         Left err
+            | shouldReconnectGemini transition requestedProvider err
+            , Just runtime <- startup.startupFullscreen ->
+                reconnectGeminiAtStartup startup runtime
             | isNothing transition
             , authErrorNeedsOnboarding err
             , Just runtime <- startup.startupFullscreen ->
@@ -108,6 +123,34 @@ loadStartupAuth startup transition requestedProvider =
                                 (\loaded -> pure (loaded, learnAboutUser))
             | otherwise ->
                 startupDie startup (Text.unpack err)
+
+shouldReconnectGemini
+    :: Maybe ProviderTransition
+    -> Maybe Provider
+    -> Text
+    -> Bool
+shouldReconnectGemini transition requestedProvider message =
+    geminiStartupAuthNeedsReconnect
+        (targetProvider == Just GeminiProvider)
+        message
+  where
+    targetProvider = case transition of
+        Just active -> Just active.transitionTarget.targetProvider
+        Nothing -> requestedProvider
+
+reconnectGeminiAtStartup
+    :: StartupRuntime
+    -> FullscreenRuntime
+    -> IO (LoadedAuth, Bool)
+reconnectGeminiAtStartup startup runtime = do
+    markStartupStage startup "Sign in with Google…"
+    connected <- withFullscreenSuspended runtime $
+        resolveColor startup.startupStderr >>= \color ->
+            connectProviderAccount color GeminiProvider
+    selectionId <- maybe (throwIO StartupCancelled) pure connected
+    loadAuthForAccount GeminiProvider selectionId >>= either
+        (startupDie startup . Text.unpack)
+        (\loaded -> pure (loaded, False))
 
 loadTransitionAuth
     :: Maybe ProviderTransition
@@ -140,6 +183,9 @@ runCredentialOnboarding startup runtime = do
           )
         , ( OpenRouterProvider
           , ("Add an OpenRouter API key", "Use API credits")
+          )
+        , ( GeminiProvider
+          , ("Sign in with Google", "Use Gemini with your Google account")
           )
         ]
     loop =

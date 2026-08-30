@@ -137,6 +137,10 @@ spec = describe "account selection" do
             (loadedAuth OpenAIProvider Nothing)
             `shouldBe` True
 
+    it "does not usage-rank Gemini API keys" do
+        providerSupportsUsageAccountSelection GeminiProvider
+            `shouldBe` False
+
     it "keeps a verified OpenRouter free-tier key usable at zero credits" do
         accountCapacity freeTierAccount `shouldBe` Just 1
 

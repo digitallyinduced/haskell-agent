@@ -1,5 +1,5 @@
 -- | Conversation compaction helpers shared by OpenAI remote compact and
--- xAI/OpenRouter local summarization.
+-- xAI/OpenRouter/Gemini local summarization.
 module Agent.OpenAI.Compaction
     ( summaryPrefix
     , summarizationPrompt

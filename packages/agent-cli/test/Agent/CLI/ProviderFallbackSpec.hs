@@ -71,6 +71,7 @@ spec = do
                 (fallbackCandidates catalog Set.empty XAIProvider exhausted)
                 `shouldBe`
                     [ (OpenAIProvider, "gpt-5.6-sol")
+                    , (GeminiProvider, "gemini-3.7-flash")
                     , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
@@ -83,6 +84,7 @@ spec = do
                 (fallbackCandidates catalog Set.empty OpenAIProvider exhausted)
                 `shouldBe`
                     [ (XAIProvider, "grok-4.6")
+                    , (GeminiProvider, "gemini-3.7-flash")
                     , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
@@ -96,10 +98,13 @@ spec = do
         it "skips providers already found unavailable" do
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog (Set.singleton OpenAIProvider) XAIProvider exhausted)
-                `shouldBe` [OpenRouterProvider]
+                `shouldBe` [GeminiProvider, OpenRouterProvider]
 
         it "accepts direct usage-limit errors from every provider" do
             fallbackCandidates catalog Set.empty OpenRouterProvider
+                (ProviderError UsageLimitReached "quota exhausted" (Just 3600))
+                `shouldSatisfy` (not . null)
+            fallbackCandidates catalog Set.empty GeminiProvider
                 (ProviderError UsageLimitReached "quota exhausted" (Just 3600))
                 `shouldSatisfy` (not . null)
 
@@ -122,11 +127,11 @@ spec = do
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog (Set.singleton XAIProvider) OpenAIProvider
                     (ProviderError AuthenticationError "rejected" Nothing))
-                `shouldBe` [OpenRouterProvider]
+                `shouldBe` [GeminiProvider, OpenRouterProvider]
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog (Set.singleton XAIProvider) OpenAIProvider
                     (CredentialError "credential file is invalid"))
-                `shouldBe` [OpenRouterProvider]
+                `shouldBe` [GeminiProvider, OpenRouterProvider]
 
     describe "automaticCooldownRetryDelay" do
         let now = UTCTime (fromGregorian 2026 8 21) 0

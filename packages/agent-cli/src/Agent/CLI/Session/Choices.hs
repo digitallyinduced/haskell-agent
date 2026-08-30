@@ -256,7 +256,7 @@ accountUsageText color provider tokenProvider openAiPool = do
         _ ->
             pure $
                 roleMuted color
-                    "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
+                    "usage: ChatGPT Codex windows only (xAI/OpenRouter/Gemini have no account usage API here)"
 
 fetchSnapshot :: OpenAI.AccountSnapshot -> IO AccountUsageLine
 fetchSnapshot snapshot = do
