@@ -42,6 +42,15 @@ spec = do
             updated.pendingExitAfter `shouldBe` True
             updated.pendingPlanState `shouldBe` PlanActive
 
+    describe "TurnResult" do
+        it "retains the formatted failure message for background callers" do
+            case TurnFailed
+                    "Provider rejected the request.\nRetry the message." of
+                TurnFailed message ->
+                    message `shouldBe`
+                        "Provider rejected the request.\nRetry the message."
+                _ -> expectationFailure "expected a failed turn"
+
     describe "transitionCommitsImmediately" do
         it "keeps a startup automatic fallback provisional" do
             transitionCommitsImmediately (transition Nothing Nothing)
