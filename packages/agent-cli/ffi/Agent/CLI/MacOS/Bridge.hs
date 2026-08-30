@@ -478,6 +478,8 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeTaskSnapshotCallback
         :: FunPtr TaskSnapshotCallback -> TaskSnapshotCallback
+
+foreign import ccall "dynamic"
     invokeSessionTurnCallback
         :: FunPtr SessionTurnCallback -> SessionTurnCallback
 
