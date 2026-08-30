@@ -898,7 +898,7 @@ submitMetaConsole = do
                 pure ()
             | otherwise -> do
                 let queued = state.appUi.uiRunning
-                liftIO $ atomically $
+                result <- liftIO $ atomically $
                     Composer.appendFullscreenInput
                         state.appRuntime.runtimeInput
                         FullscreenInput
@@ -906,16 +906,21 @@ submitMetaConsole = do
                             , fullscreenInputQueued = queued
                             , fullscreenInputDisplay = Nothing
                             }
-                if queued
-                    then
+                case result of
+                    Left message ->
                         applyLocalUiEvent $
-                            UiSetNotice $
-                                Just $
-                                    progressNotice
-                                        "Meta Console request queued for the next safe boundary."
-                    else
-                        applyLocalUiEvent (UiSetAwaitingInput False)
-                closeMetaConsole
+                            UiSetNotice (Just (warningNotice message))
+                    Right () -> do
+                        if queued
+                            then
+                                applyLocalUiEvent $
+                                    UiSetNotice $
+                                        Just $
+                                            progressNotice
+                                                "Meta Console request queued for the next safe boundary."
+                            else
+                                applyLocalUiEvent (UiSetAwaitingInput False)
+                        closeMetaConsole
 
 
 handleCtrlC :: EventM Name AppState CtrlCDecision

@@ -21,6 +21,9 @@ spec =
 
             -- Replacing a backend reuses this same provider-independent state.
             readIORef state.sessionDraft `shouldReturn` "unfinished prompt"
+            writeIORef state.sessionInitialPrompt (Just "fork directive")
+            readIORef state.sessionInitialPrompt
+                `shouldReturn` Just "fork directive"
             readLiveAttachments state.sessionConversation `shouldReturn` [image]
             readIORef state.sessionPreviewId `shouldReturn` 42
 
@@ -40,5 +43,6 @@ spec =
         it "starts a new user session with empty composer state" do
             state <- newSessionState
             readIORef state.sessionDraft `shouldReturn` ""
+            readIORef state.sessionInitialPrompt `shouldReturn` Nothing
             readLiveAttachments state.sessionConversation `shouldReturn` []
             readIORef state.sessionPreviewId `shouldReturn` 1

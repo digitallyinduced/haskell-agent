@@ -26,6 +26,7 @@ module Agent.CLI.Session
     , cleanupPendingPersistence
     , createSession
     , forkSession
+    , forkSessionAt
     , appendTurn
     , appendTurnIndexed
     , appendTurnWithMetaUpdate
@@ -296,7 +297,25 @@ forkSession
     -> [SessionTurn]
     -> Maybe Text
     -> IO (Either Text SessionHandle)
-forkSession root source turns requestedTitle
+forkSession root source turns requestedTitle =
+    forkSessionAt
+        root
+        source
+        turns
+        requestedTitle
+        source.sessionMeta.metaCwd
+
+-- | Clone a persisted session while selecting the fork's working directory.
+-- This is used by @/fork --worktree@; ordinary callers retain the source cwd
+-- through 'forkSession'.
+forkSessionAt
+    :: OsPath
+    -> SessionHandle
+    -> [SessionTurn]
+    -> Maybe Text
+    -> OsPath
+    -> IO (Either Text SessionHandle)
+forkSessionAt root source turns requestedTitle targetCwd
     | not (any substantiveTurn (activeTranscriptTurns turns)) =
         pure (Left "a session must contain at least one turn before it can be forked")
     | otherwise = mask \restore -> do
@@ -311,8 +330,13 @@ forkSession root source turns requestedTitle
                         pure (Left err)
                     Right dir -> do
                         now <- normalizePostgresTimestamp <$> getCurrentTime
-                        let meta = forkedMetadata now sessionId requestedTitle
-                                source.sessionMeta
+                        let meta =
+                                forkedMetadata
+                                    now
+                                    sessionId
+                                    requestedTitle
+                                    targetCwd
+                                    source.sessionMeta
                             storedMeta = toStoredMetadata meta
                             handle = SessionHandle
                                 { sessionPool = source.sessionPool
@@ -381,13 +405,15 @@ forkedMetadata
     :: UTCTime
     -> Text
     -> Maybe Text
+    -> OsPath
     -> SessionMeta
     -> SessionMeta
-forkedMetadata now sessionId requestedTitle source =
+forkedMetadata now sessionId requestedTitle targetCwd source =
     source
         { metaId = sessionId
         , metaCreatedAt = now
         , metaUpdatedAt = now
+        , metaCwd = targetCwd
         , metaTitle = title
         , metaTitleIsManual =
             maybe source.metaTitleIsManual (const True) normalizedTitle

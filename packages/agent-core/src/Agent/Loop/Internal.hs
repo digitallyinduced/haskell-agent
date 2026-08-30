@@ -354,6 +354,11 @@ data LoopEvent
     | ReasoningDelta Text
     -- | Ephemeral transport/tool activity for the live CLI status line.
     | ActivityUpdated Text
+    -- | Latest provider-reported limit status for retained prompt chrome.
+    | ProviderLimitUpdated
+        { providerLimitText :: !Text
+        , providerLimitWarning :: !Bool
+        }
     -- | A persistent user-visible warning that must not replace live activity.
     | WarningRaised Text
     -- | A streamed response was interrupted and its provider submission is
@@ -857,12 +862,18 @@ boundLoopToolOutput output
     | Text.length output <= loopEventTailPayloadBudgetCodeUnits =
         Text.copy output
     | otherwise =
-        Text.copy (Text.take loopEventTailPayloadCodeUnits output)
-            <> "\n[tool output truncated]"
+        toolOutputOmissionMarker
+            <> Text.copy (Text.takeEnd loopEventTailPayloadCodeUnits output)
 
 loopEventTailPayloadCodeUnits :: Int
 loopEventTailPayloadCodeUnits =
-    max 0 (loopEventTailPayloadBudgetCodeUnits - 24)
+    max 0
+        ( loopEventTailPayloadBudgetCodeUnits
+            - Text.length toolOutputOmissionMarker
+        )
+
+toolOutputOmissionMarker :: Text
+toolOutputOmissionMarker = "[earlier tool output truncated]\n"
 
 loopEventTailPayloadBudgetCodeUnits :: Int
 loopEventTailPayloadBudgetCodeUnits =

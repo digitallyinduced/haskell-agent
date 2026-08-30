@@ -14,12 +14,16 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( findExecutable
-    , getFileSize
     , getTemporaryDirectory
     , removeFile
     )
 import System.Exit (ExitCode(..))
-import System.IO (hClose, openBinaryTempFile)
+import System.IO
+    ( IOMode(ReadMode)
+    , hClose
+    , openBinaryTempFile
+    , withBinaryFile
+    )
 import System.Process (readProcessWithExitCode)
 
 readLinuxClipboardImage :: IO (Either Text ImageAttachment)
@@ -123,16 +127,15 @@ runBytesCmd cmd args = do
                 ""
             case code of
                 ExitSuccess -> do
-                    size <- getFileSize path
-                    if size > maxClipboardImageBytes
+                    bytes <- withBinaryFile path ReadMode \input ->
+                        BS.hGet input (maxClipboardImageBytes + 1)
+                    if BS.length bytes > maxClipboardImageBytes
                         then pure (Left
                             "clipboard image exceeds the 20 MB limit")
-                        else do
-                            bytes <- BS.readFile path
-                            if BS.null bytes
-                                then pure (Left
-                                    "no image found on the clipboard")
-                                else pure (Right bytes)
+                        else if BS.null bytes
+                            then pure (Left
+                                "no image found on the clipboard")
+                            else pure (Right bytes)
                 ExitFailure _ ->
                     pure (Left (Text.strip (Text.pack err))))
             `finally` cleanup
@@ -140,7 +143,7 @@ runBytesCmd cmd args = do
         Left ex -> pure (Left (formatException ex))
         Right value -> pure value
 
-maxClipboardImageBytes :: Integer
+maxClipboardImageBytes :: Int
 maxClipboardImageBytes = 20 * 1024 * 1024
 
 shellQuote :: String -> String

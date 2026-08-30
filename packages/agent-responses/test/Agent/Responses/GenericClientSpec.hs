@@ -151,6 +151,28 @@ spec = do
             readIORef recordedModels
                 `shouldReturn` [Just "provider-model", Just "provider-model"]
             readIORef recordedHeaders `shouldReturn` [True, True]
+
+        it "classifies a valid oversized error before adding truncation context" do
+            Warp.testWithApplication (pure oversizedRateLimitApp) \port -> do
+                let boundedOptions = options
+                        { baseUrl =
+                            "http://127.0.0.1:"
+                                <> show port
+                                <> "/v1"
+                        }
+                result <- createResponseWithEventsPolicy
+                    (limitRetries 0)
+                    boundedOptions
+                    defaultResponseCreateParams
+                    (const (pure ()))
+                case result of
+                    Left (ProviderError RateLimitError message Nothing) -> do
+                        message `shouldSatisfy` Text.isPrefixOf "slow down"
+                        message `shouldSatisfy` Text.isSuffixOf
+                            "[response body truncated after 1048576 bytes]"
+                    other -> expectationFailure
+                        ("expected typed truncated rate-limit error, got "
+                            <> show other)
   where
     options = GenericClientOptions
         { baseUrl = "http://localhost:8000/v1"
@@ -210,6 +232,15 @@ providerHookResponse = Wai.responseLBS HTTP.status200
             , "output" Aeson..= ([] :: [Aeson.Value])
             ]
         ]
+
+oversizedRateLimitApp :: Wai.Application
+oversizedRateLimitApp _request respond =
+    respond $ Wai.responseLBS HTTP.status429
+        [("Content-Type", "application/json")]
+        ( "{\"error\":{\"type\":\"rate_limit_error\",\
+          \\"message\":\"slow down\"}}"
+            <> LBS.replicate (1024 * 1024) 0x20
+        )
 
 expectRight :: Show error => Either error value -> IO value
 expectRight = \case

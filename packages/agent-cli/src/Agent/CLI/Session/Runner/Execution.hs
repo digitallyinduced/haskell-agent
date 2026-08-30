@@ -907,32 +907,38 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     pure
                         result <- runOneTurn env request.managedTurnText skillInputs
                         callbacks.runnerFinishTurn env True result
-                    Nothing ->
-                        case learnAboutUserOnboardingPrompt learnedSkills of
-                            Just onboardingPrompt
-                                | learnAboutUserRequested
-                                , isNothing initialPrevious -> do
-                                    skillInputs <-
-                                        callbacks.runnerPreparePromptSkillInputs
-                                            env
-                                            onboardingPrompt
-                                            [UserMessage onboardingPrompt]
-                                            >>= either
-                                                (startupDie startup . Text.unpack)
-                                                pure
-                                    forM_ fullscreen \runtime ->
-                                        emitUiEvent runtime
-                                            (UiUserSubmitted onboardingPrompt)
-                                    result <-
-                                        runOneTurn
-                                            env
-                                            onboardingPrompt
-                                            skillInputs
-                                    callbacks.runnerFinishTurn env False result
-                            _ ->
-                                readIORef
-                                    startup.startupSessionState.sessionDraft
-                                    >>= callbacks.runnerReplWithDraft env
+                    Nothing -> do
+                        initialPrompt <-
+                            atomicModifyIORef'
+                                startup.startupSessionState.sessionInitialPrompt
+                                (\pending -> (Nothing, pending))
+                        case initialPrompt of
+                            Just text -> runInteractiveInitialPrompt env text
+                            Nothing ->
+                                case learnAboutUserOnboardingPrompt learnedSkills of
+                                    Just onboardingPrompt
+                                        | learnAboutUserRequested
+                                        , isNothing initialPrevious ->
+                                            runInteractiveInitialPrompt
+                                                env
+                                                onboardingPrompt
+                                    _ ->
+                                        readIORef
+                                            startup.startupSessionState.sessionDraft
+                                            >>= callbacks.runnerReplWithDraft env
+        runInteractiveInitialPrompt env text = do
+            skillInputs <-
+                callbacks.runnerPreparePromptSkillInputs
+                    env
+                    text
+                    [UserMessage text]
+                    >>= either
+                        (startupDie startup . Text.unpack)
+                        pure
+            forM_ fullscreen \runtime ->
+                emitUiEvent runtime (UiUserSubmitted text)
+            result <- runOneTurn env text skillInputs
+            callbacks.runnerFinishTurn env False result
         btwWorker = do
             question <- readChan btwRequests
             runBtwQuestion False env question

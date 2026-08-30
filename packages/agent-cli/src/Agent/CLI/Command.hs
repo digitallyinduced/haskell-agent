@@ -1,6 +1,7 @@
 -- | Interactive REPL slash commands.
 module Agent.CLI.Command
-    ( ReplAction(..)
+    ( ForkRequest(..)
+    , ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
     , SlashCatalog(..)
@@ -228,13 +229,20 @@ parseSlash catalog raw line = case Text.words line of
                     then ReplDiff
                     else ReplCommandError "usage: /diff"
             "fork" ->
-                let name = Text.strip (Text.drop (Text.length command) line)
-                in ReplFork
-                    (if Text.null name then Nothing else Just name)
+                parseForkCommand
+                    (Text.strip (Text.drop (Text.length command) line))
             "export" ->
                 let path = Text.strip (Text.drop (Text.length command) line)
                 in ReplExport
                     (if Text.null path then Nothing else Just path)
+            "history" ->
+                if null args
+                    then ReplHistory
+                    else ReplCommandError "usage: /history"
+            "find" ->
+                ReplFind
+                    (nonEmptyText
+                        (Text.strip (Text.drop (Text.length command) line)))
             "permissions" ->
                 if null args
                     then ReplPermissions
@@ -542,6 +550,40 @@ parseDeepResearchCommand original query
     | otherwise =
         ReplExpandedPrompt original (deepResearchInstruction query)
 
+parseForkCommand :: Text -> ReplAction
+parseForkCommand input =
+    either ReplCommandError ReplFork (go Nothing (Text.stripStart input))
+  where
+    go worktree rest
+        | Text.null rest =
+            Right ForkRequest
+                { forkWorktree = worktree
+                , forkDirective = Nothing
+                }
+        | otherwise =
+            let (token, suffix) = Text.break isSpace rest
+                remaining = Text.stripStart suffix
+                finish =
+                    Right ForkRequest
+                        { forkWorktree = worktree
+                        , forkDirective = nonEmptyText (Text.strip rest)
+                        }
+            in case token of
+                "--worktree" -> case worktree of
+                    Nothing -> go (Just True) remaining
+                    Just True -> Left "--worktree specified twice"
+                    Just False ->
+                        Left
+                            "--worktree and --no-worktree are mutually exclusive"
+                "--no-worktree" -> case worktree of
+                    Nothing -> go (Just False) remaining
+                    Just False -> Left "--no-worktree specified twice"
+                    Just True ->
+                        Left
+                            "--worktree and --no-worktree are mutually exclusive"
+                "--at" -> Left "--at is not supported in this version"
+                _ -> finish
+
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
     | Text.null value = Nothing
@@ -816,6 +858,7 @@ argCompletions catalog spec = case spec.slashName of
         map (.slashName) catalog.slashCatalogCommands
             <> map (.skillCommandName) catalog.slashCatalogSkills
     "rename" -> ["--auto"]
+    "fork" -> ["--worktree", "--no-worktree"]
     "paste" -> ["--send"]
     "goal" -> ["status", "pause", "resume", "clear"]
     "workflow" -> ["runs"]

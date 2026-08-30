@@ -31,6 +31,7 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
     ( MessageContent(..)
+    , CodexRateLimits(..)
     , ComputerAction(..)
     , ComputerCall(..)
     , ComputerCallOutput(..)
@@ -507,6 +508,24 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
 -- activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
+    it "publishes Codex weekly capacity updates for retained prompt chrome" do
+        projectEvent <- newStreamEventToLoopEvents False
+        events <- projectEvent ResponseCodexRateLimitsEvent
+            { rateLimits = CodexRateLimits
+                { allowed = Just True
+                , limitReached = Just False
+                , primaryUsedPercent = Just 12
+                , secondaryUsedPercent = Just 79
+                }
+            , sequenceNumber = Nothing
+            }
+        events `shouldBe`
+            [ ProviderLimitUpdated
+                { providerLimitText = "Weekly limit left: 21%"
+                , providerLimitWarning = False
+                }
+            ]
+
     it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")

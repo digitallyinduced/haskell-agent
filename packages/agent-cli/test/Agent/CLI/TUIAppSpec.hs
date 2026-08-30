@@ -125,6 +125,7 @@ import Control.Concurrent.STM
     , newTChanIO
     , retry
     )
+import Control.Monad (replicateM_)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
@@ -393,6 +394,46 @@ spec = do
         it "submits immediately at an idle REPL boundary" do
             (_, inputs) <- runMetaConsoleSubmission False
             map (.fullscreenInputQueued) inputs `shouldBe` [False]
+
+        it "keeps the request open when the prompt queue is full" do
+            let running = reduceUi (UiLoop TurnStarted) initialUiState
+            runtime <- newScriptRuntime running
+            atomically $
+                replicateM_ Composer.fullscreenInputCountLimit do
+                    result <- Composer.appendFullscreenInput
+                        runtime.runtimeInput
+                        FullscreenInput
+                            { fullscreenInputLine = ReplEof
+                            , fullscreenInputQueued = True
+                            , fullscreenInputDisplay = Nothing
+                            }
+                    case result of
+                        Left message -> error (Text.unpack message)
+                        Right () -> pure ()
+            let request = "connect my Grok account"
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+                script =
+                    [ FullscreenScriptVty
+                        (V.EvKey (V.KChar 'k') [V.MMeta])
+                    , FullscreenScriptVty
+                        (V.EvPaste (encoded request))
+                    , FullscreenScriptVty
+                        (V.EvKey V.KEnter [])
+                    , FullscreenScriptHalt
+                    ]
+            (_, finalState) <-
+                runFullscreenScriptWithState initialState script
+            (.metaConsoleDraft) <$> finalState.appMetaConsole
+                `shouldBe` Just request
+            (.noticeText) <$> finalState.appUi.uiNotice
+                `shouldBe`
+                    Just
+                        "Prompt queue is full; wait for a queued prompt to be consumed."
+            inputs <- atomically $
+                Composer.readFullscreenInputs runtime.runtimeInput
+            Seq.length inputs
+                `shouldBe` Composer.fullscreenInputCountLimit
 
     describe "choice overlay lifecycle" do
         it "closes a running-turn choice on success or cancellation" do

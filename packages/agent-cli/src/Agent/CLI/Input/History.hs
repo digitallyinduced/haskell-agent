@@ -7,6 +7,7 @@ module Agent.CLI.Input.History
     , trySetMode
     ) where
 
+import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Control.Exception.Safe (catchIO)
 import Data.Char (isSpace)
 import Data.Text (Text)
@@ -22,6 +23,7 @@ import System.Directory (createDirectoryIfMissing, getHomeDirectory)
 import System.FilePath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
 import System.Posix.Types (FileMode)
+import System.OsPath (unsafeEncodeUtf)
 
 replHistoryPath :: FilePath -> FilePath
 replHistoryPath home = home </> ".haskell-agent" </> "history"
@@ -31,8 +33,9 @@ readReplHistory = do
     home <- getHomeDirectory
     let path = replHistoryPath home
     ensureHistoryParent path
-    history <- readHistory path `catchIO` \_ -> pure emptyHistory
-    pure (map Text.pack (historyLines history))
+    withHistoryLock path do
+        history <- readHistory path `catchIO` \_ -> pure emptyHistory
+        pure (map Text.pack (historyLines history))
 
 appendReplHistory :: Text -> IO ()
 appendReplHistory text
@@ -41,9 +44,19 @@ appendReplHistory text
         home <- getHomeDirectory
         let path = replHistoryPath home
         ensureHistoryParent path
-        history <- readHistory path `catchIO` \_ -> pure emptyHistory
-        writeHistory path (addHistory (Text.unpack text) history)
-            `catchIO` \_ -> pure ()
+        withHistoryLock path do
+            history <- readHistory path `catchIO` \_ -> pure emptyHistory
+            writeHistory path (addHistory (Text.unpack text) history)
+                `catchIO` \_ -> pure ()
+            trySetMode path 0o600
+
+-- Haskeline rewrites history in place. Fullscreen input publication and
+-- command handling run concurrently, so serialize reads with that rewrite to
+-- avoid observing the temporary truncated file. The lock also coordinates
+-- independent harness processes sharing the same history.
+withHistoryLock :: FilePath -> IO a -> IO a
+withHistoryLock path =
+    withPrivateFileLock (unsafeEncodeUtf (path <> ".lock"))
 
 ensureHistoryParent :: FilePath -> IO ()
 ensureHistoryParent path = do

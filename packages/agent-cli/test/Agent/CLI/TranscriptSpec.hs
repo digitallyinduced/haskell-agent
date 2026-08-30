@@ -12,6 +12,7 @@ import Agent.CLI.Transcript
     ( foldTranscriptTurns
     , markdownFence
     , renderTranscriptMarkdown
+    , searchTranscriptBlocks
     )
 import Agent.Provider (Provider(..))
 import Agent.TUI.Model
@@ -63,6 +64,20 @@ spec = describe "Agent.CLI.Transcript" do
         let block = testBlock { blockBody = "answer ``` with output" }
             output = renderTranscriptMarkdown testMeta [block]
         output `shouldSatisfy` Text.isInfixOf "````\nanswer ``` with output\n````"
+
+    it "searches visible transcript fields case-insensitively" do
+        let first = testBlock
+                { blockTitle = "Compiler"
+                , blockBody = "GHC loaded the module"
+                }
+            second = testBlock
+                { blockTitle = "Tests"
+                , blockDetail = "1300 examples passed"
+                }
+            blocks = [first, second]
+        searchTranscriptBlocks "ghc" blocks `shouldBe` [first]
+        searchTranscriptBlocks "EXAMPLES" blocks `shouldBe` [second]
+        searchTranscriptBlocks "   " blocks `shouldBe` blocks
 
 turn :: TranscriptEffect -> Text -> SessionTurn
 turn effect text = SessionTurn

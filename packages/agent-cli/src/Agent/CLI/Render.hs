@@ -358,6 +358,8 @@ renderEventUnlocked config = \case
             else if config.renderShowThinking
                 then startThinkingSpinnerUnlocked config
                 else putTextLn config.renderStderr (roleMuted config.renderColor activity)
+    ProviderLimitUpdated{} ->
+        pure ()
     WarningRaised warning -> do
         visible <- (.stateThinkingVisible) <$> readRenderState config
         when visible (stopThinkingSpinnerUnlocked config)
