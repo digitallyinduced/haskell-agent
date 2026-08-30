@@ -5,8 +5,10 @@ import Agent.GrokBuild.Dialect.Shell
     , PersistentShell(..)
     , closeGrokSession
     , newGrokSession
+    , readTaskOutput
     , resetGrokSessionTemp
     , runForegroundStreaming
+    , startBackground
     )
 import Agent.GrokBuild.Dialect.ProjectInstructions (formatGrokAgentsMd)
 import Agent.GrokBuild.Dialect.Prompt
@@ -31,6 +33,7 @@ import Agent.Tools.Types
     , setToolSessionTmp
     , toolSchedulingPlanFor
     )
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception.Safe (bracket)
 import Data.Bits ((.&.))
@@ -38,6 +41,7 @@ import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
 import System.Directory
     ( createDirectory
@@ -284,6 +288,32 @@ spec = describe "Grok Build dialect" do
                 result.commandExitCode `shouldBe` Just 0
                 result.commandStdout `shouldBe` "reset-ok"
 
+    it "stops background tasks when the session temp directory changes" do
+        withTempDir \dir -> do
+            let firstScratch = dir </> "first-session"
+                nextScratch = dir </> "next-session"
+                output = firstScratch </> "background-output"
+            createDirectory firstScratch
+            createDirectory nextScratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf firstScratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                started <- startBackground session
+                    "while :; do printf x >> \"$TMPDIR/background-output\"; sleep 0.02; done"
+                taskId <- case started of
+                    Right runningId -> pure runningId
+                    Left err -> expectationFailure (Text.unpack err) >> pure ""
+                waitForFile output `shouldReturn` True
+
+                resetGrokSessionTemp session (unsafeEncodeUtf nextScratch)
+                setToolSessionTmp env (Just (unsafeEncodeUtf nextScratch))
+
+                before <- Text.readFile output
+                threadDelay 100000
+                Text.readFile output `shouldReturn` before
+                readTaskOutput session taskId Nothing
+                    `shouldReturn` ("Unknown task_id: " <> taskId)
+
     it "formats and neutralizes project instruction reminders" do
         let loaded = LoadedAgentsMd
                 { loadedGlobal = Nothing
@@ -303,6 +333,15 @@ spec = describe "Grok Build dialect" do
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir = withSystemTempDirectory "agent-grok-build-dialect"
+
+waitForFile :: FilePath -> IO Bool
+waitForFile path = go (100 :: Int)
+  where
+    go 0 = doesFileExist path
+    go remaining =
+        doesFileExist path >>= \case
+            True -> pure True
+            False -> threadDelay 10000 >> go (remaining - 1)
 
 withGrokRegistry
     :: (ToolRegistry -> IO () -> IO a)

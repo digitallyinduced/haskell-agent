@@ -46,6 +46,7 @@ data GrokCodingTools = GrokCodingTools
     { grokAppTools :: ![AppTool]
     , grokPlanMode :: !PlanModeEnv
     , grokSuspendGhci :: !(IO ())
+    , grokResetSessionTemp :: !(OsPath -> IO ())
     , grokClose :: !(IO ())
     , grokAgentTypes :: !GrokSubagentSpecs
     , grokRuntimeControl :: !GrokRuntimeControl
@@ -58,7 +59,6 @@ data GrokRuntimeControl = GrokRuntimeControl
     { grokGoalRuntime :: !GoalRuntime
     , grokSchedulerRuntime :: !(Maybe SchedulerRuntime)
     , grokWorkflowRuntime :: !(Maybe WorkflowRuntime)
-    , grokResetSessionTemp :: !(OsPath -> IO ())
     }
 
 newGrokCodingTools
@@ -91,7 +91,6 @@ newGrokCodingTools env hooks multi typesRef = do
                 { grokGoalRuntime = goals
                 , grokSchedulerRuntime = scheduler
                 , grokWorkflowRuntime = workflows
-                , grokResetSessionTemp = resetGrokSessionTemp session
                 }
         pure GrokCodingTools
             { grokAppTools =
@@ -106,6 +105,9 @@ newGrokCodingTools env hooks multi typesRef = do
                     typesRef
             , grokPlanMode = plan
             , grokSuspendGhci = suspendGhciSession ghci
+            , grokResetSessionTemp = \tempDir -> do
+                suspendGhciSession ghci
+                resetGrokSessionTemp session tempDir
             , grokClose = closeResourceScope resources
             , grokAgentTypes = typesRef
             , grokRuntimeControl = runtimeControl

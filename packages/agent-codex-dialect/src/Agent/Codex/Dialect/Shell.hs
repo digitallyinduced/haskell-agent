@@ -7,6 +7,7 @@ module Agent.Codex.Dialect.Shell
     ( CodexShellSession
     , CodexShellResult(..)
     , newCodexShellSession
+    , resetCodexShellSession
     , closeCodexShellSession
     , startCodexShellCommand
     , continueCodexShellCommand
@@ -88,6 +89,24 @@ closeCodexShellSession session = do
     commands <- modifyMVar session.sessionCommands \case
         Nothing -> pure (Nothing, [])
         Just current -> pure (Nothing, Map.elems current.storeCommands)
+    stopManagedCommands commands
+
+-- | Stop and forget retained commands while keeping the shell session open.
+-- Preserve the id counter so a stale id from the previous conversation can
+-- never alias a newly started command.
+resetCodexShellSession :: CodexShellSession -> IO ()
+resetCodexShellSession session = do
+    commands <- modifyMVar session.sessionCommands \case
+        Nothing -> pure (Nothing, [])
+        Just current ->
+            pure
+                ( Just current { storeCommands = Map.empty }
+                , Map.elems current.storeCommands
+                )
+    stopManagedCommands commands
+
+stopManagedCommands :: [ManagedCommand] -> IO ()
+stopManagedCommands commands =
     mapConcurrently_
         (\task ->
             void $ try @_ @SomeException $

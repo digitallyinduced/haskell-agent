@@ -39,7 +39,7 @@ import Agent.Tools.IO
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (race)
+import Control.Concurrent.Async (mapConcurrently_, race)
 import Control.Concurrent.MVar
 import Control.Exception.Safe (mask, onException, throwIO, tryAny)
 import Control.Monad (void)
@@ -117,7 +117,8 @@ newGrokSession env = do
 -- this runs, so allocate a fresh state file under the new private temp root
 -- and reset cwd/environment state rather than retaining dead paths.
 resetGrokSessionTemp :: GrokSession -> OsPath -> IO ()
-resetGrokSessionTemp session tempDir =
+resetGrokSessionTemp session tempDir = do
+    resetGrokBackgroundTasks session
     mask \restore -> do
         (nextResource, nextEnvFile) <- restore $
             allocateResource session.grokResources
@@ -171,9 +172,21 @@ cleanupEnvFiles envFile =
 -- Call this when the CLI/session ends, including after exceptions.
 closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
-    modifyMVar_ session.grokTasks \store ->
-        pure store { backgroundTasks = Map.empty }
+    resetGrokBackgroundTasks session
     closeResourceScope session.grokResources
+
+-- | Stop and forget background commands from the previous conversation.
+-- Preserve the id counter so stale task ids cannot alias newly started work.
+resetGrokBackgroundTasks :: GrokSession -> IO ()
+resetGrokBackgroundTasks session = do
+    tasks <- modifyMVar session.grokTasks \store ->
+        pure
+            ( store { backgroundTasks = Map.empty }
+            , Map.elems store.backgroundTasks
+            )
+    mapConcurrently_
+        (\task -> void $ tryAny $ releaseResource task.backgroundResource)
+        tasks
 
 runForegroundStreaming
     :: GrokSession
