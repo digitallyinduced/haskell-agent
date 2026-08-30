@@ -180,6 +180,16 @@ spec = describe "fullscreen TUI bridge" do
                     `shouldBe` 16 * 1024 * 1024
                 state.mailboxHighWaterCount `shouldBe` 1
 
+    it "admits one indivisible event larger than the mailbox byte budget" do
+        runtime <- newBridgeTestRuntime
+        let oversizedOutput =
+                Text.replicate ((16 * 1024 * 1024 `div` 4) + 1) "x"
+        timeout 2000000
+            (emitUiEvent
+                runtime
+                (UiLoop (ToolOutputUpdated "oversized" oversizedOutput)))
+            `shouldReturn` Just ()
+
     it "rebinds provider-specific actions without replacing the runtime" do
         calls <- newIORef ([] :: [String])
         input <- newFullscreenInputBuffer

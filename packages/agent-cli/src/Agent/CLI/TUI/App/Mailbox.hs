@@ -276,13 +276,16 @@ enqueueMailboxEvent (AppEventMailbox stateRef) event = do
         byteLimit =
             appEventMailboxPayloadBudgetBytes
                 + if control then appEventMailboxControlReserveBytes else 0
-        firstOversizedControl =
-            control
-                && Seq.null state.mailboxPendingEvents
+        -- An indivisible event may itself exceed the budget. Refusing that
+        -- first event would retry forever even though the mailbox is empty;
+        -- admitting exactly one lets the consumer make progress while still
+        -- preventing any additional payload from accumulating behind it.
+        firstOversizedSingleton =
+            Seq.null state.mailboxPendingEvents
                 && count == 1
     check
         ( count <= countLimit
-            && (payloadBytes <= byteLimit || firstOversizedControl)
+            && (payloadBytes <= byteLimit || firstOversizedSingleton)
         )
     writeTVar stateRef state
         { mailboxPendingEvents = pending
