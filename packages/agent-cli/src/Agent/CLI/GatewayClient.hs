@@ -101,7 +101,7 @@ data GatewayPollResult
 
 gatewayPollDecoder :: Hermes.Decoder GatewayPollResult
 gatewayPollDecoder =
-    Hermes.withRawJsonByteString \raw ->
+    Hermes.withOwnedRawJson \raw ->
         case Hermes.decodeEither successDecoder raw of
             Right (token, websocketUrl) ->
                 pure (GatewayAuthorized token websocketUrl)

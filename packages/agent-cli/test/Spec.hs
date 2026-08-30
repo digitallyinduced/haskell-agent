@@ -28,7 +28,6 @@ import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
-import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
@@ -112,7 +111,6 @@ main = hspec do
     ExternalProgramSpec.spec
     FileUriSpec.spec
     GatewayBridgeSpec.spec
-    GatewayClientSpec.spec
     GatewayClientSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
