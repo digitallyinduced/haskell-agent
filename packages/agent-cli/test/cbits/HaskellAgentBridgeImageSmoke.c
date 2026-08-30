@@ -137,6 +137,129 @@ int ha_mcp_admin_abi_smoke(void) {
     return 0;
 }
 
+static void learned_skill_callback(
+        void *context, int32_t status, int32_t scope,
+        const uint8_t *slug, size_t slug_length, int64_t revision,
+        const uint8_t *title, size_t title_length,
+        const uint8_t *description, size_t description_length,
+        const uint8_t *applies_when, size_t applies_when_length,
+        const uint8_t *instructions, size_t instructions_length,
+        int32_t activation, int32_t priority, int32_t archived,
+        int64_t created_at_ms, int64_t updated_at_ms,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status; (void)scope; (void)slug; (void)slug_length;
+    (void)revision; (void)title; (void)title_length; (void)description;
+    (void)description_length; (void)applies_when; (void)applies_when_length;
+    (void)instructions; (void)instructions_length; (void)activation;
+    (void)priority; (void)archived; (void)created_at_ms; (void)updated_at_ms;
+    (void)error; (void)error_length;
+}
+
+static void learned_skill_revision_callback(
+        void *context, int32_t status, int64_t revision,
+        const uint8_t *title, size_t title_length,
+        const uint8_t *description, size_t description_length,
+        const uint8_t *applies_when, size_t applies_when_length,
+        const uint8_t *instructions, size_t instructions_length,
+        int32_t activation, int32_t priority, int32_t archived,
+        const uint8_t *change_summary, size_t change_summary_length,
+        int64_t created_at_ms,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status; (void)revision; (void)title;
+    (void)title_length; (void)description; (void)description_length;
+    (void)applies_when; (void)applies_when_length; (void)instructions;
+    (void)instructions_length; (void)activation; (void)priority;
+    (void)archived; (void)change_summary; (void)change_summary_length;
+    (void)created_at_ms; (void)error; (void)error_length;
+}
+
+static void learned_skill_result_callback(
+        void *context, int32_t status, int64_t revision,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status; (void)revision; (void)error;
+    (void)error_length;
+}
+
+/* Compile every typed entry point and verify public enum/status values. */
+int ha_learned_skill_admin_abi_smoke(void) {
+    ha_learned_skill_callback item = learned_skill_callback;
+    ha_learned_skill_revision_callback revision =
+        learned_skill_revision_callback;
+    ha_resource_result_callback result = learned_skill_result_callback;
+    int32_t (*list_fn)(const uint8_t *, size_t, int32_t, size_t,
+        ha_learned_skill_callback, void *) = ha_learned_skill_list;
+    int32_t (*read_fn)(const uint8_t *, size_t, int32_t,
+        const uint8_t *, size_t, uint64_t, ha_learned_skill_callback,
+        void *) = ha_learned_skill_read;
+    (void)item; (void)revision; (void)result; (void)list_fn; (void)read_fn;
+    if (HA_LEARNED_SKILL_SCOPE_ALL != -1
+            || HA_LEARNED_SKILL_SCOPE_USER != 0
+            || HA_LEARNED_SKILL_SCOPE_REPOSITORY != 1
+            || HA_LEARNED_SKILL_SCOPE_CHECKOUT != 2
+            || HA_LEARNED_SKILL_ACTIVATION_MANUAL != 2
+            || HA_RESOURCE_STATUS_REVISION_CONFLICT != -3) {
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Exercise synchronous validation through the actual exported symbols. None
+ * of these rejected calls starts PostgreSQL or schedules a callback.
+ */
+int ha_learned_skill_admin_validation_smoke(void) {
+    const uint8_t cwd[] = ".";
+    const uint8_t slug[] = "safe-slug";
+    const uint8_t text[] = "value";
+    const uint8_t invalid_utf8[] = {0xff};
+
+    if (ha_learned_skill_list(cwd, 1, HA_LEARNED_SKILL_SCOPE_ALL, 0,
+            learned_skill_callback, NULL) != 2) {
+        return 1;
+    }
+    if (ha_learned_skill_read(cwd, 1, 9, slug, sizeof(slug) - 1, 0,
+            learned_skill_callback, NULL) != 2) {
+        return 2;
+    }
+    if (ha_learned_skill_create(cwd, 1, HA_LEARNED_SKILL_SCOPE_USER,
+            slug, sizeof(slug) - 1, text, sizeof(text) - 1,
+            text, sizeof(text) - 1, NULL, 0, text, sizeof(text) - 1,
+            9, 0, text, sizeof(text) - 1,
+            learned_skill_result_callback, NULL) != 2) {
+        return 3;
+    }
+    if (ha_learned_skill_update(cwd, 1, HA_LEARNED_SKILL_SCOPE_USER,
+            slug, sizeof(slug) - 1, 0, text, sizeof(text) - 1,
+            text, sizeof(text) - 1, NULL, 0, text, sizeof(text) - 1,
+            HA_LEARNED_SKILL_ACTIVATION_RELEVANT, 0,
+            text, sizeof(text) - 1,
+            learned_skill_result_callback, NULL) != 2) {
+        return 4;
+    }
+    if (ha_learned_skill_archive(cwd, 1, HA_LEARNED_SKILL_SCOPE_USER,
+            invalid_utf8, sizeof(invalid_utf8), 1,
+            text, sizeof(text) - 1,
+            learned_skill_result_callback, NULL) != 2) {
+        return 5;
+    }
+    if (ha_learned_skill_restore(cwd, 1, HA_LEARNED_SKILL_SCOPE_USER,
+            NULL, 0, 1, text, sizeof(text) - 1,
+            learned_skill_result_callback, NULL) != 2) {
+        return 6;
+    }
+    if (ha_learned_skill_rollback(cwd, 1, HA_LEARNED_SKILL_SCOPE_USER,
+            slug, sizeof(slug) - 1, 2, 0, text, sizeof(text) - 1,
+            learned_skill_result_callback, NULL) != 2) {
+        return 7;
+    }
+    if (ha_learned_skill_history(cwd, 1, HA_LEARNED_SKILL_SCOPE_USER,
+            slug, sizeof(slug) - 1, 1001,
+            learned_skill_revision_callback, NULL) != 2) {
+        return 8;
+    }
+    return 0;
+}
+
 static void image_stage_callback(void *context, const uint8_t *bytes,
                                  size_t length) {
     (void)context;
