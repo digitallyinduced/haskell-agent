@@ -18,6 +18,8 @@ module Agent.CLI.TUI.Composer
     , drawComposer
     , drawQueuedInputs
     , drawSlashMenu
+    , fullscreenInputByteLimit
+    , fullscreenInputCountLimit
     , handleComposerKey
     , handleDictationKey
     , handleControlMouseDown
