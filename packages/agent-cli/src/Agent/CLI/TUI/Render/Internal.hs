@@ -8,7 +8,9 @@ module Agent.CLI.TUI.Render.Internal
     , conversationScrollbarRenderer
     , choiceRowColumns
     , quickStartVisible
+    , quickStartWideVisible
     , quickStartRows
+    , startupCapabilityLines
     , repositoryHeaderText
     , selectedAgentConversation
     , onboardingVisibleRowIndices
@@ -317,7 +319,9 @@ import Agent.CLI.TUI.Render.Overlays
     , normalizeTextOverlayInsertion, maskedSecretText, textOverlayDisplayText
     , resumeSearchCursorColumn )
 import Agent.CLI.TUI.Render.Transcript
-    ( stickyPromptLayers, quickStartVisible, quickStartRows )
+    ( stickyPromptLayers, quickStartVisible, quickStartWideVisible
+    , quickStartRows
+    , startupCapabilityLines )
 import Agent.CLI.TUI.Render.Workspace
     ( drawWorkspace, agentPopoverLayers, agentEntryWindow, agentPaneVisible
     , agentPaneEntryLimit, conversationScrollbarRenderer
