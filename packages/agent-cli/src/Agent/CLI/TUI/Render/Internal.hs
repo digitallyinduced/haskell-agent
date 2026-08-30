@@ -58,7 +58,7 @@ import Agent.CLI.Resume
 import Agent.CLI.Secret ()
 import Agent.CLI.Status
     ( formatEstimatedTokensPerSecond
-    , formatUsageWithRate
+    , formatTokenUsage
     )
 import Agent.CLI.Style ( motionGlyphSet )
 import Agent.CLI.TUI.History
@@ -545,7 +545,7 @@ drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
         terminalTxt
-            (formatUiUsageWithRate state.appUi)
+            (formatTokenUsage state.appUi.uiPrompt.promptUsage)
 
 drawLiveTodos :: UiState -> Widget Name
 drawLiveTodos ui =
@@ -646,26 +646,18 @@ drawPromptActivity state
             <> formatElapsed (fromIntegral ui.uiElapsedMillis / 1000)
     right
         | ui.uiRunning =
-            formatUiUsageWithRate ui
+            formatUiGenerationRate ui
         | ui.uiCompletionRemainingMillis > 0 =
-            maybe
-                ""
-                (formatEstimatedTokensPerSecond
-                    (uiTokensPerSecondEstimated ui))
-                (uiTokensPerSecond ui)
+            formatUiGenerationRate ui
         | otherwise = ""
 
-formatUiUsageWithRate :: UiState -> Text
-formatUiUsageWithRate ui =
-    Text.intercalate " · " $
-        filter (not . Text.null)
-            [ formatUsageWithRate ui.uiPrompt.promptUsage Nothing
-            , maybe
-                ""
-                (formatEstimatedTokensPerSecond
-                    (uiTokensPerSecondEstimated ui))
-                (uiTokensPerSecond ui)
-            ]
+formatUiGenerationRate :: UiState -> Text
+formatUiGenerationRate ui =
+    maybe
+        ""
+        (formatEstimatedTokensPerSecond
+            (uiTokensPerSecondEstimated ui))
+        (uiTokensPerSecond ui)
 
 -- | Describe the child agents which keep the session alive after the root
 -- agent has finished. Prefer their current running step so the status line
