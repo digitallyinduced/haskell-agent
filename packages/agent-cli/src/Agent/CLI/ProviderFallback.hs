@@ -84,10 +84,11 @@ automaticRetryCountdownText rawSeconds =
 
 -- | Curated models ordered from strongest to weakest for automatic selection.
 --
--- Availability is account-level: once a provider reports that all of its
--- credentials are exhausted, trying a weaker model on the same account would
--- only loop. 'fallbackCandidates' therefore keeps the highest-ranked model for
--- each still-eligible provider.
+-- Account and quota failures are provider-wide, so trying a weaker model on
+-- the same account would only loop. Model-access failures are different: new
+-- models are often rolled out gradually. In that case 'fallbackCandidates'
+-- first walks down the ranked models for the current provider, then keeps the
+-- highest-ranked model for every other eligible provider.
 rankedModels :: ModelCatalog -> [ModelOption]
 rankedModels = sortOn modelRank . filter hasPriority . modelCatalog
   where
@@ -98,19 +99,43 @@ rankedModels = sortOn modelRank . filter hasPriority . modelCatalog
                 `elem` ["openai", "xai", "openrouter", "gemini"]
     modelRank = maybe maxBound id . (.modelFallbackPriority)
 
--- | Return the best model for every provider that may still have a usable
--- account. Providers already observed as exhausted, including the provider
--- that produced this error, are excluded.
+-- | Return ordered recovery targets for an unavailable model or provider.
+-- Providers already observed as exhausted are excluded. A structured
+-- model-access failure may keep the current provider long enough to try its
+-- lower-ranked models.
 fallbackCandidates
     :: ModelCatalog
     -> Set Provider
     -> Provider
+    -> Text
     -> ApiError
     -> [ModelOption]
-fallbackCandidates catalog unavailable current err
+fallbackCandidates catalog unavailable current currentModel err
     | current == ClaudeCodeProvider = []
     | not (isProviderUnavailable err) = []
-    | otherwise =
+    | otherwise = sameProviderFallbacks <> otherProviderFallbacks
+  where
+    ranked = rankedModels catalog
+    sameProviderFallbacks
+        | isModelUnavailable err =
+            case currentPriority of
+                Nothing -> []
+                Just priority ->
+                    filter
+                        (\option ->
+                            option.modelTarget.targetProvider == current
+                                && option.modelTarget.targetModelId /= currentModel
+                                && option.modelFallbackPriority > Just priority)
+                        ranked
+        | otherwise = []
+    currentPriority =
+        (.modelFallbackPriority) =<< safeHead
+            (filter
+                (\option ->
+                    option.modelTarget.targetProvider == current
+                        && option.modelTarget.targetModelId == currentModel)
+                ranked)
+    otherProviderFallbacks =
         filter
             (\option ->
                 option.modelTarget.targetProvider /= current
@@ -118,7 +143,20 @@ fallbackCandidates catalog unavailable current err
                         /= ClaudeCodeProvider
                     && option.modelTarget.targetProvider
                         `Set.notMember` unavailable)
-            (nubOrdOn (.modelTarget.targetProvider) (rankedModels catalog))
+            (nubOrdOn (.modelTarget.targetProvider) ranked)
+
+    safeHead = \case
+        [] -> Nothing
+        value : _ -> Just value
+
+-- | A structured provider response that says the selected model or feature is
+-- unavailable. Unlike a bare HTTP 403, this is safe to recover from by trying
+-- a lower-ranked model on the same account.
+isModelUnavailable :: ApiError -> Bool
+isModelUnavailable = \case
+    ProviderError PermissionError _ _ -> True
+    ProviderError UsageNotIncluded _ _ -> True
+    _ -> False
 
 isUsageExhausted :: ApiError -> Bool
 isUsageExhausted = \case
