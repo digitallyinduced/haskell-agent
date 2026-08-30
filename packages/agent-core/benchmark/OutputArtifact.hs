@@ -51,7 +51,7 @@ data Sample = Sample
     { elapsedMillis :: !Double
     , cpuMillis :: !Double
     , allocatedBytes :: !Integer
-    , liveBytes :: !Integer
+    , liveDeltaBytes :: !Integer
     }
 
 main :: IO ()
@@ -115,17 +115,18 @@ benchmark :: String -> Int -> IO Text.Text -> IO ()
 benchmark label count action = do
     samples <- mapM (const (measure action)) [1 .. count]
     let median field = sort (map field samples) !! (length samples `div` 2)
-    printf "%s,elapsed-ms=%.3f,cpu-ms=%.3f,allocated=%d,live-after-gc=%d\n"
+    printf "%s,elapsed-ms=%.3f,cpu-ms=%.3f,allocated=%d,live-delta-after-gc=%d\n"
         label
         (median elapsedMillis)
         (median cpuMillis)
         (median allocatedBytes)
-        (median liveBytes)
+        (median liveDeltaBytes)
 
 measure :: IO Text.Text -> IO Sample
 measure action = do
     performGC
     before <- getRTSStats
+    beforeLive <- pure before.live_bytes
     wallStart <- getMonotonicTimeNSec
     cpuStart <- getCPUTime
     result <- action
@@ -140,7 +141,8 @@ measure action = do
         , cpuMillis = fromIntegral (cpuEnd - cpuStart) / 1.0e9
         , allocatedBytes =
             fromIntegral (after.allocated_bytes - before.allocated_bytes)
-        , liveBytes = fromIntegral settled.live_bytes
+        , liveDeltaBytes =
+            fromIntegral settled.live_bytes - fromIntegral beforeLive
         }
 
 checksum :: Int -> Char -> Int
