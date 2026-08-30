@@ -12,6 +12,11 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
+    , cmd "view-plan" ["show-plan", "plan-view"] "/view-plan" "Show the saved session plan" False
+    , cmd "queue" [] "/queue" "Show prompts waiting in the input queue" False
+    , cmd "transcript" ["log"] "/transcript" "Open the session transcript in a pager" False
+    , cmd "edit-prompt" [] "/edit-prompt" "Edit a prompt draft without submitting it" False
+    , cmd "context" [] "/context" "Show context-window usage and estimates" False
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "meta" ["configure"] "/meta <REQUEST>" "Configure the harness without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False

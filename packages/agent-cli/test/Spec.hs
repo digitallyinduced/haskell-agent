@@ -15,6 +15,7 @@ import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
+import qualified Agent.CLI.ContextSpec as ContextSpec
 import qualified Agent.CLI.ConversationStoreSpec as ConversationStoreSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
@@ -22,6 +23,7 @@ import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
+import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
@@ -63,6 +65,7 @@ import qualified Agent.CLI.SkillsSpec as SkillsSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
+import qualified Agent.CLI.TranscriptSpec as TranscriptSpec
 import qualified Agent.CLI.TurnSpec as TurnSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
@@ -94,6 +97,7 @@ main = hspec do
     CommandSpec.spec
     ConfigSpec.spec
     CompactionSpec.spec
+    ContextSpec.spec
     ConversationStoreSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
@@ -101,6 +105,7 @@ main = hspec do
     DatabaseSpec.spec
     EnvironmentSpec.spec
     ErrorSpec.spec
+    ExternalProgramSpec.spec
     FileUriSpec.spec
     GatewayBridgeSpec.spec
     ImagePreviewSpec.spec
@@ -137,6 +142,7 @@ main = hspec do
     StyleSpec.spec
     SessionHistorySpec.spec
     TimestampSpec.spec
+    TranscriptSpec.spec
     TurnSpec.spec
     TerminalSpec.spec
     TextLayoutSpec.spec
