@@ -102,6 +102,26 @@ spec = describe "repository delivery service" do
             repositoryDeliveryStatus root snapshot.snapshotId
                 `shouldReturnSatisfying` isInvalid
 
+    it "rejects percent-encoded credential-bearing URLs" $
+        withDeliveryRepository \root _ -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            _ <- git root
+                [ "remote"
+                , "set-url"
+                , "origin"
+                , "ssh://git%3Asecret@example.test/repository.git"
+                ]
+            repositoryDeliveryStatus root snapshot.snapshotId
+                `shouldReturnSatisfying` isInvalid
+            _ <- git root
+                [ "remote"
+                , "set-url"
+                , "origin"
+                , "git%3Asecret@example.test:owner/repository.git"
+                ]
+            repositoryDeliveryStatus root snapshot.snapshotId
+                `shouldReturnSatisfying` isInvalid
+
     it "previews and confirms one exact fast-forward lease push once" $
         withDeliveryRepository \root remote -> do
             appendFile (root <> "/tracked.txt") "second\n"

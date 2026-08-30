@@ -292,24 +292,31 @@ confirmRepositoryPush requested token =
                                                                     (DeliveryStale
                                                                         "the remote branch changed after push preview"))
                                                         | otherwise ->
-                                                            runGit
-                                                                current.deliveryRoot
-                                                                (remoteCommandPrefix previewedRemote
-                                                                <> [ "push"
-                                                                , "--porcelain"
-                                                                , "--no-verify"
-                                                                , leaseArgument current
-                                                                , "--"
-                                                                , BS8.unpack previewedRemote.validatedRemoteUrl
-                                                                , pushRefspec current
-                                                                ])
-                                                                BS.empty
-                                                                networkTimeoutMicros >>= \case
+                                                            revalidateLocalMutation
+                                                                current >>= \case
                                                                     Left err -> pure (Left err)
-                                                                    Right _ ->
-                                                                        refreshPushedStatus
-                                                                            current
-                                                                            previewedRemote
+                                                                    Right () ->
+                                                                        -- The explicit object ID prevents
+                                                                        -- any still-later local ref movement
+                                                                        -- from changing what is delivered.
+                                                                        runGit
+                                                                            current.deliveryRoot
+                                                                            (remoteCommandPrefix previewedRemote
+                                                                            <> [ "push"
+                                                                            , "--porcelain"
+                                                                            , "--no-verify"
+                                                                            , leaseArgument current
+                                                                            , "--"
+                                                                            , BS8.unpack previewedRemote.validatedRemoteUrl
+                                                                            , pushRefspec current
+                                                                            ])
+                                                                            BS.empty
+                                                                            networkTimeoutMicros >>= \case
+                                                                                Left err -> pure (Left err)
+                                                                                Right _ ->
+                                                                                    refreshPushedStatus
+                                                                                        current
+                                                                                        previewedRemote
         Right _ ->
             pure
                 (Left
@@ -444,30 +451,35 @@ createPullRequest requested token =
                                                                                     Left err ->
                                                                                         pure (Left err)
                                                                                     Right () ->
-                                                                                        runGh
-                                                                                            current.deliveryRoot
-                                                                                            [ "pr"
-                                                                                            , "create"
-                                                                                            , "--repo"
-                                                                                            , githubRepoArgument repository
-                                                                                            , "--base"
-                                                                                            , Text.unpack base
-                                                                                            , "--head"
-                                                                                            , Text.unpack current.deliveryBranch
-                                                                                            , "--title"
-                                                                                            , Text.unpack title
-                                                                                            , "--body-file"
-                                                                                            , "-"
-                                                                                            ]
-                                                                                            (TextEncoding.encodeUtf8 body)
-                                                                                            networkTimeoutMicros >>= \case
+                                                                                        revalidateLocalMutation
+                                                                                            current >>= \case
                                                                                                 Left err ->
                                                                                                     pure (Left err)
-                                                                                                Right output ->
-                                                                                                    pure
-                                                                                                        (parsePullRequestUrl
-                                                                                                            repository
-                                                                                                            output)
+                                                                                                Right () ->
+                                                                                                    runGh
+                                                                                                        current.deliveryRoot
+                                                                                                        [ "pr"
+                                                                                                        , "create"
+                                                                                                        , "--repo"
+                                                                                                        , githubRepoArgument repository
+                                                                                                        , "--base"
+                                                                                                        , Text.unpack base
+                                                                                                        , "--head"
+                                                                                                        , Text.unpack current.deliveryBranch
+                                                                                                        , "--title"
+                                                                                                        , Text.unpack title
+                                                                                                        , "--body-file"
+                                                                                                        , "-"
+                                                                                                        ]
+                                                                                                        (TextEncoding.encodeUtf8 body)
+                                                                                                        networkTimeoutMicros >>= \case
+                                                                                                            Left err ->
+                                                                                                                pure (Left err)
+                                                                                                            Right output ->
+                                                                                                                pure
+                                                                                                                    (parsePullRequestUrl
+                                                                                                                        repository
+                                                                                                                        output)
         Right _ ->
             pure
                 (Left
@@ -750,6 +762,22 @@ refreshPushedStatus pushed validatedRemote = do
                         , deliveryBehind = 0
                         }
 
+revalidateLocalMutation
+    :: DeliveryStatus
+    -> IO (Either DeliveryError ())
+revalidateLocalMutation expected =
+    repositoryDeliveryStatus
+        expected.deliveryRoot
+        expected.deliverySnapshotId >>= \case
+            Left err -> pure (Left err)
+            Right current
+                | current == expected -> pure (Right ())
+                | otherwise ->
+                    pure
+                        (Left
+                            (DeliveryStale
+                                "repository state changed immediately before delivery"))
+
 revalidatePullRequestMutation
     :: DeliveryStatus
     -> ValidatedRemote
@@ -936,38 +964,60 @@ validRemoteUrl url =
         "https://" `BS8.isPrefixOf` value
             && not (authorityContains '@' "https://" value)
             && not (containsQueryOrFragment value)
+            && not (authorityContains '%' "https://" value)
     validSsh value =
         "ssh://" `BS8.isPrefixOf` value
-            && not (userinfoContains ':' "ssh://" value)
+            && validSshAuthority value
             && not (containsQueryOrFragment value)
     validGit value =
         "git://" `BS8.isPrefixOf` value
             && not (authorityContains '@' "git://" value)
             && not (containsQueryOrFragment value)
+            && not (authorityContains '%' "git://" value)
     validFile value =
         "file://" `BS8.isPrefixOf` value
             && not (authorityContains '@' "file://" value)
             && not (containsQueryOrFragment value)
+            && not (authorityContains '%' "file://" value)
     authorityContains character prefix value =
         BS8.elem character
             (BS8.takeWhile (/= '/') (BS.drop (BS.length prefix) value))
-    userinfoContains character prefix value =
+    validSshAuthority value =
         let authority =
-                BS8.takeWhile (/= '/') (BS.drop (BS.length prefix) value)
+                BS8.takeWhile (/= '/') (BS.drop (BS.length "ssh://") value)
             (userinfo, separatorAndHost) = BS8.break (== '@') authority
-        in not (BS.null separatorAndHost)
-            && BS8.elem character userinfo
+            host = BS.drop 1 separatorAndHost
+        in not (BS.null authority)
+            && not (BS8.elem '%' authority)
+            && if BS.null separatorAndHost
+                then True
+                else validUsername userinfo
+                    && not (BS.null host)
+                    && not (BS8.elem '@' host)
+    validUsername username =
+        not (BS.null username)
+            && BS8.all
+                (\character ->
+                    isAsciiAlphaNumeric character
+                        || character `elem` ("._-" :: String))
+                username
+    isAsciiAlphaNumeric character =
+        (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
     containsQueryOrFragment value =
         BS8.elem '?' value || BS8.elem '#' value
     validScpLike value =
         case BS8.break (== ':') value of
-            (host, path) ->
-                not (BS.null host)
-                    && BS8.elem '@' host
+            (authority, path) ->
+                let (username, separatorAndHost) = BS8.break (== '@') authority
+                    host = BS.drop 1 separatorAndHost
+                in validUsername username
+                    && not (BS.null separatorAndHost)
+                    && not (BS.null host)
+                    && not (BS8.elem '@' host)
+                    && not (BS8.elem '%' authority)
                     && BS.length path > 1
-                    -- A canonical SCP-like URL is `git@host:path`.
-                    -- Reject a second `@`, which denotes credentials in
-                    -- the authority and would be exposed in child argv.
                     && not (BS8.elem '@' path)
                     && not (containsQueryOrFragment value)
 
