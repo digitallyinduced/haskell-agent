@@ -129,6 +129,8 @@ main = hspec $ do
                 second <- appendEvent firstProcess "two" Null
                 third <- appendEvent firstProcess "three" Null
                 secondProcess <- openJournal config
+                BS.readFile (directory </> "events.jsonl")
+                    `shouldReturn` (LBS.toStrict (encode second) <> "\n" <> LBS.toStrict (encode third) <> "\n")
                 replayAfter secondProcess 1 `shouldReturn` ReplayEvents [second, third]
                 snapshot secondProcess >>= \saved ->
                     saved.lastSequence `shouldBe` 3
@@ -136,6 +138,19 @@ main = hspec $ do
                 replayAfter thirdProcess 1 `shouldReturn` ReplayEvents [second, third]
                 fourth <- appendEvent thirdProcess "four" Null
                 fourth.sequenceNumber `shouldBe` 4
+
+        it "accepts the snapshot boundary event in a retained replay suffix" $
+            withSystemTempDirectory "daemon-snapshot-boundary" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    boundary = EventEnvelope {sequenceNumber = 4, eventType = "boundary", payload = Null}
+                    next = EventEnvelope {sequenceNumber = 5, eventType = "next", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    (LBS.toStrict (encode boundary) <> "\n" <> LBS.toStrict (encode next) <> "\n")
+                reopened <- openJournal (defaultJournalConfig directory)
+                replayAfter reopened 3 `shouldReturn` ReplayEvents [boundary, next]
+                replayAfter reopened 4 `shouldReturn` ReplayEvents [next]
 
         it "redacts sensitive fields and bounds retained task logs" $
             withSystemTempDirectory "daemon-redaction" $ \directory -> do
