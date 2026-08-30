@@ -50,12 +50,10 @@ refreshAccessTokenHTTP oauthClientId state = do
         Right response -> do
             let status = getResponseStatusCode response
             if status < 200 || status >= 300
-                then pure $ Left $ ProviderError AuthenticationError
-                    ("Codex token refresh failed with HTTP "
-                        <> Text.pack (show status) <> ": "
-                        <> Text.decodeUtf8With Text.lenientDecode
-                            (LBS.toStrict (LBS.take 500 (getResponseBody response))))
-                    Nothing
+                then pure $ Left $ HttpError status
+                    (Text.decodeUtf8With Text.lenientDecode
+                        (LBS.toStrict
+                            (LBS.take 500 (getResponseBody response))))
                 else case decodeRefreshResponse (getResponseBody response) of
                     Left err -> pure (Left err)
                     Right RefreshResponse{..} -> do
