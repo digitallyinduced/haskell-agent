@@ -7,8 +7,15 @@ module Agent.CLI.Plan
     , PlanExitState(..)
     , TerminalPlanReviewState(..)
     , TerminalPlanReviewDecision(..)
+    , PlanReviewAdapter(..)
+    , PlanReviewAdapterError(..)
+    , PlanReviewResolution(..)
     , PlanReviewFeedback(..)
     , PlanLineComment(..)
+    , runPlanReviewAdapter
+    , resolveTerminalPlanReview
+    , renderPlanReviewAdapterError
+    , renderPlanReviewFeedback
     , parsePlanReviewFeedback
     , applyPlanEnterKey
     , applyPlanExitKey
@@ -115,6 +122,32 @@ data TerminalPlanReviewState = TerminalPlanReviewState
     }
     deriving (Eq, Show)
 
+-- | Persistence and presentation boundary for a plan review. The snapshot is
+-- written and read back before the presenter is invoked, so write failures,
+-- unreadable plans, and stale contents all fail closed without opening an
+-- approval surface.
+data PlanReviewAdapter = PlanReviewAdapter
+    { planReviewWriteSnapshot :: !(Text -> IO (Either Text ()))
+    , planReviewReadSnapshot :: !(IO (Either Text Text))
+    , planReviewPresentSnapshot
+        :: !(Text -> [Text] -> IO TerminalPlanReviewDecision)
+    }
+
+data PlanReviewAdapterError
+    = PlanReviewWriteFailed !Text
+    | PlanReviewReadFailed !Text
+    | PlanReviewStale
+    | PlanReviewWarningsNotAcknowledged ![Text]
+    deriving (Eq, Show)
+
+-- | Lifecycle effects of a typed review outcome. Closing the review is
+-- intentionally distinct from abandoning it: defer leaves Plan Mode active.
+data PlanReviewResolution = PlanReviewResolution
+    { planReviewShouldDeactivate :: !Bool
+    , planReviewContinuation :: !(Maybe Text)
+    }
+    deriving (Eq, Show)
+
 data PlanReviewFeedback = PlanReviewFeedback
     { planFeedbackOverall :: !Text
     , planFeedbackLineComments :: ![PlanLineComment]
@@ -140,6 +173,99 @@ initialTerminalPlanReviewState warnings =
         { terminalReviewWarnings = warnings
         , terminalReviewIndex = 0
         }
+
+-- | Persist, verify, then present one immutable plan snapshot. Advisory
+-- warnings change the approval label/outcome but never make the document
+-- invalid.
+runPlanReviewAdapter
+    :: PlanReviewAdapter
+    -> [Text]
+    -> Text
+    -> IO (Either PlanReviewAdapterError TerminalPlanReviewDecision)
+runPlanReviewAdapter adapter warnings expectedPlan =
+    adapter.planReviewWriteSnapshot expectedPlan >>= \case
+        Left writeError ->
+            pure (Left (PlanReviewWriteFailed writeError))
+        Right () ->
+            adapter.planReviewReadSnapshot >>= \case
+                Left readError ->
+                    pure (Left (PlanReviewReadFailed readError))
+                Right persistedPlan
+                    | persistedPlan /= expectedPlan ->
+                        pure (Left PlanReviewStale)
+                    | otherwise -> do
+                        decision <-
+                            adapter.planReviewPresentSnapshot
+                                persistedPlan
+                                warnings
+                        case decision of
+                            TerminalPlanDefer ->
+                                pure (Right TerminalPlanDefer)
+                            TerminalPlanAbandon ->
+                                pure (Right TerminalPlanAbandon)
+                            TerminalPlanApprove
+                                | not (null warnings) ->
+                                    pure
+                                        (Left
+                                            (PlanReviewWarningsNotAcknowledged
+                                                warnings))
+                            _ ->
+                                adapter.planReviewReadSnapshot >>= \case
+                                    Left readError ->
+                                        pure
+                                            (Left
+                                                (PlanReviewReadFailed
+                                                    readError))
+                                    Right currentPlan
+                                        | currentPlan /= persistedPlan ->
+                                            pure (Left PlanReviewStale)
+                                        | otherwise ->
+                                            pure (Right decision)
+
+renderPlanReviewAdapterError :: PlanReviewAdapterError -> Text
+renderPlanReviewAdapterError = \case
+    PlanReviewWriteFailed detail ->
+        "the plan could not be written: " <> detail
+    PlanReviewReadFailed detail ->
+        "the written plan could not be read back: " <> detail
+    PlanReviewStale ->
+        "the plan changed before the review decision could be accepted"
+    PlanReviewWarningsNotAcknowledged _ ->
+        "the plan has advisory warnings that require Approve anyway"
+
+resolveTerminalPlanReview
+    :: TerminalPlanReviewDecision
+    -> PlanReviewResolution
+resolveTerminalPlanReview = \case
+    TerminalPlanApprove ->
+        approvedResolution
+    TerminalPlanApproveAnyway ->
+        approvedResolution
+    TerminalPlanRevise feedback ->
+        PlanReviewResolution
+            { planReviewShouldDeactivate = False
+            , planReviewContinuation =
+                planDecisionFollowUp
+                    (PlanRequestChanges
+                        (renderPlanReviewFeedback feedback))
+            }
+    TerminalPlanAbandon ->
+        PlanReviewResolution
+            { planReviewShouldDeactivate = True
+            , planReviewContinuation = Nothing
+            }
+    TerminalPlanDefer ->
+        PlanReviewResolution
+            { planReviewShouldDeactivate = False
+            , planReviewContinuation = Nothing
+            }
+  where
+    approvedResolution =
+        PlanReviewResolution
+            { planReviewShouldDeactivate = True
+            , planReviewContinuation =
+                planDecisionFollowUp PlanApprove
+            }
 
 confirmEnter :: IO Bool -> Text -> IO Bool
 confirmEnter resolveColor reason = do
@@ -386,6 +512,30 @@ parsePlanReviewFeedback input =
         { planFeedbackOverall = overall
         , planFeedbackLineComments = comments
         }
+
+renderPlanReviewFeedback :: PlanReviewFeedback -> Text
+renderPlanReviewFeedback feedback =
+    case overallRows <> commentRows of
+        [] -> "(no notes)"
+        rows -> Text.intercalate "\n" rows
+  where
+    overallRows =
+        [ feedback.planFeedbackOverall
+        | not (Text.null (Text.strip feedback.planFeedbackOverall))
+        ]
+    commentRows = map renderLineComment feedback.planFeedbackLineComments
+
+renderLineComment :: PlanLineComment -> Text
+renderLineComment comment =
+    reference <> ": " <> comment.planCommentBody
+  where
+    startLine = Text.pack (show comment.planCommentStartLine)
+    endLine = Text.pack (show comment.planCommentEndLine)
+    reference
+        | comment.planCommentStartLine == comment.planCommentEndLine =
+            "L" <> startLine
+        | otherwise =
+            "L" <> startLine <> "-L" <> endLine
 
 parseFeedbackLine :: Text -> (Maybe PlanLineComment, Text)
 parseFeedbackLine raw =

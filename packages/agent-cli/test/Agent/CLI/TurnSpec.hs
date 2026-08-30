@@ -4,6 +4,7 @@ import Agent.CLI.Turn
     ( grokFirstTurnPrefix
     , grokFrameLastUserInput
     , grokUserQuery
+    , reviewAfterDurableAppend
     , restorePlanStateAfterIncomplete
     )
 import Agent.CLI.TurnState
@@ -41,7 +42,7 @@ import Agent.Tools.PlanMode
     , activatePlanMode
     , newPlanModeEnv
     )
-import Data.IORef (readIORef, writeIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -50,6 +51,37 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "reviewAfterDurableAppend" do
+        it "appends the assistant turn before opening review" do
+            events <- newIORef ([] :: [Text])
+            let record event = modifyIORef' events (<> [event])
+            result <-
+                reviewAfterDurableAppend
+                    (record "append" >> pure True)
+                    (record "review" >> pure (Just ("continue" :: Text)))
+            result `shouldBe` Just "continue"
+            readIORef events `shouldReturn` ["append", "review"]
+
+        it "skips review when durable persistence is unavailable" do
+            reviewed <- newIORef False
+            reviewAfterDurableAppend
+                (pure False)
+                (modifyIORef' reviewed (const True)
+                    >> pure (Just ("continue" :: Text)))
+                `shouldReturn` Nothing
+            readIORef reviewed `shouldReturn` False
+
+        it "does not review or continue after an append failure" do
+            events <- newIORef ([] :: [Text])
+            let record event = modifyIORef' events (<> [event])
+            reviewAfterDurableAppend
+                (record "append"
+                    >> ioError (userError "append failed"))
+                (record "review"
+                    >> pure (Just ("continue" :: Text)))
+                `shouldThrow` anyIOException
+            readIORef events `shouldReturn` ["append"]
+
     describe "turnInputsWithContext" do
         it "orders plan, startup, and submitted inputs" do
             turnInputsWithContext

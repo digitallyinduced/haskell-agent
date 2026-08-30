@@ -3,6 +3,7 @@ module Agent.CLI.PlanSpec (spec) where
 import Agent.CLI.Plan
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Tools.PlanMode (PlanDecision(..))
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
@@ -120,6 +121,128 @@ spec = do
                         "L0: invalid\nL9-L3: backwards\nL4:"
                     , planFeedbackLineComments = []
                     }
+
+    describe "runPlanReviewAdapter" do
+        it "writes and verifies the exact snapshot before and after review" do
+            events <- newIORef []
+            let record event = modifyIORef' events (<> [event])
+                adapter = PlanReviewAdapter
+                    { planReviewWriteSnapshot = \content -> do
+                        record ("write:" <> content)
+                        pure (Right ())
+                    , planReviewReadSnapshot = do
+                        record "read"
+                        pure (Right "# Plan")
+                    , planReviewPresentSnapshot = \content warnings -> do
+                        record
+                            ("present:"
+                                <> content
+                                <> ":"
+                                <> Text.intercalate "," warnings)
+                        pure TerminalPlanApproveAnyway
+                    }
+            runPlanReviewAdapter
+                adapter
+                ["Missing verification section"]
+                "# Plan"
+                `shouldReturn` Right TerminalPlanApproveAnyway
+            readIORef events `shouldReturn`
+                [ "write:# Plan"
+                , "read"
+                , "present:# Plan:Missing verification section"
+                , "read"
+                ]
+
+        it "does not present unreadable or stale snapshots" do
+            presented <- newIORef False
+            let presenter _ _ = do
+                    modifyIORef' presented (const True)
+                    pure TerminalPlanApprove
+                unreadable = PlanReviewAdapter
+                    { planReviewWriteSnapshot = \_ -> pure (Right ())
+                    , planReviewReadSnapshot =
+                        pure (Left "permission denied")
+                    , planReviewPresentSnapshot = presenter
+                    }
+                stale = PlanReviewAdapter
+                    { planReviewWriteSnapshot = \_ -> pure (Right ())
+                    , planReviewReadSnapshot =
+                        pure (Right "different plan")
+                    , planReviewPresentSnapshot = presenter
+                    }
+            runPlanReviewAdapter unreadable [] "# Plan"
+                `shouldReturn`
+                    Left (PlanReviewReadFailed "permission denied")
+            runPlanReviewAdapter stale [] "# Plan"
+                `shouldReturn` Left PlanReviewStale
+            readIORef presented `shouldReturn` False
+
+        it "rejects a snapshot that changes while the UI is open" do
+            reads <- newIORef ["# Plan", "# Changed"]
+            let readNext =
+                    readIORef reads >>= \case
+                        content : rest -> do
+                            modifyIORef' reads (const rest)
+                            pure (Right content)
+                        [] -> pure (Left "unexpected read")
+                adapter = PlanReviewAdapter
+                    { planReviewWriteSnapshot = \_ -> pure (Right ())
+                    , planReviewReadSnapshot = readNext
+                    , planReviewPresentSnapshot = \_ _ ->
+                        pure TerminalPlanApprove
+                    }
+            runPlanReviewAdapter adapter [] "# Plan"
+                `shouldReturn` Left PlanReviewStale
+
+        it "requires approve-anyway when advisory warnings exist" do
+            let adapter decision = PlanReviewAdapter
+                    { planReviewWriteSnapshot = \_ -> pure (Right ())
+                    , planReviewReadSnapshot = pure (Right "# Plan")
+                    , planReviewPresentSnapshot = \_ _ -> pure decision
+                    }
+                warnings = ["Missing verification section"]
+            runPlanReviewAdapter
+                (adapter TerminalPlanApprove)
+                warnings
+                "# Plan"
+                `shouldReturn`
+                    Left
+                        (PlanReviewWarningsNotAcknowledged warnings)
+            runPlanReviewAdapter
+                (adapter TerminalPlanApproveAnyway)
+                warnings
+                "# Plan"
+                `shouldReturn` Right TerminalPlanApproveAnyway
+
+    describe "resolveTerminalPlanReview" do
+        it "keeps approve, revise, abandon, and defer lifecycle effects distinct" do
+            resolveTerminalPlanReview TerminalPlanApprove
+                `shouldSatisfy` \resolution ->
+                    resolution.planReviewShouldDeactivate
+                        && maybe False
+                            (Text.isInfixOf "Begin implementing")
+                            resolution.planReviewContinuation
+            resolveTerminalPlanReview TerminalPlanApproveAnyway
+                `shouldBe`
+                    resolveTerminalPlanReview TerminalPlanApprove
+            let feedback = PlanReviewFeedback
+                    { planFeedbackOverall = "Simplify this."
+                    , planFeedbackLineComments =
+                        [PlanLineComment 12 15 "Explain the retry."]
+                    }
+                revised =
+                    resolveTerminalPlanReview
+                        (TerminalPlanRevise feedback)
+            revised.planReviewShouldDeactivate `shouldBe` False
+            revised.planReviewContinuation
+                `shouldSatisfy`
+                    maybe False
+                        (Text.isInfixOf
+                            "L12-L15: Explain the retry.")
+            resolveTerminalPlanReview TerminalPlanAbandon
+                `shouldBe` PlanReviewResolution True Nothing
+            resolveTerminalPlanReview TerminalPlanDefer
+                `shouldBe` PlanReviewResolution False Nothing
 
     describe "parseProposedPlan" do
         it "pulls the inner markdown from a proposed_plan block" do

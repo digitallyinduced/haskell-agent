@@ -4,6 +4,7 @@ module Agent.CLI.Turn
     , grokFirstTurnPrefix
     , grokFrameLastUserInput
     , grokUserQuery
+    , reviewAfterDurableAppend
     , restorePlanStateAfterIncomplete
     , retryCheckpointedTurn
     , runOneTurn
@@ -13,10 +14,16 @@ import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Plan
-    ( ProposedPlanParseError(..)
+    ( PlanReviewAdapter(..)
+    , PlanReviewResolution(..)
+    , ProposedPlanParseError(..)
+    , TerminalPlanReviewDecision(..)
     , parseProposedPlan
-    , planDecisionFollowUp
+    , parsePlanReviewFeedback
+    , renderPlanReviewAdapterError
     , renderProposedPlanParseError
+    , resolveTerminalPlanReview
+    , runPlanReviewAdapter
     )
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
 import Agent.CLI.ProviderTransition
@@ -114,6 +121,7 @@ import Agent.CLI.TurnState
     , turnReplacesTranscript
     )
 import Agent.Dialect (DialectId(..), dialectId)
+import Agent.FileRetry (retryOnFileBusy)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopExecution(..)
@@ -152,6 +160,7 @@ import Data.IORef
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TextIO
 import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
@@ -564,7 +573,6 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         color <- resolveColor stderrHandle
                         putTextLn stderrHandle
                             (formatTurnStatus color "ok" detail)
-            followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- renderPrintedText render
             case (fullscreen, printedText, assistantText) of
                 (Just _, _, _) -> pure ()
@@ -582,58 +590,97 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         execution.executionState
                         then TranscriptReplace
                         else TranscriptAppend
-            case persist of
-                PersistenceDisabled -> pure ()
-                PersistenceEnabled slotRef -> do
-                    now <- getCurrentTime
-                    handle <- ensureSession slotRef
-                    writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                    writeIORef storeRoot (Just handle.sessionDir)
-                    let turn = SessionTurn
-                            { turnAt = now
-                            , turnUserText = promptText
-                            , turnAssistantText = assistantText
-                            , turnError = Nothing
-                            , turnResponseId = Just loopResult.finalResponseId
-                            , turnEffect = effect
-                            , turnItems = newItems
-                            , turnUsage = Just loopResult.tokenUsage
-                            }
-                    titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
-                    (countedHandle, turnIndex) <-
-                        appendTurnWithMetaUpdateIndexed handle turn \meta ->
-                            meta { metaTitleUserTurns = titleTurns }
-                    writeIORef env.sessionTitleTurnCount titleTurns
-                    let countedMeta = countedHandle.sessionMeta
-                    writeIORef slotRef (PersistenceActive countedHandle)
-                    forM_ fullscreen \runtime ->
-                        commitFullscreenHistoryTurn
-                            runtime
-                            (sessionHistoryTurn turnIndex turn)
-                            (case effect of
-                                TranscriptAppend -> HistoryCommitAppend
-                                -- Compaction replaces model context, not the
-                                -- on-screen transcript. Keep earlier turns
-                                -- scrollable and archive the compact summary.
-                                TranscriptReplace -> HistoryCommitAppend
-                                TranscriptReset -> HistoryCommitReset)
-                    evictDurableConversation env countedHandle
-                    when
-                        ( not countedMeta.metaTitleIsManual
-                            && shouldRequestSessionTitle titleTurns
-                                countedMeta.metaTitleRefreshIndex
-                        )
-                        (requestConversationTitle env countedHandle titleTurns)
-                    when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        setWindowTitle
-                            (cliWindowTitle countedMeta.metaCwd
-                                (Just countedMeta.metaTitle))
-                    applyPendingSessionTitles env
+            followUp <-
+                reviewAfterDurableAppend
+                    (case persist of
+                        PersistenceDisabled -> pure False
+                        PersistenceEnabled slotRef -> do
+                            now <- getCurrentTime
+                            handle <- ensureSession slotRef
+                            writeIORef planMode.planSessionDir
+                                (Just handle.sessionDir)
+                            writeIORef storeRoot (Just handle.sessionDir)
+                            let turn = SessionTurn
+                                    { turnAt = now
+                                    , turnUserText = promptText
+                                    , turnAssistantText = assistantText
+                                    , turnError = Nothing
+                                    , turnResponseId =
+                                        Just loopResult.finalResponseId
+                                    , turnEffect = effect
+                                    , turnItems = newItems
+                                    , turnUsage = Just loopResult.tokenUsage
+                                    }
+                            titleTurns <-
+                                (+ 1) <$> readIORef env.sessionTitleTurnCount
+                            (countedHandle, turnIndex) <-
+                                appendTurnWithMetaUpdateIndexed
+                                    handle
+                                    turn
+                                    \meta ->
+                                        meta
+                                            { metaTitleUserTurns =
+                                                titleTurns
+                                            }
+                            writeIORef env.sessionTitleTurnCount titleTurns
+                            let countedMeta = countedHandle.sessionMeta
+                            writeIORef slotRef
+                                (PersistenceActive countedHandle)
+                            forM_ fullscreen \runtime ->
+                                commitFullscreenHistoryTurn
+                                    runtime
+                                    (sessionHistoryTurn turnIndex turn)
+                                    (case effect of
+                                        TranscriptAppend ->
+                                            HistoryCommitAppend
+                                        -- Compaction replaces model context,
+                                        -- not the on-screen transcript.
+                                        -- Keep earlier turns scrollable and
+                                        -- archive the compact summary.
+                                        TranscriptReplace ->
+                                            HistoryCommitAppend
+                                        TranscriptReset ->
+                                            HistoryCommitReset)
+                            evictDurableConversation env countedHandle
+                            when
+                                ( not countedMeta.metaTitleIsManual
+                                    && shouldRequestSessionTitle
+                                        titleTurns
+                                        countedMeta.metaTitleRefreshIndex
+                                )
+                                (requestConversationTitle
+                                    env
+                                    countedHandle
+                                    titleTurns)
+                            when
+                                ( countedMeta.metaTitle
+                                    /= handle.sessionMeta.metaTitle
+                                ) do
+                                    setWindowTitle
+                                        (cliWindowTitle
+                                            countedMeta.metaCwd
+                                            (Just countedMeta.metaTitle))
+                            applyPendingSessionTitles env
+                            pure True)
+                    (handleProposedPlan planMode loopResult.finalText)
             case followUp of
                 Nothing -> pure TurnSucceeded
                 Just notes -> do
                     resetRenderPrintedText render
                     runOneTurn env notes [UserMessage notes]
+
+-- | Do not open a review surface or start its continuation until the
+-- assistant turn that proposed the plan is durable. A disabled or failed
+-- append therefore leaves Plan Mode active for a later recovery path.
+reviewAfterDurableAppend
+    :: IO Bool
+    -> IO (Maybe value)
+    -> IO (Maybe value)
+reviewAfterDurableAppend appendAssistantTurn review = do
+    durable <- appendAssistantTurn
+    if durable
+        then review
+        else pure Nothing
 
 -- | Release the parsed root transcript after the exact turn is durable.
 --
@@ -873,25 +920,30 @@ handleProposedPlan planMode = \case
         active <- isPlanModeActive planMode
         case (active, parseProposedPlan text) of
             (True, Right planBody) -> do
-                writePlanMarkdown planMode planBody >>= \case
-                    Left writeError ->
+                path <- planFilePath planMode
+                let PlanModeHooks{ planDecideExit = decideExit } =
+                        planMode.planHooks
+                    adapter = PlanReviewAdapter
+                        { planReviewWriteSnapshot =
+                            writePlanMarkdown planMode
+                        , planReviewReadSnapshot =
+                            readPlanReviewSnapshot path
+                        , planReviewPresentSnapshot =
+                            \persistedPlan _warnings ->
+                                legacyTerminalPlanDecision
+                                    <$> decideExit persistedPlan
+                        }
+                runPlanReviewAdapter adapter [] planBody >>= \case
+                    Left reviewError ->
                         pure $ Just $
-                            "The proposed plan could not be persisted for review: "
-                                <> writeError
-                                <> ". Stay in plan mode and try again after the plan-file error is resolved."
-                    Right () -> do
-                        let PlanModeHooks{ planDecideExit = decideExit } =
-                                planMode.planHooks
-                        decision <- decideExit planBody
-                        case decision of
-                            PlanApprove -> do
-                                deactivatePlanMode planMode
-                                pure (planDecisionFollowUp decision)
-                            PlanCancel -> do
-                                deactivatePlanMode planMode
-                                pure Nothing
-                            PlanRequestChanges _ ->
-                                pure (planDecisionFollowUp decision)
+                            "The proposed plan could not be reviewed because "
+                                <> renderPlanReviewAdapterError reviewError
+                                <> ". Stay in plan mode and present a fresh, readable plan."
+                    Right decision -> do
+                        let resolution = resolveTerminalPlanReview decision
+                        when resolution.planReviewShouldDeactivate
+                            (deactivatePlanMode planMode)
+                        pure resolution.planReviewContinuation
             (True, Left ProposedPlanNotFound) -> pure Nothing
             (True, Left parseError) ->
                 pure $ Just $
@@ -899,3 +951,24 @@ handleProposedPlan planMode = \case
                         <> renderProposedPlanParseError parseError
                         <> ". Stay in plan mode and end with exactly one complete, non-nested <proposed_plan>…</proposed_plan> block outside fenced code."
             _ -> pure Nothing
+
+legacyTerminalPlanDecision
+    :: PlanDecision
+    -> TerminalPlanReviewDecision
+legacyTerminalPlanDecision = \case
+    PlanApprove -> TerminalPlanApprove
+    PlanRequestChanges notes ->
+        TerminalPlanRevise (parsePlanReviewFeedback notes)
+    PlanCancel -> TerminalPlanAbandon
+
+readPlanReviewSnapshot
+    :: System.OsPath.OsPath
+    -> IO (Either Text Text)
+readPlanReviewSnapshot path =
+    tryAny
+        (retryOnFileBusy
+            (TextIO.readFile (unsafeToFilePath path))) >>= \case
+        Left readError ->
+            pure (Left (Text.pack (show readError)))
+        Right content ->
+            pure (Right content)
