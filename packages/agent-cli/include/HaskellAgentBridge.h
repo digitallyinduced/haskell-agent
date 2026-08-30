@@ -254,6 +254,70 @@ typedef void (*ha_repository_result_callback)(
     size_t error_length
 );
 
+/*
+ * Delivery APIs never invoke a shell and never return credentials, command
+ * output, or authenticated remote URLs. Preview confirmations are random,
+ * one-shot, in-memory tokens bound to the canonical repository, exact
+ * snapshot/HEAD, upstream configuration, and remote OID. They expire after
+ * ten minutes. Confirm rechecks that state immediately before mutation and
+ * never force-pushes or deletes a ref. Push targets the reviewed commit OID,
+ * and Git's ordinary fast-forward rule remains authoritative. Repository
+ * hooks are disabled for preview and confirmation.
+ *
+ * Status is 0 for success, -1 for failure, -2 for stale state, -3 for
+ * cancellation, and -4 for an invalid/expired/already-used confirmation.
+ * Every buffer is callback-scoped UTF-8. An accepted call emits exactly one
+ * callback. Delivery callbacks use the repository worker lifecycle and have
+ * the same cancellation/reentrancy rules documented below.
+ */
+typedef void (*ha_repository_delivery_status_callback)(
+    void *context, int32_t status,
+    const uint8_t *snapshot_id, size_t snapshot_id_length,
+    const uint8_t *head_oid, size_t head_oid_length,
+    const uint8_t *branch, size_t branch_length,
+    const uint8_t *remote, size_t remote_length,
+    const uint8_t *upstream_ref, size_t upstream_ref_length,
+    const uint8_t *upstream_oid, size_t upstream_oid_length,
+    int64_t ahead, int64_t behind,
+    const uint8_t *error, size_t error_length
+);
+
+typedef void (*ha_repository_push_preview_callback)(
+    void *context, int32_t status,
+    const uint8_t *confirmation, size_t confirmation_length,
+    int64_t expires_at_unix,
+    const uint8_t *head_oid, size_t head_oid_length,
+    const uint8_t *branch, size_t branch_length,
+    const uint8_t *remote, size_t remote_length,
+    const uint8_t *upstream_ref, size_t upstream_ref_length,
+    int64_t ahead, int64_t behind,
+    const uint8_t *error, size_t error_length
+);
+
+typedef void (*ha_repository_push_result_callback)(
+    void *context, int32_t status,
+    const uint8_t *snapshot_id, size_t snapshot_id_length,
+    const uint8_t *pushed_oid, size_t pushed_oid_length,
+    const uint8_t *error, size_t error_length
+);
+
+typedef void (*ha_repository_pr_preview_callback)(
+    void *context, int32_t status,
+    const uint8_t *confirmation, size_t confirmation_length,
+    int64_t expires_at_unix,
+    const uint8_t *repository, size_t repository_length,
+    const uint8_t *base_ref, size_t base_ref_length,
+    const uint8_t *head_ref, size_t head_ref_length,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *error, size_t error_length
+);
+
+typedef void (*ha_repository_pr_result_callback)(
+    void *context, int32_t status,
+    const uint8_t *url, size_t url_length,
+    const uint8_t *error, size_t error_length
+);
+
 enum ha_repository_operation {
     HA_REPOSITORY_STAGE = 0,
     HA_REPOSITORY_UNSTAGE = 1,
@@ -442,6 +506,41 @@ int32_t ha_repository_commit(
     size_t message_length,
     ha_repository_result_callback result_callback,
     void *context
+);
+
+/*
+ * Delivery input buffers are required non-empty UTF-8 and copied before the
+ * call returns. PR base/title/body are bounded to a 1 KiB base, 512-character
+ * title, and 1 MiB body. Return codes are 0 accepted, 1 null callback, 2
+ * invalid input, and 3 internal start failure.
+ */
+int32_t ha_repository_delivery_status(
+    const uint8_t *path, size_t path_length,
+    const uint8_t *snapshot_id, size_t snapshot_id_length,
+    ha_repository_delivery_status_callback callback, void *context
+);
+int32_t ha_repository_push_preview(
+    const uint8_t *path, size_t path_length,
+    const uint8_t *snapshot_id, size_t snapshot_id_length,
+    ha_repository_push_preview_callback callback, void *context
+);
+int32_t ha_repository_push_confirm(
+    const uint8_t *path, size_t path_length,
+    const uint8_t *confirmation, size_t confirmation_length,
+    ha_repository_push_result_callback callback, void *context
+);
+int32_t ha_repository_pr_preview(
+    const uint8_t *path, size_t path_length,
+    const uint8_t *snapshot_id, size_t snapshot_id_length,
+    const uint8_t *base, size_t base_length,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *body, size_t body_length,
+    ha_repository_pr_preview_callback callback, void *context
+);
+int32_t ha_repository_pr_confirm(
+    const uint8_t *path, size_t path_length,
+    const uint8_t *confirmation, size_t confirmation_length,
+    ha_repository_pr_result_callback callback, void *context
 );
 
 void ha_repository_cancel_all(void);

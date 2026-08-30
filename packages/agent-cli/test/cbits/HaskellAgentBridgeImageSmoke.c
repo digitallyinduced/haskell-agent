@@ -170,6 +170,82 @@ static void repository_result_callback(
     (void)error_length;
 }
 
+static void repository_delivery_status_callback(
+        void *context, int32_t status,
+        const uint8_t *snapshot_id, size_t snapshot_id_length,
+        const uint8_t *head_oid, size_t head_oid_length,
+        const uint8_t *branch, size_t branch_length,
+        const uint8_t *remote, size_t remote_length,
+        const uint8_t *upstream_ref, size_t upstream_ref_length,
+        const uint8_t *upstream_oid, size_t upstream_oid_length,
+        int64_t ahead, int64_t behind,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status;
+    (void)snapshot_id; (void)snapshot_id_length;
+    (void)head_oid; (void)head_oid_length;
+    (void)branch; (void)branch_length;
+    (void)remote; (void)remote_length;
+    (void)upstream_ref; (void)upstream_ref_length;
+    (void)upstream_oid; (void)upstream_oid_length;
+    (void)ahead; (void)behind; (void)error; (void)error_length;
+}
+
+static void repository_push_preview_callback(
+        void *context, int32_t status,
+        const uint8_t *confirmation, size_t confirmation_length,
+        int64_t expires_at_unix,
+        const uint8_t *head_oid, size_t head_oid_length,
+        const uint8_t *branch, size_t branch_length,
+        const uint8_t *remote, size_t remote_length,
+        const uint8_t *upstream_ref, size_t upstream_ref_length,
+        int64_t ahead, int64_t behind,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status;
+    (void)confirmation; (void)confirmation_length; (void)expires_at_unix;
+    (void)head_oid; (void)head_oid_length;
+    (void)branch; (void)branch_length;
+    (void)remote; (void)remote_length;
+    (void)upstream_ref; (void)upstream_ref_length;
+    (void)ahead; (void)behind; (void)error; (void)error_length;
+}
+
+static void repository_push_result_callback(
+        void *context, int32_t status,
+        const uint8_t *snapshot_id, size_t snapshot_id_length,
+        const uint8_t *pushed_oid, size_t pushed_oid_length,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status;
+    (void)snapshot_id; (void)snapshot_id_length;
+    (void)pushed_oid; (void)pushed_oid_length;
+    (void)error; (void)error_length;
+}
+
+static void repository_pr_preview_callback(
+        void *context, int32_t status,
+        const uint8_t *confirmation, size_t confirmation_length,
+        int64_t expires_at_unix,
+        const uint8_t *repository, size_t repository_length,
+        const uint8_t *base_ref, size_t base_ref_length,
+        const uint8_t *head_ref, size_t head_ref_length,
+        const uint8_t *title, size_t title_length,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status;
+    (void)confirmation; (void)confirmation_length; (void)expires_at_unix;
+    (void)repository; (void)repository_length;
+    (void)base_ref; (void)base_ref_length;
+    (void)head_ref; (void)head_ref_length;
+    (void)title; (void)title_length;
+    (void)error; (void)error_length;
+}
+
+static void repository_pr_result_callback(
+        void *context, int32_t status,
+        const uint8_t *url, size_t url_length,
+        const uint8_t *error, size_t error_length) {
+    (void)context; (void)status;
+    (void)url; (void)url_length; (void)error; (void)error_length;
+}
+
 static void repository_check_output_callback(
         void *context, int32_t stream,
         const uint8_t *bytes, size_t length) {
@@ -279,6 +355,56 @@ int ha_repository_review_abi_smoke(void) {
             NULL,
             NULL) != 1) {
         return 25;
+    }
+    if (ha_repository_delivery_status(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL, NULL) != 1
+        || ha_repository_push_preview(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL, NULL) != 1
+        || ha_repository_push_confirm(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL, NULL) != 1
+        || ha_repository_pr_preview(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL, NULL) != 1
+        || ha_repository_pr_confirm(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL, NULL) != 1) {
+        return 29;
+    }
+    if (ha_repository_delivery_status(
+            NULL, 0,
+            value, sizeof(value) - 1,
+            repository_delivery_status_callback, NULL) != 2
+        || ha_repository_push_preview(
+            NULL, 0,
+            value, sizeof(value) - 1,
+            repository_push_preview_callback, NULL) != 2
+        || ha_repository_push_confirm(
+            NULL, 0,
+            value, sizeof(value) - 1,
+            repository_push_result_callback, NULL) != 2
+        || ha_repository_pr_preview(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, (size_t)1024 * 1024 + 1,
+            repository_pr_preview_callback, NULL) != 2
+        || ha_repository_pr_confirm(
+            NULL, 0,
+            value, sizeof(value) - 1,
+            repository_pr_result_callback, NULL) != 2) {
+        return 30;
     }
     void *check = NULL;
     if (ha_repository_check_start(

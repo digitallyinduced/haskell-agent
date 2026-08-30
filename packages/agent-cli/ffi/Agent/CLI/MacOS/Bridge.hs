@@ -94,6 +94,7 @@ import Agent.CLI.Project
     )
 import Agent.CLI.Render
     ( summarizeToolCall )
+import qualified Agent.CLI.RepositoryDelivery as RepositoryDelivery
 import qualified Agent.CLI.RepositoryReview as RepositoryReview
 import Agent.CLI.Options (parseEffort)
 import Agent.CLI.Session
@@ -354,6 +355,32 @@ type RepositoryResultCallback =
     -> CString -> CSize -- error
     -> IO ()
 
+type RepositoryDeliveryStatusCallback =
+    Ptr () -> CInt
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CLLong -> CLLong -> CString -> CSize -> IO ()
+
+type RepositoryPushPreviewCallback =
+    Ptr () -> CInt -> CString -> CSize -> CLLong
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CLLong -> CLLong -> CString -> CSize -> IO ()
+
+type RepositoryPushResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> IO ()
+
+type RepositoryPullRequestPreviewCallback =
+    Ptr () -> CInt -> CString -> CSize -> CLLong
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> IO ()
+
+type RepositoryPullRequestResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
+
 type RepositoryCheckOutputCallback =
     Ptr () -> CInt -> Ptr Word8 -> CSize -> IO ()
 
@@ -409,6 +436,31 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeRepositoryResultCallback
         :: FunPtr RepositoryResultCallback -> RepositoryResultCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryDeliveryStatusCallback
+        :: FunPtr RepositoryDeliveryStatusCallback
+        -> RepositoryDeliveryStatusCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPushPreviewCallback
+        :: FunPtr RepositoryPushPreviewCallback
+        -> RepositoryPushPreviewCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPushResultCallback
+        :: FunPtr RepositoryPushResultCallback
+        -> RepositoryPushResultCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPullRequestPreviewCallback
+        :: FunPtr RepositoryPullRequestPreviewCallback
+        -> RepositoryPullRequestPreviewCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPullRequestResultCallback
+        :: FunPtr RepositoryPullRequestResultCallback
+        -> RepositoryPullRequestResultCallback
 
 foreign import ccall "dynamic"
     invokeRepositoryCheckOutputCallback
@@ -663,6 +715,27 @@ foreign export ccall ha_repository_apply_hunks
 foreign export ccall ha_repository_commit
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
     -> FunPtr RepositoryResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_delivery_status
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_push_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_push_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_pr_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_pr_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_repository_cancel_all :: IO ()
 
@@ -933,6 +1006,227 @@ ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
                                 message)
                     pure (if started then 0 else 3)
                 Right _ -> pure 3
+
+ha_repository_delivery_status
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
+ha_repository_delivery_status pathBytes pathLength snapshotBytes snapshotLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid
+            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
+                Right [path, snapshot] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitDeliveryStatusFailure callback context (-3)
+                                "repository delivery was cancelled") $
+                        tryRepositorySynchronous
+                            (RepositoryDelivery.repositoryDeliveryStatus
+                                (Text.unpack path)
+                                snapshot) >>= \case
+                                    Left _ ->
+                                        emitDeliveryOnce terminal $
+                                            emitDeliveryStatusFailure
+                                            callback context (-1)
+                                            "repository delivery failed"
+                                    Right (Left err) ->
+                                        emitDeliveryOnce terminal $
+                                            emitDeliveryStatusFailure
+                                            callback context
+                                            (deliveryErrorStatus err)
+                                            (RepositoryDelivery.deliveryErrorText err)
+                                    Right (Right status) ->
+                                        emitDeliveryOnce terminal $
+                                            emitDeliveryStatus
+                                                callback context status
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_push_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
+ha_repository_push_preview pathBytes pathLength snapshotBytes snapshotLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid
+            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
+                Right [path, snapshot] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPushPreviewFailure callback context (-3)
+                                "repository push preview was cancelled") $
+                        tryRepositorySynchronous
+                            (RepositoryDelivery.previewRepositoryPush
+                                (Text.unpack path)
+                                snapshot) >>= \case
+                                    Left _ ->
+                                        emitDeliveryOnce terminal $
+                                            emitPushPreviewFailure
+                                            callback context (-1)
+                                            "repository push preview failed"
+                                    Right (Left err) ->
+                                        emitDeliveryOnce terminal $
+                                            emitPushPreviewFailure
+                                            callback context
+                                            (deliveryErrorStatus err)
+                                            (RepositoryDelivery.deliveryErrorText err)
+                                    Right (Right preview) ->
+                                        emitDeliveryOnce terminal $
+                                            emitPushPreview
+                                                callback context preview
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_push_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
+ha_repository_push_confirm pathBytes pathLength tokenBytes tokenLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
+            pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
+                Right [path, token] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPushResultFailure callback context (-3)
+                                "repository push was cancelled") $
+                        tryRepositorySynchronous
+                            (RepositoryDelivery.confirmRepositoryPush
+                                (Text.unpack path)
+                                token) >>= \case
+                                    Left _ ->
+                                        emitDeliveryOnce terminal $
+                                            emitPushResultFailure
+                                            callback context (-1)
+                                            "repository push failed"
+                                    Right (Left err) ->
+                                        emitDeliveryOnce terminal $
+                                            emitPushResultFailure
+                                            callback context
+                                            (deliveryErrorStatus err)
+                                            (RepositoryDelivery.deliveryErrorText err)
+                                    Right (Right status) ->
+                                        emitDeliveryOnce terminal $
+                                        withText status.deliverySnapshotId
+                                            \snapshotPtr snapshotSize ->
+                                        withText status.deliveryHeadOid
+                                            \headPtr headSize ->
+                                                invokeRepositoryPushResultCallback
+                                                    callback context 0
+                                                    snapshotPtr snapshotSize
+                                                    headPtr headSize
+                                                    nullPtr 0
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_pr_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
+ha_repository_pr_preview pathBytes pathLength snapshotBytes snapshotLength
+    baseBytes baseLength titleBytes titleLength bodyBytes bodyLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid
+            snapshotBytes snapshotLength deliveryTokenLimit)
+        || not (deliveryInputValid baseBytes baseLength deliveryRefLimit)
+        || not (deliveryInputValid titleBytes titleLength deliveryTitleLimit)
+        || not (deliveryInputValid bodyBytes bodyLength deliveryBodyLimit) =
+            pure 2
+    | otherwise =
+        copyRequiredTexts
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (baseBytes, baseLength)
+            , (titleBytes, titleLength)
+            , (bodyBytes, bodyLength)
+            ] >>= \case
+                Right [path, snapshot, base, title, body] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPullRequestPreviewFailure
+                                callback context (-3)
+                                "pull-request preview was cancelled") $
+                        tryRepositorySynchronous
+                            (RepositoryDelivery.previewPullRequest
+                                (Text.unpack path)
+                                snapshot base title body) >>= \case
+                                    Left _ ->
+                                        emitDeliveryOnce terminal $
+                                            emitPullRequestPreviewFailure
+                                            callback context (-1)
+                                            "pull-request preview failed"
+                                    Right (Left err) ->
+                                        emitDeliveryOnce terminal $
+                                            emitPullRequestPreviewFailure
+                                            callback context
+                                            (deliveryErrorStatus err)
+                                            (RepositoryDelivery.deliveryErrorText err)
+                                    Right (Right preview) ->
+                                        emitDeliveryOnce terminal $
+                                            emitPullRequestPreview
+                                            callback context preview
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_pr_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
+ha_repository_pr_confirm pathBytes pathLength tokenBytes tokenLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
+            pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
+                Right [path, token] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPullRequestResultFailure callback context (-3)
+                                "pull-request creation was cancelled") $
+                        tryRepositorySynchronous
+                            (RepositoryDelivery.createPullRequest
+                                (Text.unpack path)
+                                token) >>= \case
+                                    Left _ ->
+                                        emitDeliveryOnce terminal $
+                                            emitPullRequestResultFailure
+                                            callback context (-1)
+                                            "pull-request creation failed"
+                                    Right (Left err) ->
+                                        emitDeliveryOnce terminal $
+                                            emitPullRequestResultFailure
+                                            callback context
+                                            (deliveryErrorStatus err)
+                                            (RepositoryDelivery.deliveryErrorText err)
+                                    Right (Right url) ->
+                                        emitDeliveryOnce terminal $
+                                        withText url \urlPtr urlSize ->
+                                            invokeRepositoryPullRequestResultCallback
+                                                callback context 0
+                                                urlPtr urlSize nullPtr 0
+                    pure (if started then 0 else 3)
+                _ -> pure 2
 
 startRepositoryMutation
     :: FunPtr RepositoryResultCallback
@@ -1472,6 +1766,141 @@ emitRepositoryError callback context err =
         _ ->
             emitRepositoryFailure
                 callback context (RepositoryReview.repositoryErrorText err)
+
+emitDeliveryOnce :: MVar Bool -> IO () -> IO ()
+emitDeliveryOnce terminal callback =
+    mask \_ -> do
+        shouldRun <- modifyMVar terminal \completed ->
+            pure (True, not completed)
+        when shouldRun callback
+
+emitDeliveryStatus
+    :: FunPtr RepositoryDeliveryStatusCallback
+    -> Ptr ()
+    -> RepositoryDelivery.DeliveryStatus
+    -> IO ()
+emitDeliveryStatus callback context status =
+    withText status.deliverySnapshotId \snapshotPtr snapshotSize ->
+    withText status.deliveryHeadOid \headPtr headSize ->
+    withText status.deliveryBranch \branchPtr branchSize ->
+    withText status.deliveryRemote \remotePtr remoteSize ->
+    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
+    withText status.deliveryUpstreamOid \upstreamOidPtr upstreamOidSize ->
+        invokeRepositoryDeliveryStatusCallback
+            callback context 0
+            snapshotPtr snapshotSize headPtr headSize
+            branchPtr branchSize remotePtr remoteSize
+            upstreamPtr upstreamSize upstreamOidPtr upstreamOidSize
+            (fromIntegral status.deliveryAhead)
+            (fromIntegral status.deliveryBehind)
+            nullPtr 0
+
+emitDeliveryStatusFailure
+    :: FunPtr RepositoryDeliveryStatusCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitDeliveryStatusFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryDeliveryStatusCallback
+            callback context status
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            nullPtr 0 nullPtr 0 0 0 errorPtr errorSize
+
+emitPushPreview
+    :: FunPtr RepositoryPushPreviewCallback
+    -> Ptr ()
+    -> RepositoryDelivery.PushPreview
+    -> IO ()
+emitPushPreview callback context preview =
+    let status = preview.pushPreviewStatus
+        expires = fromIntegral
+            (floor preview.pushPreviewExpiresAt :: Integer)
+    in withText preview.pushPreviewConfirmation \tokenPtr tokenSize ->
+    withText status.deliveryHeadOid \headPtr headSize ->
+    withText status.deliveryBranch \branchPtr branchSize ->
+    withText status.deliveryRemote \remotePtr remoteSize ->
+    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
+        invokeRepositoryPushPreviewCallback
+            callback context 0 tokenPtr tokenSize expires
+            headPtr headSize branchPtr branchSize remotePtr remoteSize
+            upstreamPtr upstreamSize
+            (fromIntegral status.deliveryAhead)
+            (fromIntegral status.deliveryBehind)
+            nullPtr 0
+
+emitPushPreviewFailure
+    :: FunPtr RepositoryPushPreviewCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPushPreviewFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPushPreviewCallback
+            callback context status nullPtr 0 0
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            0 0 errorPtr errorSize
+
+emitPushResultFailure
+    :: FunPtr RepositoryPushResultCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPushResultFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPushResultCallback
+            callback context status
+            nullPtr 0 nullPtr 0 errorPtr errorSize
+
+emitPullRequestPreview
+    :: FunPtr RepositoryPullRequestPreviewCallback
+    -> Ptr ()
+    -> RepositoryDelivery.PullRequestPreview
+    -> IO ()
+emitPullRequestPreview callback context preview =
+    let expires = fromIntegral
+            (floor preview.pullRequestExpiresAt :: Integer)
+    in withText preview.pullRequestConfirmation \tokenPtr tokenSize ->
+    withText preview.pullRequestRepository \repositoryPtr repositorySize ->
+    withText preview.pullRequestBaseRef \basePtr baseSize ->
+    withText preview.pullRequestHeadRef \headPtr headSize ->
+    withText preview.pullRequestTitle \titlePtr titleSize ->
+        invokeRepositoryPullRequestPreviewCallback
+            callback context 0 tokenPtr tokenSize expires
+            repositoryPtr repositorySize basePtr baseSize
+            headPtr headSize titlePtr titleSize nullPtr 0
+
+emitPullRequestPreviewFailure
+    :: FunPtr RepositoryPullRequestPreviewCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPullRequestPreviewFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPullRequestPreviewCallback
+            callback context status nullPtr 0 0
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 errorPtr errorSize
+
+emitPullRequestResultFailure
+    :: FunPtr RepositoryPullRequestResultCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPullRequestResultFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPullRequestResultCallback
+            callback context status nullPtr 0 errorPtr errorSize
+
+deliveryErrorStatus :: RepositoryDelivery.DeliveryError -> CInt
+deliveryErrorStatus = \case
+    RepositoryDelivery.DeliveryStale _ -> -2
+    RepositoryDelivery.DeliveryConfirmationRejected _ -> -4
+    _ -> -1
+
+deliveryInputValid :: Ptr Word8 -> CSize -> Int -> Bool
+deliveryInputValid pointer length limit =
+    pointer /= nullPtr
+        && length > 0
+        && toInteger length <= toInteger limit
+
+deliveryPathLimit, deliveryTokenLimit, deliveryRefLimit :: Int
+deliveryPathLimit = 16 * 1024
+deliveryTokenLimit = 4 * 1024
+deliveryRefLimit = 1024
+
+deliveryTitleLimit, deliveryBodyLimit :: Int
+deliveryTitleLimit = 4 * 1024
+deliveryBodyLimit = 1024 * 1024
 
 copyRequiredText :: Ptr Word8 -> CSize -> IO (Either () Text)
 copyRequiredText pointer (CSize length)

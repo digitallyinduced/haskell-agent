@@ -49,6 +49,7 @@ import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
 import qualified Agent.CLI.RequestSpec as RequestSpec
+import qualified Agent.CLI.RepositoryDeliverySpec as RepositoryDeliverySpec
 import qualified Agent.CLI.RepositoryReviewSpec as RepositoryReviewSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
@@ -127,6 +128,7 @@ main = hspec do
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec
     RequestSpec.spec
+    RepositoryDeliverySpec.spec
     RepositoryReviewSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec

@@ -146,6 +146,7 @@ library
                     , Agent.CLI.Prompt
                     , Agent.CLI.Recap
                     , Agent.CLI.Request
+                    , Agent.CLI.RepositoryDelivery
                     , Agent.CLI.RepositoryReview
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
@@ -396,6 +397,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
                     , Agent.CLI.RequestSpec
+                    , Agent.CLI.RepositoryDeliverySpec
                     , Agent.CLI.RepositoryReviewSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec

@@ -1,0 +1,386 @@
+module Agent.CLI.RepositoryDeliverySpec (spec) where
+
+import Agent.CLI.RepositoryDelivery
+import Agent.CLI.RepositoryReview
+    ( RepositorySnapshot(..)
+    , repositorySnapshot
+    )
+import Control.Exception.Safe (bracket)
+import qualified Data.Text as Text
+import System.Directory
+    ( createDirectory
+    , doesFileExist
+    , getTemporaryDirectory
+    , removePathForcibly
+    )
+import System.Environment (getEnv, lookupEnv, setEnv, unsetEnv)
+import System.Exit (ExitCode(..))
+import System.IO (hClose, openTempFile)
+import System.Posix.Files
+    ( ownerExecuteMode
+    , ownerReadMode
+    , ownerWriteMode
+    , setFileMode
+    , unionFileModes
+    )
+import System.Process
+    ( CreateProcess(..)
+    , proc
+    , readCreateProcessWithExitCode
+    )
+import Test.Hspec
+
+spec :: Spec
+spec = describe "repository delivery service" do
+    it "validates branch and remote names without option/ref injection" do
+        validateBranchName "feature/safe-name" `shouldBe` True
+        validateBranchName "-force" `shouldBe` False
+        validateBranchName "bad..name" `shouldBe` False
+        validateBranchName "bad name" `shouldBe` False
+        validateBranchName ".hidden" `shouldBe` False
+        validateBranchName "topic/.hidden" `shouldBe` False
+        validateBranchName "topic.lock" `shouldBe` False
+        validateRemoteName "origin" `shouldBe` True
+        validateRemoteName "-origin" `shouldBe` False
+        validateRemoteName "origin\n--upload-pack=evil" `shouldBe` False
+
+    it "previews and confirms one exact non-force push once" $
+        withDeliveryRepository \root remote -> do
+            appendFile (root <> "/tracked.txt") "second\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+
+            snapshot <- expectRight =<< repositorySnapshot root
+            status <- expectRight
+                =<< repositoryDeliveryStatus root snapshot.snapshotId
+            status.deliveryBranch `shouldBe` "main"
+            status.deliveryRemote `shouldBe` "origin"
+            status.deliveryAhead `shouldBe` 1
+            status.deliveryBehind `shouldBe` 0
+
+            let hookMarker = root <> "/hook-ran"
+                hook = root <> "/.git/hooks/pre-push"
+            writeFile hook
+                ("#!/bin/sh\nprintf ran > " <> shellQuote hookMarker <> "\n")
+            setFileMode hook
+                (ownerReadMode
+                    `unionFileModes` ownerWriteMode
+                    `unionFileModes` ownerExecuteMode)
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+            Text.length preview.pushPreviewConfirmation `shouldBe` 64
+            pushed <- expectRight
+                =<< confirmRepositoryPush
+                    root
+                    preview.pushPreviewConfirmation
+            remoteHead <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/main"
+                    ]
+            remoteHead `shouldBe` pushed.deliveryHeadOid
+            doesFileExist hookMarker `shouldReturn` False
+
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isConfirmationRejection
+
+    it "consumes a preview without pushing when the local snapshot changes" $
+        withDeliveryRepository \root remote -> do
+            appendFile (root <> "/tracked.txt") "second\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            snapshot <- expectRight =<< repositorySnapshot root
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+            remoteBefore <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/main"
+                    ]
+
+            writeFile (root <> "/untracked.txt") "changes exact snapshot\n"
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isStale
+            remoteAfter <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/main"
+                    ]
+            remoteAfter `shouldBe` remoteBefore
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isConfirmationRejection
+
+    it "rejects an externally changed remote after preview without pushing" $
+        withDeliveryRepository \root remote -> do
+            appendFile (root <> "/tracked.txt") "second\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            snapshot <- expectRight =<< repositorySnapshot root
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+            initial <- Text.strip <$> git root ["rev-parse", "HEAD^"]
+            tree <- Text.strip <$> git root ["rev-parse", "HEAD^{tree}"]
+            divergent <- Text.strip
+                <$> git root
+                    [ "commit-tree"
+                    , Text.unpack tree
+                    , "-p"
+                    , Text.unpack initial
+                    , "-m"
+                    , "remote advance"
+                    ]
+            _ <- git root
+                [ "push"
+                , "-q"
+                , remote
+                , Text.unpack divergent <> ":refs/heads/main"
+                ]
+
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isStale
+            remoteHead <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/main"
+                    ]
+            remoteHead `shouldBe` divergent
+
+    it "rejects a remote rewind observed after preview" $
+        withDeliveryRepository \root remote -> do
+            appendFile (root <> "/tracked.txt") "second\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            _ <- git root ["push", "-q", "origin", "main"]
+            appendFile (root <> "/tracked.txt") "third\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "third"]
+            snapshot <- expectRight =<< repositorySnapshot root
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+            rewound <- Text.strip <$> git root ["rev-parse", "HEAD^^"]
+            _ <- git root
+                [ "--git-dir"
+                , remote
+                , "update-ref"
+                , "refs/heads/main"
+                , Text.unpack rewound
+                ]
+
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isStale
+            remoteHead <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/main"
+                    ]
+            remoteHead `shouldBe` rewound
+
+    it "binds confirmation to the upstream push destination" $
+        withDeliveryRepository \root remote -> do
+            appendFile (root <> "/tracked.txt") "second\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            snapshot <- expectRight =<< repositorySnapshot root
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+            let redirected = remote <> "-redirected"
+            _ <- git root ["init", "-q", "--bare", redirected]
+            _ <- git root ["remote", "set-url", "--push", "origin", redirected]
+
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isInvalid
+            originalHead <- Text.strip
+                <$> git root
+                    [ "--git-dir"
+                    , remote
+                    , "rev-parse"
+                    , "refs/heads/main"
+                    ]
+            originalHead `shouldBe` preview.pushPreviewStatus.deliveryUpstreamOid
+
+    it "rejects malformed PR inputs before invoking GitHub CLI" $
+        withDeliveryRepository \root _ -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            previewPullRequest
+                root snapshot.snapshotId "-bad" "title" "body"
+                `shouldReturnSatisfying` isInvalid
+            previewPullRequest
+                root snapshot.snapshotId "main" "" "body"
+                `shouldReturnSatisfying` isInvalid
+            previewPullRequest
+                root snapshot.snapshotId "main" "title"
+                (Text.replicate (1024 * 1024 + 1) "x")
+                `shouldReturnSatisfying` isInvalid
+
+    it "previews and creates a PR through argv-only gh with a one-shot token" $
+        withDeliveryRepository \root _ ->
+            withFakeGh root \bodyCapture injectionMarker -> do
+                snapshot <- expectRight =<< repositorySnapshot root
+                let title =
+                        "Safe title $(touch "
+                            <> Text.pack injectionMarker
+                            <> ")"
+                    body = "Body is passed on stdin, not argv."
+                preview <- expectRight
+                    =<< previewPullRequest
+                        root snapshot.snapshotId "main" title body
+                preview.pullRequestRepository `shouldBe` "owner/repository"
+                preview.pullRequestHeadRef `shouldBe` "main"
+                url <- expectRight
+                    =<< createPullRequest
+                        root
+                        preview.pullRequestConfirmation
+                url `shouldBe`
+                    "https://github.com/owner/repository/pull/123"
+                readFile bodyCapture `shouldReturn` Text.unpack body
+                doesFileExist injectionMarker `shouldReturn` False
+                createPullRequest root preview.pullRequestConfirmation
+                    `shouldReturnSatisfying` isConfirmationRejection
+
+    it "rejects a gh result URL for another repository" $
+        withDeliveryRepository \root _ ->
+            withFakeGh root \_ _ -> do
+                setEnv "GH_FAKE_PR_URL"
+                    "https://github.com/attacker/repository/pull/1"
+                snapshot <- expectRight =<< repositorySnapshot root
+                preview <- expectRight
+                    =<< previewPullRequest
+                        root snapshot.snapshotId "main" "Title" "Body"
+                createPullRequest root preview.pullRequestConfirmation
+                    `shouldReturnSatisfying` isCommandFailure
+
+withDeliveryRepository :: (FilePath -> FilePath -> IO value) -> IO value
+withDeliveryRepository action =
+    withTempDirectory "repository-delivery" \container -> do
+        let root = container <> "/checkout"
+            remote = container <> "/remote.git"
+        createDirectory root
+        _ <- git container ["init", "-q", "--bare", remote]
+        _ <- git root ["init", "-q", "-b", "main"]
+        _ <- git root ["config", "user.name", "Repository Delivery Test"]
+        _ <- git root ["config", "user.email", "delivery@example.test"]
+        writeFile (root <> "/tracked.txt") "first\n"
+        _ <- git root ["add", "tracked.txt"]
+        _ <- git root ["commit", "-q", "-m", "initial"]
+        _ <- git root ["remote", "add", "origin", remote]
+        _ <- git root ["push", "-q", "-u", "origin", "main"]
+        action root remote
+
+withTempDirectory :: String -> (FilePath -> IO value) -> IO value
+withTempDirectory template action = do
+    base <- getTemporaryDirectory
+    bracket
+        (do
+            (path, handle) <- openTempFile base template
+            hClose handle
+            removePathForcibly path
+            createDirectory path
+            pure path)
+        removePathForcibly
+        action
+
+withFakeGh
+    :: FilePath
+    -> (FilePath -> FilePath -> IO value)
+    -> IO value
+withFakeGh root action = do
+    originalPath <- getEnv "PATH"
+    originalCapture <- lookupEnv "GH_BODY_CAPTURE"
+    originalFakeUrl <- lookupEnv "GH_FAKE_PR_URL"
+    withTempDirectory "repository-delivery-gh" \bin -> do
+        let executable = bin <> "/gh"
+            bodyCapture = bin <> "/body.txt"
+            injectionMarker = root <> "/shell-injection"
+        writeFile executable $ unlines
+            [ "#!/bin/sh"
+            , "set -eu"
+            , "case \"$1 $2\" in"
+            , "  'auth status') exit 0 ;;"
+            , "  'repo view') printf '%s\\n' '{\"nameWithOwner\":\"owner/repository\"}' ;;"
+            , "  'pr list') printf '%s\\n' '[]' ;;"
+            , "  'pr create')"
+            , "    cat > \"$GH_BODY_CAPTURE\""
+            , "    printf '%s\\n' \"${GH_FAKE_PR_URL:-https://github.com/owner/repository/pull/123}\""
+            , "    ;;"
+            , "  *) exit 64 ;;"
+            , "esac"
+            ]
+        setFileMode executable
+            (ownerReadMode
+                `unionFileModes` ownerWriteMode
+                `unionFileModes` ownerExecuteMode)
+        bracket
+            (do
+                setEnv "PATH" (bin <> ":" <> originalPath)
+                setEnv "GH_BODY_CAPTURE" bodyCapture)
+            (\_ -> do
+                setEnv "PATH" originalPath
+                case originalCapture of
+                    Nothing -> unsetEnv "GH_BODY_CAPTURE"
+                    Just value -> setEnv "GH_BODY_CAPTURE" value
+                case originalFakeUrl of
+                    Nothing -> unsetEnv "GH_FAKE_PR_URL"
+                    Just value -> setEnv "GH_FAKE_PR_URL" value)
+            (\_ -> action bodyCapture injectionMarker)
+
+git :: FilePath -> [String] -> IO Text.Text
+git root arguments = do
+    (exitCode, output, errors) <-
+        readCreateProcessWithExitCode
+            (proc "git" arguments) { cwd = Just root }
+            ""
+    case exitCode of
+        ExitSuccess -> pure (Text.pack output)
+        ExitFailure code ->
+            expectationFailure
+                ("git exited " <> show code <> ": " <> errors)
+                >> pure ""
+
+expectRight :: (HasCallStack, Show error) => Either error value -> IO value
+expectRight = \case
+    Left err -> expectationFailure (show err) >> fail "unreachable"
+    Right value -> pure value
+
+isInvalid :: Either DeliveryError value -> Bool
+isInvalid = \case
+    Left (DeliveryInvalidRequest _) -> True
+    _ -> False
+
+isCommandFailure :: Either DeliveryError value -> Bool
+isCommandFailure = \case
+    Left (DeliveryCommandFailed _) -> True
+    _ -> False
+
+isStale :: Either DeliveryError value -> Bool
+isStale = \case
+    Left (DeliveryStale _) -> True
+    _ -> False
+
+isConfirmationRejection :: Either DeliveryError value -> Bool
+isConfirmationRejection = \case
+    Left (DeliveryConfirmationRejected _) -> True
+    _ -> False
+
+shouldReturnSatisfying
+    :: (HasCallStack, Show value)
+    => IO value
+    -> (value -> Bool)
+    -> Expectation
+shouldReturnSatisfying action predicate =
+    action >>= (`shouldSatisfy` predicate)
+
+shellQuote :: String -> String
+shellQuote value = "'" <> concatMap escape value <> "'"
+  where
+    escape '\'' = "'\"'\"'"
+    escape character = [character]
