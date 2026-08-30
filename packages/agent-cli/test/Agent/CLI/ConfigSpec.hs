@@ -1,9 +1,11 @@
 module Agent.CLI.ConfigSpec (spec) where
 
 import Agent.CLI.Config
+import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
+import Data.Either (isRight)
 import qualified Data.Text as Text
 import System.Directory.OsPath
     ( createDirectoryIfMissing
@@ -16,6 +18,7 @@ import System.OsPath
     , decodeUtf
     , takeDirectory
     , unsafeEncodeUtf
+    , (</>)
     )
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Files
@@ -154,7 +157,7 @@ spec = describe "Agent.CLI.Config" do
                     { configMcpServers = Map.singleton "seo-mcp" server
                     , configMaxConcurrentAgents = Just 48
                     }
-            saveHarnessConfig home config `shouldReturn` Right ()
+            replaceConfig home config `shouldReturn` Right ()
             loadHarnessConfig home `shouldReturn` Right config
             status <- getFileStatus (filePath (harnessConfigPath home))
             fileMode status `shouldBe` 0o100600
@@ -173,9 +176,82 @@ spec = describe "Agent.CLI.Config" do
                             , mcpRequestTimeoutSeconds = 60
                             }
                     }
-            saveHarnessConfig home broken
+            replaceConfig home broken
                 `shouldReturn`
                     Left "MCP server 'broken' has an empty command"
+
+    it "serializes concurrent read-modify-write transactions without loss" $
+        withTempDir "agent-config-" \home -> do
+            let increment _ config =
+                    Right
+                        ( config
+                            { configMaxConcurrentAgents =
+                                Just (maybe 1 (+ 1)
+                                    config.configMaxConcurrentAgents)
+                            }
+                        , ()
+                        )
+            results <- mapConcurrently
+                (const (modifyHarnessConfig home increment))
+                [1 .. 32 :: Int]
+            results `shouldSatisfy` all isRight
+            loadHarnessConfig home >>= \case
+                Left err -> expectationFailure (show err)
+                Right config ->
+                    config.configMaxConcurrentAgents `shouldBe` Just 32
+
+    it "returns a stable keyed revision for the exact locked snapshot" $
+        withTempDir "agent-config-" \home -> do
+            Right (initialRevision, initial) <-
+                loadHarnessConfigSnapshot home
+            replaceConfig home initial `shouldReturn` Right ()
+            Right (firstRevision, firstConfig) <-
+                loadHarnessConfigSnapshot home
+            replaceConfig home firstConfig `shouldReturn` Right ()
+            Right (sameRevision, sameConfig) <-
+                loadHarnessConfigSnapshot home
+            replaceConfig home
+                (firstConfig { configMaxConcurrentAgents = Just 7 })
+                `shouldReturn` Right ()
+            Right (changedRevision, changedConfig) <-
+                loadHarnessConfigSnapshot home
+            initialRevision `shouldBe` firstRevision
+            sameRevision `shouldBe` firstRevision
+            sameConfig `shouldBe` firstConfig
+            changedRevision `shouldNotBe` firstRevision
+            changedConfig.configMaxConcurrentAgents `shouldBe` Just 7
+
+    it "derives a new token after an out-of-band config replacement" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"maxConcurrentAgents\":2}"
+            Right (firstRevision, firstConfig) <-
+                loadHarnessConfigSnapshot home
+            writeConfig home "{\"maxConcurrentAgents\":3}"
+            Right (secondRevision, secondConfig) <-
+                loadHarnessConfigSnapshot home
+            firstConfig.configMaxConcurrentAgents `shouldBe` Just 2
+            secondConfig.configMaxConcurrentAgents `shouldBe` Just 3
+            secondRevision `shouldNotBe` firstRevision
+
+    it "invalidates old tokens when the owner-only key is missing or corrupt" $
+        withTempDir "agent-config-" \home -> do
+            Right (firstRevision, _) <- loadHarnessConfigSnapshot home
+            let key = home
+                    </> unsafeEncodeUtf ".haskell-agent"
+                    </> unsafeEncodeUtf "config.revision-key"
+            Directory.removeFile (filePath key)
+            Right (secondRevision, _) <- loadHarnessConfigSnapshot home
+            secondRevision `shouldNotBe` firstRevision
+            LBS.writeFile (filePath key) "corrupt"
+            Right (thirdRevision, _) <- loadHarnessConfigSnapshot home
+            thirdRevision `shouldNotBe` secondRevision
+            status <- getFileStatus (filePath key)
+            fileMode status `shouldBe` 0o100600
+
+replaceConfig :: OsPath -> HarnessConfig -> IO (Either Text.Text ())
+replaceConfig home replacement =
+    fmap (fmap (const ())) $
+        modifyHarnessConfig home \_ _ -> Right (replacement, ())
 
 writeConfig :: OsPath -> LBS.ByteString -> IO ()
 writeConfig home bytes = do

@@ -338,6 +338,23 @@ spec = describe "Agent.MCP" do
                     releaseMcpFleetLease second
                     countStarts counter `shouldReturn` 2
 
+        it "restarts idle fleets but refuses an active lease" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    let config =
+                            (baseConfig "restartable" script)
+                                { mcpServerArgs = [counter]
+                                }
+                    first <- acquireMcpFleet supervisor [config]
+                    restartMcpSupervisor supervisor
+                        `shouldThrow` anyIOException
+                    releaseMcpFleetLease first
+                    restartMcpSupervisor supervisor
+                    second <- acquireMcpFleet supervisor [config]
+                    releaseMcpFleetLease second
+                    countStarts counter `shouldReturn` 2
+
         it "does not reuse an inherited-cwd fleet after the cwd changes" $
             withCountingFakeServer \script counter ->
                 withDistinctWorkingDirectories \firstDir secondDir -> do

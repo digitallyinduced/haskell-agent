@@ -3,6 +3,7 @@ module Agent.CLI.NativeRuntime
     , NativeRunHooks(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
+    , restartNativeMcpRuntime
     , runNativeAgent
     ) where
 
@@ -49,6 +50,10 @@ closeNativeProcessRuntime :: NativeProcessRuntime -> IO ()
 closeNativeProcessRuntime runtime =
     closeSessionThreadManager runtime.nativeSessionThreads
         `finally` MCP.closeMcpSupervisor runtime.nativeMcpSupervisor
+
+restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
+restartNativeMcpRuntime runtime =
+    MCP.restartMcpSupervisor runtime.nativeMcpSupervisor
 
 runNativeAgent
     :: NativeProcessRuntime

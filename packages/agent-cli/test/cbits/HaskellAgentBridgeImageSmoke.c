@@ -1,6 +1,17 @@
 #include "HaskellAgentBridge.h"
 
 #include <stddef.h>
+#include <stdatomic.h>
+
+static void restart_result_callback(void *context, int32_t status,
+                                    uint64_t revision, const uint8_t *error,
+                                    size_t error_length) {
+    (void)status;
+    (void)revision;
+    (void)error;
+    (void)error_length;
+    atomic_fetch_add((_Atomic int *)context, 1);
+}
 
 /*
  * Keep a native compile/run smoke check next to the public ABI. This catches
@@ -100,6 +111,31 @@ int ha_gateway_abi_smoke(void) {
     return 0;
 }
 
+int ha_mcp_admin_abi_smoke(void) {
+    static const uint8_t arg[] = "--stdio";
+    static const uint8_t key[] = "TOKEN";
+    static const uint8_t secret[] = "not-returned";
+    const ha_utf8_slice arguments[] = {
+        {.bytes = arg, .length = sizeof(arg) - 1},
+    };
+    const ha_mcp_env_entry environment[] = {
+        {
+            .key = {.bytes = key, .length = sizeof(key) - 1},
+            .value = {.bytes = secret, .length = sizeof(secret) - 1},
+        },
+    };
+    if (offsetof(ha_utf8_slice, bytes) != 0
+            || offsetof(ha_utf8_slice, length) != sizeof(const uint8_t *)
+            || sizeof(ha_mcp_env_entry) != 2 * sizeof(ha_utf8_slice)) {
+        return 1;
+    }
+    if (arguments[0].length != 7 || environment[0].key.length != 5
+            || environment[0].value.length != 12) {
+        return 2;
+    }
+    return 0;
+}
+
 static void image_stage_callback(void *context, const uint8_t *bytes,
                                  size_t length) {
     (void)context;
@@ -151,7 +187,18 @@ int ha_image_attachment_stage_smoke(void) {
         status = ha_engine_stage_turn_images(
             engine, turn_id, sizeof(turn_id) - 1, NULL, 0);
     }
+    _Atomic int callbacks = 0;
+    if (status == 0) {
+        const uint8_t missing_name[] =
+            "__ha_restart_destroy_smoke_missing__";
+        status = ha_engine_mcp_server_restart(
+            engine, 0, missing_name, sizeof(missing_name) - 1,
+            restart_result_callback, &callbacks);
+    }
     ha_engine_destroy(engine);
+    if (status == 0 && atomic_load(&callbacks) != 1) {
+        status = 13;
+    }
     ha_runtime_exit();
     return status;
 }

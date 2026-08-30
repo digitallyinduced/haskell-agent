@@ -195,6 +195,137 @@ int32_t ha_learned_skills_list(
     ha_learned_skills_list_callback callback, void *context
 );
 
+typedef struct ha_utf8_slice {
+    const uint8_t *bytes;
+    size_t length;
+} ha_utf8_slice;
+
+typedef struct ha_mcp_env_entry {
+    ha_utf8_slice key;
+    ha_utf8_slice value;
+} ha_mcp_env_entry;
+
+/*
+ * MCP catalog reads expose redacted typed rows. Environment values are never
+ * returned: field callbacks use kind 0 for an argument and kind 1 for an
+ * environment key. Fields for a row are emitted before that row. List uses
+ * status 0 for rows, 1 for terminal completion, and -1 for terminal failure.
+ * Read/status invokes exactly one callback: status 0 for its row or -1 for
+ * failure, with no trailing status 1. revision is an opaque optimistic-
+ * concurrency token; a conflict reports the current revision. Callback
+ * buffers are valid only until that callback returns.
+ */
+typedef void (*ha_mcp_server_callback)(
+    void *context, int32_t status, uint64_t revision,
+    const uint8_t *name, size_t name_length,
+    int32_t enabled,
+    const uint8_t *command, size_t command_length,
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t startup_timeout_seconds,
+    int32_t request_timeout_seconds,
+    size_t argument_count,
+    size_t environment_key_count,
+    const uint8_t *error, size_t error_length
+);
+
+typedef void (*ha_mcp_server_field_callback)(
+    void *context,
+    const uint8_t *name, size_t name_length,
+    int32_t kind, size_t index,
+    const uint8_t *value, size_t value_length
+);
+
+typedef void (*ha_mcp_result_callback)(
+    void *context, int32_t status, uint64_t revision,
+    const uint8_t *error, size_t error_length
+);
+
+int32_t ha_mcp_servers_list(
+    ha_mcp_server_callback callback,
+    ha_mcp_server_field_callback field_callback,
+    void *context
+);
+/*
+ * Status is a side-effect-free catalog status: enabled means configured for
+ * the next turn, disabled means intentionally stopped. It does not start a
+ * server or probe its process. Like read, it invokes exactly one callback and
+ * does not emit a separate completion callback.
+ */
+int32_t ha_mcp_server_status(
+    const uint8_t *name, size_t name_length,
+    ha_mcp_server_callback callback,
+    ha_mcp_server_field_callback field_callback,
+    void *context
+);
+int32_t ha_mcp_server_read(
+    const uint8_t *name, size_t name_length,
+    ha_mcp_server_callback callback,
+    ha_mcp_server_field_callback field_callback,
+    void *context
+);
+
+/*
+ * Adds and edits copy all inputs before returning. Environment values are
+ * write-only secrets. edit preserves enabled state; use the explicit
+ * enable/disable operations to change it. expected_revision must come from
+ * the most recent list/read/mutation callback. Text fields are limited to
+ * 1 MiB each and argument/environment arrays to 4096 entries. These calls
+ * return 0 when accepted, 1 for a missing callback, and 2 for invalid or
+ * over-limit input.
+ */
+int32_t ha_mcp_server_add(
+    uint64_t expected_revision,
+    const uint8_t *name, size_t name_length,
+    const uint8_t *command, size_t command_length,
+    const ha_utf8_slice *arguments, size_t argument_count,
+    const uint8_t *cwd, size_t cwd_length,
+    const ha_mcp_env_entry *environment, size_t environment_count,
+    int32_t startup_timeout_seconds,
+    int32_t request_timeout_seconds,
+    ha_mcp_result_callback callback, void *context
+);
+/*
+ * Restart discards the engine's warm MCP fleet after validating name and
+ * revision. It is rejected asynchronously if a turn is active; the next turn
+ * starts servers from the current catalog. A 0 return accepts the callback:
+ * it is delivered exactly once before a concurrent ha_engine_destroy returns,
+ * with success or an error (including shutdown cancellation if the worker
+ * exits early). Once destruction has won the acceptance race, restart returns
+ * 3 synchronously and no callback is delivered.
+ */
+int32_t ha_engine_mcp_server_restart(
+    void *engine,
+    uint64_t expected_revision,
+    const uint8_t *name, size_t name_length,
+    ha_mcp_result_callback callback, void *context
+);
+int32_t ha_mcp_server_edit(
+    uint64_t expected_revision,
+    const uint8_t *name, size_t name_length,
+    const uint8_t *command, size_t command_length,
+    const ha_utf8_slice *arguments, size_t argument_count,
+    const uint8_t *cwd, size_t cwd_length,
+    const ha_mcp_env_entry *environment, size_t environment_count,
+    int32_t startup_timeout_seconds,
+    int32_t request_timeout_seconds,
+    ha_mcp_result_callback callback, void *context
+);
+int32_t ha_mcp_server_enable(
+    uint64_t expected_revision,
+    const uint8_t *name, size_t name_length,
+    ha_mcp_result_callback callback, void *context
+);
+int32_t ha_mcp_server_disable(
+    uint64_t expected_revision,
+    const uint8_t *name, size_t name_length,
+    ha_mcp_result_callback callback, void *context
+);
+int32_t ha_mcp_server_remove(
+    uint64_t expected_revision,
+    const uint8_t *name, size_t name_length,
+    ha_mcp_result_callback callback, void *context
+);
+
 /*
  * Account list callbacks use status 0 for an item, 1 for end-of-list, and
  * -1 for an error. Item strings include disabled managed credentials and
