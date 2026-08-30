@@ -129,6 +129,7 @@ testMeta = SessionMeta
     , metaLastRecap = Nothing
     , metaLastTurnSummary = Nothing
     , metaLastRecapMainTurns = 0
+    , metaPromptSnapshot = Nothing
     }
 
 testBlock :: UiBlock

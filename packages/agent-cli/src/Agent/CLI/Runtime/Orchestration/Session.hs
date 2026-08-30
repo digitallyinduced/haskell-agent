@@ -62,6 +62,7 @@ import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
 import Agent.CLI.Request
     ( requestParams
+    , setRequestInstructionsAndTools
     , setRequestPromptCacheKey
     )
 import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
@@ -82,13 +83,15 @@ import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( addSessionUsage,
       ensureSession,
+      compatibleSessionPromptSnapshot,
       resumeHint,
       sessionTitleFromPrompt,
       sessionUsageFromTurns,
       Persistence(..),
       PersistenceState(PersistenceActive, PersistencePending),
       SessionHandle(sessionMeta, sessionDir),
-      SessionMeta(metaId, metaLastResponseId, metaTitle) )
+      SessionMeta(metaId, metaLastResponseId, metaPromptSnapshot, metaTitle),
+      SessionPromptSnapshot(..) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History
@@ -110,7 +113,8 @@ import Agent.CLI.Session.Runtime.Types
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
-                     conversationRef, needsInitialContext, persist,
+                     conversationRef, needsInitialContext, queueInitialContext,
+                     initialGrokContext, persist,
                      contextOccupancyRef, currentContextWindow,
                      startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
@@ -155,7 +159,7 @@ import Agent.CLI.WebFetch ()
 import Agent.CLI.Worktree ()
 import Agent.Cancel ()
 import Agent.Claude ()
-import Agent.Dialect ()
+import Agent.Dialect (dialectId)
 import Agent.Error ()
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
@@ -275,6 +279,7 @@ runAgentSession
     learnedSkillAppTools
     legacySubagentTarget
     mcpFleet
+    mcpInstructions
     mcpTools
     model
     multiCtx
@@ -335,7 +340,6 @@ runAgentSession
                         ("Failed to initialize MCP tools: " <> Text.unpack err)
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
-        mcpInstructions <- MCP.mcpFleetInstructions mcpFleet
         -- Catalog models provide the per-model instructions template. Full
         -- code mode remains opt-in, but code_mode_only models still route the
         -- reserved image-generation tool through exec because Responses Lite
@@ -415,9 +419,27 @@ runAgentSession
                     <> maybe [] (.codeModeWireTools) codeModeRuntime
             baseParams = requestParams provider model instructions
                 wireSchemas effortText
-            params = maybe baseParams
-                (`setRequestPromptCacheKey` baseParams)
-                sessionId
+            compatiblePromptSnapshot =
+                compatibleSessionPromptSnapshot
+                    provider
+                    inferredTarget.targetConnectionId
+                    (dialectId dialect)
+                    cwd
+                    sessionId
+                    baseParams
+                    (resumed >>= \(meta, _) -> meta.metaPromptSnapshot)
+            params = case compatiblePromptSnapshot of
+                Just snapshot ->
+                    setRequestPromptCacheKey
+                        snapshot.promptSnapshotCacheKey
+                        (setRequestInstructionsAndTools
+                            snapshot.promptSnapshotInstructions
+                            (Just snapshot.promptSnapshotTools)
+                            baseParams)
+                Nothing ->
+                    maybe baseParams
+                        (`setRequestPromptCacheKey` baseParams)
+                        sessionId
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             resumeNeedsFreshContext =
@@ -428,6 +450,15 @@ runAgentSession
                     | resumeTargetChanged -> Nothing
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
+            needsInitialContext =
+                resumeNeedsFreshContext
+                    || (null initialTurns && isNothing initialPrevious)
+            restoredInitialPromptSnapshot
+                | null initialTurns && isNothing initialPrevious =
+                    compatiblePromptSnapshot
+                | otherwise = Nothing
+            queueInitialContext =
+                needsInitialContext && isNothing restoredInitialPromptSnapshot
         paramsRef <- newIORef params
         policyRef <- newIORef policy
         claudeRuntimeSlot <- newClaudeSessionRuntimeSlot
@@ -516,22 +547,25 @@ runAgentSession
                     ReportAgentsContextLoaded
                 | otherwise =
                     SuppressAgentsContextLoaded
-        startupContext <-
-            loadAgentsContext
-                stderrHandle
-                fullscreen
-                agentsContextNotice
-                options
-                dialect
-                home
-                cwd
-                (if refreshDialectContext || resumeNeedsFreshContext
-                    then []
-                    else initialItems)
-                (if refreshDialectContext || resumeNeedsFreshContext
-                    then Nothing
-                    else initialPrevious)
-                environmentContextBlock
+        startupContext <- case restoredInitialPromptSnapshot of
+            Just snapshot ->
+                newIORef snapshot.promptSnapshotGeneratedContext
+            Nothing ->
+                loadAgentsContext
+                    stderrHandle
+                    fullscreen
+                    agentsContextNotice
+                    options
+                    dialect
+                    home
+                    cwd
+                    (if refreshDialectContext || resumeNeedsFreshContext
+                        then []
+                        else initialItems)
+                    (if refreshDialectContext || resumeNeedsFreshContext
+                        then Nothing
+                        else initialPrevious)
+                    environmentContextBlock
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -634,10 +668,11 @@ runAgentSession
                                             <|> (resolvedContextWindow
                                                 =<< codexModelInfo)
                                 , automaticCompactionRef
-                                , needsInitialContext =
-                                    resumeNeedsFreshContext
-                                        || (null initialTurns
-                                            && isNothing initialPrevious)
+                                , needsInitialContext
+                                , queueInitialContext
+                                , initialGrokContext =
+                                    restoredInitialPromptSnapshot
+                                        >>= (.promptSnapshotGrokContext)
                                 , persist
                                 , startupWindowTitle
                                 , projectRoot

@@ -2,6 +2,8 @@ module Agent.CLI.RequestSpec (spec) where
 
 import Agent.CLI.Request
     ( requestParams
+    , requestPromptParts
+    , requestToolIdentities
     , setRequestInstructionsAndTools
     , setRequestModel
     , setRequestPromptCacheKey
@@ -178,6 +180,68 @@ spec = describe "requestParams" do
             _ -> expectationFailure
                 "expected refreshed prefix followed by pending input"
 
+    it "restores an exact persisted Lite instruction/tool prefix" do
+        let original =
+                requestParams
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    "persisted instructions"
+                    [ webSearchTool
+                    , functionTool "lookup"
+                    , customTool "exec"
+                    , namespaceTool "editor" Nothing [functionTool "edit"]
+                    ]
+                    "high"
+            persisted@(instructionText, toolSchemas) =
+                requestPromptParts original
+            regenerated =
+                requestParams
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    "new binary instructions"
+                    [ webSearchTool
+                    , documentedFunctionTool
+                        "lookup"
+                        "new description"
+                    , customTool "exec"
+                    , namespaceTool "editor" Nothing [functionTool "edit"]
+                    ]
+                    "high"
+            restored =
+                setRequestInstructionsAndTools
+                    instructionText
+                    (Just toolSchemas)
+                    regenerated
+
+        requestToolIdentities toolSchemas
+            `shouldBe`
+                requestToolIdentities
+                    (snd (requestPromptParts regenerated))
+        requestPromptParts restored `shouldBe` persisted
+
+    it "treats tool identity and order changes as new prompt epochs" do
+        let old =
+                [ functionTool "lookup"
+                , customTool "exec"
+                ]
+            descriptionOnly =
+                [ documentedFunctionTool
+                    "lookup"
+                    "updated documentation"
+                , customTool "exec"
+                ]
+            reordered = reverse old
+            renamed =
+                [ functionTool "search"
+                , customTool "exec"
+                ]
+        requestToolIdentities descriptionOnly
+            `shouldBe` requestToolIdentities old
+        requestToolIdentities reordered
+            `shouldNotBe` requestToolIdentities old
+        requestToolIdentities renamed
+            `shouldNotBe` requestToolIdentities old
+
     it "rebuilds request dialect fields when models cross the Lite boundary" do
         let pending = userMessage "pending"
             genericText = ResponseTextConfig
@@ -257,6 +321,15 @@ functionTool toolName = FunctionToolValue FunctionTool
     , parameters = Nothing
     , strict = Just True
     }
+
+documentedFunctionTool :: Text -> Text -> ResponseTool
+documentedFunctionTool toolName documentation =
+    FunctionToolValue FunctionTool
+        { name = toolName
+        , description = Just documentation
+        , parameters = Nothing
+        , strict = Just True
+        }
 
 customTool :: Text -> ResponseTool
 customTool toolName = CustomToolValue CustomTool

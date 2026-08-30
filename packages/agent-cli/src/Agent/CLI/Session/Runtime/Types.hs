@@ -138,6 +138,8 @@ data SessionRequest = SessionRequest
     , automaticCompactionRef
         :: !(IORef (Maybe AutomaticCompactionBoundary))
     , needsInitialContext :: !Bool
+    , queueInitialContext :: !Bool
+    , initialGrokContext :: !(Maybe Text)
     , persist :: !Persistence
     , startupWindowTitle :: !Text
     , projectRoot :: !OsPath

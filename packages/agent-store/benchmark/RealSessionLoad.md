@@ -11,13 +11,16 @@ bin=$(nix develop -c cabal list-bin \
   agent-store:bench:real-session-load-bench)
 "$bin" per-item "$HOME/.haskell-agent" active SESSION_KEY 11 +RTS -T
 "$bin" adaptive "$HOME/.haskell-agent" active SESSION_KEY 11 +RTS -T
+"$bin" adaptive "$HOME/.haskell-agent" active-prompt SESSION_KEY 11 +RTS -T
 ```
 
 Use `active` to measure the inference context loaded when resuming a session,
-starting at its latest replacement/reset checkpoint. Use `full` to load every
-persisted turn. The `per-item` implementation is the executable baseline that
-issues the original child-row point reads; `adaptive` selects the production
-implementation.
+starting at its latest replacement/reset checkpoint. Use `active-prompt` to
+include the bounded latest-prompt-epoch lookup performed by a cache-stable
+resume, while retaining `active` as its same-binary baseline. Use `full` to
+load every persisted turn. The `per-item` implementation is the executable
+baseline that issues the original child-row point reads; `adaptive` selects
+the production implementation.
 
 Inputs are read from the local managed PostgreSQL store. The store must already
 contain the selected session. The first load is discarded as a warm-up; the

@@ -2,6 +2,7 @@
 module Agent.CLI.Prompt
     ( appendMcpInstructions
     , codexEnvironmentContext
+    , mcpInstructionsForRequest
     , mcpInstructionsGuidance
     , secretInputGuidance
     , imageDisplayGuidance
@@ -247,6 +248,19 @@ appendMcpInstructions :: [(Text, Text)] -> Text -> Text
 appendMcpInstructions [] base = base
 appendMcpInstructions instructions base =
     base <> "\n\n" <> mcpInstructionsGuidance instructions
+
+-- | Progressive MCP readiness is timing-dependent: a cold fleet may have no
+-- server instructions when the request is built, while a reused fleet may
+-- already have all of them. Keep that content in the MCP conversation notice
+-- so the request prefix does not change merely because startup was faster.
+-- Blocking startup has a complete snapshot and can safely include it.
+mcpInstructionsForRequest
+    :: Bool
+    -> [(Text, Text)]
+    -> [(Text, Text)]
+mcpInstructionsForRequest progressive instructions
+    | progressive = []
+    | otherwise = instructions
 
 learnedSkillGuidance :: Set Text -> Text
 learnedSkillGuidance available

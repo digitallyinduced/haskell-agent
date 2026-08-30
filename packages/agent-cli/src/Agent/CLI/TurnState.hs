@@ -3,6 +3,7 @@ module Agent.CLI.TurnState
     ( ConversationState(..)
     , FieldUpdate(..)
     , StartupUpdate(..)
+    , GrokContextUpdate(..)
     , ConversationPatch(..)
     , PreparedTurn(..)
     , ConversationOutcome(..)
@@ -62,6 +63,7 @@ data ConversationState = ConversationState
     { conversationPreviousResponseId :: !(Maybe Text)
     , conversationTranscript :: ![ResponseItem]
     , conversationStartupContext :: !(Maybe Text)
+    , conversationGrokFirstTurnContext :: !(Maybe Text)
     , conversationUsage :: !TokenUsage
     , conversationLastAssistant :: !(Maybe Text)
     } deriving (Eq, Show)
@@ -76,6 +78,11 @@ data StartupUpdate
     | RestoreStartup !Text
     deriving (Eq, Show)
 
+data GrokContextUpdate
+    = KeepGrokContext
+    | RestoreGrokContext !Text
+    deriving (Eq, Show)
+
 -- | A description of the conversation mutations owned by a turn.
 -- Usage is a delta so automatic compaction can add usage concurrently without
 -- a later whole-state write losing it. Startup restoration is a merge for the
@@ -84,6 +91,7 @@ data ConversationPatch = ConversationPatch
     { patchPreviousResponseId :: !(FieldUpdate (Maybe Text))
     , patchTranscript :: !(FieldUpdate [ResponseItem])
     , patchStartupContext :: !StartupUpdate
+    , patchGrokFirstTurnContext :: !GrokContextUpdate
     , patchUsageDelta :: !TokenUsage
     , patchLastAssistant :: !(FieldUpdate (Maybe Text))
     } deriving (Eq, Show)
@@ -91,6 +99,7 @@ data ConversationPatch = ConversationPatch
 data PreparedTurn = PreparedTurn
     { preparedBeforeItems :: ![ResponseItem]
     , preparedConsumedStartup :: !(Maybe Text)
+    , preparedConsumedGrokContext :: !(Maybe Text)
     , preparedTurnInputs :: ![TurnInput]
     } deriving (Eq, Show)
 
@@ -286,6 +295,7 @@ rebasePreparedTurn boundary prepared =
                 { preparedBeforeItems =
                     committed.automaticCompactionHistory
                 , preparedConsumedStartup = Nothing
+                , preparedConsumedGrokContext = Nothing
                 , preparedTurnInputs =
                     committed.automaticCompactionPendingInputs
                 }
@@ -298,12 +308,13 @@ finishConversation prepared = \case
             , patchStartupContext =
                 maybe KeepStartup RestoreStartup
                     prepared.preparedConsumedStartup
+            , patchGrokFirstTurnContext = grokContextUpdate
             }
     ConversationCancelled retained -> retainItems retained
     ConversationFailed retained -> retainItems retained
-    ConversationInterrupted -> restoreStartup
+    ConversationInterrupted -> restorePromptContext
     ConversationProviderUnavailable ->
-        restoreStartup
+        restorePromptContext
     ConversationCompleted _responseId usage assistant ->
         basePatch
             { patchUsageDelta = usage
@@ -314,6 +325,7 @@ finishConversation prepared = \case
         { patchPreviousResponseId = KeepField
         , patchTranscript = KeepField
         , patchStartupContext = KeepStartup
+        , patchGrokFirstTurnContext = KeepGrokContext
         , patchUsageDelta = emptyTokenUsage
         , patchLastAssistant = KeepField
         }
@@ -325,12 +337,16 @@ finishConversation prepared = \case
             , patchTranscript =
                 SetField (prepared.preparedBeforeItems <> retained)
             }
-    restoreStartup =
+    restorePromptContext =
         basePatch
             { patchStartupContext =
                 maybe KeepStartup RestoreStartup
                     prepared.preparedConsumedStartup
+            , patchGrokFirstTurnContext = grokContextUpdate
             }
+    grokContextUpdate =
+        maybe KeepGrokContext RestoreGrokContext
+            prepared.preparedConsumedGrokContext
 
 applyConversationPatch
     :: ConversationPatch
@@ -346,6 +362,9 @@ applyConversationPatch patch state =
         , conversationStartupContext =
             applyStartup patch.patchStartupContext
                 state.conversationStartupContext
+        , conversationGrokFirstTurnContext =
+            applyGrokContext patch.patchGrokFirstTurnContext
+                state.conversationGrokFirstTurnContext
         , conversationUsage =
             addTokenUsage state.conversationUsage patch.patchUsageDelta
         , conversationLastAssistant =
@@ -377,3 +396,10 @@ applyStartup :: StartupUpdate -> Maybe Text -> Maybe Text
 applyStartup update current = case update of
     KeepStartup -> current
     RestoreStartup consumed -> restoreStartupContext consumed current
+
+applyGrokContext :: GrokContextUpdate -> Maybe Text -> Maybe Text
+applyGrokContext update current = case update of
+    KeepGrokContext -> current
+    RestoreGrokContext consumed -> case current of
+        Nothing -> Just consumed
+        Just _ -> current

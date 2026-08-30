@@ -9,11 +9,14 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Postgres.Session
     ( SessionMetadata(..)
+    , SessionPromptEpoch(..)
+    , SessionPromptSnapshot(..)
     , SessionReadImplementation(..)
     , SessionTurn(..)
     , StoredSession(..)
     , StoredTurn(..)
     , loadActiveSessionWithImplementation
+    , loadLatestSessionPromptEpoch
     , loadSessionWithImplementation
     )
 import Agent.Store.SessionItem
@@ -24,6 +27,7 @@ import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Vector as Vector
+import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
 import System.CPUTime (getCPUTime)
@@ -32,7 +36,10 @@ import System.Exit (die)
 import System.Mem (performGC)
 import Text.Printf (printf)
 
-data Workload = Active | Full
+data Workload
+    = Active
+    | ActiveWithPrompt
+    | Full
 
 data Sample = Sample
     { elapsedMillis :: !Double
@@ -55,6 +62,7 @@ main = do
                 value -> die ("unknown implementation: " <> value)
             workload <- case workloadArg of
                 "active" -> pure Active
+                "active-prompt" -> pure ActiveWithPrompt
                 "full" -> pure Full
                 value -> die ("unknown workload: " <> value)
             sampleCount <- parsePositive sampleCountArg
@@ -86,7 +94,7 @@ main = do
             die $
                 "usage: real-session-load-bench "
                     <> "(per-item|adaptive) STATE_DIRECTORY "
-                    <> "(active|full) SESSION_KEY SAMPLES\n"
+                    <> "(active|active-prompt|full) SESSION_KEY SAMPLES\n"
                     <> "output: implementation,workload,session_key,"
                     <> "elapsed_ms,cpu_ms,allocated_bytes,checksum"
 
@@ -102,26 +110,38 @@ loadWorkload
     -> Workload
     -> Store
     -> Text
-    -> IO (Either StoreError StoredSession)
+    -> IO
+        (Either StoreError (StoredSession, Maybe SessionPromptEpoch))
 loadWorkload implementation workload store sessionKey =
     loader (trustedPool store) sessionKey >>= \case
         Left err -> pure (Left err)
         Right Nothing ->
             die ("session not found: " <> Text.unpack sessionKey)
-        Right (Just session) -> pure (Right session)
+        Right (Just session) -> case workload of
+            ActiveWithPrompt ->
+                loadLatestSessionPromptEpoch
+                    (trustedPool store)
+                    sessionKey >>= \case
+                        Left err -> pure (Left err)
+                        Right prompt -> pure (Right (session, prompt))
+            _ -> pure (Right (session, Nothing))
   where
     loader = case workload of
         Active -> loadActiveSessionWithImplementation implementation
+        ActiveWithPrompt ->
+            loadActiveSessionWithImplementation implementation
         Full -> loadSessionWithImplementation implementation
 
-measure :: IO (Either StoreError StoredSession) -> IO Sample
+measure
+    :: IO (Either StoreError (StoredSession, Maybe SessionPromptEpoch))
+    -> IO Sample
 measure action = do
     performGC
     beforeStats <- getRTSStats
     beforeCpu <- getCPUTime
     beforeElapsed <- getMonotonicTimeNSec
-    stored <- action >>= requireStore "load session"
-    forced <- pure $! checksumSession stored
+    (stored, prompt) <- action >>= requireStore "load session"
+    forced <- pure $! checksumSession stored + maybe 0 checksumPrompt prompt
     afterElapsed <- getMonotonicTimeNSec
     afterCpu <- getCPUTime
     performGC
@@ -149,6 +169,24 @@ checksumSession stored =
         checksumTurn
         (Text.length stored.storedMetadata.sessionMetadataTitle)
         stored.storedTurns
+
+checksumPrompt :: SessionPromptEpoch -> Int
+checksumPrompt epoch =
+    let snapshot = epoch.sessionPromptEpochSnapshot
+    in fromIntegral epoch.sessionPromptEpochIndex
+        + fromIntegral snapshot.sessionPromptVersion
+        + floor
+            (utcTimeToPOSIXSeconds snapshot.sessionPromptCreatedAt)
+        + Text.length snapshot.sessionPromptProvider
+        + Text.length snapshot.sessionPromptConnection
+        + Text.length snapshot.sessionPromptModel
+        + Text.length snapshot.sessionPromptDialect
+        + Text.length snapshot.sessionPromptCwd
+        + Text.length snapshot.sessionPromptInstructions
+        + Text.length snapshot.sessionPromptTools
+        + maybeText snapshot.sessionPromptGeneratedContext
+        + maybeText snapshot.sessionPromptGrokContext
+        + Text.length snapshot.sessionPromptCacheKey
 
 checksumTurn :: Int -> StoredTurn -> Int
 checksumTurn total stored =

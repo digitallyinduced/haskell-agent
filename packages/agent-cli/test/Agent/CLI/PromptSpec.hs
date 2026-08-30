@@ -218,6 +218,30 @@ spec = describe "systemPrompt" do
             "Store actionable reusable guidance"
         withoutSkills `shouldNotSatisfy` Text.isInfixOf "Learned skills:"
 
+    it "keeps progressive MCP readiness out of the request prefix" do
+        let base = "stable base instructions"
+            configured =
+                [("example", "Readiness-dependent server instructions")]
+            discovered =
+                mcpInstructionsForRequest True configured
+            cold =
+                appendMcpInstructions
+                    (mcpInstructionsForRequest True [])
+                    base
+            warm =
+                appendMcpInstructions
+                    discovered
+                    base
+            blocking =
+                appendMcpInstructions
+                    (mcpInstructionsForRequest False configured)
+                    base
+        discovered `shouldBe` []
+        warm `shouldBe` cold
+        warm `shouldBe` base
+        blocking `shouldSatisfy` Text.isInfixOf
+            "Readiness-dependent server instructions"
+
     it "renders ghci-only and bash-only root prompts from registered tools" do
         let day = fromGregorian 2026 8 19
             ghciOnly =
