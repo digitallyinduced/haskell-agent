@@ -12,12 +12,26 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "parseReplLine" do
-        it "keeps :q and :quit as quit" do
-            parseReplLine ":q" `shouldBe` ReplQuit
-            parseReplLine ":quit" `shouldBe` ReplQuit
-            parseReplLine "  :quit  " `shouldBe` ReplQuit
+        it "recognizes bare shell- and Vim-style exit aliases" do
+            map parseReplLine
+                [ "exit"
+                , "quit"
+                , "EXIT"
+                , " Quit "
+                , ":q"
+                , ":Q!"
+                , ":quit"
+                , ":wq"
+                , ":WQ!"
+                ]
+                `shouldBe` replicate 9 ReplQuit
             parseReplLine "/quit" `shouldBe` ReplQuit
             parseReplLine "/exit" `shouldBe` ReplQuit
+
+        it "does not exit for near matches" do
+            map parseReplLine ["exiting", "quite", "q", "wq", ":w", ":x"]
+                `shouldBe`
+                    map ReplPrompt ["exiting", "quite", "q", "wq", ":w", ":x"]
 
         it "treats :reload as a GHCi reload request" do
             parseReplLine ":reload" `shouldBe` ReplReload

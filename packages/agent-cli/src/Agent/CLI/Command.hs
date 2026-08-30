@@ -179,7 +179,7 @@ parseReplLineWithSkills skills =
 parseReplLineWithCatalog :: SlashCatalog -> Text -> ReplAction
 parseReplLineWithCatalog catalog raw =
     let line = Text.strip raw
-    in if line == ":q" || line == ":quit"
+    in if isExitAlias line
         then ReplQuit
         else if line == ":reload"
             then ReplReload
@@ -189,6 +189,13 @@ parseReplLineWithCatalog catalog raw =
                     | otherwise -> parseSlash catalog raw line
                 Just (':', _) -> parseColon raw
                 _ -> ReplPrompt raw
+
+-- | Bare shell- and Vim-style input that exits the interactive session.
+-- Keep this exact so ordinary prompts such as @exiting@ still reach the model.
+isExitAlias :: Text -> Bool
+isExitAlias raw =
+    Text.toLower (Text.strip raw)
+        `elem` ["exit", "quit", ":q", ":q!", ":quit", ":wq", ":wq!"]
 
 -- Absolute paths share slash commands' leading slash. A path with at least
 -- one further separator is unambiguously path-like, so leave it as prompt
