@@ -105,6 +105,7 @@ import Agent.CLI.Session.Runtime.Types
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
                      conversationRef, needsInitialContext, persist,
+                     contextOccupancyRef, currentContextWindow,
                      startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
                      automaticCompactionHookRef, skillsRef, skillInvocationsRef,
@@ -159,6 +160,7 @@ import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.ImageGeneration ( imageGenerationToolName )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
+import Agent.OpenAI.Models.Types ( resolvedContextWindow )
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ()
 import Agent.Provider ( tokenProviderBillingMode )
@@ -182,7 +184,7 @@ import Agent.Tools.Types
     , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
     )
 import Agent.XAI.LoopBackend ()
-import Control.Applicative ()
+import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( waitSTM, withAsync )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
@@ -553,6 +555,7 @@ runAgentSession
                         sessionTokenProvider
                         sessionOpenAiPool
                         sessionSelectAccount
+                        sessionContextWindow
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
@@ -586,6 +589,13 @@ runAgentSession
                                 , startupUnavailable
                                 , paramsRef
                                 , conversationRef
+                                , contextOccupancyRef = contextTokensRef
+                                , currentContextWindow = do
+                                    configured <- sessionContextWindow
+                                    pure $
+                                        configured
+                                            <|> (resolvedContextWindow
+                                                =<< codexModelInfo)
                                 , automaticCompactionRef
                                 , needsInitialContext =
                                     resumeNeedsFreshContext

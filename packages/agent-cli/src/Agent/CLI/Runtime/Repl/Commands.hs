@@ -29,6 +29,8 @@ import Agent.CLI.Command
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
                  ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
                  ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
+                 ReplViewPlan, ReplQueue, ReplTranscript, ReplEditPrompt,
+                 ReplContext,
                  ReplBtw, ReplMetaConsole, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplLogin, ReplUsage, ReplReloadAuth,
@@ -44,11 +46,22 @@ import Agent.CLI.Config
     , loadHarnessConfig
     , updateHarnessConfig
     )
+import Agent.CLI.Context ( formatContextReport )
+import Agent.CLI.Transcript
+    ( foldTranscriptTurns
+    , renderTranscriptMarkdown
+    )
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
+import Agent.CLI.ExternalProgram
+    ( normalizeEditedText
+    , resolveExternalProgram
+    , runExternalProgramOnFile
+    , withTemporaryTextFile
+    )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
     ( formatPasteChip,
@@ -61,7 +74,11 @@ import Agent.CLI.Input
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
-import Agent.CLI.Login ( connectProviderAccount, runLoginManager )
+import Agent.CLI.Login
+    ( connectProviderAccount
+    , runFullscreenLoginManager
+    , runLoginManager
+    )
 import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ( runMcpManager )
@@ -123,8 +140,10 @@ import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReplace),
       appendTurnWithMetaUpdateIndexed,
       ensureSession,
+      loadSession,
       Persistence(..),
-      PersistenceState(PersistenceActive),
+      PersistenceState(PersistenceActive, PersistencePending),
+      sessionsRoot,
       SessionHandle(sessionMeta, sessionDir),
       SessionMeta(metaId, metaLastResponseId),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
@@ -134,7 +153,7 @@ import Agent.CLI.Session.Attachments ( queueAttachedImages )
 import Agent.CLI.Session.Choices
     ( accountUsageText, showAccountUsage )
 import Agent.CLI.Session.History
-    ( modifyLiveAttachments, readLiveAttachments )
+    ( modifyLiveAttachments, readLiveAttachments, readLiveTranscript )
 import Agent.CLI.Session.Interaction ( runBtwQuestion )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types ()
@@ -154,18 +173,21 @@ import Agent.CLI.Style
     ( glyphOk, glyphSession, roleError, roleMuted, roleSuccess )
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime,
-      beginFullscreenLiveHistory,
+    ( beginFullscreenLiveHistory,
       commitFullscreenImagePreviews,
       commitFullscreenHistoryTurn,
       emitUiEvent,
       requestFullscreenChoiceWithBody,
       requestFullscreenSecret,
       requestFullscreenText,
+      queuedFullscreenInputDisplays,
       setFullscreenImagePreviews,
       withFullscreenSuspended )
 import Agent.CLI.TUI.SessionHistory ( sessionHistoryTurn )
-import Agent.CLI.TUI.Types ( HistoryCommit(..) )
+import Agent.CLI.TUI.Types
+    ( FullscreenRuntime(runtimeInput)
+    , HistoryCommit(..)
+    )
 import Agent.CLI.Terminal
     ( copyTerminalClipboard, formatTerminalCapabilities, resolveColor )
 import Agent.CLI.Tools ()
@@ -188,7 +210,7 @@ import Agent.OsPath ( toText )
 import Agent.Provider ( Provider(ClaudeCodeProvider), providerSlug )
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
-import Agent.Responses.Types ()
+import Agent.Responses.Types ( ResponseCreateParams(model) )
 import Agent.Skills
     ( SkillInvocation(invocationSkill),
       formatSkillActivation,
@@ -211,6 +233,7 @@ import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef, planSessionDir),
       activatePlanMode,
       planFilePath,
+      readPlanMarkdown,
       PlanModeState(PlanPending) )
 import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
@@ -224,6 +247,7 @@ import Control.Exception ( AsyncException(UserInterrupt) )
 import Control.Exception.Safe
     ( displayException, finally, throwIO, tryAny )
 import Control.Monad ( foldM, when, forM_ )
+import Data.Foldable ( toList )
 import Data.IORef ( atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
 import Data.Maybe ( isNothing )
@@ -256,8 +280,8 @@ import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( intercalate, map, null, pack, strip, toLower )
-import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
+    ( intercalate, map, null, pack, replace, strip, toLower )
+import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn, readFile )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
 
@@ -278,6 +302,8 @@ handleReplLine
             { sessionCompact = compactRunner
             , sessionRender = render
             , sessionConversation = conversationRef
+            , sessionContextOccupancy = contextOccupancyRef
+            , sessionContextWindow = currentContextWindow
             , sessionProvider = provider
             , sessionPolicy = policyRef
             , sessionPersist = persist
@@ -289,6 +315,7 @@ handleReplLine
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
+            , sessionDraft = draftRef
             , sessionPreviewId = previewIdRef
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
@@ -686,6 +713,16 @@ handleReplLine
                                         (roleMuted color
                                             (glyphSession <> statsMessage))
                                 continue
+                    ReplViewPlan -> do
+                        markdown <- readPlanMarkdown planMode
+                        if Text.null (Text.strip markdown)
+                            then do
+                                let message =
+                                        "No saved plan is available for this session."
+                                displayInfo message (Text.putStrLn message)
+                            else
+                                displayInfo markdown (Text.putStrLn markdown)
+                        continue
                     ReplPlan _
                         | provider == ClaudeCodeProvider -> do
                             let message =
@@ -699,6 +736,81 @@ handleReplLine
                             Just providerSwitch ->
                                 pure (RunSwitchProvider providerSwitch)
                             Nothing -> continue
+                    ReplQueue -> do
+                        prompts <- case fullscreen of
+                            Nothing -> pure []
+                            Just runtime ->
+                                toList
+                                    <$> queuedFullscreenInputDisplays
+                                        runtime.runtimeInput
+                        let message = formatQueuedPrompts prompts
+                        displayInfo message (Text.putStrLn message)
+                        continue
+                    ReplContext -> do
+                        currentParams <- readIORef env.sessionParams
+                        history <- readLiveTranscript conversationRef
+                        occupancy <- readIORef contextOccupancyRef
+                        contextWindow <- currentContextWindow
+                        activeTools <- env.sessionActiveToolNames
+                        let model = maybe "<unknown>" id currentParams.model
+                            message =
+                                formatContextReport
+                                    model
+                                    contextWindow
+                                    occupancy
+                                    currentParams
+                                    history
+                                    activeTools
+                        displayInfo message (Text.putStrLn message)
+                        continue
+                    ReplTranscript -> do
+                        outcome <- case persist of
+                            PersistenceDisabled ->
+                                pure (Right "No conversation transcript is available yet.")
+                            PersistenceEnabled slotRef ->
+                                readIORef slotRef >>= \case
+                                    PersistencePending _ _ _ ->
+                                        pure (Right "No conversation transcript is available yet.")
+                                    PersistenceActive handle ->
+                                        loadSession
+                                            env.sessionDatabasePool
+                                            (sessionsRoot env.sessionHome)
+                                            handle.sessionMeta.metaId
+                                            >>= \case
+                                                Left err -> pure (Left err)
+                                                Right (meta, turns) ->
+                                                    let blocks =
+                                                            foldTranscriptTurns
+                                                                (zip [0 ..] turns)
+                                                    in if null blocks
+                                                        then pure (Right "No conversation transcript is available yet.")
+                                                        else
+                                                            legacy
+                                                                (openPager
+                                                                    (renderTranscriptMarkdown
+                                                                        meta
+                                                                        blocks))
+                                                                >>= \case
+                                                                    Left err -> pure (Left err)
+                                                                    Right () -> pure (Right "")
+                        case outcome of
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                            Right message
+                                | Text.null message -> pure ()
+                                | otherwise ->
+                                    displayInfo message (Text.putStrLn message)
+                        continue
+                    ReplEditPrompt -> do
+                        legacy editPrompt >>= \case
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                                continue
+                            Right edited -> continueWith edited
                     ReplBtw question -> do
                         runBtwQuestion True env question
                         continue
@@ -733,8 +845,12 @@ handleReplLine
                     action@ReplRename{} -> handleSessionAction env slashCatalog continue action
                     action@ReplRenameAuto -> handleSessionAction env slashCatalog continue action
                     ReplLogin -> do
-                        color <- resolveColor stderr
-                        legacy (runLoginManager color)
+                        case fullscreen of
+                            Just runtime ->
+                                runFullscreenLoginManager runtime
+                            Nothing -> do
+                                color <- resolveColor stderr
+                                runLoginManager color
                         continue
                     ReplUsage -> do
                         case fullscreen of
@@ -1175,6 +1291,62 @@ handleReplLine
                         Text.hPutStrLn stderr
                             (roleError color
                                 "terminal clipboard is unavailable")
+    editPrompt = do
+        initialDraft <- readIORef draftRef
+        outcome <- tryAny do
+            resolveExternalProgram
+                [("VISUAL", "$VISUAL"), ("EDITOR", "$EDITOR")]
+                "vi" >>= \case
+                    Left err -> pure (Left err)
+                    Right program ->
+                        withTemporaryTextFile
+                            "agent-prompt-"
+                            initialDraft
+                            \path ->
+                                runExternalProgramOnFile program path >>= \case
+                                    Left err -> pure (Left err)
+                                    Right () ->
+                                        Right . normalizeEditedText
+                                            <$> Text.readFile path
+        pure $ case outcome of
+            Left exception ->
+                Left
+                    ( "could not edit prompt: "
+                        <> Text.pack (show exception)
+                    )
+            Right result -> result
+
+    openPager markdown = do
+        outcome <- tryAny do
+            resolveExternalProgram
+                [("PAGER", "$PAGER")]
+                "less -R" >>= \case
+                    Left err -> pure (Left err)
+                    Right program ->
+                        withTemporaryTextFile
+                            "agent-transcript-"
+                            markdown
+                            (runExternalProgramOnFile program)
+        pure $ case outcome of
+            Left exception ->
+                Left
+                    ( "could not open transcript: "
+                        <> Text.pack (show exception)
+                    )
+            Right result -> result
+
+formatQueuedPrompts :: [Text] -> Text
+formatQueuedPrompts [] = "No prompts are queued."
+formatQueuedPrompts prompts =
+    "Queued prompts (" <> Text.pack (show (length prompts)) <> "):\n"
+        <> Text.intercalate
+            "\n"
+            (zipWith formatPrompt [1 :: Int ..] prompts)
+  where
+    formatPrompt index prompt =
+        Text.pack (show index)
+            <> ". "
+            <> Text.replace "\n" "\n   " prompt
 
 requestReload
     :: Maybe FullscreenRuntime
