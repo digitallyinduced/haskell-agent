@@ -35,7 +35,9 @@ deliverable without increasing the transport frame bound.
 Commands and command results carry client-generated command IDs. The public
 task adapter accepts the following versioned command payloads. Unknown versions,
 types, invalid combinations, empty identifiers, and values beyond the
-documented bounds are rejected without changing scheduler state.
+documented bounds are rejected without changing scheduler state. Scheduler
+command admission is bounded and nonblocking: a full queue returns an immediate
+error rather than allowing an expired client request to execute later.
 
 ```json
 {"version":1,"type":"submit","task_id":"stable-client-id","session_id":"optional-existing-session","prompt":"...","cwd":"/absolute/or/relative/path","provider":"openai","model":"gpt-5.6","effort":"high","worktree":false}
@@ -75,7 +77,9 @@ be retried.
 The shipped daemon runner executes `agent-cli` directly without a shell
 (`HASKELL_AGENT_CLI` can override its path), using the real one-shot CLI flags
 for prompt, session resume, cwd, provider/model/effort, session persistence,
-and optional worktree creation. Stdout and stderr are concurrently drained in
+and optional worktree creation. It always passes `--no-yolo`, so a noninteractive
+task fails closed rather than implicitly approving mutating tools. Stdout and
+stderr are concurrently drained in
 bounded chunks before journal log limits are applied, total output is capped,
 and every process task has a six-hour wall-clock deadline. Embedders can supply
 a typed `TaskRunner` while retaining the same scheduler, persistence, and wire

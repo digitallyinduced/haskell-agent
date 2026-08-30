@@ -5,6 +5,7 @@ module Agent.Runtime.Daemon.TaskAdapter
     , processTaskRunnerForWithTimeout
     , processTaskArguments
     , withTaskAdapter
+    , withTaskAdapterQueueSize
     ) where
 
 import Control.Concurrent.Async
@@ -102,7 +103,7 @@ data SubmitCommand = SubmitCommand
     }
 
 data AdapterMessage
-    = Execute !TaskCommand !(TMVar (Either Text Value))
+    = Execute !TaskCommand !(TMVar (Either Text Value)) !(TVar Bool)
     | TaskLogged !TaskId !Int !Text
     | TaskFinished !TaskId !Int !(Either Text ())
 
@@ -126,9 +127,17 @@ maximumTaskLimit :: Int
 maximumTaskLimit = 32
 
 withTaskAdapter :: Journal -> TaskRunner -> (Supervisor -> IO value) -> IO value
-withTaskAdapter journal runner action = do
+withTaskAdapter = withTaskAdapterQueueSize 1_024
+
+withTaskAdapterQueueSize ::
+    Int ->
+    Journal ->
+    TaskRunner ->
+    (Supervisor -> IO value) ->
+    IO value
+withTaskAdapterQueueSize rawQueueSize journal runner action = do
     saved <- snapshot journal
-    commands <- newTBQueueIO 1_024
+    commands <- newTBQueueIO (fromIntegral (max 1 rawQueueSize))
     let initial =
             AdapterState
                 { adapterLimit = defaultTaskLimit
@@ -144,8 +153,20 @@ withTaskAdapter journal runner action = do
                     case parseTaskCommand raw of
                         Left message -> pure (Left message)
                         Right command -> do
-                            atomically (writeTBQueue commands (Execute command reply))
-                            atomically (takeTMVar reply)
+                            active <- newTVarIO True
+                            admitted <-
+                                atomically $ do
+                                    full <- isFullTBQueue commands
+                                    if full
+                                        then pure False
+                                        else do
+                                            writeTBQueue commands (Execute command reply active)
+                                            pure True
+                            if admitted
+                                then
+                                    atomically (takeTMVar reply)
+                                        `onException` atomically (writeTVar active False)
+                                else pure (Left "task scheduler command queue is full")
                 }
     workers <- newTVarIO Map.empty
     let loop = schedulerLoopWithRegistry journal runner commands workers initial
@@ -169,11 +190,15 @@ schedulerLoopWithRegistry journal runner commands registry = go
         handleMessage state message >>= go
 
     handleMessage state = \case
-        Execute command reply -> do
-            (next, result) <-
-                executeCommand journal registry state command
-            atomically (putTMVar reply result)
-            pure next
+        Execute command reply active -> do
+            stillActive <- readTVarIO active
+            if stillActive
+                then do
+                    (next, result) <-
+                        executeCommand journal registry state command
+                    atomically (putTMVar reply result)
+                    pure next
+                else pure state
         TaskLogged taskId taskAttempt line ->
             case Map.lookup taskId state.adapterTasks of
                 Just task
@@ -588,7 +613,7 @@ runProcessTask runtimeSeconds executable task logLine = do
 
 processTaskArguments :: DurableTask -> [String]
 processTaskArguments task =
-    ["--prompt", Text.unpack task.description, "--save-session"]
+    ["--prompt", Text.unpack task.description, "--save-session", "--no-yolo"]
         <> maybe [] (\value -> ["--resume", Text.unpack value]) task.sessionId
         <> ["--cwd", task.workingDirectory]
         <> maybe [] (\value -> ["--provider", Text.unpack value]) task.provider

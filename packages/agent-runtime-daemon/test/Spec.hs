@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (cancel, concurrently, waitCatch, withAsync)
+import Control.Concurrent.Async (async, cancel, concurrently, wait, waitCatch, withAsync)
 import Control.Concurrent.STM
     ( TQueue
     , TMVar
@@ -9,12 +9,13 @@ import Control.Concurrent.STM
     , flushTQueue
     , newEmptyTMVarIO
     , newTQueueIO
+    , putTMVar
     , readTQueue
     , readTVarIO
     , takeTMVar
     , writeTQueue
     )
-import Control.Exception.Safe (bracket, isAsyncException)
+import Control.Exception.Safe (bracket, finally, isAsyncException, uninterruptibleMask_)
 import Data.Aeson (Result (..), Value (..), encode, fromJSON, object, toJSON, (.=))
 import Data.Bits ((.&.))
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -913,6 +914,7 @@ main = hspec $ do
                         [ "--prompt"
                         , "hello agent"
                         , "--save-session"
+                        , "--no-yolo"
                         , "--resume"
                         , "session-id"
                         , "--cwd"
@@ -971,6 +973,75 @@ main = hspec $ do
                 let retained = (.logTail) (saved.tasks Map.! TaskId "bounded-log")
                 length retained `shouldSatisfy` (<= 3)
                 sum (map Text.length retained) `shouldSatisfy` (<= 10)
+
+        it "rejects full command queues and skips requests cancelled before execution" $
+            withSystemTempDirectory "daemon-command-admission" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                runGate <- newEmptyTMVarIO
+                cleanupGate <- newEmptyTMVarIO
+                runnerStarted <- newTQueueIO
+                cleanupStarted <- newTQueueIO
+                let runner =
+                        TaskRunner
+                            { runTask = \_ _ -> do
+                                atomically (writeTQueue runnerStarted ())
+                                _ <- atomically (takeTMVar runGate)
+                                    `finally`
+                                        uninterruptibleMask_
+                                            ( do
+                                                atomically (writeTQueue cleanupStarted ())
+                                                atomically (takeTMVar cleanupGate)
+                                            )
+                                pure (Right ())
+                            }
+                    command kind fields =
+                        object
+                            ( [ "version" .= (1 :: Int)
+                              , "type" .= (kind :: Text)
+                              ]
+                                <> fields
+                            )
+                withTaskAdapterQueueSize 1 journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit")
+                        (submitCommand "admission-task" "admission-session")
+                        >>= shouldSucceed
+                    timeout 1_000_000 (atomically (readTQueue runnerStarted))
+                        `shouldReturn` Just ()
+                    cancelling <-
+                        async $
+                            supervisor.handleCommand
+                                (CommandId "cancel")
+                                (command "cancel" ["task_id" .= ("admission-task" :: Text)])
+                    timeout 1_000_000 (atomically (readTQueue cleanupStarted))
+                        `shouldReturn` Just ()
+                    ghost <-
+                        async $
+                            supervisor.handleCommand
+                                (CommandId "ghost")
+                                (command "set_limit" ["limit" .= (1 :: Int)])
+                    threadDelay 20_000
+                    cancel ghost
+                    waitCatch ghost >>= (`shouldSatisfy` \case
+                        Left exception -> isAsyncException exception
+                        Right _ -> False)
+                    timeout
+                        200_000
+                        ( supervisor.handleCommand
+                            (CommandId "overflow")
+                            (command "list" [])
+                        )
+                        `shouldReturn` Just (Left "task scheduler command queue is full")
+                    atomically (putTMVar cleanupGate ())
+                    wait cancelling >>= shouldSucceed
+                    threadDelay 20_000
+                    afterCancel <- snapshot journal
+                    supervisor.handleCommand
+                        (CommandId "list")
+                        (command "list" [])
+                        >>= shouldSucceed
+                    afterList <- snapshot journal
+                    afterList.lastSequence `shouldBe` afterCancel.lastSequence
 
 withSocketPair :: ((Socket, Socket) -> IO value) -> IO value
 withSocketPair =
