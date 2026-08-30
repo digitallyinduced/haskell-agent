@@ -25,6 +25,7 @@ module Agent.CLI.Session
     , loadSessionActivity
     , cleanupPendingPersistence
     , createSession
+    , forkSession
     , appendTurn
     , appendTurnIndexed
     , appendTurnWithMetaUpdate
@@ -109,7 +110,13 @@ import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (StoreError, renderStoreError)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (displayException, finally, onException, tryIO)
+import Control.Exception.Safe
+    ( displayException
+    , finally
+    , mask
+    , onException
+    , tryIO
+    )
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -120,31 +127,37 @@ import Control.Monad.Trans.Except
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.Bits (xor)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import Data.Word (Word64)
 import qualified Data.Vector as Vector
 import Numeric (showHex)
 import System.Directory.OsPath
-    ( createDirectory
+    ( copyFile
+    , createDirectory
     , createDirectoryIfMissing
     , doesDirectoryExist
     , doesFileExist
+    , listDirectory
     , removePathForcibly
     , removeFile
     )
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
-import System.Posix.Files (setFileMode)
+import System.IO.Error (isDoesNotExistError)
+import System.Posix.Files
+    ( FileStatus
+    , getSymbolicLinkStatus
+    , isDirectory
+    , isRegularFile
+    , isSymbolicLink
+    , setFileMode
+    )
 
 sessionSchemaVersion :: Int
 sessionSchemaVersion = 1
@@ -273,6 +286,221 @@ createSession spec = do
     (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
     createReservedSession spec sessionId tempDir
         `onException` removeReservedTemp spec.createRoot sessionId
+
+-- | Clone a persisted session and its durable branch artifacts under a new
+-- id. The returned handle is not locked or installed as the active session;
+-- callers should use the same active-session handoff used by @/new@.
+forkSession
+    :: OsPath
+    -> SessionHandle
+    -> [SessionTurn]
+    -> Maybe Text
+    -> IO (Either Text SessionHandle)
+forkSession root source turns requestedTitle
+    | not (any substantiveTurn (activeTranscriptTurns turns)) =
+        pure (Left "a session must contain at least one turn before it can be forked")
+    | otherwise = mask \restore -> do
+        allocated <- tryIO (restore (allocateSessionTemp root))
+        case allocated of
+            Left err ->
+                pure (Left ("could not reserve fork session: " <> exceptionText err))
+            Right (sessionId, tempDir) ->
+                case sessionDirForId root sessionId of
+                    Left err -> do
+                        cleanupForkFiles root sessionId Nothing
+                        pure (Left err)
+                    Right dir -> do
+                        now <- normalizePostgresTimestamp <$> getCurrentTime
+                        let meta = forkedMetadata now sessionId requestedTitle
+                                source.sessionMeta
+                            storedMeta = toStoredMetadata meta
+                            handle = SessionHandle
+                                { sessionPool = source.sessionPool
+                                , sessionDir = dir
+                                , sessionTempDir = tempDir
+                                , sessionMetaPath =
+                                    dir </> unsafeEncodeUtf "meta.json"
+                                , sessionTranscriptPath =
+                                    dir </> unsafeEncodeUtf "transcript.jsonl"
+                                , sessionMeta = meta
+                                }
+                            cleanupFiles =
+                                cleanupForkFiles root sessionId (Just dir)
+                            cleanupOwned = do
+                                cleanupForkDatabaseIfOwned
+                                    source.sessionPool
+                                    storedMeta
+                                cleanupFiles
+                        prepared <- tryIO $
+                            restore (prepareForkDirectory source.sessionDir dir)
+                        case prepared of
+                            Left err -> do
+                                cleanupForkFiles root sessionId Nothing
+                                pure
+                                    (Left
+                                        ("could not copy fork session artifacts: "
+                                            <> exceptionText err))
+                            Right () -> do
+                                stored <-
+                                    restore
+                                        (Store.createSessionFromSnapshot
+                                            source.sessionPool
+                                            storedMeta
+                                            (map toStoredTurn turns))
+                                        `onException` cleanupOwned
+                                case stored of
+                                    Left err -> do
+                                        cleanupOwned
+                                        pure (Left (renderStoreError err))
+                                    Right False -> do
+                                        cleanupFiles
+                                        pure
+                                            (Left
+                                                "could not allocate a unique PostgreSQL session id")
+                                    Right True -> pure (Right handle)
+  where
+    exceptionText = Text.pack . displayException
+
+substantiveTurn :: SessionTurn -> Bool
+substantiveTurn turn =
+    turn.turnEffect /= TranscriptReset
+        && ( not (Text.null (Text.strip turn.turnUserText))
+            || maybe False (not . Text.null . Text.strip)
+                turn.turnAssistantText
+            || maybe False (not . Text.null . Text.strip) turn.turnError
+            || not (null turn.turnItems)
+           )
+
+activeTranscriptTurns :: [SessionTurn] -> [SessionTurn]
+activeTranscriptTurns =
+    reverse
+        . takeWhile ((/= TranscriptReset) . (.turnEffect))
+        . reverse
+
+forkedMetadata
+    :: UTCTime
+    -> Text
+    -> Maybe Text
+    -> SessionMeta
+    -> SessionMeta
+forkedMetadata now sessionId requestedTitle source =
+    source
+        { metaId = sessionId
+        , metaCreatedAt = now
+        , metaUpdatedAt = now
+        , metaTitle = title
+        , metaTitleIsManual =
+            maybe source.metaTitleIsManual (const True) normalizedTitle
+        , metaTitleRefreshIndex =
+            maybe source.metaTitleRefreshIndex
+                (const (max 2 source.metaTitleRefreshIndex))
+                normalizedTitle
+        }
+  where
+    normalizedTitle =
+        requestedTitle
+            >>= \raw ->
+                let normalized = Text.unwords (Text.words raw)
+                in if Text.null normalized then Nothing else Just normalized
+    title = fromMaybe source.metaTitle normalizedTitle
+
+prepareForkDirectory :: OsPath -> OsPath -> IO ()
+prepareForkDirectory sourceDir destinationDir = do
+    createDirectory destinationDir
+    (do
+        setFileMode (unsafeToFilePath destinationDir) 0o700
+        copyOptionalArtifact
+            ArtifactRegularFile
+            (sourceDir </> unsafeEncodeUtf "plan.md")
+            (destinationDir </> unsafeEncodeUtf "plan.md")
+        copyOptionalArtifact
+            ArtifactDirectory
+            (sourceDir </> unsafeEncodeUtf "agents")
+            (destinationDir </> unsafeEncodeUtf "agents"))
+        `onException` do
+            _ <- tryIO (removePathForcibly destinationDir)
+            pure ()
+
+data ArtifactKind
+    = ArtifactRegularFile
+    | ArtifactDirectory
+    deriving (Eq)
+
+copyOptionalArtifact :: ArtifactKind -> OsPath -> OsPath -> IO ()
+copyOptionalArtifact expected source destination =
+    symbolicLinkStatusMaybe source >>= \case
+        Nothing -> pure ()
+        Just status
+            | isSymbolicLink status ->
+                fail ("refusing to copy symbolic link: " <> Text.unpack (toText source))
+            | expected == ArtifactRegularFile && isRegularFile status ->
+                copyPrivateFile source destination
+            | expected == ArtifactDirectory && isDirectory status ->
+                copyPrivateDirectory source destination
+            | otherwise ->
+                fail ("unexpected fork artifact type: " <> Text.unpack (toText source))
+
+copyPrivateDirectory :: OsPath -> OsPath -> IO ()
+copyPrivateDirectory source destination = do
+    createDirectory destination
+    setFileMode (unsafeToFilePath destination) 0o700
+    entries <- listDirectory source
+    mapM_
+        (\entry -> do
+            let sourcePath = source </> entry
+                destinationPath = destination </> entry
+            status <- getSymbolicLinkStatus (unsafeToFilePath sourcePath)
+            if isSymbolicLink status
+                then
+                    fail
+                        ("refusing to copy symbolic link: "
+                            <> Text.unpack (toText sourcePath))
+                else if isDirectory status
+                    then copyPrivateDirectory sourcePath destinationPath
+                    else if isRegularFile status
+                        then copyPrivateFile sourcePath destinationPath
+                        else
+                            fail
+                                ("unexpected fork artifact type: "
+                                    <> Text.unpack (toText sourcePath)))
+        entries
+
+copyPrivateFile :: OsPath -> OsPath -> IO ()
+copyPrivateFile source destination = do
+    copyFile source destination
+    setFileMode (unsafeToFilePath destination) 0o600
+
+symbolicLinkStatusMaybe :: OsPath -> IO (Maybe FileStatus)
+symbolicLinkStatusMaybe path =
+    tryIO (getSymbolicLinkStatus (unsafeToFilePath path)) >>= \case
+        Left err
+            | isDoesNotExistError err -> pure Nothing
+            | otherwise -> ioError err
+        Right status -> pure (Just status)
+
+cleanupForkDatabaseIfOwned
+    :: StorePool
+    -> Store.SessionMetadata
+    -> IO ()
+cleanupForkDatabaseIfOwned pool expected = do
+    loaded <- Store.loadSessionMetadata pool expected.sessionMetadataKey
+    case loaded of
+        Right (Just actual)
+            | actual == expected -> do
+                now <- getCurrentTime
+                _ <- Store.deleteSession pool expected.sessionMetadataKey now
+                pure ()
+        _ -> pure ()
+
+cleanupForkFiles :: OsPath -> Text -> Maybe OsPath -> IO ()
+cleanupForkFiles root sessionId dir = do
+    mapM_
+        (\path -> do
+            _ <- tryIO (removePathForcibly path)
+            pure ())
+        dir
+    _ <- removeSessionTemp root sessionId
+    pure ()
 
 createReservedSession
     :: SessionCreate
@@ -928,7 +1156,9 @@ allocateSessionTemp root = do
                     root </> unsafeEncodeUtf (Text.unpack sessionId)
                 tempDir =
                     tempRoot </> unsafeEncodeUtf (Text.unpack sessionId)
-            durableExists <- doesDirectoryExist durableDir
+            durableExists <-
+                maybe False (const True)
+                    <$> symbolicLinkStatusMaybe durableDir
             if durableExists
                 then go tempRoot now (attempt + 1)
                 else tryIO (createDirectory tempDir) >>= \case

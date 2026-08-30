@@ -68,6 +68,32 @@ spec = do
             parseReplLine "/effort MAX" `shouldBe` ReplSetEffort EffortMax
             parseReplLine "/effort medium" `shouldBe` ReplSetEffort EffortMedium
 
+        it "parses the Codex workflow commands" do
+            parseReplLine "/init" `shouldBe` ReplInit
+            parseReplLine "/init now"
+                `shouldBe` ReplCommandError "usage: /init"
+            parseReplLine "/review" `shouldBe` ReplReview Nothing
+            parseReplLine "/review   inspect auth  "
+                `shouldBe` ReplReview (Just "inspect auth")
+            parseReplLine "/diff" `shouldBe` ReplDiff
+            parseReplLine "/diff now"
+                `shouldBe` ReplCommandError "usage: /diff"
+            parseReplLine "/fork" `shouldBe` ReplFork Nothing
+            parseReplLine "/fork   experiment branch  "
+                `shouldBe` ReplFork (Just "experiment branch")
+            parseReplLine "/export" `shouldBe` ReplExport Nothing
+            parseReplLine "/export  notes/session.md  "
+                `shouldBe` ReplExport (Just "notes/session.md")
+            parseReplLine "/permissions" `shouldBe` ReplPermissions
+            parseReplLine "/permissions now"
+                `shouldBe` ReplCommandError "usage: /permissions"
+
+        it "includes the no-overwrite AGENTS.md init prompt" do
+            initInstruction `shouldSatisfy` Text.isInfixOf
+                "Before writing, check whether AGENTS.md already exists"
+            initInstruction `shouldSatisfy` Text.isInfixOf
+                "Repository Guidelines"
+
         it "toggles always-approve from slash and colon aliases" do
             parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
             parseReplLine "/Always-Approve" `shouldBe` ReplToggleAlwaysApprove
@@ -333,6 +359,12 @@ spec = do
             names
                 `shouldBe`
                     [ "help"
+                    , "init"
+                    , "review"
+                    , "diff"
+                    , "fork"
+                    , "export"
+                    , "permissions"
                     , "model"
                     , "effort"
                     , "fast"
@@ -463,7 +495,8 @@ spec = do
                     map
                         (("/" <>) . (.slashName))
                         defaultSlashCatalog.slashCatalogCommands
-            displays "/mo" 3 `shouldBe` ["/model", "/codemod"]
+            displays "/mo" 3
+                `shouldBe` ["/model", "/codemod", "/permissions"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 

@@ -97,7 +97,7 @@ import Agent.CLI.Session.History
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
-                     connectionId, options, provider, dialect, policy, allTools,
+                     connectionId, options, provider, dialect, policyRef, allTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, resetToolSessionTemp, grokRuntime,
                      mcpRegistrations, mcpWarnings,
@@ -418,6 +418,7 @@ runAgentSession
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
+        policyRef <- newIORef policy
         automaticCompactionRef <- newIORef Nothing
         automaticCompactionHookRef <-
             newIORef
@@ -442,7 +443,7 @@ runAgentSession
                 { subagentOptions = options
                 , subagentGhciEnabled = ghciEnabledRef
                 , subagentBashEnabled = bashEnabledRef
-                , subagentPolicy = policy
+                , subagentPolicy = policyRef
                 , subagentPlanHooks = planHooks
                 , subagentSkillRoots = toolEnv.toolSkillRoots
                 , subagentAllowedRoots = toolEnv.toolAllowedRoots
@@ -566,7 +567,7 @@ runAgentSession
                                 , options
                                 , provider
                                 , dialect
-                                , policy
+                                , policyRef
                                 , allTools = registryTools
                                 , recordImageGenerationInputs
                                 , clearImageGenerationHistory
