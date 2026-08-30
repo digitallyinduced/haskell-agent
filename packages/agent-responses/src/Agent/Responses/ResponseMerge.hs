@@ -1,6 +1,7 @@
 module Agent.Responses.ResponseMerge
     ( mergeCompletedResponseOutput
     , mergeDoneResponse
+    , mergeResponseFragment
     , mergeResponseFragments
     , responseItemIdentities
     , responseItemKind

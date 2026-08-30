@@ -521,8 +521,8 @@ runAgentSession
                 | startup.startupBackground = action
                 | otherwise =
                     withCtrlCHandler interrupt $
-                        withInterruptResume
-                            fullscreen progName persist RunQuit action
+                        withResumeHintOnQuit
+                            fullscreen progName persist action
         runWithInterruptHandling do
                 let shouldProbeAtStartup =
                         checkStartupUsageInBackground
@@ -665,28 +665,30 @@ runAgentSession
                         transportModel
                         unavailableProviders
 
--- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
-withInterruptResume
+-- | Print a copy-pasteable --resume line whenever the CLI session quits.
+-- Ctrl-C is normalized to the same graceful 'RunQuit' result as :q/Ctrl-D so
+-- every exit path reports the persisted session exactly once.
+withResumeHintOnQuit
     :: Maybe FullscreenRuntime
     -> String
     -> Persistence
-    -> a
-    -> IO a
-    -> IO a
-withInterruptResume fullscreen progName persist interrupted action =
-    catchUserInterrupt action finishInterrupt
-  where
-    finishInterrupt = do
-        case fullscreen of
-            Nothing -> printResumeHint progName persist
-            Just runtime ->
-                withFullscreenSuspended runtime
-                    (printResumeHint progName persist)
-        -- The interrupt is the requested, graceful end of the CLI session.
-        -- Returning lets the surrounding brackets restore the SIGINT handler
-        -- and close tools without GHC's top-level exception handler printing
-        -- "user interrupt" and a backtrace.
-        pure interrupted
+    -> IO RunResult
+    -> IO RunResult
+withResumeHintOnQuit fullscreen progName persist action = do
+    result <- catchUserInterrupt action (pure RunQuit)
+    case result of
+        RunQuit -> do
+            case fullscreen of
+                Nothing -> printResumeHint progName persist
+                Just runtime ->
+                    withFullscreenSuspended runtime
+                        (printResumeHint progName persist)
+        _ -> pure ()
+    -- An interrupt is the requested, graceful end of the CLI session.
+    -- Returning lets the surrounding brackets restore the SIGINT handler
+    -- and close tools without GHC's top-level exception handler printing
+    -- "user interrupt" and a backtrace.
+    pure result
 
 printResumeHint
     :: String

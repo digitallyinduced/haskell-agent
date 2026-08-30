@@ -5,6 +5,7 @@ import Test.Hspec (hspec)
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
+import qualified Agent.CLI.AgentViewportRuntimeSpec as AgentViewportRuntimeSpec
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
@@ -80,6 +81,7 @@ main :: IO ()
 main = hspec do
     AccountSelectionSpec.spec
     AgentViewportSpec.spec
+    AgentViewportRuntimeSpec.spec
     AgentSessionsSpec.spec
     ApprovalSpec.spec
     ArtifactSpec.spec

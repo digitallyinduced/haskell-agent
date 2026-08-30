@@ -54,7 +54,8 @@ spec = do
                     , "gpt-5.6-luna"
                     ]
             modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
-            modelIdsFor OpenRouterProvider `shouldBe` ["stealth/ox-alpha"]
+            modelIdsFor OpenRouterProvider
+                `shouldBe` ["stealth/ox-alpha", "meta/muse-spark-1.2"]
             modelIdsFor ClaudeCodeProvider
                 `shouldBe` ["sonnet", "opus", "fable"]
 

@@ -45,6 +45,7 @@ spec = do
             [request] <- readIORef recorded
             request.path `shouldBe` "/v1/responses"
             lookup "Authorization" request.headers `shouldBe` Just "Bearer token-a"
+            lookup "User-Agent" request.headers `shouldBe` Just "haskell-agent"
             lookup "HTTP-Referer" request.headers `shouldBe` Just "https://example.com"
             lookup "X-Title" request.headers `shouldBe` Just "haskell-agent-test"
             requestModel request `shouldBe` Just "openai/gpt-5.1"

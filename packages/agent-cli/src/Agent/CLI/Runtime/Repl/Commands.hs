@@ -282,8 +282,8 @@ handleReplLine
             putStrLn ""
         pure RunQuit
     ReplQuitInterrupt ->
-        -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
-        -- the --resume hint and the process exits.
+        -- Let the orchestration boundary normalize confirmed Ctrl-C to the
+        -- same graceful quit path used by :q and Ctrl-D.
         throwIO UserInterrupt
     ReplCycleMode keptDraft
         | provider == ClaudeCodeProvider -> do

@@ -13,10 +13,9 @@ import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
     )
-import Agent.Responses.Client
-    ( ResponsesClientConfig(..)
-    , performResponsesRequest
-    , retryStreamingResultWithPolicy
+import Agent.Responses.GenericClient
+    ( ProviderClientConfig(..)
+    , createResponseWithProviderPolicy
     )
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Types
@@ -114,25 +113,26 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
         "agent-xai requires an xAI credential"
         Nothing
     | otherwise =
-        retryStreamingResultWithPolicy
+        createResponseWithProviderPolicy
             policy
-            isCapacityRetryable
-            performOnce
+            (xaiProviderConfig options credential)
+            request
             onEvent
-  where
-    performOnce =
-        performResponsesRequest
-            ResponsesClientConfig
-                { clientExceptionPrefix = "xAI request failed"
-                , clientBaseUrl = options.baseUrl
-                , clientTimeoutSeconds = options.requestTimeoutSeconds
-                , clientClassifyFailure = classifyFailure
-                , clientBuildResponse = buildResponse
-                }
-            (buildRequest options request)
-            configureRequest
 
-    configureRequest =
+defaultTransientPolicy :: RetryPolicyM IO
+defaultTransientPolicy =
+    constantDelay (capacityRetryAfterSeconds * 1_000_000) <> limitRetries 3
+
+xaiProviderConfig
+    :: ClientOptions
+    -> Credential
+    -> ProviderClientConfig
+xaiProviderConfig options credential = ProviderClientConfig
+    { providerExceptionPrefix = "xAI request failed"
+    , providerBaseUrl = options.baseUrl
+    , providerRequestTimeoutSeconds = options.requestTimeoutSeconds
+    , providerBuildRequest = buildRequest options
+    , providerConfigureRequest =
         setRequestHeader "Authorization"
             ["Bearer " <> Text.encodeUtf8 credential.accessToken]
             . setRequestHeader "X-XAI-Token-Auth"
@@ -146,10 +146,10 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
             . setRequestHeader "x-grok-client-mode" ["interactive"]
             . setRequestHeader "User-Agent"
                 [Text.encodeUtf8 (grokUserAgent options.clientVersion)]
-
-defaultTransientPolicy :: RetryPolicyM IO
-defaultTransientPolicy =
-    constantDelay (capacityRetryAfterSeconds * 1_000_000) <> limitRetries 3
+    , providerClassifyFailure = classifyFailure
+    , providerBuildResponse = buildResponse
+    , providerRetryableFailure = isCapacityRetryable
+    }
 
 -- | Retry capacity / overload pressure and short-lived 5xx failures. Generic
 -- connection drops and quota errors are left to the caller. Production uses a

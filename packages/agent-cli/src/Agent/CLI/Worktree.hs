@@ -3,10 +3,13 @@ module Agent.CLI.Worktree
     ( createWorktree
     , createWorktreeWithFetch
     , createManagedWorktree
+    , createManagedWorktreeWithProgress
     , removeWorktree
     , isUnderWorktreeRoot
+    , worktreeProgressMessage
     , worktreePath
     , worktreeRoot
+    , WorktreeProgress(..)
     ) where
 
 import Agent.CLI.Config
@@ -53,6 +56,25 @@ import System.OsPath
     )
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 
+data WorktreeProgress
+    = WorktreeInspectingRepository
+    | WorktreeCheckingRemote !Text
+    | WorktreeFetchingRemote !Text !Text
+    | WorktreeCreating
+    deriving (Eq, Show)
+
+worktreeProgressMessage :: WorktreeProgress -> Text
+worktreeProgressMessage = \case
+    WorktreeInspectingRepository -> "Inspecting Git repository…"
+    WorktreeCheckingRemote remote ->
+        "Checking Git remote " <> remote <> "…"
+    WorktreeFetchingRemote remote remoteHead ->
+        "Fetching latest from " <> remote <> "/" <> branchName remoteHead <> "…"
+    WorktreeCreating -> "Creating worktree…"
+  where
+    branchName ref =
+        maybe ref id (Text.stripPrefix "refs/heads/" ref)
+
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
 worktreeRoot :: OsPath -> OsPath
 worktreeRoot home =
@@ -80,13 +102,24 @@ createWorktree = createWorktreeWithFetch False
 -- default branch and using that commit as the base.
 createWorktreeWithFetch
     :: Bool -> OsPath -> OsPath -> IO (Either Text OsPath)
-createWorktreeWithFetch fetchLatest source root = runExceptT do
+createWorktreeWithFetch =
+    createWorktreeWithFetchProgress (const (pure ()))
+
+createWorktreeWithFetchProgress
+    :: (WorktreeProgress -> IO ())
+    -> Bool
+    -> OsPath
+    -> OsPath
+    -> IO (Either Text OsPath)
+createWorktreeWithFetchProgress report fetchLatest source root = runExceptT do
+    lift (report WorktreeInspectingRepository)
     repo <- gitToplevel source
     repoName <- gitRepositoryName repo
     base <-
         if fetchLatest
-            then fetchLatestUpstream repo
+            then fetchLatestUpstream report repo
             else pure Nothing
+    lift (report WorktreeCreating)
     now <- lift getCurrentTime
     let day = utctDay now
         start = posixMicros now
@@ -97,11 +130,20 @@ createWorktreeWithFetch fetchLatest source root = runExceptT do
 -- Configuration is read for every creation so startup, slash-command, and
 -- subagent worktrees all follow the same current setting.
 createManagedWorktree :: OsPath -> OsPath -> IO (Either Text OsPath)
-createManagedWorktree home source =
+createManagedWorktree =
+    createManagedWorktreeWithProgress (const (pure ()))
+
+createManagedWorktreeWithProgress
+    :: (WorktreeProgress -> IO ())
+    -> OsPath
+    -> OsPath
+    -> IO (Either Text OsPath)
+createManagedWorktreeWithProgress report home source =
     loadHarnessConfig home >>= \case
         Left err -> pure (Left err)
         Right config ->
-            createWorktreeWithFetch
+            createWorktreeWithFetchProgress
+                report
                 config.configWorktree.worktreeFetchLatestUpstream
                 source
                 (worktreeRoot home)
@@ -187,12 +229,17 @@ gitRepositoryName repo = do
 -- branch, or use the local @HEAD@ when the repository has no remotes. The
 -- current branch's configured remote wins, followed by conventional @upstream@
 -- and @origin@ names, then a sole remaining remote.
-fetchLatestUpstream :: OsPath -> ExceptT Text IO (Maybe Text)
-fetchLatestUpstream repo = do
+fetchLatestUpstream
+    :: (WorktreeProgress -> IO ())
+    -> OsPath
+    -> ExceptT Text IO (Maybe Text)
+fetchLatestUpstream report repo = do
     selectUpstreamRemote repo >>= \case
         Nothing -> pure Nothing
         Just remote -> do
+            lift (report (WorktreeCheckingRemote remote))
             remoteHead <- remoteDefaultBranch repo remote
+            lift (report (WorktreeFetchingRemote remote remoteHead))
             localRef <- lift freshFetchRef
             commit <-
                 ExceptT $

@@ -13,6 +13,11 @@
       "api": "builtin",
       "provider": "openrouter"
     },
+    "meta": {
+      "api": "responses",
+      "base_url": "https://api.meta.ai/v1",
+      "api_key_env": "MODEL_API_KEY"
+    },
     "claude-code": {
       "api": "builtin",
       "provider": "claude-code"
@@ -56,6 +61,20 @@
       "label": "default · frontier · free · coding · 1M context",
       "default": true,
       "fallback_priority": 20
+    },
+    {
+      "id": "meta/muse-spark-1.2",
+      "connection": "openrouter",
+      "dialect": "generic-responses",
+      "context_window": 1048576,
+      "label": "reasoning · agentic · 1M context"
+    },
+    {
+      "id": "muse-spark-1.2",
+      "connection": "meta",
+      "dialect": "generic-responses",
+      "context_window": 1048576,
+      "label": "direct · reasoning · agentic · 1M context"
     },
     {
       "id": "sonnet",
