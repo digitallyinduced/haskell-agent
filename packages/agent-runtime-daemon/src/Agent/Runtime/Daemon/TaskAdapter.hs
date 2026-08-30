@@ -1,6 +1,8 @@
 module Agent.Runtime.Daemon.TaskAdapter
     ( TaskRunner(..)
     , processTaskRunner
+    , processTaskRunnerFor
+    , processTaskArguments
     , withTaskAdapter
     ) where
 
@@ -15,7 +17,9 @@ import Control.Concurrent.Async
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe
-    ( finally
+    ( IOException
+    , catch
+    , finally
     , isAsyncException
     , mask
     , onException
@@ -25,6 +29,7 @@ import Control.Exception.Safe
 import Control.Monad (foldM, forM_, unless, when)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)
+import qualified Data.ByteString as BS
 import Data.Char (isControl)
 import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
@@ -34,12 +39,15 @@ import Data.Sequence (Seq)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time (getCurrentTime)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import System.IO (hIsEOF, hSetEncoding, utf8)
+import System.IO (Handle, hClose)
+import System.Posix.Signals (sigKILL, sigTERM, signalProcessGroup)
 import System.Process
+import System.Timeout (timeout)
 
 import Agent.Runtime.Daemon.Journal
 import Agent.Runtime.Daemon.Protocol (EventEnvelope (..))
@@ -49,7 +57,6 @@ import Agent.Runtime.Daemon.TaskScheduler
 
 data TaskRunner = TaskRunner
     { runTask :: DurableTask -> (Text -> IO ()) -> IO (Either Text ())
-    , resolveApproval :: TaskId -> Text -> Text -> IO (Either Text ())
     }
 
 -- | Execute a submitted turn through the installed @agent-cli@ executable.
@@ -59,12 +66,13 @@ data TaskRunner = TaskRunner
 processTaskRunner :: IO TaskRunner
 processTaskRunner = do
     executable <- maybe "agent-cli" id <$> lookupEnv "HASKELL_AGENT_CLI"
-    pure
-        TaskRunner
-            { runTask = runProcessTask executable
-            , resolveApproval = \_ _ _ ->
-                pure (Left "the process task runner cannot resolve interactive approvals")
-            }
+    pure (processTaskRunnerFor executable)
+
+processTaskRunnerFor :: FilePath -> TaskRunner
+processTaskRunnerFor executable =
+    TaskRunner
+        { runTask = runProcessTask executable
+        }
 
 data TaskCommand
     = Submit SubmitCommand
@@ -292,27 +300,16 @@ executeCommand journal runner registry state = \case
                 ( state {adapterLimit = limit}
                 , Right (object ["version" .= (1 :: Int), "limit" .= limit])
                 )
-    Approval taskId approvalId decision ->
+    Approval taskId _ _ ->
         case Map.lookup taskId state.adapterTasks of
-            Just task | task.status == TaskRunning -> do
-                result <- runner.resolveApproval taskId approvalId decision
-                case result of
-                    Left message -> pure (state, Left message)
-                    Right () -> do
-                        let response =
-                                object
-                                    [ "version" .= (1 :: Int)
-                                    , "task_id" .= taskId
-                                    , "approval_id" .= approvalId
-                                    ]
-                        _ <- appendEvent journal "approval_resolved" $
-                            object
-                                [ "version" .= (1 :: Int)
-                                , "task_id" .= taskId
-                                , "approval_id" .= approvalId
-                                , "decision" .= decision
-                                ]
-                        pure (state, Right response)
+            Just task | task.status == TaskRunning ->
+                pure
+                    ( state
+                    , Left
+                        ( "interactive approval resolution is unsupported by "
+                            <> "the daemon task adapter"
+                        )
+                    )
             _ -> pure (state, Left "task is not running")
     Retry taskId ->
         case Map.lookup taskId state.adapterTasks of
@@ -531,6 +528,7 @@ boundedString :: String -> Int -> String -> Parser String
 boundedString label maximumLength raw = do
     when (null raw) (fail (label <> " must not be empty"))
     when (length raw > maximumLength) (fail (label <> " is too long"))
+    when ('\0' `elem` raw) (fail (label <> " contains a NUL byte"))
     pure raw
 
 validDecision :: Text -> Parser Text
@@ -542,37 +540,85 @@ validDecision raw = do
 
 runProcessTask :: FilePath -> DurableTask -> (Text -> IO ()) -> IO (Either Text ())
 runProcessTask executable task logLine = do
-    let arguments =
-            ["--prompt", Text.unpack task.description, "--save-session"]
-                <> maybe [] (\value -> ["--resume", Text.unpack value]) task.sessionId
-                <> ["--cwd", task.workingDirectory]
-                <> maybe [] (\value -> ["--provider", Text.unpack value]) task.provider
-                <> maybe [] (\value -> ["--model", Text.unpack value]) task.model
-                <> maybe [] (\value -> ["--effort", Text.unpack value]) task.effort
-                <> ["--worktree" | task.worktree]
+    let arguments = processTaskArguments task
         configuration =
             (proc executable arguments)
                 { std_out = CreatePipe
                 , std_err = CreatePipe
+                , create_group = True
+                , close_fds = True
                 }
     (stdoutHandle, stderrHandle, process) <-
         createProcess configuration >>= \case
             (_, Just stdoutHandle, Just stderrHandle, process) ->
                 pure (stdoutHandle, stderrHandle, process)
             _ -> fail "failed to capture agent-cli output"
-    let terminate = terminateProcess process >> voidWait process
-        consume handle = do
-            hSetEncoding handle utf8
-            let go = do
-                    ended <- hIsEOF handle
-                    unless ended (Text.hGetLine handle >>= logLine >> go)
-            go
-    (concurrently_ (consume stdoutHandle) (consume stderrHandle) >> waitForProcess process)
-        `onException` terminate
+    let terminate = terminateProcessGroup process
+        consume = consumeBoundedOutput logLine
+        closeHandles = hClose stdoutHandle `finally` hClose stderrHandle
+    ((concurrently_ (consume stdoutHandle) (consume stderrHandle) >> waitForProcess process)
+        `onException` terminate)
+        `finally` closeHandles
         >>= \case
             ExitSuccess -> pure (Right ())
             ExitFailure code ->
                 pure (Left ("agent-cli exited with status " <> Text.pack (show code)))
+
+processTaskArguments :: DurableTask -> [String]
+processTaskArguments task =
+    ["--prompt", Text.unpack task.description, "--save-session"]
+        <> maybe [] (\value -> ["--resume", Text.unpack value]) task.sessionId
+        <> ["--cwd", task.workingDirectory]
+        <> maybe [] (\value -> ["--provider", Text.unpack value]) task.provider
+        <> maybe [] (\value -> ["--model", Text.unpack value]) task.model
+        <> maybe [] (\value -> ["--effort", Text.unpack value]) task.effort
+        <> ["--worktree" | task.worktree]
+
+consumeBoundedOutput :: (Text -> IO ()) -> Handle -> IO ()
+consumeBoundedOutput logChunk handle = go 0 BS.empty
+  where
+    go total pending = do
+        bytes <- BS.hGetSome handle 4_096
+        let nextTotal = total + BS.length bytes
+        when (nextTotal > maxTaskOutputBytes) $
+            ioError (userError "daemon task output exceeded 64 MiB")
+        let buffered = pending <> bytes
+        if BS.null bytes
+            then unless (BS.null buffered) (emit buffered)
+            else drain buffered >>= go nextTotal
+    drain buffered =
+        let candidate = BS.take 4_096 buffered
+         in case BS.elemIndex 10 candidate of
+                Just newline -> do
+                    emit (BS.take newline buffered)
+                    drain (BS.drop (newline + 1) buffered)
+                Nothing
+                    | BS.length buffered > 4_096 -> do
+                        emit candidate
+                        drain (BS.drop 4_096 buffered)
+                    | otherwise -> pure buffered
+    emit = logChunk . TextEncoding.decodeUtf8With lenientDecode
+
+maxTaskOutputBytes :: Int
+maxTaskOutputBytes = 64 * 1024 * 1024
+
+terminateProcessGroup :: ProcessHandle -> IO ()
+terminateProcessGroup process = do
+    signalGroup sigTERM
+    timeout 2_000_000 (waitForProcess process) >>= \case
+        Just _ -> pure ()
+        Nothing -> do
+            signalGroup sigKILL
+            voidWait process
+  where
+    signalGroup signal =
+        getPid process >>= \case
+            Just pid ->
+                signalProcessGroup signal (fromIntegral pid)
+                    `catch` \(_ :: IOException) -> pure ()
+            Nothing ->
+                terminateProcess process
+                    `catch` \(_ :: IOException) -> pure ()
 
 voidWait :: ProcessHandle -> IO ()
 voidWait process = do
