@@ -10,6 +10,7 @@ module Agent.CLI.MacOS.Bridge
     , browserToolsWhenEnabled
     , invokeBrowserCommand
     , TurnStart(..)
+    , nativeExceptionMessage
     , nativeTurnArguments
     ) where
 
@@ -21,6 +22,7 @@ import Agent.CLI.BrowserTools
 import Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
     , NativeRunHooks(..)
+    , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
     , runNativeAgent
@@ -187,6 +189,7 @@ import Control.Exception.Safe
     ( SomeException
     , bracket
     , finally
+    , fromException
     , tryAny
     )
 import Control.Monad
@@ -1895,7 +1898,7 @@ runNativeTurn callback context processRuntime control nativeBrowserTools start i
         { turnOutcomeSessionId = sessionId
         , turnOutcomeError =
             case result of
-                Left exception -> Just (Text.pack (show exception))
+                Left exception -> Just (nativeExceptionMessage exception)
                 Right (Left err) -> Just err
                 Right (Right ())
                     | completed -> Nothing
@@ -1903,6 +1906,12 @@ runNativeTurn callback context processRuntime control nativeBrowserTools start i
                         Just
                             "turn ended without a completion event"
         }
+
+nativeExceptionMessage :: SomeException -> Text
+nativeExceptionMessage exception =
+    case fromException exception of
+        Just (StartupFailure message) -> Text.pack message
+        Nothing -> Text.pack (show exception)
 
 nativeTurnArguments :: TurnStart -> [String]
 nativeTurnArguments start =
