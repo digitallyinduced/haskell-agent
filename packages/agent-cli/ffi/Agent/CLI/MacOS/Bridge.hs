@@ -279,6 +279,11 @@ decodeInput pointer length
     | otherwise = TextEncoding.decodeUtf8 <$> BS.packCStringLen
         (castPtr pointer, fromIntegral length)
 
+decodeUtf8Input :: Ptr Word8 -> Word64 -> IO (Either () Text)
+decodeUtf8Input pointer length =
+    first (const ()) . TextEncoding.decodeUtf8'
+        <$> BS.packCStringLen (castPtr pointer, fromIntegral length)
+
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
     | Text.null value = Nothing
@@ -1629,25 +1634,30 @@ ha_session_load_around sessionBytes (CSize sessionLength) center radius
         callback context
     | callback == nullFunPtr = pure 2
     | sessionBytes == nullPtr || sessionLength == 0 = pure 2
+    | toInteger sessionLength > toInteger (maxBound :: Int) = pure 2
     | center < 0 || radius < 0 = pure 2
     | otherwise = do
-        sessionId <- decodeInput sessionBytes sessionLength
-        _ <- forkIO do
-            result <- tryAny $ withNativeSessionStore \pool root ->
-                loadSessionHistoryTurnsAround
-                    pool root sessionId center (fromIntegral radius)
-            case result of
-                Left exception ->
-                    sessionTurnFailure callback context
-                        (Text.pack (show exception))
-                Right (Left err) ->
-                    sessionTurnFailure callback context err
-                Right (Right page) -> do
-                    forM_ page.pageTurns \(turnIndex, turn) ->
-                        emitSessionTurn callback context turnIndex turn
-                    sessionTurnTerminal callback context
-                        page.pageHasOlder page.pageHasNewer
-        pure 0
+        decoded <- tryAny (decodeUtf8Input sessionBytes sessionLength)
+        case decoded of
+            Left _ -> pure 3
+            Right (Left ()) -> pure 2
+            Right (Right sessionId) -> do
+                _ <- forkIO do
+                    result <- tryAny $ withNativeSessionStore \pool root ->
+                        loadSessionHistoryTurnsAround
+                            pool root sessionId center (fromIntegral radius)
+                    case result of
+                        Left exception ->
+                            sessionTurnFailure callback context
+                                (Text.pack (show exception))
+                        Right (Left err) ->
+                            sessionTurnFailure callback context err
+                        Right (Right page) -> do
+                            forM_ page.pageTurns \(turnIndex, turn) ->
+                                emitSessionTurn callback context turnIndex turn
+                            sessionTurnTerminal callback context
+                                page.pageHasOlder page.pageHasNewer
+                pure 0
 
 ha_session_fork
     :: Ptr Word8 -> CSize -> Int64
@@ -1655,13 +1665,18 @@ ha_session_fork
 ha_session_fork sessionBytes (CSize sessionLength) throughIndex callback context
     | callback == nullFunPtr = pure 2
     | sessionBytes == nullPtr || sessionLength == 0 || throughIndex < 0 = pure 2
+    | toInteger sessionLength > toInteger (maxBound :: Int) = pure 2
     | otherwise = do
-        sessionId <- decodeInput sessionBytes sessionLength
-        _ <- forkIO do
-            result <- tryAny $ withNativeSessionStore \pool root ->
-                forkSessionAtTurn pool root sessionId throughIndex
-            completeSessionResult callback context result
-        pure 0
+        decoded <- tryAny (decodeUtf8Input sessionBytes sessionLength)
+        case decoded of
+            Left _ -> pure 3
+            Right (Left ()) -> pure 2
+            Right (Right sessionId) -> do
+                _ <- forkIO do
+                    result <- tryAny $ withNativeSessionStore \pool root ->
+                        forkSessionAtTurn pool root sessionId throughIndex
+                    completeSessionResult callback context result
+                pure 0
 
 ha_session_export
     :: Ptr Word8 -> CSize
@@ -1669,22 +1684,27 @@ ha_session_export
 ha_session_export sessionBytes (CSize sessionLength) callback context
     | callback == nullFunPtr = pure 2
     | sessionBytes == nullPtr || sessionLength == 0 = pure 2
+    | toInteger sessionLength > toInteger (maxBound :: Int) = pure 2
     | otherwise = do
-        sessionId <- decodeInput sessionBytes sessionLength
-        _ <- forkIO do
-            result <- tryAny $ withNativeSessionStore \pool root ->
-                streamSessionTransfer pool root sessionId
-                    (emitSessionExportChunk callback context)
-            case result of
-                Left exception ->
-                    sessionExportFailure callback context
-                        (Text.pack (show exception))
-                Right (Left err) ->
-                    sessionExportFailure callback context err
-                Right (Right ()) ->
-                    invokeSessionExportCallback callback
-                        context 1 nullPtr 0 nullPtr 0
-        pure 0
+        decoded <- tryAny (decodeUtf8Input sessionBytes sessionLength)
+        case decoded of
+            Left _ -> pure 3
+            Right (Left ()) -> pure 2
+            Right (Right sessionId) -> do
+                _ <- forkIO do
+                    result <- tryAny $ withNativeSessionStore \pool root ->
+                        streamSessionTransfer pool root sessionId
+                            (emitSessionExportChunk callback context)
+                    case result of
+                        Left exception ->
+                            sessionExportFailure callback context
+                                (Text.pack (show exception))
+                        Right (Left err) ->
+                            sessionExportFailure callback context err
+                        Right (Right ()) ->
+                            invokeSessionExportCallback callback
+                                context 1 nullPtr 0 nullPtr 0
+                pure 0
 
 ha_session_import
     :: Ptr Word8 -> CSize
@@ -1697,19 +1717,25 @@ ha_session_import bytes (CSize length) callback context
         payload <- BS.packCStringLen (castPtr bytes, fromIntegral length)
         _ <- forkIO do
             result <- tryAny $
-                case
-                    (Aeson.eitherDecodeStrict' payload
-                        :: Either String SessionTransferEnvelope)
-                of
-                    Left err ->
+                case TextEncoding.decodeUtf8' payload of
+                    Left _ ->
                         pure
                             (Left
-                                ("invalid session transfer: "
-                                    <> Text.pack err))
-                    Right envelope ->
-                        withNativeSessionStore \pool root ->
-                            importSessionTransferRemapped
-                                pool root Nothing envelope
+                                "invalid session transfer: invalid UTF-8")
+                    Right _ ->
+                        case
+                            (Aeson.eitherDecodeStrict' payload
+                                :: Either String SessionTransferEnvelope)
+                        of
+                            Left err ->
+                                pure
+                                    (Left
+                                        ("invalid session transfer: "
+                                            <> Text.pack err))
+                            Right envelope ->
+                                withNativeSessionStore \pool root ->
+                                    importSessionTransferRemapped
+                                        pool root Nothing envelope
             completeSessionResult callback context result
         pure 0
 
