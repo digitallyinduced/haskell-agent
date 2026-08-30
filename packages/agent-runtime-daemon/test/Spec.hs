@@ -152,6 +152,19 @@ main = hspec $ do
                 replayAfter reopened 3 `shouldReturn` ReplayEvents [boundary, next]
                 replayAfter reopened 4 `shouldReturn` ReplayEvents [next]
 
+        it "fails closed on duplicate retained sequence numbers" $
+            withSystemTempDirectory "daemon-duplicate-boundary" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    duplicate = EventEnvelope {sequenceNumber = 4, eventType = "duplicate", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    (LBS.toStrict (encode duplicate) <> "\n" <> LBS.toStrict (encode duplicate) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalEventGap 5 4 -> True
+                        _ -> False
+
         it "redacts sensitive fields and bounds retained task logs" $
             withSystemTempDirectory "daemon-redaction" $ \directory -> do
                 now <- getCurrentTime
