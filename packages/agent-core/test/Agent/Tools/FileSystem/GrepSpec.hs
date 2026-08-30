@@ -9,6 +9,7 @@ import Agent.ToolDispatch
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.Types (AppTool(..), defaultToolEnv)
 import Control.Exception.Safe (bracket)
+import qualified Data.ByteString as BS
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
@@ -59,6 +60,21 @@ spec = describe "grepTool" do
                 result.output `shouldContain`
                     "[at least 2 lines; output truncated]"
                 result.output `shouldContain` "many.txt"
+
+    it "leniently decodes invalid UTF-8 in matching output" do
+        findExecutable "rg" >>= \case
+            Nothing -> pendingWith "rg is not installed"
+            Just _ -> withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                createDirectory workspace
+                BS.writeFile (workspace </> "invalid.txt")
+                    (BS.pack [110, 101, 101, 100, 108, 101, 0xc3, 0x28, 10])
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                result <- dispatchToolCall testConfig
+                    [(grepTool env).appToolHandler]
+                    (functionToolCall "grep-utf8" "grep"
+                        "{\"pattern\":\"needle\"}")
+                result.output `shouldContain` "invalid.txt"
 
     it "reports an invalid regular expression without leaking a child process" do
         findExecutable "rg" >>= \case
