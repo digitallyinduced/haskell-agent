@@ -2,6 +2,7 @@ module Agent.CLI.AccountPicker
     ( AccountPickerOption(..)
     , accountBillingMode
     , accountPickerMatches
+    , accountPickerMatchesRequest
     , accountPickerRow
     , formatLoginUsageSummary
     , loadAllAccountPickerOptions
@@ -166,6 +167,27 @@ accountPickerMatches currentProvider currentSelectionId currentAccountId = \case
                 || accountId == currentAccountId
                )
     AccountPickerConnect _ -> False
+
+-- | Restrict a Meta Console account request to the requested provider and,
+-- when present, an exact case-insensitive label or id.  In particular, a
+-- connect row can never satisfy a selection request.
+accountPickerMatchesRequest
+    :: Provider
+    -> Maybe Text
+    -> AccountPickerOption
+    -> Bool
+accountPickerMatchesRequest requestedProvider selector = \case
+    AccountPickerAccount optionProvider _ selectionId accountId label _ ->
+        optionProvider == requestedProvider
+            && maybe
+                True
+                (\requested ->
+                    normalize requested
+                        `elem` map normalize [selectionId, accountId, label])
+                selector
+    AccountPickerConnect _ -> False
+  where
+    normalize = Text.toCaseFold . Text.strip
 
 accountPickerRow
     :: Provider

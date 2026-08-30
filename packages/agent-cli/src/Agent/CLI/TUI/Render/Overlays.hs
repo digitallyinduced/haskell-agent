@@ -7,6 +7,7 @@ module Agent.CLI.TUI.Render.Overlays
     , drawResume
     , drawChoice
     , drawTextPrompt
+    , drawMetaConsole
     , choiceRowColumns
     , onboardingVisibleRowIndices
     , normalizeTextOverlayInsertion
@@ -77,6 +78,7 @@ import Agent.CLI.TUI.Types
     ( TextInputMode(..),
       TextOverlay(textBody, textCursor, textInputMode, textDraft,
                   textTitle),
+      MetaConsoleOverlay(metaConsoleDraft, metaConsoleCursor),
       ResumeOverlay(resumeOverlayBrowser),
       ChoiceOverlay(choicePresentation, choiceIndex, choiceRows,
                     choiceTitle, choiceBody, choiceSearch, choiceQuery),
@@ -86,7 +88,7 @@ import Agent.CLI.TUI.Types
                  agentHoverPaneWidth, agentHoverUpperLeft),
       AppState(appRuntime, appHistorySelectedBlock, appSyntaxHighlighter,
                appImagePreviews, appSubmittedImagePreviews, appResume,
-               appDictation, appTextPrompt, appChoice,
+               appDictation, appTextPrompt, appChoice, appMetaConsole,
                appMotionElapsedMillis, appCompletionFlashes, appHoveredControl,
                appPressedControl, appAgentSelected, appConversationAnchor,
                appAgentEntries, appUi, appHistoryWindow, appAgentHover,
@@ -100,7 +102,7 @@ import Agent.CLI.TUI.Types
            QuickStartModel, CodeBlockCache, ConversationBlock,
            ConversationBlockCache, ConversationBodyCache, CodeCopy, PermissionRow, ResumeViewport,
            ResumeSearchCursor, ResumeRow, OverlayViewport, MarkdownLink,
-           OverlayCursor) )
+           OverlayCursor, MetaConsoleCursor) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
 import Agent.Loop ()
@@ -238,6 +240,7 @@ import qualified Agent.CLI.TUI.Composer as Composer
       drawSlashMenu,
       drawQueuedInputs,
       drawComposer,
+      wrapDraftWindow,
       controlAttr,
       controlInteractionAttr )
 import qualified Data.Map.Strict as Map ( findWithDefault, member )
@@ -348,31 +351,43 @@ drawFooter state =
         padLeftRight 2 $
             txt footer
   where
-    footer = case (state.appDictation, state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
-        (Just _, _, _, _) ->
+    footer = case
+        ( state.appDictation
+        , state.appTextPrompt
+        , state.appChoice
+        , state.appMetaConsole
+        , state.appUi.uiFocus
+        , state.appUi.uiPermission
+        )
+      of
+        (Just _, _, _, _, _, _) ->
             "Enter stop  │  Esc cancel  │  Ctrl+R stop"
-        (_, Just _, _, _) ->
+        (_, Just _, _, _, _, _) ->
             if state.appUi.uiRunning
                 then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
                 else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
-        (_, Nothing, Just choice, _)
+        (_, Nothing, Just choice, _, _, _)
             | choice.choiceSearch ->
                 "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
-        (_, Nothing, Just _, _) ->
+        (_, Nothing, Just _, _, _, _) ->
             if state.appUi.uiRunning
                 then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
                 else "↑↓ select  │  Enter choose  │  Esc cancel"
-        (_, Nothing, Nothing, focus) ->
+        (_, Nothing, Nothing, _, _, Just _) ->
+            "↑↓ select  │  Enter choose  │  Esc deny"
+        (_, Nothing, Nothing, Just _, _, Nothing) ->
+            "Enter submit  │  Shift+Enter newline  │  Esc/⌘K close"
+        (_, Nothing, Nothing, Nothing, focus, Nothing) ->
                 case focus of
                     FocusPermission ->
                         "↑↓ select  │  Enter choose  │  Esc deny"
                     FocusScrollback ->
-                        "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
+                        "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt  │  ⌘K meta"
                     FocusComposer
                         | not state.appUi.uiAwaitingInput ->
-                            "Enter steer  │  Ctrl+R dictate  │  Ctrl+Enter/Ctrl+O send now  │  Esc/Ctrl+C cancel  │  Tab scrollback"
+                            "Enter steer  │  Ctrl+R dictate  │  Ctrl+Enter/Ctrl+O send now  │  Esc/Ctrl+C cancel  │  Tab scrollback  │  ⌘K meta"
                         | otherwise ->
-                            "Enter send  │  Ctrl+R dictate  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Tab scrollback"
+                            "Enter send  │  Ctrl+R dictate  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Tab scrollback  │  ⌘K meta"
 
 drawPermission :: AppState -> PermissionOverlay -> Widget Name
 drawPermission state permission =
@@ -868,6 +883,62 @@ drawTextPrompt state prompt =
                                                         , vLimit 1 (fill ' ')
                                                         ]
                                     ]
+
+drawMetaConsole :: AppState -> MetaConsoleOverlay -> Widget Name
+drawMetaConsole state overlay =
+    centerLayer $
+        hLimit 72 $
+            overrideAttr Border.borderAttr Theme.borderAttr $
+                withBorderStyle unicodeRounded $
+                    borderWithLabel
+                        (waitingOverlayLabel state "Meta Console") $
+                        padAll 1 $
+                            vBox
+                                [ withAttr Theme.mutedAttr $
+                                    terminalTxtWrap
+                                        "Describe a configuration change for the agent."
+                                , padTop (Pad 1) $
+                                    overrideAttr
+                                        Border.borderAttr
+                                        Theme.borderActiveAttr $
+                                        withBorderStyle unicodeRounded $
+                                            borderWithLabel (txt " Request ") $
+                                                padLeftRight 1 $
+                                                    renderMetaConsoleDraft overlay
+                                , padTop (Pad 1) $
+                                    withAttr Theme.footerAttr $
+                                        terminalTxtWrap
+                                            "For example: add this MCP https://… or connect my Grok account."
+                                ]
+
+renderMetaConsoleDraft :: MetaConsoleOverlay -> Widget Name
+renderMetaConsoleDraft overlay =
+    Widget Greedy Fixed do
+        context <- getContext
+        let maxRows = 4
+            width = max 1 context.availWidth
+            (rows, (cursorRow, cursorColumn)) =
+                Composer.wrapDraftWindow
+                    maxRows
+                    width
+                    overlay.metaConsoleDraft
+                    overlay.metaConsoleCursor
+            height = min maxRows (length rows)
+            firstVisibleRow = max 0 (cursorRow - height + 1)
+            visibleRows = take height (drop firstVisibleRow rows)
+            visibleCursorRow = cursorRow - firstVisibleRow
+            renderRow row
+                | Text.null row = txt " "
+                | otherwise = terminalTxt row
+            content = vBox (map renderRow visibleRows)
+        render $
+            hBox
+                [ showCursor
+                    MetaConsoleCursor
+                    (Location (cursorColumn, visibleCursorRow))
+                    content
+                , vLimit height (fill ' ')
+                ]
 
 renderTextDraft :: TextOverlay -> Widget Name
 renderTextDraft prompt =

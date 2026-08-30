@@ -22,6 +22,7 @@ module Agent.CLI.Terminal
     , kittyCtrlUnderscoreCsiBodies
     , kittyCtrlVCsiBodies
     , kittyEscapeCsiBodies
+    , kittySuperCsiBodies
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
     , kittyKeyboardDisambiguatePush
@@ -241,7 +242,15 @@ kittyCtrlUnderscoreCsiBodies =
 -- | Paste chords retained as named lists for inline and fullscreen input.
 kittyCtrlVCsiBodies, kittySuperVCsiBodies :: [String]
 kittyCtrlVCsiBodies = kittyCtrlCsiBodies 'v'
-kittySuperVCsiBodies = kittyModifiedCsiBodies 'v' 9
+
+-- | CSI bodies emitted by Kitty's keyboard protocol for Super/Command
+-- chords.  Kitty encodes the Super modifier as 9; keeping this helper
+-- parameterized lets the fullscreen editor recognize command shortcuts
+-- without duplicating the protocol's shifted-codepoint variants.
+kittySuperCsiBodies :: Char -> [String]
+kittySuperCsiBodies character = kittyModifiedCsiBodies character 9
+
+kittySuperVCsiBodies = kittySuperCsiBodies 'v'
 
 -- | CSI bodies emitted by Kitty's keyboard protocol for the Esc key. The
 -- disambiguate flag re-encodes Esc as @CSI 27 u@ so it is distinguishable
