@@ -51,8 +51,8 @@ subscriptionSubagentModelGuidance provider billing
     | provider == OpenAIProvider
     , billing == SubscriptionBilled =
         Just $ Text.unwords
-            [ "When OpenAI subscription billing is active, choose the subagent"
-            , "model from the delegated goal's complexity, ambiguity, and risk—not"
+            [ "Choose the subagent model from the delegated goal's complexity,"
+            , "ambiguity, and risk—not"
             , "just its apparent size. Consider how much the parent outcome depends"
             , "on the result and how easily errors can be detected. Use"
             , "`gpt-5.6-luna` (fast · low cost) only"
