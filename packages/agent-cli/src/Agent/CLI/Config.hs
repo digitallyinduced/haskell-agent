@@ -12,7 +12,7 @@ module Agent.CLI.Config
     , loadHarnessConfig
     , loadHarnessConfigSnapshot
     , modifyHarnessConfig
-    , saveHarnessConfig
+    , withHarnessConfigSnapshot
     , useProgressiveMcp
     ) where
 
@@ -31,7 +31,7 @@ import Data.Aeson
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.Bits (xor)
+import Data.Bits ((.|.), rotateL, shiftL, xor)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -41,6 +41,7 @@ import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import Data.Word (Word64)
+import System.IO (IOMode(ReadMode), withBinaryFile)
 
 harnessConfigSchemaVersion :: Int
 harnessConfigSchemaVersion = 1
@@ -355,54 +356,62 @@ loadHarnessConfig :: OsPath -> IO (Either Text HarnessConfig)
 loadHarnessConfig home =
     fmap (fmap snd) (loadHarnessConfigSnapshot home)
 
--- | Read one config and its content-derived revision under the same lock used
--- by every writer. The token describes the exact validated bytes and is never
--- computed from a separately replaceable sidecar.
+-- | Read one config and its keyed opaque revision under the same lock used by
+-- every writer. The owner-only key prevents the public token from becoming a
+-- dictionary oracle for write-only configuration secrets.
 loadHarnessConfigSnapshot
     :: OsPath -> IO (Either Text (Word64, HarnessConfig))
 loadHarnessConfigSnapshot home =
     withPrivateFileLock (harnessConfigLockPath home) $
         loadHarnessConfigUnlocked home
 
+-- | Run an effect against one locked config snapshot. This is used when an
+-- external side effect must linearize with revision validation.
+withHarnessConfigSnapshot
+    :: OsPath
+    -> (Word64 -> HarnessConfig -> IO a)
+    -> IO (Either Text a)
+withHarnessConfigSnapshot home action =
+    withPrivateFileLock (harnessConfigLockPath home) do
+        loadHarnessConfigUnlocked home >>= \case
+            Left err -> pure (Left err)
+            Right (revision, config) ->
+                Right <$> action revision config
+
 loadHarnessConfigUnlocked
     :: OsPath -> IO (Either Text (Word64, HarnessConfig))
 loadHarnessConfigUnlocked home = do
     let path = harnessConfigPath home
     exists <- doesFileExist path
-    if not exists
-        then pure (Right (0, defaultHarnessConfig))
-        else do
-            bytesResult <-
-                tryIO (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
-            case bytesResult of
-                Left exception ->
+    bytesResult <-
+        if exists
+            then tryIO
+                (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
+            else pure (Right (Aeson.encode defaultHarnessConfig))
+    case bytesResult of
+        Left exception ->
+            pure . Left $
+                "Failed to read "
+                    <> Text.pack (unsafeToFilePath path)
+                    <> ": "
+                    <> Text.pack (displayException exception)
+        Right bytes ->
+            case Aeson.eitherDecode' bytes of
+                Left err ->
                     pure . Left $
-                        "Failed to read "
+                        "Invalid "
                             <> Text.pack (unsafeToFilePath path)
                             <> ": "
-                            <> Text.pack (displayException exception)
-                Right bytes ->
-                    case Aeson.eitherDecode' bytes of
-                        Left err ->
-                            pure . Left $
-                                "Invalid "
-                                    <> Text.pack (unsafeToFilePath path)
-                                    <> ": "
-                                    <> Text.pack err
-                        Right config ->
-                            case validateHarnessConfig config of
+                            <> Text.pack err
+                Right config ->
+                    case validateHarnessConfig config of
+                        Left err -> pure (Left err)
+                        Right valid ->
+                            loadHarnessRevisionKeyUnlocked home >>= \case
                                 Left err -> pure (Left err)
-                                Right valid ->
+                                Right key ->
                                     pure (Right
-                                        (configBytesRevision bytes, valid))
-
--- | Persist the machine-wide harness configuration with owner-only
--- permissions. The replacement is atomic so an interrupted edit cannot leave
--- a partially-written JSON file for the next agent startup.
-saveHarnessConfig :: OsPath -> HarnessConfig -> IO (Either Text ())
-saveHarnessConfig home config =
-    withPrivateFileLock (harnessConfigLockPath home) $
-        fmap (fmap (const ())) (writeHarnessConfigUnlocked home config)
+                                        (keyedConfigRevision key bytes, valid))
 
 -- | Atomically read, transform, validate, and replace the config while holding
 -- the process-shared config lock. The returned revision is for the exact bytes
@@ -435,20 +444,23 @@ writeHarnessConfigUnlocked home config =
                     home </> unsafeEncodeUtf ".haskell-agent"
                 path = harnessConfigPath home
                 bytes = Aeson.encode valid
-            result <- tryIO do
-                createDirectoryIfMissing True directory
-                setFileMode (unsafeToFilePath directory) 0o700
-                writeLazyFileAtomically path 0o600 bytes
-            case result of
-                Left exception ->
-                    pure . Left $
-                        ( "Failed to write "
-                            <> Text.pack (unsafeToFilePath path)
-                            <> ": "
-                            <> Text.pack (displayException exception)
-                        )
-                Right () ->
-                    pure (Right (configBytesRevision bytes))
+            loadHarnessRevisionKeyUnlocked home >>= \case
+                Left err -> pure (Left err)
+                Right key -> do
+                    result <- tryIO do
+                        createDirectoryIfMissing True directory
+                        setFileMode (unsafeToFilePath directory) 0o700
+                        writeLazyFileAtomically path 0o600 bytes
+                    case result of
+                        Left exception ->
+                            pure . Left $
+                                ( "Failed to write "
+                                    <> Text.pack (unsafeToFilePath path)
+                                    <> ": "
+                                    <> Text.pack (displayException exception)
+                                )
+                        Right () ->
+                            pure (Right (keyedConfigRevision key bytes))
 
 harnessConfigLockPath :: OsPath -> OsPath
 harnessConfigLockPath home =
@@ -456,11 +468,119 @@ harnessConfigLockPath home =
         </> unsafeEncodeUtf ".haskell-agent"
         </> unsafeEncodeUtf "config.lock"
 
-configBytesRevision :: LBS.ByteString -> Word64
-configBytesRevision =
-    BS.foldl' step 14695981039346656037 . LBS.toStrict
+harnessRevisionKeyPath :: OsPath -> OsPath
+harnessRevisionKeyPath home =
+    home
+        </> unsafeEncodeUtf ".haskell-agent"
+        </> unsafeEncodeUtf "config.revision-key"
+
+loadHarnessRevisionKeyUnlocked :: OsPath -> IO (Either Text BS.ByteString)
+loadHarnessRevisionKeyUnlocked home = do
+    let path = harnessRevisionKeyPath home
+        directory = home </> unsafeEncodeUtf ".haskell-agent"
+    exists <- doesFileExist path
+    existing <-
+        if exists
+            then tryIO (BS.readFile (unsafeToFilePath path))
+            else pure (Right BS.empty)
+    case existing of
+        Right key | BS.length key == 16 -> do
+            secured <- tryIO
+                (setFileMode (unsafeToFilePath path) 0o600)
+            case secured of
+                Left exception ->
+                    pure (Left
+                        ("Failed to secure config revision key: "
+                            <> Text.pack (displayException exception)))
+                Right () -> pure (Right key)
+        _ -> do
+            generated <- tryIO $
+                withBinaryFile "/dev/urandom" ReadMode (`BS.hGet` 16)
+            case generated of
+                Left exception ->
+                    pure (Left
+                        ("Failed to generate config revision key: "
+                            <> Text.pack (displayException exception)))
+                Right key | BS.length key == 16 -> do
+                    written <- tryIO do
+                        createDirectoryIfMissing True directory
+                        setFileMode (unsafeToFilePath directory) 0o700
+                        writeLazyFileAtomically path 0o600
+                            (LBS.fromStrict key)
+                    case written of
+                        Left exception ->
+                            pure (Left
+                                ("Failed to store config revision key: "
+                                    <> Text.pack
+                                        (displayException exception)))
+                        Right () -> pure (Right key)
+                Right _ ->
+                    pure (Left "Failed to generate config revision key")
+
+-- SipHash-2-4, used only to derive an opaque revision token from exact config
+-- bytes. The key never crosses the native boundary.
+keyedConfigRevision :: BS.ByteString -> LBS.ByteString -> Word64
+keyedConfigRevision key lazyBytes =
+    finalize (compressBlocks initial bytes)
   where
-    step hash byte = (hash `xor` fromIntegral byte) * 1099511628211
+    bytes = LBS.toStrict lazyBytes
+    k0 = word64LE (BS.take 8 key)
+    k1 = word64LE (BS.drop 8 key)
+    initial =
+        ( 0x736f6d6570736575 `xor` k0
+        , 0x646f72616e646f6d `xor` k1
+        , 0x6c7967656e657261 `xor` k0
+        , 0x7465646279746573 `xor` k1
+        )
+    compressBlocks state remaining
+        | BS.length remaining >= 8 =
+            let message = word64LE (BS.take 8 remaining)
+                (v0, v1, v2, v3) = state
+                mixed = sipRounds 2 (v0, v1, v2, v3 `xor` message)
+                (r0, r1, r2, r3) = mixed
+            in compressBlocks
+                (r0 `xor` message, r1, r2, r3)
+                (BS.drop 8 remaining)
+        | otherwise =
+            let finalBlock =
+                    (fromIntegral (BS.length bytes) `shiftL` 56)
+                        .|. word64LE remaining
+                (v0, v1, v2, v3) = state
+                mixed = sipRounds 2
+                    (v0, v1, v2, v3 `xor` finalBlock)
+                (r0, r1, r2, r3) = mixed
+            in (r0 `xor` finalBlock, r1, r2, r3)
+    finalize (v0, v1, v2, v3) =
+        let (r0, r1, r2, r3) =
+                sipRounds 4 (v0, v1, v2 `xor` 0xff, v3)
+        in r0 `xor` r1 `xor` r2 `xor` r3
+
+word64LE :: BS.ByteString -> Word64
+word64LE =
+    snd . BS.foldl' step (0 :: Int, 0)
+  where
+    step (offset, value) byte =
+        (offset + 8, value .|. (fromIntegral byte `shiftL` offset))
+
+sipRounds
+    :: Int
+    -> (Word64, Word64, Word64, Word64)
+    -> (Word64, Word64, Word64, Word64)
+sipRounds count state
+    | count <= 0 = state
+    | otherwise =
+        let (v0, v1, v2, v3) = state
+            a0 = v0 + v1
+            a1 = rotateL v1 13 `xor` a0
+            a2 = rotateL a0 32
+            a3 = v2 + v3
+            a4 = rotateL v3 16 `xor` a3
+            b0 = a2 + a4
+            b1 = rotateL a4 21 `xor` b0
+            b2 = a3 + a1
+            b3 = rotateL a1 17 `xor` b2
+            b4 = rotateL b2 32
+        in sipRounds (count - 1) (b0, b3, b4, b1)
 
 
 validateHarnessConfig :: HarnessConfig -> Either Text HarnessConfig

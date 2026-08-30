@@ -1,6 +1,17 @@
 #include "HaskellAgentBridge.h"
 
 #include <stddef.h>
+#include <stdatomic.h>
+
+static void restart_result_callback(void *context, int32_t status,
+                                    uint64_t revision, const uint8_t *error,
+                                    size_t error_length) {
+    (void)status;
+    (void)revision;
+    (void)error;
+    (void)error_length;
+    atomic_fetch_add((_Atomic int *)context, 1);
+}
 
 /*
  * Keep a native compile/run smoke check next to the public ABI. This catches
@@ -176,7 +187,18 @@ int ha_image_attachment_stage_smoke(void) {
         status = ha_engine_stage_turn_images(
             engine, turn_id, sizeof(turn_id) - 1, NULL, 0);
     }
+    _Atomic int callbacks = 0;
+    if (status == 0) {
+        const uint8_t missing_name[] =
+            "__ha_restart_destroy_smoke_missing__";
+        status = ha_engine_mcp_server_restart(
+            engine, 0, missing_name, sizeof(missing_name) - 1,
+            restart_result_callback, &callbacks);
+    }
     ha_engine_destroy(engine);
+    if (status == 0 && atomic_load(&callbacks) != 1) {
+        status = 13;
+    }
     ha_runtime_exit();
     return status;
 }
