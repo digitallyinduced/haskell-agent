@@ -2,6 +2,8 @@
 module Agent.CLI.Login
     ( AccountBilling(..)
     , AccountUsage(..)
+    , DevicePollReadiness(..)
+    , DevicePollSchedule
     , LoginAccount(..)
     , LoginAction(..)
     , LoginState(..)
@@ -9,10 +11,13 @@ module Agent.CLI.Login
     , UsageWindow(..)
     , applyLoginKey
     , connectProviderAccount
+    , advanceDevicePollSchedule
+    , devicePollReadiness
     , discoverLoginAccounts
     , discoverSelectableLoginAccounts
     , formatLoginAccounts
     , formatCurrencyAmount
+    , initialDevicePollSchedule
     , initialLoginState
     , loginAccountActionRows
     , loginAccountDetail
@@ -121,7 +126,12 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
-import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Clock
+    ( UTCTime
+    , addUTCTime
+    , diffUTCTime
+    , getCurrentTime
+    )
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
@@ -256,6 +266,67 @@ runFullscreenLoginManager runtime = do
             dashboardLoop nextNotice rediscovered
 
 data LoginNotice = LoginNotice !Bool !Text
+
+data DevicePollSchedule = DevicePollSchedule
+    { devicePollIntervalSeconds :: !Int
+    , devicePollNextAt :: !UTCTime
+    , devicePollExpiresAt :: !UTCTime
+    } deriving (Eq, Show)
+
+data DevicePollReadiness
+    = DevicePollReady
+    | DevicePollWait !Int
+    | DevicePollExpired
+    deriving (Eq, Show)
+
+-- | Start a bounded device-code flow. The first explicit check is allowed
+-- immediately; every pending response schedules the next permitted check.
+initialDevicePollSchedule
+    :: UTCTime
+    -> Int
+    -> Int
+    -> DevicePollSchedule
+initialDevicePollSchedule startedAt intervalSeconds expiresInSeconds =
+    DevicePollSchedule
+        { devicePollIntervalSeconds = max 1 intervalSeconds
+        , devicePollNextAt = startedAt
+        , devicePollExpiresAt =
+            addUTCTime
+                (fromIntegral (max 0 expiresInSeconds))
+                startedAt
+        }
+
+devicePollReadiness
+    :: UTCTime
+    -> DevicePollSchedule
+    -> DevicePollReadiness
+devicePollReadiness now schedule
+    | now >= schedule.devicePollExpiresAt =
+        DevicePollExpired
+    | now < schedule.devicePollNextAt =
+        DevicePollWait
+            (max 1 (ceiling
+                (diffUTCTime schedule.devicePollNextAt now)))
+    | otherwise =
+        DevicePollReady
+
+-- | Record a pending poll. A @slow_down@ response adds the cumulative
+-- five-second backoff required by RFC 8628.
+advanceDevicePollSchedule
+    :: Bool
+    -> UTCTime
+    -> DevicePollSchedule
+    -> DevicePollSchedule
+advanceDevicePollSchedule slowedDown polledAt schedule =
+    schedule
+        { devicePollIntervalSeconds = intervalSeconds
+        , devicePollNextAt =
+            addUTCTime (fromIntegral intervalSeconds) polledAt
+        }
+  where
+    intervalSeconds =
+        schedule.devicePollIntervalSeconds
+            + if slowedDown then 5 else 0
 
 data LoginDashboardAction
     = LoginDashboardConnect
@@ -866,14 +937,23 @@ connectOpenAIFullscreen runtime = do
     clientId <-
         openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
     let options = OpenAILogin.defaultLoginOptions clientId
+    requestedAt <- getCurrentTime
     requested <-
         withLoginProgress runtime "Starting OpenAI device authorization…" $
             OpenAILogin.requestDeviceCode options
     case requested of
         Left err -> pure (Just (Left err))
-        Right device -> awaitAuthorization options device False
+        Right device ->
+            awaitAuthorization
+                options
+                device
+                (initialDevicePollSchedule
+                    requestedAt
+                    device.pollIntervalSeconds
+                    deviceAuthorizationDefaultTimeoutSeconds)
+                Nothing
   where
-    awaitAuthorization options device pending = do
+    awaitAuthorization options device schedule notice = do
         choice <-
             requestFullscreenChoiceWithBody
                 runtime
@@ -882,7 +962,7 @@ connectOpenAIFullscreen runtime = do
                     "OpenAI"
                     (Text.pack device.verificationUrl)
                     device.userCode
-                    pending)
+                    notice)
                 0
                 [ ( "Check authorization"
                   , "Return after approving the one-time code in your browser"
@@ -891,16 +971,47 @@ connectOpenAIFullscreen runtime = do
                 ]
         case choice of
             Just 0 -> do
-                polled <-
-                    withLoginProgress runtime "Checking OpenAI authorization…" $
-                        OpenAILogin.pollDeviceCode options device
-                case polled of
-                    Left err -> pure (Just (Left err))
-                    Right Nothing ->
-                        awaitAuthorization options device True
-                    Right (Just authJson) ->
-                        finishOpenAIFullscreen authJson
+                now <- getCurrentTime
+                case devicePollReadiness now schedule of
+                    DevicePollExpired ->
+                        openAITimedOut
+                    DevicePollWait seconds ->
+                        awaitAuthorization
+                            options
+                            device
+                            schedule
+                            (Just (pollWaitNotice seconds))
+                    DevicePollReady -> do
+                        polled <-
+                            withLoginProgress runtime
+                                "Checking OpenAI authorization…" $
+                                    OpenAILogin.pollDeviceCode options device
+                        polledAt <- getCurrentTime
+                        case polled of
+                            Left err -> pure (Just (Left err))
+                            Right Nothing ->
+                                if devicePollReadiness polledAt schedule
+                                        == DevicePollExpired
+                                    then openAITimedOut
+                                    else
+                                        awaitAuthorization
+                                            options
+                                            device
+                                            (advanceDevicePollSchedule
+                                                False polledAt schedule)
+                                            (Just authorizationPendingNotice)
+                            Right (Just authJson)
+                                | devicePollReadiness polledAt schedule
+                                    == DevicePollExpired ->
+                                        openAITimedOut
+                                | otherwise ->
+                                    finishOpenAIFullscreen authJson
             _ -> pure Nothing
+
+    openAITimedOut =
+        pure $
+            Just $
+                Left "OpenAI device authorization timed out after 15 minutes"
 
     finishOpenAIFullscreen authJson = do
         now <- getCurrentTime
@@ -926,14 +1037,25 @@ connectXAIFullscreen runtime = do
     clientId <-
         xaiOAuthClientId <$> lookupNonEmpty "XAI_OAUTH_CLIENT_ID"
     let options = XAIAuth.defaultOAuthOptions clientId
+    requestedAt <- getCurrentTime
     requested <-
         withLoginProgress runtime "Starting xAI device authorization…" $
             XAIAuth.requestDeviceAuthorization options
     case requested of
         Left err -> pure (Just (Left err))
-        Right device -> awaitAuthorization options device False
+        Right device ->
+            awaitAuthorization
+                options
+                device
+                (initialDevicePollSchedule
+                    requestedAt
+                    device.pollIntervalSeconds
+                    (fromMaybe
+                        deviceAuthorizationDefaultTimeoutSeconds
+                        device.expiresInSeconds))
+                Nothing
   where
-    awaitAuthorization options device pending = do
+    awaitAuthorization options device schedule notice = do
         choice <-
             requestFullscreenChoiceWithBody
                 runtime
@@ -942,7 +1064,7 @@ connectXAIFullscreen runtime = do
                     "xAI"
                     device.verificationUrl
                     device.userCode
-                    pending)
+                    notice)
                 0
                 [ ( "Check authorization"
                   , "Return after approving the one-time code in your browser"
@@ -951,16 +1073,73 @@ connectXAIFullscreen runtime = do
                 ]
         case choice of
             Just 0 -> do
-                polled <-
-                    withLoginProgress runtime "Checking xAI authorization…" $
-                        XAIAuth.pollDeviceAuthorization options device
-                case polled of
-                    Left err -> pure (Just (Left err))
-                    Right Nothing ->
-                        awaitAuthorization options device True
-                    Right (Just tokens) ->
-                        finishXAIFullscreen tokens
+                now <- getCurrentTime
+                case devicePollReadiness now schedule of
+                    DevicePollExpired ->
+                        xaiTimedOut
+                    DevicePollWait seconds ->
+                        awaitAuthorization
+                            options
+                            device
+                            schedule
+                            (Just (pollWaitNotice seconds))
+                    DevicePollReady -> do
+                        polled <-
+                            withLoginProgress runtime
+                                "Checking xAI authorization…" $
+                                    XAIAuth.pollDeviceAuthorizationStatus
+                                        options device
+                        polledAt <- getCurrentTime
+                        case polled of
+                            Left err -> pure (Just (Left err))
+                            Right XAIAuth.DeviceAuthorizationPending ->
+                                continuePending False polledAt
+                                    authorizationPendingNotice
+                            Right XAIAuth.DeviceAuthorizationSlowDown ->
+                                let nextSchedule =
+                                        advanceDevicePollSchedule
+                                            True polledAt schedule
+                                    seconds = case
+                                        devicePollReadiness
+                                            polledAt nextSchedule of
+                                        DevicePollWait waitSeconds ->
+                                            waitSeconds
+                                        _ -> 0
+                                in continueWithSchedule
+                                    polledAt
+                                    nextSchedule
+                                    (authorizationSlowDownNotice seconds)
+                            Right
+                                (XAIAuth.DeviceAuthorizationComplete tokens)
+                                    | devicePollReadiness polledAt schedule
+                                        == DevicePollExpired ->
+                                            xaiTimedOut
+                                    | otherwise ->
+                                        finishXAIFullscreen tokens
             _ -> pure Nothing
+      where
+        continuePending slowedDown polledAt nextNotice =
+            continueWithSchedule
+                polledAt
+                (advanceDevicePollSchedule
+                    slowedDown polledAt schedule)
+                nextNotice
+
+        continueWithSchedule polledAt nextSchedule nextNotice
+            | devicePollReadiness polledAt schedule
+                == DevicePollExpired =
+                    xaiTimedOut
+            | otherwise =
+                awaitAuthorization
+                    options
+                    device
+                    nextSchedule
+                    (Just nextNotice)
+
+    xaiTimedOut =
+        pure $
+            Just $
+                Left "xAI device authorization timed out"
 
     finishXAIFullscreen tokens
         | Nothing <- tokens.refreshToken =
@@ -1036,19 +1215,35 @@ deviceAuthorizationBody
     :: Text
     -> Text
     -> Text
-    -> Bool
+    -> Maybe Text
     -> Text
-deviceAuthorizationBody provider url userCode pending =
+deviceAuthorizationBody provider url userCode notice =
     Text.intercalate "\n\n" $
         [ "1. [Open the " <> provider <> " sign-in page](" <> url <> ")."
         , "2. Enter this one-time code:"
         , "`" <> markdownText 100 userCode <> "`"
         , "3. Return here and choose **Check authorization**."
         ]
-            <> [ "Authorization is still pending. Finish the browser step, "
-                    <> "then check again."
-               | pending
-               ]
+            <> maybe [] (pure . markdownText 300) notice
+
+deviceAuthorizationDefaultTimeoutSeconds :: Int
+deviceAuthorizationDefaultTimeoutSeconds = 15 * 60
+
+authorizationPendingNotice :: Text
+authorizationPendingNotice =
+    "Authorization is still pending. Finish the browser step, then check again."
+
+pollWaitNotice :: Int -> Text
+pollWaitNotice seconds =
+    "Please wait "
+        <> Text.pack (show seconds)
+        <> " seconds before checking authorization again."
+
+authorizationSlowDownNotice :: Int -> Text
+authorizationSlowDownNotice seconds =
+    "xAI asked this client to slow down. The next check is available in "
+        <> Text.pack (show seconds)
+        <> " seconds."
 
 connectOpenAI :: Bool -> IO (Maybe Text)
 connectOpenAI color = do

@@ -7,7 +7,7 @@ import Agent.Provider (Provider(..))
 import Data.Either (isLeft)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..))
+import Data.Time.Clock (UTCTime(..), addUTCTime)
 import Test.Hspec
 
 spec :: Spec
@@ -172,6 +172,39 @@ spec = do
             detail `shouldSatisfy` Text.isInfixOf "31% used"
             detail `shouldSatisfy` Text.isInfixOf "Resets"
             detail `shouldSatisfy` not . Text.isInfixOf "secret-openai"
+
+    describe "device authorization polling" do
+        it "enforces the provider interval after a pending check" do
+            let initial = initialDevicePollSchedule epoch 5 60
+                pending = advanceDevicePollSchedule False epoch initial
+            devicePollReadiness epoch initial
+                `shouldBe` DevicePollReady
+            devicePollReadiness epoch pending
+                `shouldBe` DevicePollWait 5
+            devicePollReadiness (addUTCTime 4 epoch) pending
+                `shouldBe` DevicePollWait 1
+            devicePollReadiness (addUTCTime 5 epoch) pending
+                `shouldBe` DevicePollReady
+
+        it "adds five seconds after slow_down and enforces expiry" do
+            let initial = initialDevicePollSchedule epoch 5 60
+                slowedDownOnce =
+                    advanceDevicePollSchedule True epoch initial
+                slowedDownTwice =
+                    advanceDevicePollSchedule
+                        True
+                        (addUTCTime 10 epoch)
+                        slowedDownOnce
+            devicePollReadiness (addUTCTime 9 epoch) slowedDownOnce
+                `shouldBe` DevicePollWait 1
+            devicePollReadiness (addUTCTime 10 epoch) slowedDownOnce
+                `shouldBe` DevicePollReady
+            devicePollReadiness (addUTCTime 24 epoch) slowedDownTwice
+                `shouldBe` DevicePollWait 1
+            devicePollReadiness (addUTCTime 25 epoch) slowedDownTwice
+                `shouldBe` DevicePollReady
+            devicePollReadiness (addUTCTime 60 epoch) slowedDownTwice
+                `shouldBe` DevicePollExpired
 
 openai :: LoginAccount
 openai = LoginAccount
