@@ -128,6 +128,22 @@ library
                     , websockets
                     , yaml
 
+benchmark grep-streaming-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          GrepStreaming.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , async
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , process
+                    , safe-exceptions
+                    , time
+
 benchmark output-artifact-bench
     import:           common-opts
     type:             exitcode-stdio-1.0
