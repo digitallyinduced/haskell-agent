@@ -146,6 +146,58 @@ spec = describe "Agent.Tools.OutputArtifact" do
                                 && Text.isInfixOf "1:" value
                                 && Text.isInfixOf "needle" value
 
+    it "finds a literal split across streaming input chunks" do
+        withTempEnv \env -> do
+            let bytes =
+                    ByteString.concat
+                        [ ByteString.replicate (32768 - 3) 97
+                        , "nee"
+                        , "dle\n"
+                        ]
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"pattern\":\"needle\"}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value -> Text.isInfixOf "1:" value
+
+    it "stops after proving that the match cap was exceeded" do
+        withTempEnv \env -> do
+            let bytes = ByteString.concat (replicate 100 "needle\n")
+            writeOutputArtifactDetailed env bytes >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right artifact -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> artifact.artifactHandle
+                                <> "\",\"pattern\":\"needle\","
+                                <> "\"head_limit\":5}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value ->
+                            Text.isInfixOf
+                                "[search truncated after 5 matches]"
+                                value
+                                && not (Text.isInfixOf "6:needle" value)
+
+    it "preserves Unicode case-insensitive artifact search" do
+        withTempEnv \env -> do
+            writeOutputArtifact env "Straße\n" >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right handle -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ( "{\"handle\":\"" <> handle
+                                <> "\",\"pattern\":\"STRASSE\","
+                                <> "\"case_insensitive\":true}" )
+                    result `shouldSatisfy` \case
+                        Left _ -> False
+                        Right value -> Text.isInfixOf "1:Straße" value
+
     it "exposes delegated analysis only when a spawner is available" do
         withTempEnv \env -> do
             let names = map (.appToolName)

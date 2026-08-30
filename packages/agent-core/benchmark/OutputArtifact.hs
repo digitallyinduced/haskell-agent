@@ -177,9 +177,7 @@ legacySearch env handle = do
         shown = take 5 matches
         suffix
             | length matches > 5 =
-                "\n[search truncated: "
-                    <> Text.pack (show (length matches - 5))
-                    <> " matches omitted]"
+                "\n[search truncated after 5 matches]"
             | otherwise = ""
     pure (Text.intercalate "\n" shown <> suffix)
 

@@ -217,21 +217,31 @@ searchToolOutput env args =
     resolveArtifactPath env args.handle >>= \case
         Left err -> pure (Left err)
         Right path -> do
-            let needle = foldCaseLazy args.caseInsensitive
-                    (LazyText.fromStrict args.pattern)
-                cap = min 200 (max 1 (fromMaybe 50 args.headLimit))
+            let cap = min 200 (max 1 (fromMaybe 50 args.headLimit))
             tryAny (withBinaryFile path ReadMode \handle -> do
-                content <- LazyEncoding.decodeUtf8With EncodingError.lenientDecode
-                    <$> LazyByteString.hGetContents handle
                 (shownRev, matchCount) <-
-                    collectMatches needle args.caseInsensitive cap
-                        (LazyText.lines content)
+                    if args.caseInsensitive
+                        then do
+                            content <-
+                                LazyEncoding.decodeUtf8With
+                                    EncodingError.lenientDecode
+                                    <$> LazyByteString.hGetContents handle
+                            collectFoldedMatches
+                                (LazyText.toCaseFold
+                                    (LazyText.fromStrict args.pattern))
+                                cap
+                                (LazyText.lines content)
+                        else
+                            collectByteMatches
+                                (Encoding.encodeUtf8 args.pattern)
+                                cap
+                                handle
                 let shown = reverse shownRev
                     suffix
                         | matchCount > cap =
-                            "\n[search truncated: "
-                                <> Text.pack (show (matchCount - cap))
-                                <> " matches omitted]"
+                            "\n[search truncated after "
+                                <> Text.pack (show cap)
+                                <> " matches]"
                         | otherwise = ""
                     result =
                         boundResult $
@@ -246,14 +256,22 @@ searchToolOutput env args =
                             <> exceptionText exception))
                     Right result -> pure result
   where
-    collectMatches needle caseInsensitive cap =
+    collectFoldedMatches
+        :: LazyText.Text
+        -> Int
+        -> [LazyText.Text]
+        -> IO ([Text], Int)
+    collectFoldedMatches needle cap =
         go 1 [] 0
       where
+        go :: Int -> [Text] -> Int -> [LazyText.Text] -> IO ([Text], Int)
+        go _ shown !matchCount _
+            | matchCount > cap = pure (shown, matchCount)
         go _ shown !matchCount [] = pure (shown, matchCount)
         go lineNumber shown !matchCount (line : rest) = do
             let matched =
                     needle `LazyText.isInfixOf`
-                        foldCaseLazy caseInsensitive line
+                        LazyText.toCaseFold line
                 nextCount = if matched then matchCount + 1 else matchCount
                 nextShown =
                     if matched && matchCount < cap
@@ -266,9 +284,152 @@ searchToolOutput env args =
             -- is capped at 200 entries.
             nextCount `seq` go (lineNumber + 1) nextShown nextCount rest
 
-foldCaseLazy :: Bool -> LazyText.Text -> LazyText.Text
-foldCaseLazy True = LazyText.toCaseFold
-foldCaseLazy False = id
+data ByteSearchState = ByteSearchState
+    { byteSearchLineNumber :: !Int
+    , byteSearchShownRev :: ![Text]
+    , byteSearchMatchCount :: !Int
+    , byteSearchMatched :: !Bool
+    , byteSearchCarry :: !BS.ByteString
+    , byteSearchPreview :: !BS.ByteString
+    , byteSearchLineBytes :: !Int
+    }
+
+collectByteMatches
+    :: BS.ByteString
+    -> Int
+    -> Handle
+    -> IO ([Text], Int)
+collectByteMatches needle cap handle =
+    go initialState
+  where
+    initialState = ByteSearchState
+        { byteSearchLineNumber = 1
+        , byteSearchShownRev = []
+        , byteSearchMatchCount = 0
+        , byteSearchMatched = False
+        , byteSearchCarry = BS.empty
+        , byteSearchPreview = BS.empty
+        , byteSearchLineBytes = 0
+        }
+
+    go :: ByteSearchState -> IO ([Text], Int)
+    go !state
+        | state.byteSearchMatchCount > cap =
+            pure (state.byteSearchShownRev, state.byteSearchMatchCount)
+        | otherwise = do
+            chunk <- BS.hGetSome handle 32768
+            if BS.null chunk
+                then
+                    let finalState =
+                            if state.byteSearchLineBytes > 0
+                                then finishLine state
+                                else state
+                    in pure
+                        ( finalState.byteSearchShownRev
+                        , finalState.byteSearchMatchCount
+                        )
+                else go (consumeChunk state chunk)
+
+    consumeChunk :: ByteSearchState -> BS.ByteString -> ByteSearchState
+    consumeChunk !state bytes
+        | BS.null bytes || state.byteSearchMatchCount > cap = state
+        | otherwise =
+            let (part, restWithNewline) = BS.break (== 10) bytes
+                !withPart = consumePart state part
+            in if BS.null restWithNewline
+                then withPart
+                else
+                    consumeChunk
+                        (finishLine withPart)
+                        (BS.tail restWithNewline)
+
+    consumePart :: ByteSearchState -> BS.ByteString -> ByteSearchState
+    consumePart !state part
+        | BS.null part = state
+        | otherwise =
+            let candidate
+                    | BS.null state.byteSearchCarry = part
+                    | otherwise = state.byteSearchCarry <> part
+                !matched =
+                    state.byteSearchMatched
+                        || needle `BS.isInfixOf` candidate
+                !carry
+                    | matched = BS.empty
+                    | otherwise = retainedNeedlePrefix candidate
+                remainingPreview =
+                    max 0
+                        (artifactLinePreviewSourceBytes
+                            - BS.length state.byteSearchPreview)
+                keptPreview
+                    | state.byteSearchMatchCount >= cap = BS.empty
+                    | otherwise = BS.take remainingPreview part
+                !preview
+                    | BS.null keptPreview = state.byteSearchPreview
+                    | BS.null state.byteSearchPreview = BS.copy keptPreview
+                    | otherwise =
+                        state.byteSearchPreview <> keptPreview
+            in state
+                { byteSearchMatched = matched
+                , byteSearchCarry = carry
+                , byteSearchPreview = preview
+                , byteSearchLineBytes =
+                    state.byteSearchLineBytes + BS.length part
+                }
+
+    retainedNeedlePrefix :: BS.ByteString -> BS.ByteString
+    retainedNeedlePrefix bytes
+        | BS.length needle <= 1 = BS.empty
+        | otherwise =
+            let keep = min
+                    (BS.length bytes)
+                    (BS.length needle - 1)
+            in BS.copy (BS.drop (BS.length bytes - keep) bytes)
+
+    finishLine :: ByteSearchState -> ByteSearchState
+    finishLine !state =
+        let matched =
+                state.byteSearchMatched || BS.null needle
+            !nextCount =
+                if matched
+                    then state.byteSearchMatchCount + 1
+                    else state.byteSearchMatchCount
+            !nextShown
+                | matched && state.byteSearchMatchCount < cap =
+                    ( Text.pack (show state.byteSearchLineNumber)
+                        <> ":"
+                        <> previewArtifactBytes
+                            state.byteSearchPreview
+                            state.byteSearchLineBytes
+                    ) : state.byteSearchShownRev
+                | otherwise = state.byteSearchShownRev
+        in ByteSearchState
+            { byteSearchLineNumber = state.byteSearchLineNumber + 1
+            , byteSearchShownRev = nextShown
+            , byteSearchMatchCount = nextCount
+            , byteSearchMatched = False
+            , byteSearchCarry = BS.empty
+            , byteSearchPreview = BS.empty
+            , byteSearchLineBytes = 0
+            }
+
+previewArtifactBytes :: BS.ByteString -> Int -> Text
+previewArtifactBytes prefix totalBytes =
+    let decoded =
+            Encoding.decodeUtf8With EncodingError.lenientDecode prefix
+        preview = Text.take artifactLinePreviewChars decoded
+        truncated =
+            totalBytes > BS.length prefix
+                || Text.length decoded > artifactLinePreviewChars
+    in if truncated
+        then boundedPreview artifactLinePreviewBytes
+            (preview <> "\n… [line omitted] …")
+        else decoded
+
+-- Four bytes per character are enough to decide whether a UTF-8 line exceeds
+-- the character preview limit, plus one complete maximum-width code point.
+artifactLinePreviewSourceBytes :: Int
+artifactLinePreviewSourceBytes =
+    artifactLinePreviewChars * 4 + 4
 
 -- A selected/search-matching line may itself be enormous (for example, a
 -- minified JSON document).  Keep only a small prefix before applying the
