@@ -1,6 +1,15 @@
 {
     description = "Universal agent harness";
 
+    nixConfig = {
+        extra-substituters = [
+            "https://cache.digitallyinduced.com/public"
+        ];
+        extra-trusted-public-keys = [
+            "public:kR6JCoqAIMaO4s+EdDGh+jsHEHnoLq4ZLJPMCo0hcIQ="
+        ];
+    };
+
     inputs = {
         nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
         flake-utils.url = "github:numtide/flake-utils";

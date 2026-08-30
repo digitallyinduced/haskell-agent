@@ -1,0 +1,89 @@
+name: Publish binary cache
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: haskell-agent-binary-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.system }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: '["self-hosted", "haskell-agent", "office-builder", "x86_64-linux"]'
+          - system: aarch64-darwin
+            runner: '["self-hosted", "haskell-agent", "ihp-ci-mac", "aarch64-darwin"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 90
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Build install closure
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" && -x /run/current-system/sw/bin/nix ]]; then
+            nix_bin=/run/current-system/sw/bin/nix
+          fi
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to build haskell-agent"
+            exit 1
+          fi
+
+          out_path=$(
+            "$nix_bin" build .#default \
+              --accept-flake-config \
+              --no-link \
+              --print-out-paths
+          )
+          printf 'out-path=%s\n' "$out_path" >> "$GITHUB_OUTPUT"
+
+      - name: Push install closure to the public IHP cache
+        shell: bash
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          OUT_PATH: ${{ steps.build.outputs.out-path }}
+        run: |
+          set -euo pipefail
+
+          attic_bin="$(command -v attic || true)"
+          if [[ -z "$attic_bin" && -x /run/current-system/sw/bin/attic ]]; then
+            attic_bin=/run/current-system/sw/bin/attic
+          fi
+          if [[ -z "$attic_bin" ]]; then
+            echo "::error title=Missing Attic binary::attic is required to publish haskell-agent"
+            exit 1
+          fi
+          if [[ -z "$ATTIC_TOKEN" ]]; then
+            echo "::error title=Missing Attic token::configure the ATTIC_TOKEN repository secret"
+            exit 1
+          fi
+
+          export HOME="$RUNNER_TEMP/attic-home"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          mkdir -p "$XDG_CONFIG_HOME"
+          chmod 700 "$HOME" "$XDG_CONFIG_HOME"
+          trap 'rm -rf "$HOME"' EXIT
+
+          "$attic_bin" login di \
+            https://cache.digitallyinduced.com \
+            "$ATTIC_TOKEN"
+          "$attic_bin" push --jobs 4 di:public "$OUT_PATH"
