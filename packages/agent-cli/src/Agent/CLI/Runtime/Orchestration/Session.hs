@@ -59,7 +59,10 @@ import Agent.CLI.ProviderTransition ()
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
-import Agent.CLI.Request ( requestParams )
+import Agent.CLI.Request
+    ( requestParams
+    , setRequestPromptCacheKey
+    )
 import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
@@ -116,7 +119,7 @@ import Agent.CLI.Session.Runtime.Types
                      selectAccount, onPersisted, compactRunner, codeModeNestedSlot),
       StartupRuntime(startupBackground, startupDatabaseStore,
                      startupSessionState) )
-import Agent.CLI.Session.Selection ()
+import Agent.CLI.Session.Selection ( reservedSessionId )
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
 import Agent.CLI.SessionLock ()
@@ -361,6 +364,7 @@ runAgentSession
                 Right runtime -> pure (runtime, False)
         writeIORef codeModeCloseRef
             (maybe (pure ()) (.codeModeClose) codeModeRuntime)
+        sessionId <- reservedSessionId persist
         let providerTools
                 | suppressDirectImageGeneration =
                     filter
@@ -405,8 +409,11 @@ runAgentSession
             registryTools =
                 allTools
                     <> maybe [] (.codeModeWireTools) codeModeRuntime
-            params = requestParams provider model instructions
+            baseParams = requestParams provider model instructions
                 wireSchemas effortText
+            params = maybe baseParams
+                (`setRequestPromptCacheKey` baseParams)
+                sessionId
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             resumeNeedsFreshContext =

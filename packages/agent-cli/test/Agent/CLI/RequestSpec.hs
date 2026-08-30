@@ -4,6 +4,7 @@ import Agent.CLI.Request
     ( requestParams
     , setRequestInstructionsAndTools
     , setRequestModel
+    , setRequestPromptCacheKey
     )
 import Agent.CLI.Tools (webSearchTool)
 import Agent.Provider (Provider(..))
@@ -46,6 +47,16 @@ spec = describe "requestParams" do
                 reasoning.generateSummary `shouldBe` Nothing
                 reasoning.reasoningMode `shouldBe` Nothing
                 reasoning.summary `shouldBe` Just "auto"
+
+    it "sets the prompt cache key" do
+        let params = setRequestPromptCacheKey "session-123" $
+                requestParams
+                    OpenAIProvider
+                    "test-model"
+                    "test instructions"
+                    []
+                    "high"
+        params.promptCacheKey `shouldBe` Just "session-123"
 
     it "decodes Responses metadata as a string map" do
         let decoded = Hermes.decodeEither responseCreateParamsDecoder $
