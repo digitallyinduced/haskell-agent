@@ -1,6 +1,8 @@
 -- | Command-line entry point: one-shot @-p@ or an interactive REPL.
 module Agent.CLI.Runtime.Internal
-    ( DevResult(..)
+    ( BuildInfo(..)
+    , DevResult(..)
+    , agentBuildInfo
     , afterDev
     , accountSwitchTarget
     , applyReplMode
@@ -12,6 +14,8 @@ module Agent.CLI.Runtime.Internal
     , formatMcpModelNotice
     , formatMcpModelNoticeFor
     , formatMcpProgress
+    , formatBuildInfo
+    , formatBuildInfoCompact
     , formatReplStatusLine
     , formatRepositoryPath
     , formatStartupTimings
@@ -63,7 +67,13 @@ import Agent.CLI.SessionAdmin
     )
 import Agent.CLI.Startup.Auth ( learnAboutUserOnboardingPrompt )
 import Agent.CLI.Startup.Format
-    ( formatRepositoryPath, formatStartupTimings )
+    ( BuildInfo(..)
+    , agentBuildInfo
+    , formatBuildInfo
+    , formatBuildInfoCompact
+    , formatRepositoryPath
+    , formatStartupTimings
+    )
 import Agent.CLI.Status
     ( applyReplMode
     , cycleReplInteraction
@@ -137,7 +147,8 @@ devMainResume resumeId = do
     case parseArgs args of
         Left err -> die err
         Right ShowHelp -> putStr usage >> pure DevQuit
-        Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
+        Right ShowVersion ->
+            putStrLn (Text.unpack (formatBuildInfo agentBuildInfo)) >> pure DevQuit
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
@@ -163,7 +174,8 @@ run = do
     case parseArgs args of
         Left err -> die err
         Right ShowHelp -> putStr usage
-        Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
+        Right ShowVersion ->
+            putStrLn (Text.unpack (formatBuildInfo agentBuildInfo))
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
