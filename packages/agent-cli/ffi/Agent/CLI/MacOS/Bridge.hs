@@ -5,6 +5,7 @@ module Agent.CLI.MacOS.Bridge
     , repositoryCancelClassificationSmoke
     , repositoryCancelAllReentrancySmoke
     , repositoryCheckDestroyReentrancySmoke
+    , repositoryTerminalThrowSmoke
     ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
@@ -177,6 +178,7 @@ import Control.Exception.Safe
     , isAsyncException
     , mask
     , throwIO
+    , throwString
     , tryAny
     , uninterruptibleMask_
     )
@@ -690,17 +692,20 @@ ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
             Left _ -> pure 2
             Right path -> do
                 started <- startRepositoryWorker
-                    (emitRepositoryCancelled resultCallback context) $
+                    (emitRepositoryCancelled resultCallback context) do
                     tryRepositorySynchronous
                         (RepositoryReview.repositorySnapshot (Text.unpack path))
                         >>= \case
                             Left exception ->
-                                emitRepositoryFailure
-                                    resultCallback
-                                    context
-                                    (Text.pack (show exception))
+                                pure
+                                    (emitRepositoryFailure
+                                        resultCallback
+                                        context
+                                        (Text.pack (show exception)))
                             Right (Left err) ->
-                                emitRepositoryError resultCallback context err
+                                pure
+                                    (emitRepositoryError
+                                        resultCallback context err)
                             Right (Right snapshot) -> do
                                 streamed <- tryRepositorySynchronous do
                                     withRepositorySnapshot snapshot $
@@ -728,15 +733,17 @@ ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
                                                             file.repositoryFileWorktreeStatus))
                                 case streamed of
                                     Left exception ->
-                                        emitRepositoryFailure
-                                            resultCallback
-                                            context
-                                            (Text.pack (show exception))
+                                        pure
+                                            (emitRepositoryFailure
+                                                resultCallback
+                                                context
+                                                (Text.pack (show exception)))
                                     Right () ->
-                                        emitRepositorySuccess
-                                            resultCallback
-                                            context
-                                            snapshot.snapshotId
+                                        pure
+                                            (emitRepositorySuccess
+                                                resultCallback
+                                                context
+                                                snapshot.snapshotId)
                 pure (if started then 0 else 3)
 
 ha_repository_diff
@@ -762,7 +769,7 @@ ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
                         Nothing -> pure 2
                         Just kind -> do
                             started <- startRepositoryWorker
-                                (emitRepositoryCancelled resultCallback context) $
+                                (emitRepositoryCancelled resultCallback context) do
                                 tryRepositorySynchronous
                                     (RepositoryReview.repositoryDiff
                                         (Text.unpack path)
@@ -771,13 +778,15 @@ ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
                                         (Text.unpack file))
                                     >>= \case
                                         Left exception ->
-                                            emitRepositoryFailure
-                                                resultCallback
-                                                context
-                                                (Text.pack (show exception))
+                                            pure
+                                                (emitRepositoryFailure
+                                                    resultCallback
+                                                    context
+                                                    (Text.pack (show exception)))
                                         Right (Left err) ->
-                                            emitRepositoryError
-                                                resultCallback context err
+                                            pure
+                                                (emitRepositoryError
+                                                    resultCallback context err)
                                         Right (Right diff) -> do
                                             streamed <- tryRepositorySynchronous do
                                                 forM_
@@ -814,16 +823,18 @@ ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
                                                                         headerLength
                                             case streamed of
                                                 Left exception ->
-                                                    emitRepositoryFailure
-                                                        resultCallback
-                                                        context
-                                                        (Text.pack
-                                                            (show exception))
+                                                    pure
+                                                        (emitRepositoryFailure
+                                                            resultCallback
+                                                            context
+                                                            (Text.pack
+                                                                (show exception)))
                                                 Right () ->
-                                                    emitRepositorySuccess
-                                                        resultCallback
-                                                        context
-                                                        expected
+                                                    pure
+                                                        (emitRepositorySuccess
+                                                            resultCallback
+                                                            context
+                                                            expected)
                             pure (if started then 0 else 3)
                 Right _ -> pure 3
 
@@ -860,6 +871,8 @@ ha_repository_apply_hunks pathBytes pathLength snapshotBytes snapshotLength
     | callback == nullFunPtr = pure 1
     | hunkIndices == nullPtr || hunkCount == 0 = pure 2
     | hunkCount > 4096 = pure 2
+    | fromIntegral hunkCount
+        > (maxBound :: Int) `div` sizeOf (undefined :: CSize) = pure 2
     | otherwise =
         copyRequiredTexts
             [ (pathBytes, pathLength)
@@ -869,21 +882,31 @@ ha_repository_apply_hunks pathBytes pathLength snapshotBytes snapshotLength
             >>= \case
                 Left _ -> pure 2
                 Right [path, expected, file] -> do
-                    indices <- mapM
+                    rawIndices <- mapM
                         (\index ->
-                            fromIntegral
-                                <$> (peekByteOff
+                            (peekByteOff
                                     hunkIndices
                                     (index * sizeOf (undefined :: CSize))
                                     :: IO CSize))
                         [0 .. fromIntegral hunkCount - 1]
-                    case repositoryHunkMutation
-                        operation (Text.unpack file) indices of
-                        Nothing -> pure 2
-                        Just mutation -> do
-                            started <- startRepositoryMutation
-                                callback context (Text.unpack path) expected mutation
-                            pure (if started then 0 else 3)
+                    if any
+                        ((> toInteger (maxBound :: Int)) . toInteger)
+                        rawIndices
+                        then pure 2
+                        else
+                            case repositoryHunkMutation
+                                operation
+                                (Text.unpack file)
+                                (map fromIntegral rawIndices) of
+                                    Nothing -> pure 2
+                                    Just mutation -> do
+                                        started <- startRepositoryMutation
+                                            callback
+                                            context
+                                            (Text.unpack path)
+                                            expected
+                                            mutation
+                                        pure (if started then 0 else 3)
                 Right _ -> pure 3
 
 ha_repository_commit
@@ -902,20 +925,11 @@ ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
                 Right [path, expected, message] -> do
                     started <- startRepositoryWorker
                         (emitRepositoryCancelled callback context) $
-                        tryRepositorySynchronous
+                        prepareRepositoryResult callback context $
                             (RepositoryReview.commitRepository
                                 (Text.unpack path)
                                 expected
                                 message)
-                            >>= \case
-                                Left exception ->
-                                    emitRepositoryFailure
-                                        callback context (Text.pack (show exception))
-                                Right (Left err) ->
-                                    emitRepositoryError callback context err
-                                Right (Right snapshot) ->
-                                    emitRepositorySuccess
-                                        callback context snapshot.snapshotId
                     pure (if started then 0 else 3)
                 Right _ -> pure 3
 
@@ -928,19 +942,32 @@ startRepositoryMutation
     -> IO Bool
 startRepositoryMutation callback context path expected mutation =
     startRepositoryWorker (emitRepositoryCancelled callback context) $
-        tryRepositorySynchronous
+        prepareRepositoryResult callback context $
             (RepositoryReview.mutateRepository path expected mutation)
-            >>= \case
-                Left exception ->
-                    emitRepositoryFailure callback context
-                        (Text.pack (show exception))
-                Right (Left err) ->
-                    emitRepositoryError callback context err
-                Right (Right snapshot) ->
-                    emitRepositorySuccess callback context snapshot.snapshotId
 
-startRepositoryWorker :: IO () -> IO () -> IO Bool
-startRepositoryWorker onCancelled action =
+prepareRepositoryResult
+    :: FunPtr RepositoryResultCallback
+    -> Ptr ()
+    -> IO
+        (Either
+            RepositoryReview.RepositoryError
+            RepositoryReview.RepositorySnapshot)
+    -> IO (IO ())
+prepareRepositoryResult callback context action =
+    tryRepositorySynchronous action >>= \case
+        Left exception ->
+            pure
+                (emitRepositoryFailure callback context
+                    (Text.pack (show exception)))
+        Right (Left err) ->
+            pure (emitRepositoryError callback context err)
+        Right (Right snapshot) ->
+            pure
+                (emitRepositorySuccess
+                    callback context snapshot.snapshotId)
+
+startRepositoryWorker :: IO () -> IO (IO ()) -> IO Bool
+startRepositoryWorker onCancelled prepare =
     tryRepositorySynchronous
         (mask \_ -> do
             gate <- newEmptyMVar
@@ -951,10 +978,11 @@ startRepositoryWorker onCancelled action =
                         let workerId = state.repositoryWorkerNextId
                         worker <- asyncWithUnmask \unmask -> do
                             withRepositoryCallbackThread
-                                (((readMVar gate >> unmask action)
+                                (((Just <$> (readMVar gate >> unmask prepare))
                                     `catchAsync`
                                         \(_ :: SomeAsyncException) ->
-                                            onCancelled))
+                                            onCancelled >> pure Nothing)
+                                    >>= mapM_ id)
                                 `finally`
                                 unregisterRepositoryWorker workerId
                         pure
@@ -1029,6 +1057,7 @@ repositoryCancelAllAdmissionSmoke = do
     firstAccepted <- startRepositoryWorker (putMVar cancelled ()) do
         putMVar entered ()
         uninterruptibleMask_ (threadDelay 250_000)
+        pure (pure ())
     if not firstAccepted
         then pure False
         else do
@@ -1040,7 +1069,7 @@ repositoryCancelAllAdmissionSmoke = do
                 completed <- newEmptyMVar
                 acceptedAfter <- startRepositoryWorker
                     (pure ())
-                    (putMVar completed ())
+                    (pure (putMVar completed ()))
                 finishedAfter <- if acceptedAfter
                     then readMVar completed >> pure True
                     else pure False
@@ -1053,7 +1082,7 @@ repositoryCancelAllAdmissionSmoke = do
     awaitRejection attempts
         | attempts <= (0 :: Int) = pure False
         | otherwise =
-            startRepositoryWorker (pure ()) (pure ()) >>= \case
+            startRepositoryWorker (pure ()) (pure (pure ())) >>= \case
                 False -> pure True
                 True -> threadDelay 1000 >> awaitRejection (attempts - 1)
 
@@ -1061,8 +1090,9 @@ repositoryCancelAllReentrancySmoke :: IO Bool
 repositoryCancelAllReentrancySmoke = do
     completed <- newEmptyMVar
     accepted <- startRepositoryWorker (pure ()) do
-        ha_repository_cancel_all
-        putMVar completed ()
+        pure do
+            ha_repository_cancel_all
+            putMVar completed ()
     if accepted
         then readMVar completed >> pure True
         else pure False
@@ -1077,6 +1107,7 @@ repositoryCancelClassificationSmoke = do
         tryRepositorySynchronous (threadDelay 30_000_000) >>= \case
             Left _ -> putMVar synthesizedFailure ()
             Right () -> pure ()
+        pure (pure ())
     if not accepted
         then pure False
         else do
@@ -1085,6 +1116,24 @@ repositoryCancelClassificationSmoke = do
             cancellation <- tryReadMVar cancelled
             failure <- tryReadMVar synthesizedFailure
             pure (isJust cancellation && isNothing failure)
+
+repositoryTerminalThrowSmoke :: IO Bool
+repositoryTerminalThrowSmoke = do
+    cancelled <- newEmptyMVar
+    terminal <- newEmptyMVar
+    finished <- newEmptyMVar
+    accepted <- startRepositoryWorker (putMVar cancelled ()) do
+        pure
+            ((putMVar terminal () >> throwString "terminal callback failed")
+                `finally` putMVar finished ())
+    if not accepted
+        then pure False
+        else do
+            readMVar terminal
+            readMVar finished
+            ha_repository_cancel_all
+            cancellation <- tryReadMVar cancelled
+            pure (isNothing cancellation)
 
 {-# NOINLINE repositoryWorkers #-}
 repositoryWorkers :: MVar RepositoryWorkerState
@@ -1406,6 +1455,8 @@ copyRequiredText :: Ptr Word8 -> CSize -> IO (Either () Text)
 copyRequiredText pointer (CSize length)
     | pointer == nullPtr || length == 0 = pure (Left ())
     | toInteger length > toInteger (maxBound :: Int) = pure (Left ())
+    | toInteger length > toInteger maxRepositoryRequestItemBytes =
+        pure (Left ())
     | otherwise = do
         bytes <- BS.packCStringLen (castPtr pointer, fromIntegral length)
         pure (first (const ()) (TextEncoding.decodeUtf8' bytes))
@@ -1413,7 +1464,17 @@ copyRequiredText pointer (CSize length)
 copyRequiredTexts
     :: [(Ptr Word8, CSize)]
     -> IO (Either () [Text])
-copyRequiredTexts = fmap sequence . mapM (uncurry copyRequiredText)
+copyRequiredTexts fields
+    | sum (map (toInteger . snd) fields)
+        > toInteger maxRepositoryRequestTotalBytes = pure (Left ())
+    | otherwise =
+        fmap sequence (mapM (uncurry copyRequiredText) fields)
+
+maxRepositoryRequestItemBytes :: Int
+maxRepositoryRequestItemBytes = 8 * 1024 * 1024
+
+maxRepositoryRequestTotalBytes :: Int
+maxRepositoryRequestTotalBytes = 16 * 1024 * 1024
 
 byteStringChunks :: Int -> BS.ByteString -> [BS.ByteString]
 byteStringChunks size bytes

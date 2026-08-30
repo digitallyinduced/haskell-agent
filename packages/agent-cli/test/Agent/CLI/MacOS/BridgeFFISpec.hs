@@ -36,6 +36,9 @@ spec = describe "native image attachment staging" do
     it "classifies async cancellation as cancelled, not failure" do
         Bridge.repositoryCancelClassificationSmoke `shouldReturn` True
 
+    it "does not retry a terminal callback that throws" do
+        Bridge.repositoryTerminalThrowSmoke `shouldReturn` True
+
     it "validates the typed repository-review ABI from native code" do
 #ifdef darwin_HOST_OS
         repositoryReviewAbiSmoke `shouldReturn` 0

@@ -347,21 +347,26 @@ void ha_engine_destroy(void *engine);
  * before these functions return. Hunk indices identify the immutable hunk
  * ordering returned by ha_repository_diff for the supplied snapshot and file;
  * arbitrary patch bytes never cross the ABI. Callers must keep callback
- * context valid until its terminal result callback.
+ * context valid until its terminal result callback. Each input text is capped
+ * at 8 MiB, combined text per request at 16 MiB, and hunk_count at 4096;
+ * oversized values are rejected before pointer arithmetic or allocation.
  *
  * Return values are 0 when accepted, 1 for a null required callback, 2 for an
  * invalid pointer/length/UTF-8/operation, and 3 for an internal start failure.
- * All mutations compare the supplied snapshot fingerprint while holding a
- * per-repository mutation lock. Stale operations do not modify the repository.
+ * All reads and mutations compare the supplied snapshot fingerprint while
+ * holding canonical per-repository in-process and OS advisory locks in the
+ * common Git directory. Cooperating runtime processes therefore serialize.
+ * Stale operations do not modify the repository.
  * File paths must be normalized, literal, repository-relative paths; pathspec
  * magic, globs, absolute paths, and traversal are rejected, and the path must
  * exactly match a changed-file path in that snapshot. Hunk mutations rebuild
  * the patch server-side and reject binary, deletion, and rename diffs.
- * Restore never deletes an untracked file. The lock coordinates API callers;
- * unrelated external git
- * writers cannot acquire it, so the fingerprint is revalidated immediately
- * before Git's single apply or commit operation and Git still validates patch
- * context.
+ * Restore never deletes an untracked file. Unrelated Git clients do not honor
+ * the advisory lock, so the fingerprint is revalidated immediately before
+ * Git's single transactional apply or commit command; Git's own index/ref
+ * locks and patch context validation close index mutation races. A
+ * non-cooperating process that directly edits worktree files remains outside
+ * any advisory-lock guarantee.
  *
  * ha_repository_cancel_all cancels and joins accepted snapshot, diff, and
  * mutation operations before returning. Checks are owned and cancelled by
@@ -371,7 +376,9 @@ void ha_engine_destroy(void *engine);
  * New repository operations are rejected while cancel_all owns its admission
  * barrier and may be retried after it returns.
  * A streaming callback failure stops that stream and is followed by one
- * failure terminal attempt; terminal callbacks are never retried.
+ * failure terminal attempt; terminal callbacks are emitted separately from
+ * action execution and are never retried, including when success emission
+ * throws.
  *
  * Repository callbacks must return promptly and must not call
  * ha_repository_cancel_all reentrantly. A reentrant call is detected and is a

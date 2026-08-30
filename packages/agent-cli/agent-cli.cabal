@@ -272,6 +272,7 @@ foreign-library haskell-agent-bridge
                     , bytestring
                     , containers
                     , directory
+                    , filelock
                     , filepath
                     , safe-exceptions
                     , stm

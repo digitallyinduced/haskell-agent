@@ -40,9 +40,10 @@ import Control.Exception.Safe
     , isAsyncException
     , onException
     , throwIO
+    , throwString
     , tryAny
     )
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (isDigit)
@@ -61,6 +62,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode(..))
+import qualified System.FileLock as FileLock
 import System.IO (Handle, hClose)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Directory (canonicalizePath)
@@ -225,6 +227,17 @@ repositoryDiffAtRoot root expected kind path = do
                         after <- snapshotAtRoot root
                         pure do
                             patch <- result
+                            when
+                                (BS.length patch > maxRepositoryPatchBytes)
+                                (Left
+                                    (InvalidRepositoryRequest
+                                        "repository diff exceeds the 64 MiB limit"))
+                            let hunks = parseDiffHunks patch
+                            when
+                                (length hunks > maxRepositoryDiffHunks)
+                                (Left
+                                    (InvalidRepositoryRequest
+                                        "repository diff has too many hunks"))
                             latest <- after
                             if latest.snapshotId /= expected
                                 then
@@ -241,7 +254,7 @@ repositoryDiffAtRoot root expected kind path = do
                                                 || "Binary files "
                                                     `BS8.isInfixOf` patch
                                         , repositoryDiffHunks =
-                                            parseDiffHunks patch
+                                            hunks
                                         }
 
 mutateRepository
@@ -273,6 +286,11 @@ commitRepository requested expected rawMessage =
             Right _
                 | Text.null (Text.strip rawMessage) ->
                     pure (Left (InvalidRepositoryRequest "commit message is empty"))
+                | Text.length rawMessage > maxRepositoryCommitCharacters ->
+                    pure
+                        (Left
+                            (InvalidRepositoryRequest
+                                "commit message exceeds the 8 MiB character limit"))
                 | Text.any (== '\NUL') rawMessage ->
                     pure
                         (Left
@@ -312,11 +330,34 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                         (Left
                             (InvalidRepositoryRequest
                                 "check executable is invalid"))
+                | length executable > maxRepositoryArgumentCharacters ->
+                    pure
+                        (Left
+                            (InvalidRepositoryRequest
+                                "check executable exceeds the 1 MiB character limit"))
+                | length arguments > maxRepositoryCheckArguments ->
+                    pure
+                        (Left
+                            (InvalidRepositoryRequest
+                                "check has too many arguments"))
                 | any (elem '\NUL') arguments ->
                     pure
                         (Left
                             (InvalidRepositoryRequest
                                 "check argument contains a NUL byte"))
+                | any
+                    ((> maxRepositoryArgumentCharacters) . length)
+                    arguments ->
+                        pure
+                            (Left
+                                (InvalidRepositoryRequest
+                                    "check argument exceeds the 1 MiB character limit"))
+                | sum (map (toInteger . length) arguments)
+                    > toInteger maxRepositoryCheckTotalCharacters ->
+                        pure
+                            (Left
+                                (InvalidRepositoryRequest
+                                    "check arguments exceed the 8 MiB total limit"))
                 | otherwise -> do
                     created <- trySynchronous do
                         (maybeOutput, maybeError, process) <-
@@ -668,6 +709,10 @@ selectReviewedHunks
 selectReviewedHunks snapshot path reviewed indices
     | null indices || length indices /= length (nub indices) =
         Left (InvalidRepositoryRequest "hunk selection is empty or duplicated")
+    | length indices > maxRepositorySelectedHunks =
+        Left (InvalidRepositoryRequest "too many selected hunks")
+    | BS.length reviewed > maxRepositoryPatchBytes =
+        Left (InvalidRepositoryRequest "repository patch exceeds the 64 MiB limit")
     | isDestructivePatch =
         Left
             (InvalidRepositoryRequest
@@ -718,13 +763,17 @@ textPatchSections patch = do
         let collect (current, completed) line
                 | isHunkHeader line =
                     ( [line]
-                    , if null current then completed else current : completed
+                    , if null current
+                        then completed
+                        else reverse current : completed
                     )
                 | null current = ([], completed)
-                | otherwise = (current <> [line], completed)
+                | otherwise = (line : current, completed)
             (lastHunk, reversed) = foldl' collect ([], []) lines'
             result = reverse
-                (if null lastHunk then reversed else lastHunk : reversed)
+                (if null lastHunk
+                    then reversed
+                    else reverse lastHunk : reversed)
         in if null result then Nothing else Just result
 
 appendUntrackedHashes
@@ -811,10 +860,13 @@ parsePorcelain bytes = go (filter (not . BS.null) (BS.split 0 bytes)) []
 
 parseDiffHunks :: BS.ByteString -> [DiffHunk]
 parseDiffHunks =
-    foldl' collect [] . Text.lines . TextEncoding.decodeUtf8With lenientDecode
+    reverse
+        . foldl' collect []
+        . Text.lines
+        . TextEncoding.decodeUtf8With lenientDecode
   where
     collect acc line =
-        maybe acc (\hunk -> acc <> [hunk]) (parseHunkHeader line)
+        maybe acc (: acc) (parseHunkHeader line)
 
 parseHunkHeader :: Text -> Maybe DiffHunk
 parseHunkHeader line = do
@@ -850,10 +902,7 @@ runRepositoryRead
     -> (FilePath -> IO (Either RepositoryError value))
     -> IO (Either RepositoryError value)
 runRepositoryRead requested action = do
-    rootResult <- repositoryRoot requested
-    case rootResult of
-        Left err -> pure (Left err)
-        Right root -> action root
+    withRepositoryMutationLock requested action
 
 withRepositoryMutationLock
     :: FilePath
@@ -870,7 +919,52 @@ withRepositoryMutationLock requested action = do
                     Nothing -> do
                         created <- newMVar ()
                         pure (Map.insert root created locks, created)
-            withMVar lock (const (action root))
+            withMVar lock \_ -> do
+                lockPathResult <- repositoryAdvisoryLockPath root
+                case lockPathResult of
+                    Left err -> pure (Left err)
+                    Right lockPath ->
+                        trySynchronous
+                            (FileLock.withFileLock
+                                lockPath
+                                FileLock.Exclusive
+                                (const (action root))) >>= \case
+                                    Left exception ->
+                                        pure
+                                            (Left
+                                                (RepositoryCommandFailed
+                                                    "repository advisory lock"
+                                                    (-1)
+                                                    (Text.pack
+                                                        (show exception))))
+                                    Right result -> pure result
+
+repositoryAdvisoryLockPath
+    :: FilePath
+    -> IO (Either RepositoryError FilePath)
+repositoryAdvisoryLockPath root =
+    runGit root ["rev-parse", "--git-common-dir"] BS.empty >>= \case
+        Left err -> pure (Left err)
+        Right commonDirectory -> do
+            let commonPath = Text.unpack (decodeTrimmed commonDirectory)
+            trySynchronous
+                (canonicalizePath
+                    (if isAbsolute commonPath
+                        then commonPath
+                        else root </> commonPath))
+                >>= \case
+                    Left exception ->
+                        pure
+                            (Left
+                                (RepositoryCommandFailed
+                                    "resolve repository advisory lock"
+                                    (-1)
+                                    (Text.pack (show exception))))
+                    Right canonical ->
+                        pure
+                            (Right
+                                (canonical
+                                    </> "haskell-agent-repository-review.lock"))
 
 repositoryRoot :: FilePath -> IO (Either RepositoryError FilePath)
 repositoryRoot requested
@@ -953,16 +1047,26 @@ runProcessBytes
     -> BS.ByteString
     -> IO (ExitCode, BS.ByteString, BS.ByteString)
 runProcessBytes workingDirectory executable arguments input =
-    bracket start stop \(inputHandle, outputHandle, errorHandle, process) -> do
+    bracket start stop
+        \(inputHandle, outputHandle, errorHandle, process, _, completed) -> do
         withAsync
             (BS.hPut inputHandle input `finally` closeQuietly inputHandle)
             \inputWriter ->
-                withAsync (BS.hGetContents outputHandle) \outputReader ->
-                    withAsync (BS.hGetContents errorHandle) \errorReader -> do
+                withAsync
+                    (hGetBounded
+                        maxRepositoryProcessOutputBytes
+                        outputHandle)
+                    \outputReader ->
+                    withAsync
+                        (hGetBounded
+                            maxRepositoryProcessErrorBytes
+                            errorHandle)
+                        \errorReader -> do
                         exitCode <- waitForProcess process
                         _ <- wait inputWriter
                         output <- wait outputReader
                         errors <- wait errorReader
+                        writeIORef completed True
                         pure (exitCode, output, errors)
   where
     start = do
@@ -973,21 +1077,61 @@ runProcessBytes workingDirectory executable arguments input =
                     , std_in = CreatePipe
                     , std_out = CreatePipe
                     , std_err = CreatePipe
+                    , close_fds = True
+                    , create_group = True
                     }
         case (maybeInput, maybeOutput, maybeError) of
-            (Just inputHandle, Just outputHandle, Just errorHandle) ->
-                pure (inputHandle, outputHandle, errorHandle, process)
+            (Just inputHandle, Just outputHandle, Just errorHandle) -> do
+                processGroup <- getPid process
+                completed <- newIORef False
+                pure
+                    ( inputHandle
+                    , outputHandle
+                    , errorHandle
+                    , process
+                    , processGroup
+                    , completed
+                    )
             _ -> do
                 terminateProcess process
                 _ <- waitForProcess process
                 fail "could not create process pipes"
-    stop (inputHandle, outputHandle, errorHandle, process) = do
+    stop
+        ( inputHandle
+        , outputHandle
+        , errorHandle
+        , process
+        , processGroup
+        , completed
+        ) = do
         closeQuietly inputHandle
         closeQuietly outputHandle
         closeQuietly errorHandle
-        _ <- tryAny (terminateProcess process)
+        finished <- readIORef completed
+        unless finished do
+            signalCheckProcessGroup sigTERM processGroup process
+            threadDelay 250_000
+            -- The group can outlive its leader (for example, a Git hook that
+            -- forks and exits), so always escalate the captured group.
+            signalCheckProcessGroup sigKILL processGroup process
         _ <- tryAny (waitForProcess process)
         pure ()
+
+hGetBounded :: Int -> Handle -> IO BS.ByteString
+hGetBounded limit handle = go 0 False []
+  where
+    go total exceeded chunks = do
+        chunk <- BS.hGetSome handle (64 * 1024)
+        if BS.null chunk
+            then
+                if exceeded
+                    then throwString "repository process output limit exceeded"
+                    else pure (BS.concat (reverse chunks))
+            else do
+                let next = total + BS.length chunk
+                if exceeded || next > limit
+                    then go total True chunks
+                    else go next False (chunk : chunks)
 
 closeQuietly :: Handle -> IO ()
 closeQuietly handle = do
@@ -1023,6 +1167,33 @@ repositoryErrorText = \case
 
 voidResult :: Either error value -> Either error ()
 voidResult = fmap (const ())
+
+maxRepositoryPatchBytes :: Int
+maxRepositoryPatchBytes = 64 * 1024 * 1024
+
+maxRepositoryDiffHunks :: Int
+maxRepositoryDiffHunks = 100_000
+
+maxRepositorySelectedHunks :: Int
+maxRepositorySelectedHunks = 4096
+
+maxRepositoryCommitCharacters :: Int
+maxRepositoryCommitCharacters = 8 * 1024 * 1024
+
+maxRepositoryCheckArguments :: Int
+maxRepositoryCheckArguments = 4096
+
+maxRepositoryArgumentCharacters :: Int
+maxRepositoryArgumentCharacters = 1024 * 1024
+
+maxRepositoryCheckTotalCharacters :: Int
+maxRepositoryCheckTotalCharacters = 8 * 1024 * 1024
+
+maxRepositoryProcessOutputBytes :: Int
+maxRepositoryProcessOutputBytes = 64 * 1024 * 1024
+
+maxRepositoryProcessErrorBytes :: Int
+maxRepositoryProcessErrorBytes = 8 * 1024 * 1024
 
 trySynchronous :: IO value -> IO (Either SomeException value)
 trySynchronous action =

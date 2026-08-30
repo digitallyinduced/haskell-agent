@@ -1,6 +1,12 @@
 module Agent.CLI.RepositoryReviewSpec (spec) where
 
 import Agent.CLI.RepositoryReview
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async
+    ( async
+    , cancel
+    , waitCatch
+    )
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -28,8 +34,11 @@ import System.Exit (ExitCode(..))
 import System.IO (hClose, openTempFile)
 import System.Process
     ( CreateProcess(..)
+    , createProcess
     , proc
     , readCreateProcessWithExitCode
+    , terminateProcess
+    , waitForProcess
     )
 import System.Timeout (timeout)
 import System.Posix.Files
@@ -64,6 +73,32 @@ spec = describe "repository review service" do
                 linked <- expectRight =<< repositorySnapshot alias
                 linked.snapshotRoot `shouldBe` direct.snapshotRoot
                 linked.snapshotId `shouldBe` direct.snapshotId
+
+    it "honors the common-directory advisory transaction lock" $
+        withRepository \root -> do
+            let lockPath =
+                    root
+                        <> "/.git/haskell-agent-repository-review.lock"
+                readyPath = root <> "/advisory-lock-ready"
+                script =
+                    "import fcntl,time;"
+                        <> "f=open(" <> show lockPath <> ",'w');"
+                        <> "fcntl.flock(f,fcntl.LOCK_EX);"
+                        <> "open(" <> show readyPath <> ",'w').close();"
+                        <> "time.sleep(30)"
+            (_, _, _, locker) <-
+                createProcess (proc "/usr/bin/python3" ["-c", script])
+            _ <- awaitFileContents readyPath 200
+            pending <- async (repositorySnapshot root)
+            blocked <- timeout 200_000 (waitCatch pending)
+            blocked `shouldSatisfy` \case
+                Nothing -> True
+                Just _ -> False
+            terminateProcess locker
+            _ <- waitForProcess locker
+            waitCatch pending `shouldReturnSatisfying` \case
+                Right (Right _) -> True
+                _ -> False
 
     it "includes untracked file mode in the worktree fingerprint" $
         withRepository \root -> do
@@ -372,6 +407,37 @@ spec = describe "repository review service" do
             takeMVar terminal `shouldReturn` (False, ExitFailure 9)
             readIORef terminalCount `shouldReturn` 1
 
+    it "kills commit-hook descendants when the commit worker is cancelled" $
+        withRepository \root -> do
+            appendFile (root <> "/tracked.txt") "hook cancellation\n"
+            before <- expectRight =<< repositorySnapshot root
+            staged <- expectRight
+                =<< mutateRepository root before.snapshotId
+                    (StagePath "tracked.txt")
+            let pidFile = root <> "/hook-child.pid"
+                hook = root <> "/.git/hooks/pre-commit"
+            writeFile hook
+                ( "#!/bin/sh\n"
+                    <> "trap '' TERM\n"
+                    <> "/bin/sh -c 'trap \"\" TERM; echo $$ > "
+                    <> shellQuote pidFile
+                    <> "; exec /bin/sleep 30' &\n"
+                    <> "wait\n"
+                )
+            setFileMode hook
+                (ownerReadMode
+                    `unionFileModes` ownerWriteMode
+                    `unionFileModes` ownerExecuteMode)
+
+            worker <- async
+                (commitRepository root staged.snapshotId "blocked hook\n")
+            childPid <- awaitFileContents pidFile 200
+            cancel worker
+            _ <- waitCatch worker
+            childGone <- awaitProcessGone (Text.strip childPid) 200
+            childGone `shouldBe` True
+            git root ["log", "-1", "--pretty=%B"] `shouldReturn` "initial\n\n"
+
     it "cancels and joins a running check" $
         withRepository \root -> do
             snapshot <- expectRight =<< repositorySnapshot root
@@ -453,3 +519,35 @@ shouldReturnSatisfying
     -> Expectation
 shouldReturnSatisfying action predicate =
     action >>= (`shouldSatisfy` predicate)
+
+awaitFileContents :: FilePath -> Int -> IO Text.Text
+awaitFileContents path attempts
+    | attempts <= 0 =
+        expectationFailure ("timed out waiting for " <> path) >> pure ""
+    | otherwise =
+        doesFileExist path >>= \case
+            True -> Text.pack <$> readFile path
+            False -> threadDelay 10_000 >> awaitFileContents path (attempts - 1)
+
+processExists :: Text.Text -> IO Bool
+processExists pid = do
+    (exitCode, _, _) <-
+        readCreateProcessWithExitCode
+            (proc "/bin/kill" ["-0", Text.unpack pid])
+            ""
+    pure (exitCode == ExitSuccess)
+
+awaitProcessGone :: Text.Text -> Int -> IO Bool
+awaitProcessGone pid attempts =
+    processExists pid >>= \case
+        False -> pure True
+        True
+            | attempts <= 0 -> pure False
+            | otherwise ->
+                threadDelay 10_000 >> awaitProcessGone pid (attempts - 1)
+
+shellQuote :: String -> String
+shellQuote value = "'" <> concatMap escape value <> "'"
+  where
+    escape '\'' = "'\\''"
+    escape character = [character]

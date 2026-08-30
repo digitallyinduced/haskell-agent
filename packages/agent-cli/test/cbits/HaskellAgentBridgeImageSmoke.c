@@ -213,6 +213,14 @@ int ha_repository_review_abi_smoke(void) {
             NULL) != 2) {
         return 21;
     }
+    if (ha_repository_snapshot(
+            value, SIZE_MAX,
+            repository_snapshot_callback,
+            repository_file_callback,
+            repository_result_callback,
+            NULL) != 2) {
+        return 29;
+    }
     if (ha_repository_diff(
             value, sizeof(value) - 1,
             value, sizeof(value) - 1,
@@ -242,6 +250,27 @@ int ha_repository_review_abi_smoke(void) {
             repository_result_callback,
             NULL) != 2) {
         return 24;
+    }
+    const size_t oversized_hunk = SIZE_MAX;
+    if (ha_repository_apply_hunks(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            HA_REPOSITORY_STAGE,
+            value, sizeof(value) - 1,
+            &oversized_hunk, 1,
+            repository_result_callback,
+            NULL) != 2) {
+        return 30;
+    }
+    if (ha_repository_apply_hunks(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            HA_REPOSITORY_STAGE,
+            value, sizeof(value) - 1,
+            &oversized_hunk, 4097,
+            repository_result_callback,
+            NULL) != 2) {
+        return 31;
     }
     if (ha_repository_commit(
             value, sizeof(value) - 1,
