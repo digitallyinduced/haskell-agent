@@ -113,6 +113,10 @@ runAuthStatusProbe executablePath cleanEnvironment =
         let spec =
                 (proc executablePath ["auth", "status", "--json"])
                     { env = Just cleanEnvironment
+                    -- Claude Code inspects an inherited TTY even for this
+                    -- non-interactive status command. Give it a closed pipe
+                    -- instead of the full-screen UI's raw-mode terminal.
+                    , std_in = CreatePipe
                     , std_out = CreatePipe
                     , std_err = CreatePipe
                     , close_fds = True
