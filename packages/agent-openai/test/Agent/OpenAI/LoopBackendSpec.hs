@@ -1388,6 +1388,24 @@ spec = do
                 , HttpError 503 "unavailable"
                 ]
 
+        it "retains WebSocket provenance without making replay safe" do
+            let failure =
+                    replayUnsafeAuxiliaryFailure
+                        (ConnectionError
+                            "WebSocket receive error: ParseException \"not enough bytes\"")
+            isOpenAiReplayUnsafeWebSocketTransportFailure failure
+                `shouldBe` True
+            -- Callers use the ordinary predicate only when replaying the same
+            -- logical request over HTTP is safe.
+            isOpenAiWebSocketTransportFailure failure `shouldBe` False
+
+        it "does not label post-output provider failures as transport failures" do
+            let failure =
+                    replayUnsafeAuxiliaryFailure
+                        (ProviderError ApiErrorType "server error" Nothing)
+            isOpenAiReplayUnsafeWebSocketTransportFailure failure
+                `shouldBe` False
+
     describe "openAiBackendWithTransportFallback" do
         it "switches permanently to fallback after a pre-output connection error" do
             fallbackActive <- newIORef False
@@ -1972,11 +1990,16 @@ isAuxiliaryOutputEvent = streamOutputObserved
 
 replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
 replayUnsafeAuxiliaryFailure failure =
-    ProviderError (UnknownErrorType "replay_unsafe")
+    ProviderError replayUnsafeType
         ( "provider failed after auxiliary response output; refusing to replay: "
             <> Text.pack (show failure)
         )
         Nothing
+  where
+    replayUnsafeType
+        | isOpenAiWebSocketTransportFailure failure =
+            UnknownErrorType "replay_unsafe_websocket_transport"
+        | otherwise = UnknownErrorType "replay_unsafe"
 
 isInputFile :: ResponseContentPart -> Bool
 isInputFile = \case

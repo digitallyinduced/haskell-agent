@@ -21,6 +21,7 @@ module Agent.OpenAI.LoopBackend
     , openAiBackendWithTransportFallback
     , withCodexTurnStateScope
     , isOpenAiWebSocketTransportFailure
+    , isOpenAiReplayUnsafeWebSocketTransportFailure
     , statelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
@@ -463,19 +464,35 @@ replayUnsafeError :: Text -> ApiError -> ApiError
 replayUnsafeError outputLabel err =
     if isReplayUnsafeError err
         then err
-        else ProviderError (UnknownErrorType "replay_unsafe")
+        else ProviderError replayUnsafeType
             ( "provider failed after "
                 <> outputLabel
                 <> "; refusing to replay: "
                 <> Text.pack (show err)
             )
             Nothing
+  where
+    -- Retain transport provenance in the structured error type. Auxiliary
+    -- callers must not replay a request after an opaque checkpoint arrived,
+    -- but they still need to retire the broken WebSocket for later requests.
+    replayUnsafeType
+        | isOpenAiWebSocketTransportFailure err =
+            UnknownErrorType replayUnsafeWebSocketTransportType
+        | otherwise = UnknownErrorType replayUnsafeTypeName
 
 isReplayUnsafeError :: ApiError -> Bool
 isReplayUnsafeError = \case
     ProviderError (UnknownErrorType errorType) _ _ ->
-        errorType == "replay_unsafe"
+        errorType == replayUnsafeTypeName
+            || errorType == replayUnsafeWebSocketTransportType
     _ -> False
+
+replayUnsafeTypeName :: Text
+replayUnsafeTypeName = "replay_unsafe"
+
+replayUnsafeWebSocketTransportType :: Text
+replayUnsafeWebSocketTransportType =
+    "replay_unsafe_websocket_transport"
 
 -- | Prefer a WebSocket backend, then switch this agent session permanently to
 -- a fallback transport once the socket has failed.
@@ -556,6 +573,17 @@ isOpenAiWebSocketTransportFailure = \case
     -- A server that does not support the Responses WebSocket protocol
     -- advertises that explicitly with HTTP 426.
     HttpError 426 _ -> True
+    _ -> False
+
+-- | A WebSocket failure whose request has already produced provider output.
+--
+-- The connection should not be reused, but the failed logical request must
+-- not be replayed: an auxiliary response may contain a billable opaque
+-- compaction checkpoint even when no text was rendered.
+isOpenAiReplayUnsafeWebSocketTransportFailure :: ApiError -> Bool
+isOpenAiReplayUnsafeWebSocketTransportFailure = \case
+    ProviderError (UnknownErrorType errorType) _ _ ->
+        errorType == replayUnsafeWebSocketTransportType
     _ -> False
 
 -- | Reset Codex sticky-routing state when a backend submission starts a new
