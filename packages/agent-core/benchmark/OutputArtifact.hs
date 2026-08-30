@@ -76,7 +76,7 @@ main = do
     writeOutputArtifactDetailed env payload >>= \case
         Left err -> die (Text.unpack err)
         Right artifact -> do
-            compareOutputs "read" 
+            compareOutputs "read"
                 (legacyRead env artifact.artifactHandle)
                 (streamingRead env artifact.artifactHandle)
             compareOutputs "search"
