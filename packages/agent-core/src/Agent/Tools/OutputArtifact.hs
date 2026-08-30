@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
 -- | Session-scoped storage for oversized tool output.
@@ -36,18 +37,22 @@ import Control.Concurrent.MVar
     , modifyMVar_
     , newMVar
     )
+import Control.Exception (evaluate)
 import Control.Exception.Safe
     ( SomeException
     , tryAny
     )
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (readIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
 import qualified Data.Text.Encoding.Error as EncodingError
+import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Encoding as LazyEncoding
 import System.Directory
     ( createDirectoryIfMissing
     , doesFileExist
@@ -59,7 +64,10 @@ import System.FilePath ((</>), takeFileName)
 import System.IO
     ( Handle
     , hClose
+    , hFileSize
+    , IOMode(ReadMode)
     , openBinaryTempFile
+    , withBinaryFile
     )
 import System.Posix.Files (setFileMode)
 
@@ -171,46 +179,115 @@ analyzeArgsDecoder = objectArgs \o ->
 
 readToolOutput :: ToolEnv -> ReadArgs -> IO (Either Text Text)
 readToolOutput env args =
-    readOutputArtifact env args.handle >>= \case
+    resolveArtifactPath env args.handle >>= \case
         Left err -> pure (Left err)
-        Right content -> do
+        Right path -> do
             let start = max 1 (fromMaybe 1 args.offset)
                 count = min 1000 (max 1 (fromMaybe 200 args.limit))
-                selected = take count (drop (start - 1) (Text.lines content))
-                end = start + length selected - 1
-                body = Text.intercalate "\n" selected
-            pure . Right . boundResult $
-                "artifact " <> args.handle <> " lines "
-                    <> Text.pack (show start) <> "-"
-                    <> Text.pack (show end)
-                    <> ":\n" <> body
+            tryAny (withBinaryFile path ReadMode \handle -> do
+                content <- LazyEncoding.decodeUtf8With EncodingError.lenientDecode
+                    <$> LazyByteString.hGetContents handle
+                let selected =
+                        take count
+                            (drop (start - 1) (LazyText.lines content))
+                    rendered =
+                        [ previewArtifactLine line
+                        | line <- selected
+                        ]
+                    end = start + length rendered - 1
+                    body = Text.intercalate "\n" rendered
+                    result = boundResult $
+                        "artifact " <> args.handle <> " lines "
+                            <> Text.pack (show start) <> "-"
+                            <> Text.pack (show end)
+                            <> ":\n" <> body
+                -- Force the bounded result while the handle is open.  This
+                -- keeps lazy I/O exceptions on the tool call and avoids
+                -- returning a thunk that retains the file handle.
+                _ <- evaluate (Text.length result)
+                pure (Right result))
+                >>= \case
+                    Left exception ->
+                        pure (Left ("failed to read artifact: "
+                            <> exceptionText exception))
+                    Right result -> pure result
 
 searchToolOutput :: ToolEnv -> SearchArgs -> IO (Either Text Text)
 searchToolOutput env args =
-    readOutputArtifact env args.handle >>= \case
+    resolveArtifactPath env args.handle >>= \case
         Left err -> pure (Left err)
-        Right content -> do
-            let needle = foldCase args.caseInsensitive args.pattern
-                matches =
-                    [ Text.pack (show n) <> ":" <> line
-                    | (n, line) <- zip [1 :: Int ..] (Text.lines content)
-                    , needle `Text.isInfixOf` foldCase args.caseInsensitive line
-                    ]
+        Right path -> do
+            let needle = foldCaseLazy args.caseInsensitive
+                    (LazyText.fromStrict args.pattern)
                 cap = min 200 (max 1 (fromMaybe 50 args.headLimit))
-                shown = take cap matches
-                suffix
-                    | length matches > cap =
-                        "\n[search truncated: "
-                            <> Text.pack (show (length matches - cap))
-                            <> " matches omitted]"
-                    | otherwise = ""
-            pure . Right . boundResult $
-                if null shown
-                    then "No matches in artifact " <> args.handle
-                    else Text.intercalate "\n" shown <> suffix
+            tryAny (withBinaryFile path ReadMode \handle -> do
+                content <- LazyEncoding.decodeUtf8With EncodingError.lenientDecode
+                    <$> LazyByteString.hGetContents handle
+                (shownRev, matchCount) <-
+                    collectMatches needle args.caseInsensitive cap
+                        (LazyText.lines content)
+                let shown = reverse shownRev
+                    suffix
+                        | matchCount > cap =
+                            "\n[search truncated: "
+                                <> Text.pack (show (matchCount - cap))
+                                <> " matches omitted]"
+                        | otherwise = ""
+                    result =
+                        boundResult $
+                            if null shown
+                                then "No matches in artifact " <> args.handle
+                                else Text.intercalate "\n" shown <> suffix
+                _ <- evaluate (Text.length result)
+                pure (Right result))
+                >>= \case
+                    Left exception ->
+                        pure (Left ("failed to read artifact: "
+                            <> exceptionText exception))
+                    Right result -> pure result
   where
-    foldCase True = Text.toCaseFold
-    foldCase False = id
+    collectMatches needle caseInsensitive cap =
+        go 1 [] 0
+      where
+        go _ shown !matchCount [] = pure (shown, matchCount)
+        go lineNumber shown !matchCount (line : rest) = do
+            let matched =
+                    needle `LazyText.isInfixOf`
+                        foldCaseLazy caseInsensitive line
+                nextCount = if matched then matchCount + 1 else matchCount
+                nextShown =
+                    if matched && matchCount < cap
+                        then
+                            (Text.pack (show lineNumber) <> ":"
+                                <> previewArtifactLine line) : shown
+                        else shown
+            -- Do not retain the lazy line list while processing a line.  The
+            -- recursive call is strict in the counters and the shown prefix
+            -- is capped at 200 entries.
+            nextCount `seq` go (lineNumber + 1) nextShown nextCount rest
+
+foldCaseLazy :: Bool -> LazyText.Text -> LazyText.Text
+foldCaseLazy True = LazyText.toCaseFold
+foldCaseLazy False = id
+
+-- A selected/search-matching line may itself be enormous (for example, a
+-- minified JSON document).  Keep only a small prefix before applying the
+-- final result bound, while still scanning the complete lazy line for
+-- searches.
+previewArtifactLine :: LazyText.Text -> Text
+previewArtifactLine line =
+    let prefix = LazyText.toStrict (LazyText.take artifactLinePreviewChars line)
+        truncated = LazyText.length line > artifactLinePreviewChars
+    in if truncated
+        then boundedPreview artifactLinePreviewBytes
+                (prefix <> "\n… [line omitted] …")
+        else prefix
+
+artifactLinePreviewChars :: Int
+artifactLinePreviewChars = 16 * 1024
+
+artifactLinePreviewBytes :: Int
+artifactLinePreviewBytes = 32 * 1024
 
 -- | Replace an oversized provider-facing result with a compact artifact marker.
 finalizeToolOutput :: ToolEnv -> ToolCall -> Text -> IO Text
@@ -367,14 +444,24 @@ outputArtifactMetadata
     -> Text
     -> IO (Either Text OutputArtifactMetadata)
 outputArtifactMetadata env handle =
-    readOutputArtifact env handle >>= \case
+    resolveArtifactPath env handle >>= \case
         Left err -> pure (Left err)
-        Right content ->
-            pure $ Right OutputArtifactMetadata
-                { metadataHandle = handle
-                , metadataBytes = BS.length (Encoding.encodeUtf8 content)
-                , metadataCharacters = Text.length content
-                }
+        Right path ->
+            tryAny (withBinaryFile path ReadMode \fileHandle -> do
+                bytes <- hFileSize fileHandle
+                content <- LazyEncoding.decodeUtf8With EncodingError.lenientDecode
+                    <$> LazyByteString.hGetContents fileHandle
+                characters <- evaluate (LazyText.length content)
+                pure OutputArtifactMetadata
+                    { metadataHandle = handle
+                    , metadataBytes = fromIntegral bytes
+                    , metadataCharacters = characters
+                    })
+                >>= \case
+                    Left exception ->
+                        pure (Left ("failed to read artifact metadata: "
+                            <> exceptionText exception))
+                    Right metadata -> pure (Right metadata)
 
 artifactExists :: ToolEnv -> Text -> IO (Either Text ())
 artifactExists env handle =
