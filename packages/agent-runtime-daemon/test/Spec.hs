@@ -100,6 +100,23 @@ main = hspec $ do
                     ReplaySnapshot saved -> saved.lastSequence == 3
                     ReplayEvents _ -> False)
 
+        it "persists a snapshot anchor before dropping an unanchored prefix" $
+            withSystemTempDirectory "daemon-retention-anchor" $ \directory -> do
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumEvents = 1
+                            , maximumJournalBytes = 1_048_576
+                            }
+                firstProcess <- openJournal config
+                _ <- appendEvent firstProcess "one" Null
+                second <- appendEvent firstProcess "two" Null
+                secondProcess <- openJournal config
+                recovered <- snapshot secondProcess
+                recovered.lastSequence `shouldBe` 2
+                replayAfter secondProcess 1 `shouldReturn` ReplayEvents [second]
+                third <- appendEvent secondProcess "three" Null
+                third.sequenceNumber `shouldBe` 3
+
         it "redacts sensitive fields and bounds retained task logs" $
             withSystemTempDirectory "daemon-redaction" $ \directory -> do
                 now <- getCurrentTime
@@ -290,6 +307,40 @@ main = hspec $ do
                 bounded.description `shouldBe` "[REDACTED]"
                 bounded.logTail `shouldBe` []
 
+        it "applies lowered task limits to snapshots and rejects excess old tasks" $
+            withSystemTempDirectory "daemon-lowered-task-limits" $ \directory -> do
+                now <- getCurrentTime
+                let oldTask taskId =
+                        DurableTask
+                            { taskId
+                            , status = TaskCompleted
+                            , description = "password=private"
+                            , updatedAt = now
+                            , logTail = ["old", "token=private", "new"]
+                            }
+                    oldSnapshot =
+                        JournalSnapshot
+                            { lastSequence = 0
+                            , tasks = Map.singleton (TaskId "old") (oldTask (TaskId "old"))
+                            }
+                    lowered =
+                        (defaultJournalConfig directory)
+                            { maximumTaskDescriptionCharacters = 8
+                            , maximumTaskLogLines = 1
+                            , maximumTaskLogCharacters = 2
+                            }
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode oldSnapshot))
+                first <- openJournal lowered >>= snapshot
+                let bounded = first.tasks Map.! TaskId "old"
+                bounded.description `shouldBe` "[REDACTE"
+                bounded.logTail `shouldBe` ["ne"]
+                second <- openJournal lowered >>= snapshot
+                second `shouldBe` first
+                openJournal (lowered {maximumTasks = 0})
+                    `shouldThrow` \case
+                        JournalTaskCapacityExceeded 0 -> True
+                        _ -> False
+
         it "retains no events when maximumEvents is zero and preserves the sequence" $
             withSystemTempDirectory "daemon-zero-retention" $ \directory -> do
                 let config = (defaultJournalConfig directory) {maximumEvents = 0}
@@ -307,6 +358,23 @@ main = hspec $ do
                 BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode exhausted))
                 journal <- openJournal (defaultJournalConfig directory)
                 appendEvent journal "wrapped" Null
+                    `shouldThrow` \case
+                        JournalSequenceExhausted sequenceNumber ->
+                            sequenceNumber == Sequence maxBound
+                        _ -> False
+
+        it "rejects maxBound-to-zero sequence wrap during recovery" $
+            withSystemTempDirectory "daemon-recovery-sequence-wrap" $ \directory -> do
+                let event sequenceNumber =
+                        EventEnvelope {sequenceNumber, eventType = "test", payload = Null}
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    ( LBS.toStrict (encode (event (Sequence maxBound)))
+                        <> "\n"
+                        <> LBS.toStrict (encode (event 0))
+                        <> "\n"
+                    )
+                openJournal (defaultJournalConfig directory)
                     `shouldThrow` \case
                         JournalSequenceExhausted sequenceNumber ->
                             sequenceNumber == Sequence maxBound

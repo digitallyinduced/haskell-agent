@@ -155,17 +155,25 @@ openJournal config = do
     savedEvents <- readEvents config
     validateEventSequence savedEvents
     validateRecoveryOrigin snapshotExists savedSnapshot.lastSequence savedEvents
-    recoveredSnapshot <- foldM (recoverTask config) savedSnapshot (toList savedEvents)
+    normalisedEvents <- traverse (normaliseRecoveredEvent config) savedEvents
+    savedTasks <- normaliseRecoveredTasks config savedSnapshot.tasks
+    let normalisedSnapshot = savedSnapshot {tasks = savedTasks}
+    recoveredSnapshot <- foldM (recoverTask config) normalisedSnapshot (toList normalisedEvents)
     recoveredTasks <- enforceTaskCapacity config recoveredSnapshot.tasks
     let boundedSnapshot = recoveredSnapshot {tasks = recoveredTasks}
         lastEventSequence =
-            maybe 0 (.sequenceNumber) (Seq.lookup (Seq.length savedEvents - 1) savedEvents)
+            maybe 0 (.sequenceNumber) (Seq.lookup (Seq.length normalisedEvents - 1) normalisedEvents)
         nextSequence = max boundedSnapshot.lastSequence lastEventSequence
         initialState =
             JournalState
                 { durableSnapshot = boundedSnapshot {lastSequence = nextSequence}
-                , retainedEvents = savedEvents
+                , retainedEvents = normalisedEvents
                 }
+    forM_ normalisedEvents (ensureEventFits config)
+    when (savedTasks /= savedSnapshot.tasks) $
+        writeSnapshot config normalisedSnapshot
+    when (normalisedEvents /= savedEvents) $
+        rewriteEvents config normalisedEvents
     state <- newMVar initialState
     subscribers <- newTVarIO Map.empty
     nextSubscriber <- newTVarIO 0
@@ -193,6 +201,23 @@ recoverTask config saved event
                     { lastSequence = event.sequenceNumber
                     , tasks = boundedTasks
                     }
+
+normaliseRecoveredEvent :: JournalConfig -> EventEnvelope -> IO EventEnvelope
+normaliseRecoveredEvent config event
+    | event.eventType /= "task_changed" =
+        pure event {payload = redactValue event.payload}
+    | otherwise =
+        case fromJSON event.payload of
+            Error message -> throwIO (JournalCorrupt "events.jsonl" message)
+            Success task ->
+                pure event {payload = toJSON (boundTaskLog config task)}
+
+normaliseRecoveredTasks ::
+    JournalConfig ->
+    Map TaskId DurableTask ->
+    IO (Map TaskId DurableTask)
+normaliseRecoveredTasks config recoveredTasks =
+    enforceTaskCapacity config (fmap (boundTaskLog config) recoveredTasks)
 
 synchronisePath :: FilePath -> IO ()
 synchronisePath path =
