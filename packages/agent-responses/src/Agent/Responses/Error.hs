@@ -263,12 +263,15 @@ isPreviousResponseIdError = \case
 --
 -- The Codex backend can return stored chains carrying
 -- @prompt_cache_retention@ parameter after routing a follow-up to a model that
--- no longer accepts it. Replaying the local transcript without the continuation
--- id creates a fresh chain and is safe before any model output is observed.
+-- no longer accepts it. Provider-managed continuation state can also lose a
+-- pending function call and reject its otherwise valid output. Replaying the
+-- local transcript without the continuation id creates a fresh chain and is
+-- safe before any model output is observed.
 isResponseChainCompatibilityError :: ApiError -> Bool
 isResponseChainCompatibilityError error =
     isPreviousResponseIdError error
         || apiErrorTextMatches mentionsUnsupportedPromptCacheRetention error
+        || apiErrorTextMatches mentionsMissingFunctionCallOutput error
 
 apiErrorTextMatches :: (Text -> Bool) -> ApiError -> Bool
 apiErrorTextMatches predicate = \case
@@ -295,6 +298,11 @@ mentionsUnsupportedPromptCacheRetention value =
     in "prompt_cache_retention" `Text.isInfixOf` lowered
         && ("not supported" `Text.isInfixOf` lowered
             || "unsupported" `Text.isInfixOf` lowered)
+
+mentionsMissingFunctionCallOutput :: Text -> Bool
+mentionsMissingFunctionCallOutput =
+    Text.isInfixOf "no tool output found for function call"
+        . Text.toLower
 
 orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just value) _ = Just value

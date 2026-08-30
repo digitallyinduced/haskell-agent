@@ -3,8 +3,10 @@ module Agent.Claude.LoopBackendSpec (spec) where
 import Agent.Claude.LoopBackend
     ( appendHostTranscript
     , claudeCodeOneShotBackend
+    , sdkErrorToApiError
     , withClaudeCodeBackend
     )
+import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
 import Agent.Claude.Options
     ( ClaudeCodeOptions(..)
     , ClaudeCodePermission(..)
@@ -75,6 +77,29 @@ submitBackend backend previous inputs onEvent =
 
 spec :: Spec
 spec = do
+    describe "sdkErrorToApiError" do
+        it "classifies status and subtype categories" do
+            sdkErrorToApiError
+                (ResultError "rate_limit_error" (Just 429) [] Nothing)
+                `shouldSatisfy` \case
+                    ProviderError{errorType = RateLimitError} -> True
+                    _ -> False
+            sdkErrorToApiError
+                (ResultError "permission_error" (Just 403) ["forbidden"] Nothing)
+                `shouldSatisfy` \case
+                    ProviderError{errorType = PermissionError} -> True
+                    _ -> False
+        it "classifies an expired OAuth session reported in the result" do
+            sdkErrorToApiError
+                (ResultError
+                    "error"
+                    Nothing
+                    []
+                    (Just "Failed to authenticate: OAuth session expired and could not be refreshed"))
+                `shouldSatisfy` \case
+                    ProviderError{errorType = AuthenticationError} -> True
+                    _ -> False
+
     describe "appendHostTranscript" do
         it "appends turn inputs followed by assistant text" $ do
             let history =
@@ -474,7 +499,7 @@ spec = do
                                 (\_ -> pure ())
                         result `shouldSatisfy` \case
                             Just (Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 }) ->
                                     "login expired" `Text.isInfixOf` message
@@ -506,7 +531,7 @@ spec = do
                                     modifyIORef' events (<> [event]))
                         result `shouldSatisfy` \case
                             Just (Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 }) ->
                                     "non-subscription credential source"
@@ -970,7 +995,7 @@ spec = do
                                 turns
                         failed `shouldSatisfy` \case
                             Left ProviderError
-                                { errorType = ApiErrorType
+                                { errorType = AuthenticationError
                                 , message
                                 } ->
                                     "login expired"

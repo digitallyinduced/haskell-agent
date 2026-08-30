@@ -3,6 +3,7 @@ module Agent.CLI.NativeRuntime
     , NativeInteractionMode(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
+    , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
     , restartNativeMcpRuntime
@@ -27,7 +28,7 @@ import Agent.CLI.Runtime.Orchestration.Types
     , NativeRunHooks(..)
     , nativeRunMode
     )
-import Agent.CLI.Runtime.Types (DevResult(..))
+import Agent.CLI.Runtime.Types (DevResult(..), StartupFailure(..))
 import qualified Agent.MCP as MCP
 import Control.Exception.Safe (finally, onException)
 import Data.Text (Text)

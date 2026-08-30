@@ -7,6 +7,7 @@ module Agent.Claude.LoopBackend
     , appendHostTranscript
     , ClaudeToolPermissionDecision(..)
     , ClaudeToolPermissionRequest(..)
+    , sdkErrorToApiError
     ) where
 
 import Agent.Claude.Options
@@ -21,6 +22,7 @@ import Agent.Claude.Internal.Messages
 import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
+    , errorTypeFromText
     )
 import Agent.InterAgentMessage (renderInterAgentMessage)
 import Agent.Loop
@@ -72,7 +74,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, maybeToList)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -783,7 +785,7 @@ sdkErrorToApiError = \case
             }
     sdkError@ResultError{} ->
         ProviderError
-            { errorType = ApiErrorType
+            { errorType = classifyResultError sdkError
             , message = renderClaudeSDKError sdkError
             , retryAfter = Nothing
             }
@@ -795,6 +797,51 @@ sdkErrorToApiError = \case
             }
     sdkError ->
         ConnectionError (renderClaudeSDKError sdkError)
+
+classifyResultError :: ClaudeSDKError -> ErrorType
+classifyResultError ResultError{subtype, apiErrorStatus, errors, result} =
+    case apiErrorStatus of
+        Just 401 -> AuthenticationError
+        Just 403 -> PermissionError
+        Just 404 -> NotFoundError
+        Just 413 -> PayloadTooLargeError
+        Just 429 -> RateLimitError
+        Just status
+            | status >= 500 && status < 503 -> ServiceUnavailableError
+            | status == 503 -> ServiceUnavailableError
+            | status == 529 -> OverloadedError
+        _ ->
+            let bySubtype = errorTypeFromText (Text.toLower subtype)
+            in case bySubtype of
+                UnknownErrorType _ ->
+                    classifyResultMessage
+                        (Text.toLower (Text.intercalate " " (errors <> maybeToList result)))
+                other -> other
+classifyResultError _ = ApiErrorType
+
+classifyResultMessage :: Text -> ErrorType
+classifyResultMessage message
+    | any (`Text.isInfixOf` message)
+        [ "authentication"
+        , "failed to authenticate"
+        , "oauth session expired"
+        , "unauthorized"
+        , "invalid api key"
+        ] =
+        AuthenticationError
+    | any (`Text.isInfixOf` message) ["permission", "forbidden", "not allowed"] =
+        PermissionError
+    | any (`Text.isInfixOf` message) ["context length", "context window", "too many tokens"] =
+        ContextWindowExceeded
+    | any (`Text.isInfixOf` message) ["rate limit", "rate_limit", "too many requests"] =
+        RateLimitError
+    | any (`Text.isInfixOf` message) ["overloaded", "overload"] =
+        OverloadedError
+    | any (`Text.isInfixOf` message) ["unavailable", "temporarily down"] =
+        ServiceUnavailableError
+    | any (`Text.isInfixOf` message) ["payload too large", "request too large"] =
+        PayloadTooLargeError
+    | otherwise = ApiErrorType
 
 sdkUsageToTokenUsage :: Usage -> TokenUsage
 sdkUsageToTokenUsage usage =
