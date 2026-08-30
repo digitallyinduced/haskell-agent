@@ -341,6 +341,10 @@ parseSlash catalog raw line = case Text.words line of
                     then ReplLogin
                     else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
+            "home" ->
+                if null args
+                    then ReplHome
+                    else ReplCommandError "usage: /home"
             "search" ->
                 let query =
                         Text.strip (Text.drop (Text.length command) line)
@@ -352,6 +356,10 @@ parseSlash catalog raw line = case Text.words line of
                         Text.strip (Text.drop (Text.length command) line)
                 in ReplCompact
                     (if Text.null focus then Nothing else Just focus)
+            "rewind" ->
+                if null args
+                    then ReplRewind
+                    else ReplCommandError "usage: /rewind"
             "clear" ->
                 if null args
                     then ReplClear

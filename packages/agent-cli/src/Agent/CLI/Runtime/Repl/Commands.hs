@@ -33,7 +33,8 @@ import Agent.CLI.Command
                  ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplViewPlan, ReplQueue, ReplTranscript, ReplEditPrompt,
                  ReplContext, ReplHistory, ReplFind,
-                 ReplBtw, ReplMetaConsole, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew, ReplDelete,
+                 ReplBtw, ReplMetaConsole, ReplRecap, ReplRetry, ReplResume, ReplSearch,
+                 ReplHome, ReplRewind, ReplClear, ReplNew, ReplDelete,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplInit, ReplReview, ReplDiff,
                  ReplFork, ReplExport, ReplPermissions,
@@ -1113,6 +1114,8 @@ handleReplLine
                                     continue
                     action@ReplResume{} -> handleSessionAction env slashCatalog continue action
                     action@ReplSearch{} -> handleSessionAction env slashCatalog continue action
+                    action@ReplHome -> handleSessionAction env slashCatalog continue action
+                    action@ReplRewind -> handleSessionAction env slashCatalog continue action
                     action@ReplClear -> handleSessionAction env slashCatalog continue action
                     action@ReplNew -> handleSessionAction env slashCatalog continue action
                     action@ReplDelete -> handleSessionAction env slashCatalog continue action

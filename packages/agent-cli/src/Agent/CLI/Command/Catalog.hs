@@ -37,8 +37,10 @@ slashCommands =
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
+    , cmd "home" ["welcome"] "/home" "Return to the session picker" False
     , cmd "search" [] "/search <QUERY>" "Search past conversations and resume a match" True
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
+    , cmd "rewind" ["undo"] "/rewind" "Rewind to a previous turn" False
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
     , cmd "delete" [] "/delete" "Delete the current session and start fresh" False

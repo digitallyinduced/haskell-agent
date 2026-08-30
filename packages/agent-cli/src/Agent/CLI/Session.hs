@@ -33,6 +33,8 @@ module Agent.CLI.Session
     , appendTurnWithMetaUpdateIndexed
     , appendTurnKeepTitle
     , appendTurnKeepTitleIndexed
+    , sessionRewindChoices
+    , rewindSession
     , addSessionUsage
     , deleteSession
     , loadSession
@@ -110,7 +112,9 @@ import Agent.CLI.Session.Codec
     , validateSessionMeta
     )
 import Agent.CLI.Models (ModelTarget(..))
+import Agent.CLI.SessionTitle (titleRefreshIndex)
 import Agent.Loop (TokenUsage(..))
+import Agent.OpenAI.Compaction (rewindSessionUserText)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
@@ -815,6 +819,85 @@ appendTurnKeepTitleIndexed
     -> IO (SessionHandle, Int64)
 appendTurnKeepTitleIndexed handle turn =
     appendTurnWithMetaTransitionIndexed handle turn id
+
+-- | Prompts in the current immutable transcript branch, paired with the turns
+-- that should remain when rewinding to immediately before that prompt.
+sessionRewindChoices :: [SessionTurn] -> [(SessionTurn, [SessionTurn])]
+sessionRewindChoices turns =
+    [ (turn, take turnIndex active)
+    | (turnIndex, turn) <- zip [0 ..] active
+    , isRewindPromptTurn turn
+    ]
+  where
+    active =
+        reverse
+            (takeWhile
+                ((/= TranscriptReset) . (.turnEffect))
+                (reverse turns))
+
+-- | Publish a rewound conversation branch without mutating historical turns.
+--
+-- The reset marker and retained prefix are appended atomically. Replayed
+-- compaction checkpoints keep their replace effect, so model context resumes
+-- from the correct compacted suffix while the full visual prefix stays
+-- scrollable.
+rewindSession
+    :: SessionHandle
+    -> [SessionTurn]
+    -> IO (Either Text SessionHandle)
+rewindSession handle retained = do
+    now <- normalizePostgresTimestamp <$> getCurrentTime
+    let promptCount = length (filter isRewindPromptTurn retained)
+        meta0 = handle.sessionMeta
+        meta = meta0
+            { metaUpdatedAt = now
+            , metaLastResponseId = retainedLastResponseId retained
+            , metaTitleRefreshIndex =
+                min
+                    meta0.metaTitleRefreshIndex
+                    (titleRefreshIndex promptCount)
+            , metaTitleUserTurns = promptCount
+            , metaLastRecap = Nothing
+            , metaLastTurnSummary = Nothing
+            , metaLastRecapMainTurns = 0
+            }
+        marker = SessionTurn
+            { turnAt = now
+            , turnUserText = rewindSessionUserText
+            , turnAssistantText = Just "Conversation rewound."
+            , turnError = Nothing
+            , turnResponseId = Nothing
+            , turnEffect = TranscriptReset
+            , turnItems = []
+            , turnUsage = Nothing
+            , turnProviderTelemetry = []
+            }
+    Store.appendSessionTurns
+        handle.sessionPool
+        (map toStoredTurn (marker : retained))
+        (toStoredMetadata meta) >>= \case
+            Left err ->
+                pure
+                    (Left
+                        ("could not rewind PostgreSQL session: "
+                            <> renderStoreError err))
+            Right False ->
+                pure (Left ("session not found: " <> meta.metaId))
+            Right True ->
+                pure (Right handle { sessionMeta = meta })
+
+isRewindPromptTurn :: SessionTurn -> Bool
+isRewindPromptTurn turn =
+    turn.turnEffect == TranscriptAppend
+        && not (Text.null (Text.strip turn.turnUserText))
+
+retainedLastResponseId :: [SessionTurn] -> Maybe Text
+retainedLastResponseId = foldl' step Nothing
+  where
+    step responseId turn = case turn.turnEffect of
+        TranscriptAppend -> turn.turnResponseId <|> responseId
+        TranscriptReplace -> turn.turnResponseId
+        TranscriptReset -> turn.turnResponseId
 
 
 loadSession

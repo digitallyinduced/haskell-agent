@@ -111,10 +111,14 @@ data ReplAction
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
     -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
+    | ReplHome
+    -- ^ Return to the session picker.
     | ReplSearch !Text
     -- ^ Search persisted conversation turns and open matching sessions.
     | ReplCompact (Maybe Text)
     -- ^ Optional focus note for what to keep while compacting history.
+    | ReplRewind
+      -- ^ Restore conversation state before a selected prompt.
     | ReplClear
       -- ^ Soft-reset live transcript; keep the same session id.
     | ReplNew
