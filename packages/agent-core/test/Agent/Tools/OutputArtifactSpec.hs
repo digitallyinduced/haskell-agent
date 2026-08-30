@@ -186,7 +186,7 @@ runArtifactTool env toolName call = do
             , toolDispatchOnOutput = \_ _ -> pure ()
             , toolDispatchFinalizeOutput = \_ output -> pure output
             }
-    result <- dispatchToolHandler config (appToolHandler <$> tool) call
+    result <- dispatchToolHandler config ((.appToolHandler) <$> tool) call
     pure (Right result.output)
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a

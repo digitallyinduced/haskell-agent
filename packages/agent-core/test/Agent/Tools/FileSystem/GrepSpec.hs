@@ -57,9 +57,9 @@ spec = describe "grepTool" do
                     [(grepTool env).appToolHandler]
                     (functionToolCall "grep-2" "grep"
                         "{\"pattern\":\"needle\",\"head_limit\":2}")
-                result.output `shouldContain`
-                    "[at least 2 lines; output truncated]"
-                result.output `shouldContain` "many.txt"
+                result.output `shouldSatisfy`
+                    Text.isInfixOf "[at least 2 lines; output truncated]"
+                result.output `shouldSatisfy` Text.isInfixOf "many.txt"
 
     it "leniently decodes invalid UTF-8 in matching output" do
         findExecutable "rg" >>= \case
@@ -74,7 +74,7 @@ spec = describe "grepTool" do
                     [(grepTool env).appToolHandler]
                     (functionToolCall "grep-utf8" "grep"
                         "{\"pattern\":\"needle\"}")
-                result.output `shouldContain` "invalid.txt"
+                result.output `shouldSatisfy` Text.isInfixOf "invalid.txt"
 
     it "reports an invalid regular expression without leaking a child process" do
         findExecutable "rg" >>= \case
@@ -88,7 +88,7 @@ spec = describe "grepTool" do
                     [(grepTool env).appToolHandler]
                     (functionToolCall "grep-3" "grep"
                         "{\"pattern\":\"[\"}")
-                result.output `shouldContain` "ERR"
+                result.output `shouldSatisfy` Text.isInfixOf "ERR"
     it "preserves no-match and context behavior" do
         findExecutable "rg" >>= \case
             Nothing -> pendingWith "rg is not installed"
@@ -107,9 +107,9 @@ spec = describe "grepTool" do
                     [(grepTool env).appToolHandler]
                     (functionToolCall "grep-5" "grep"
                         "{\"pattern\":\"needle\",\"-C\":1}")
-                context.output `shouldContain` "before"
-                context.output `shouldContain` "needle"
-                context.output `shouldContain` "after"
+                context.output `shouldSatisfy` Text.isInfixOf "before"
+                context.output `shouldSatisfy` Text.isInfixOf "needle"
+                context.output `shouldSatisfy` Text.isInfixOf "after"
 
 testConfig :: ToolDispatchConfig
 testConfig = ToolDispatchConfig
