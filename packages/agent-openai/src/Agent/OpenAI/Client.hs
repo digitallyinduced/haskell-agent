@@ -442,9 +442,9 @@ sniffSuccessfulResponse
     -> Streams.InputStream BS.ByteString
     -> IO (Either ApiError OpenAI.Response)
 sniffSuccessfulResponse idleMicros modelHint stream =
-    sniff [] 0
+    sniff [] 0 ""
   where
-    sniff reversedChunks bytesRead = do
+    sniff reversedChunks bytesRead probe = do
         next <- System.Timeout.timeout idleMicros (Streams.read stream)
         case next of
             Nothing -> pure $ Left $ ConnectionError
@@ -455,17 +455,22 @@ sniffSuccessfulResponse idleMicros modelHint stream =
             Just (Just chunk) -> do
                 let chunks' = chunk : reversedChunks
                     bytesRead' = bytesRead + BS.length chunk
-                    sniffBytes = LBS.toStrict $ LBS.take
-                        (fromIntegral maxResponseSniffBytes)
-                        (LBS.fromChunks (reverse chunks'))
-                if looksLikeSsePrefix sniffBytes
-                    then readCodexSseResponse
-                        idleMicros modelHint stream (reverse chunks')
-                    else if looksLikeJsonPrefix sniffBytes
-                        || bytesRead' >= maxResponseSniffBytes
-                        then readSuccessfulJsonResponse
+                    probe' = advanceResponseProbe
+                        (maxResponseSniffBytes - bytesRead)
+                        probe
+                        chunk
+                case classifyResponseProbe probe' of
+                    Just ResponseBodySse ->
+                        readCodexSseResponse
+                            idleMicros modelHint stream (reverse chunks')
+                    Just ResponseBodyJson ->
+                        readSuccessfulJsonResponse
                             idleMicros modelHint stream chunks' bytesRead'
-                        else sniff chunks' bytesRead'
+                    Nothing
+                        | bytesRead' >= maxResponseSniffBytes ->
+                            readSuccessfulJsonResponse
+                                idleMicros modelHint stream chunks' bytesRead'
+                        | otherwise -> sniff chunks' bytesRead' probe'
 
 readSuccessfulJsonResponse
     :: Int
@@ -573,20 +578,34 @@ isEventStreamContentType =
         . BS8.takeWhile (/= ';')
         . BS8.dropWhile (`elem` [' ', '\t'])
 
-looksLikeSsePrefix :: BS.ByteString -> Bool
-looksLikeSsePrefix bytes =
-    any isSseLine (BS8.lines (dropAsciiSpace bytes))
-  where
-    isSseLine line =
-        "event:" `BS.isPrefixOf` line
-            || "data:" `BS.isPrefixOf` line
-            || ":" `BS.isPrefixOf` line
+data ResponseBodyKind = ResponseBodySse | ResponseBodyJson
 
-looksLikeJsonPrefix :: BS.ByteString -> Bool
-looksLikeJsonPrefix bytes =
-    case BS.uncons (dropAsciiSpace bytes) of
-        Just (byte, _) -> byte == 0x7b || byte == 0x5b
-        Nothing -> False
+-- Keep only the first non-whitespace token needed to distinguish JSON from
+-- SSE. This remains O(total sniff bytes), even when a proxy sends one byte per
+-- chunk; the complete pending chunks are bounded separately by 8 KiB.
+advanceResponseProbe
+    :: Int -> BS.ByteString -> BS.ByteString -> BS.ByteString
+advanceResponseProbe remaining current chunk
+    | remaining <= 0 || BS.length current >= maxProbeTokenBytes = current
+    | otherwise =
+        BS.take maxProbeTokenBytes $
+            current <> candidate
+  where
+    candidate =
+        (if BS.null current then dropAsciiSpace else id)
+            (BS.take remaining chunk)
+
+classifyResponseProbe :: BS.ByteString -> Maybe ResponseBodyKind
+classifyResponseProbe probe =
+    case BS.uncons probe of
+        Nothing -> Nothing
+        Just (byte, _)
+            | byte == 0x7b || byte == 0x5b -> Just ResponseBodyJson
+            | byte == 0x3a -> Just ResponseBodySse
+            | probe == "event:" || probe == "data:" -> Just ResponseBodySse
+            | probe `BS.isPrefixOf` "event:"
+                || probe `BS.isPrefixOf` "data:" -> Nothing
+            | otherwise -> Just ResponseBodyJson
 
 dropAsciiSpace :: BS.ByteString -> BS.ByteString
 dropAsciiSpace = BS.dropWhile (`elem` [0x20, 0x09, 0x0a, 0x0d])
@@ -612,6 +631,9 @@ successfulJsonTooLargeMessage =
 
 maxResponseSniffBytes :: Int
 maxResponseSniffBytes = 8 * 1024
+
+maxProbeTokenBytes :: Int
+maxProbeTokenBytes = 6
 
 maxSuccessfulJsonBytes :: Int
 maxSuccessfulJsonBytes = 64 * 1024 * 1024
