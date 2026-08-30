@@ -11,6 +11,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
+import Data.Either (isLeft)
 import Data.IORef
 import Data.Text (Text)
 
@@ -53,6 +54,39 @@ spec = do
                 }
         lookup "x-codex-beta-features" (buildCodexWsHeaders credential)
             `shouldBe` Just "remote_compaction_v2"
+
+    it "recognizes gateway websocket credentials without leaking the URL as an account id" do
+        let credential = Credential
+                { accessToken = "gateway-token"
+                , accountId = "wss://gateway.example/v1/responses"
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+            headers = buildCodexWsHeaders credential
+        isGatewayWebSocketCredential credential `shouldBe` True
+        lookup "Authorization" headers `shouldBe` Just "Bearer gateway-token"
+        lookup "chatgpt-account-id" headers `shouldBe` Nothing
+
+    it "accepts loopback ws gateway URLs but rejects unrelated account ids" do
+        let gateway = Credential
+                { accessToken = "token"
+                , accountId = "ws://127.0.0.1:8080/v1/responses"
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+            direct = gateway { accountId = "chatgpt-account" }
+        isGatewayWebSocketCredential gateway `shouldBe` True
+        isGatewayWebSocketCredential direct `shouldBe` False
+
+    it "validates gateway endpoints before a gateway bearer can be used" do
+        validateGatewayWebSocketUrl "wss://gateway.example/v1/responses"
+            `shouldBe` Right ()
+        validateGatewayWebSocketUrl "ws://127.0.0.1:8080/v1/responses"
+            `shouldBe` Right ()
+        validateGatewayWebSocketUrl "ws://gateway.example/v1/responses"
+            `shouldSatisfy` isLeft
+        validateGatewayWebSocketUrl "https://gateway.example/v1/responses"
+            `shouldSatisfy` isLeft
 
   describe "buildWsPayloadWithOptions" do
     it "forces store=false for the Codex WebSocket contract" do

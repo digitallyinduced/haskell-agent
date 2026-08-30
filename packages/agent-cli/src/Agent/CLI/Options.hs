@@ -4,6 +4,7 @@ module Agent.CLI.Options
     , ApprovalPolicy(..)
     , CliOptions(..)
     , Command(..)
+    , GatewayCommand(..)
     , ScreenMode(..)
     , SessionOutputFormat(..)
     , SessionPageRequest(..)
@@ -34,12 +35,19 @@ data Command
     = ShowHelp
     | ShowVersion
     | Login
+    | Gateway GatewayCommand
     | ListSessions SessionOutputFormat
     | ShowSession Text SessionOutputFormat (Maybe SessionPageRequest)
     | WaitSession Text
     | ImportSession (Maybe OsPath)
     | Storage StorageCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data GatewayCommand
+    = GatewayConnect Text
+    | GatewayStatus
+    | GatewayDisconnect
     deriving (Eq, Show)
 
 data SessionPageRequest
@@ -208,7 +216,7 @@ parseArgs args
 
 isRunInvocation :: [String] -> Bool
 isRunInvocation = \case
-    command : _ -> command `notElem` ["login", "sessions", "storage"]
+    command : _ -> command `notElem` ["gateway", "login", "sessions", "storage"]
     [] -> True
 
 parserPreferences :: Options.ParserPrefs
@@ -257,6 +265,9 @@ commandParser =
         ( Options.command "login"
             (Options.info (pure Login)
                 (Options.progDesc "Manage provider credentials"))
+            <> Options.command "gateway"
+                (Options.info gatewayParser
+                    (Options.progDesc "Connect this agent to an LLM gateway"))
             <> Options.command "sessions"
                 (Options.info sessionsParser
                     (Options.progDesc "Administer persisted sessions"))
@@ -265,6 +276,25 @@ commandParser =
                     (Options.progDesc "Administer managed PostgreSQL storage"))
         )
         Options.<|> (RunAgent <$> runOptionsParser)
+
+gatewayParser :: Options.Parser Command
+gatewayParser = Gateway <$> Options.hsubparser
+    ( Options.command "connect"
+        (Options.info
+            (GatewayConnect . Text.pack
+                <$> Options.strOption
+                    ( Options.long "url"
+                        <> Options.metavar "HTTPS_URL"
+                        <> Options.help "Gateway base URL"
+                    ))
+            (Options.progDesc "Authorize this installation with a gateway user"))
+    <> Options.command "status"
+        (Options.info (pure GatewayStatus)
+            (Options.progDesc "Show the connected gateway"))
+    <> Options.command "disconnect"
+        (Options.info (pure GatewayDisconnect)
+            (Options.progDesc "Remove the saved gateway credential"))
+    )
 
 sessionsParser :: Options.Parser Command
 sessionsParser =
@@ -553,6 +583,8 @@ usage :: String
 usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
     , "       agent-cli login"
+    , "       agent-cli gateway connect --url <https-url>"
+    , "       agent-cli gateway <status|disconnect>"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id> [--json]"
     , "              [--limit N] [--before TURN_INDEX]"

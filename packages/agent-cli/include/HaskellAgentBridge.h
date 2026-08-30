@@ -259,6 +259,75 @@ typedef void (*ha_account_oauth_start_callback)(
     const uint8_t *error,
     size_t error_length
 );
+
+/*
+ * Gateway operations are process-global and do not require an engine.
+ * Accepted operations run asynchronously on a Haskell worker thread; that
+ * thread is not the caller or the AppKit main thread. Every string is UTF-8
+ * and valid only for the duration of its callback, so callers must copy it
+ * before returning. The caller owns callback/context and must keep both valid
+ * until the callback returns. No gateway access token or WebSocket credential
+ * crosses this ABI.
+ */
+enum {
+    HA_GATEWAY_CONNECTED = 0,
+    HA_GATEWAY_DISCONNECTED = 1,
+    HA_GATEWAY_ERROR = -1
+};
+
+typedef void (*ha_gateway_status_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *base_url,
+    size_t base_url_length,
+    const uint8_t *error,
+    size_t error_length
+);
+
+/* Start status is HA_GATEWAY_CONNECTED (0) for a challenge, or -1 on error. */
+typedef void (*ha_gateway_connect_start_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *user_code,
+    size_t user_code_length,
+    const uint8_t *verification_uri,
+    size_t verification_uri_length,
+    const uint8_t *verification_uri_complete,
+    size_t verification_uri_complete_length,
+    const uint8_t *device_code,
+    size_t device_code_length,
+    int32_t poll_interval_seconds,
+    int32_t expires_in_seconds,
+    const uint8_t *error,
+    size_t error_length
+);
+
+enum {
+    HA_GATEWAY_POLL_AUTHORIZED = 0,
+    HA_GATEWAY_POLL_PENDING = 1,
+    HA_GATEWAY_POLL_SLOW_DOWN = 2,
+    HA_GATEWAY_POLL_ERROR = -1
+};
+
+/*
+ * An authorized poll has already persisted the credential inside the trusted
+ * runtime. retry_interval_seconds is zero unless the server supplied a new
+ * interval for pending/slow-down.
+ */
+typedef void (*ha_gateway_poll_callback)(
+    void *context,
+    int32_t status,
+    int32_t retry_interval_seconds,
+    const uint8_t *error,
+    size_t error_length
+);
+
+typedef void (*ha_gateway_result_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *error,
+    size_t error_length
+);
 /*
  * An image submitted for a native turn. The runtime copies both buffers
  * before this call returns; the caller retains ownership of them.
@@ -377,6 +446,36 @@ int32_t ha_account_oauth_poll(
     int32_t poll_interval_seconds,
     int32_t expires_in_seconds,
     ha_account_result_callback callback,
+    void *context
+);
+
+/*
+ * Gateway inputs are copied before return. Immediate return is 0 when the
+ * worker was accepted, 1 for a null callback, or 2 for a null pointer paired
+ * with a nonzero length. Semantic and network failures arrive asynchronously.
+ */
+int32_t ha_gateway_status(
+    ha_gateway_status_callback callback,
+    void *context
+);
+int32_t ha_gateway_connect_start(
+    const uint8_t *base_url,
+    size_t base_url_length,
+    const uint8_t *client_name,
+    size_t client_name_length,
+    ha_gateway_connect_start_callback callback,
+    void *context
+);
+int32_t ha_gateway_connect_poll(
+    const uint8_t *base_url,
+    size_t base_url_length,
+    const uint8_t *device_code,
+    size_t device_code_length,
+    ha_gateway_poll_callback callback,
+    void *context
+);
+int32_t ha_gateway_disconnect(
+    ha_gateway_result_callback callback,
     void *context
 );
 int32_t ha_account_api_key_connect(

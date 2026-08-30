@@ -48,6 +48,12 @@ import Agent.CLI.Dialects
       filterGhciTools )
 import Agent.CLI.Error ( formatApiErrorAt, formatException )
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
+import Agent.CLI.GatewayModels
+    ( catalogUsesGateway
+    , gatewayDefaultModelId
+    , isGatewayModelId
+    , loadGatewayModelCatalogAt
+    )
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
     ( CtrlCDecision(..),
@@ -73,8 +79,7 @@ import Agent.CLI.ModelConfig
       ResponsesConnection(..),
       builtinConnectionId,
       catalogConnection,
-      catalogContextWindowForTransport,
-      loadModelCatalogAt )
+      catalogContextWindowForTransport )
 import Agent.CLI.Models
     ( defaultModelFor,
       rawModelOption,
@@ -286,6 +291,7 @@ import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..),
       closeCodexConn,
       codexConnTurnState,
+      isGatewayWebSocketCredential,
       resetCodexTurnState,
       withCodexWsCredential,
       withCodexWsWithProvider )
@@ -1059,7 +1065,7 @@ runAgentInitializedWithLock
         concurrently
             (loadProjectSettings projectRoot)
             (concurrently
-                (loadModelCatalogAt home cwd)
+                (loadGatewayModelCatalogAt home cwd)
                 (detectGitBranch cwd))
     catalog <- either
         (startupDie startup . Text.unpack)
@@ -1067,13 +1073,17 @@ runAgentInitializedWithLock
         catalogResult
     setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
-    let transitionTarget = (.transitionTarget) <$> transition
+    let gatewayMode = catalogUsesGateway catalog
+        transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         unavailableProviders =
             maybe [] (.transitionUnavailableProviders) transition
         configuredOptionTarget =
             (.modelTarget)
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
+        gatewayDefaultTarget =
+            (.modelTarget)
+                <$> resolveConfiguredModel catalog gatewayDefaultModelId
         savedTarget provider connection model transport dialect =
             case resolveConfiguredModel catalog model of
                 Just option
@@ -1094,10 +1104,14 @@ runAgentInitializedWithLock
                                 <> connection <> "/" <> model
                                 <> " is not present in ~/.haskell-agent/models.json"
         resumedTargetResult
+            | gatewayMode =
+                Right Nothing
             | isJust transitionTarget || isJust options.optModel =
                 Right Nothing
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
+            Just meta
+                | isGatewayModelId meta.metaModel -> Right Nothing
             Just meta ->
                 Just <$> savedTarget
                     meta.metaProvider
@@ -1106,6 +1120,8 @@ runAgentInitializedWithLock
                     meta.metaTransportModel
                     meta.metaDialect
         projectTargetResult
+            | gatewayMode =
+                Right Nothing
             | isJust transitionTarget
                 || isJust options.optModel
                 || isJust resumed =
@@ -1114,24 +1130,59 @@ runAgentInitializedWithLock
             Nothing -> Right Nothing
             Just remembered ->
                 let target = remembered.projectModelTarget
-                in
-                Just <$> savedTarget
-                    target.targetProvider
-                    target.targetConnectionId
-                    target.targetModelId
-                    (Just target.targetWireModelId)
-                    target.targetDialect
+                in if isGatewayModelId target.targetModelId
+                    then Right Nothing
+                    else
+                        Just <$> savedTarget
+                            target.targetProvider
+                            target.targetConnectionId
+                            target.targetModelId
+                            (Just target.targetWireModelId)
+                            target.targetDialect
+    when
+        ( gatewayMode
+            && isJust options.optModel
+            && isNothing configuredOptionTarget
+        ) $
+        startupDie startup
+            "the connected gateway accepts router-default, router-codex, or \
+            \router-grok; direct provider model ids are unavailable"
+    when
+        ( not gatewayMode
+            && maybe False isGatewayModelId options.optModel
+        ) $
+        startupDie startup
+            "gateway router models require an active gateway connection"
+    when
+        ( not gatewayMode
+            && maybe
+                False
+                (isGatewayModelId . (.targetModelId))
+                transitionTarget
+        ) $
+        startupDie startup
+            "the requested gateway transition is unavailable after disconnect"
     resumedTarget <-
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
         either (startupDie startup . Text.unpack) pure projectTargetResult
-    let targetHint =
-            transitionTarget
-                <|> configuredOptionTarget
-                <|> resumedTarget
-                <|> if isNothing options.optModel
-                    then projectTarget
+    let gatewayTarget candidate =
+            candidate >>= \target ->
+                if isGatewayModelId target.targetModelId
+                    then Just target
                     else Nothing
+        targetHint
+            | gatewayMode =
+                gatewayTarget transitionTarget
+                    <|> configuredOptionTarget
+                    <|> gatewayDefaultTarget
+            | otherwise =
+                transitionTarget
+                    <|> configuredOptionTarget
+                    <|> resumedTarget
+                    <|> if isNothing options.optModel
+                        then projectTarget
+                        else Nothing
         requestedProvider =
             (.targetProvider) <$> targetHint
                 <|> options.optProvider
@@ -1146,7 +1197,8 @@ runAgentInitializedWithLock
                     (connection.connectionId, responses)
                 BuiltinConnection _ -> Nothing
         checkStartupUsageInBackground =
-            isJust fullscreen
+            not gatewayMode
+                && isJust fullscreen
                 && isNothing transition
                 && isNothing resumed
                 && isNothing options.optProvider
@@ -1200,6 +1252,8 @@ runAgentInitializedWithLock
     (loaded, startupAccountIds) <- case customResponses of
         Just _ -> pure (initialLoaded, Nothing)
         Nothing
+            | gatewayMode ->
+                pure (initialLoaded, Nothing)
             | Just active <- transition
             , Just selectionId <- active.transitionAccountSelectionId ->
                 pure
@@ -1267,13 +1321,15 @@ runAgentInitializedWithLock
                                             ))
     case (transitionTarget, resumed) of
         (Just target, _)
-            | loaded.loadedProvider /= target.targetProvider ->
+            | not gatewayMode
+            , loaded.loadedProvider /= target.targetProvider ->
                 startupDie startup $ "provider transition requested "
                     <> Text.unpack (providerSlug target.targetProvider)
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         (Nothing, Just (meta, _))
-            | loaded.loadedProvider /= meta.metaProvider ->
+            | not gatewayMode
+            , loaded.loadedProvider /= meta.metaProvider ->
                 startupDie startup $ "session provider is "
                     <> Text.unpack (providerSlug meta.metaProvider)
                     <> " but auth resolved "
@@ -1494,14 +1550,7 @@ runAgentInitializedWithLock
             (maybe fallbackModel (.targetModelId) targetHint)
             options.optModel
         rawTarget = (rawModelOption provider model).modelTarget
-        inferredTarget0 =
-            fromMaybe rawTarget $
-                transitionTarget
-                    <|> configuredOptionTarget
-                    <|> resumedTarget
-                    <|> if isNothing options.optModel
-                        then projectTarget
-                        else Nothing
+        inferredTarget0 = fromMaybe rawTarget targetHint
         transportModel = case customResponses of
             Just _ ->
                 \name ->
@@ -2411,12 +2460,16 @@ runAgentInitializedWithLock
                                     Just ctx ->
                                         setSubagentRunner ctx.multiRegistry $
                                             runCodexSubagent
+                                                (isGatewayWebSocketCredential
+                                                    credential)
                                                 subagentRuntime
                                                 selectableTokenProvider
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let (compactSender, lockedBackend) =
                                         lockedOpenAiSession
+                                            (isGatewayWebSocketCredential
+                                                credential)
                                             options.optCompactThreshold
                                             options.optShowRawReasoning
                                             wsLock
@@ -2564,7 +2617,8 @@ runAgentInitializedWithLock
                                 startupUnavailable
                                 (Just tokenProvider)
                                 loaded.loadedOpenAiPool
-                                (if isJust customGenericOptions
+                                (if gatewayMode
+                                    || isJust customGenericOptions
                                     then Nothing
                                     else Just selectHttpAccount)
                                 compactRunner)

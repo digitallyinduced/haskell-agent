@@ -53,7 +53,10 @@ data OpenAiPersistentConnection
 -- its continuation because the active WebSocket is not multiplexed and
 -- transcript mutation must not interleave between those two requests.
 lockedOpenAiSession
-    :: Maybe Int
+    :: Bool
+    -- ^ When true, every model and compaction request must remain on the
+    -- gateway WebSocket; direct provider HTTP fallback is forbidden.
+    -> Maybe Int
     -> Bool
     -> MVar ()
     -> IORef Bool
@@ -64,7 +67,7 @@ lockedOpenAiSession
     -> (TokenUsage -> IO ())
     -> IO ()
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession compactThreshold showRawReasoning wsLock fallbackActive
+lockedOpenAiSession gatewayOnly compactThreshold showRawReasoning wsLock fallbackActive
         provider activeConnection getParams contextTokens
         recordCompactionUsage onCompacted =
     let sendResponse request previousResponseId onEvent = do
@@ -122,20 +125,24 @@ lockedOpenAiSession compactThreshold showRawReasoning wsLock fallbackActive
                 getParams
         baseBackend =
             withConnectionRecovery $
-                openAiBackendWithTransportFallback
-                    fallbackActive
-                    websocketBackend
-                    httpFallbackBackend
+                if gatewayOnly
+                    then websocketBackend
+                    else
+                        openAiBackendWithTransportFallback
+                            fallbackActive
+                            websocketBackend
+                            httpFallbackBackend
         compactSender request = do
             active <- readIORef fallbackActive
-            if active
+            if active && not gatewayOnly
                 then sendHttpCompaction request
                 else do
                     result <-
                         sendAuxiliary request Nothing (const (pure ()))
                     case result of
                         Left err
-                            | isOpenAiWebSocketTransportFailure err -> do
+                            | not gatewayOnly
+                            , isOpenAiWebSocketTransportFailure err -> do
                                 writeIORef fallbackActive True
                                 sendHttpCompaction request
                         _ -> pure result

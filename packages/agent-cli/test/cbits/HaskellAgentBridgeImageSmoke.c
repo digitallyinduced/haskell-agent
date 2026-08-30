@@ -44,6 +44,47 @@ int ha_image_attachment_abi_smoke(void) {
     return 0;
 }
 
+/*
+ * Compile the four gateway function/callback signatures as a native consumer
+ * and exercise their synchronous argument validation without network or
+ * credential-store access.
+ */
+int ha_gateway_abi_smoke(void) {
+    ha_gateway_status_callback status_callback = NULL;
+    ha_gateway_connect_start_callback start_callback = NULL;
+    ha_gateway_poll_callback poll_callback = NULL;
+    ha_gateway_result_callback result_callback = NULL;
+    const uint8_t base_url[] = "https://platform.digitallyinduced.com";
+    const uint8_t client_name[] = "native-smoke";
+    const uint8_t device_code[] = "device-code";
+
+    if (HA_GATEWAY_CONNECTED != 0 || HA_GATEWAY_DISCONNECTED != 1
+            || HA_GATEWAY_ERROR != -1 || HA_GATEWAY_POLL_AUTHORIZED != 0
+            || HA_GATEWAY_POLL_PENDING != 1 || HA_GATEWAY_POLL_SLOW_DOWN != 2
+            || HA_GATEWAY_POLL_ERROR != -1) {
+        return 20;
+    }
+    if (ha_gateway_status(status_callback, NULL) != 1) {
+        return 21;
+    }
+    if (ha_gateway_connect_start(
+            base_url, sizeof(base_url) - 1,
+            client_name, sizeof(client_name) - 1,
+            start_callback, NULL) != 1) {
+        return 22;
+    }
+    if (ha_gateway_connect_poll(
+            base_url, sizeof(base_url) - 1,
+            device_code, sizeof(device_code) - 1,
+            poll_callback, NULL) != 1) {
+        return 23;
+    }
+    if (ha_gateway_disconnect(result_callback, NULL) != 1) {
+        return 24;
+    }
+    return 0;
+}
+
 static void image_stage_callback(void *context, const uint8_t *bytes,
                                  size_t length) {
     (void)context;

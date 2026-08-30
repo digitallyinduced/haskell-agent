@@ -23,6 +23,7 @@ module Agent.CLI.Runtime.Internal
 
 import Agent.CLI.AgentSessions
     ( closeSessionThreadManager, newSessionThreadManager )
+import Agent.CLI.GatewayClient (runGatewayCommand)
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
 import Agent.CLI.McpStatus
@@ -129,6 +130,7 @@ devMainResume resumeId = do
             color <- resolveColor stderr
             runLoginManager color
             pure DevQuit
+        Right (Gateway command) -> runGatewayCommand command >> pure DevQuit
         Right (ListSessions outputFormat) ->
             runListSessions outputFormat >> pure DevQuit
         Right (ShowSession sessionId outputFormat pageRequest) ->
@@ -153,6 +155,7 @@ run = do
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
+        Right (Gateway command) -> runGatewayCommand command
         Right (ListSessions outputFormat) ->
             runListSessions outputFormat
         Right (ShowSession sessionId outputFormat pageRequest) ->
