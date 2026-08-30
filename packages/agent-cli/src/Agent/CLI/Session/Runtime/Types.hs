@@ -22,6 +22,7 @@ import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary
     , CompactOutcome
     , CompactionInstall
+    , OccupancySnapshot
     )
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Interrupt (InterruptState)
@@ -52,6 +53,7 @@ import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
     ( Backend
+    , ImageAttachment
     , TokenUsage
     , TurnInput
     )
@@ -109,6 +111,8 @@ data SessionRequest = SessionRequest
     , dialect :: !Dialect
     , policy :: !ApprovalPolicy
     , allTools :: ![AppTool]
+    , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())
+    , clearImageGenerationHistory :: !(IO ())
     , suspendGhci :: !(IO ())
     , grokRuntime :: !(Maybe GrokRuntimeControl)
     , mcpRegistrations :: ![MCP.McpToolRegistration]
@@ -128,6 +132,8 @@ data SessionRequest = SessionRequest
     , startupUnavailable :: !(Maybe (STM ApiError))
     , paramsRef :: !(IORef ResponseCreateParams)
     , conversationRef :: !(IORef LiveConversation)
+    , contextOccupancyRef :: !(IORef (Maybe OccupancySnapshot))
+    , currentContextWindow :: !(IO (Maybe Int))
     , automaticCompactionRef
         :: !(IORef (Maybe AutomaticCompactionBoundary))
     , needsInitialContext :: !Bool

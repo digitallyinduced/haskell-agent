@@ -223,12 +223,38 @@ parseSlash catalog raw line = case Text.words line of
                         Text.strip (Text.drop (Text.length command) line)
                 in ReplPlan
                     (if Text.null description then Nothing else Just description)
+            "view-plan" ->
+                if null args
+                    then ReplViewPlan
+                    else ReplCommandError "usage: /view-plan"
+            "queue" ->
+                if null args
+                    then ReplQueue
+                    else ReplCommandError "usage: /queue"
+            "transcript" ->
+                if null args
+                    then ReplTranscript
+                    else ReplCommandError "usage: /transcript"
+            "edit-prompt" ->
+                if null args
+                    then ReplEditPrompt
+                    else ReplCommandError "usage: /edit-prompt"
+            "context" ->
+                if null args
+                    then ReplContext
+                    else ReplCommandError "usage: /context"
             "btw" ->
                 let question =
                         Text.strip (Text.drop (Text.length command) line)
                 in if Text.null question
                     then ReplCommandError "usage: /btw <QUESTION>"
                     else ReplBtw question
+            "meta" ->
+                let request =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null request
+                    then ReplCommandError "usage: /meta <REQUEST>"
+                    else ReplMetaConsole request
             "recap" ->
                 if null args
                     then ReplRecap
@@ -245,6 +271,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplShowSessionInfo
                     else ReplCommandError "usage: /session-info"
+            "desktop" ->
+                if null args
+                    then ReplDesktop
+                    else ReplCommandError "usage: /desktop"
             "afk" -> case args of
                 [] -> ReplAfk Nothing
                 [target] -> ReplAfk (Just target)

@@ -1,44 +1,51 @@
 -- | Parent and child tool-approval policy for interactive CLI sessions.
 module Agent.CLI.Approval
-    ( ApprovalNotice(..)
+    ( ApprovalAction(..)
+    , ApprovalFacts(..)
+    , ApprovalNotice(..)
+    , ApprovalPlan(..)
     , approveToolDecision
     , approveToolDecisionClassified
     , approveToolDecisionWith
     , approveToolDecisionWithReporter
     , approveToolDecisionWithReporterAndPersistence
     , approveToolDecisionWithReporterAndPersistenceClassified
+    , approveFilesystemRootAccess
     , childApprove
+    , planApproval
+    , resolveApprovalPrompt
     , toggleAlwaysApprove
     ) where
 
+import Agent.CLI.Approval.Decision
+    ( ApprovalAction(..)
+    , ApprovalFacts(..)
+    , ApprovalNotice(..)
+    , ApprovalPlan(..)
+    , planApproval
+    , resolveApprovalPrompt
+    )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Permission
-    ( PermissionChoice(..)
+    ( PermissionChoice
     , promptPermission
     )
-import System.OsPath (OsPath)
 import Agent.CLI.Project (saveProjectAutoApprove)
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Style
-    ( glyphOk
-    , glyphWarn
-    , roleSuccess
+    ( roleSuccess
     , roleWarn
     )
 import Agent.CLI.Terminal (resolveColor)
-import Agent.JsonText (jsonTextFieldDefault)
-import Agent.OsPath (fromText, toText)
+import Agent.OsPath (toText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
     )
-import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
-    , isPlanFileEditTarget
     , isPlanModeActive
     , planFilePath
-    , planModeBlockedEditMessage
     )
 import Agent.Tools.Types
     ( ToolRegistry
@@ -54,13 +61,17 @@ import Data.IORef
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
 import System.IO (stderr)
+import System.OsPath (OsPath)
 
-data ApprovalNotice
-    = ApprovalWarning !Text
-    | ApprovalSuccess !Text
-    deriving (Eq, Show)
+-- | Auto-approve access to additional filesystem roots while yolo mode is
+-- active. Read the live policy so toggling yolo during a session takes effect
+-- for subsequent root requests.
+approveFilesystemRootAccess :: IORef ApprovalPolicy -> IO Bool -> IO Bool
+approveFilesystemRootAccess policyRef requestAccess =
+    readIORef policyRef >>= \case
+        ApproveAll -> pure True
+        _ -> requestAccess
 
 approveToolDecision
     :: IORef ApprovalPolicy
@@ -185,101 +196,49 @@ approveToolDecisionWithReporterAndPersistenceClassified
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
-    let toolName = canonicalToolName call.name
-    -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
-    case shellCommandBlocked toolName call.arguments of
-        Just msg -> do
-            report (ApprovalWarning (glyphWarn <> msg))
-            pure (Left msg)
-        Nothing -> do
-            classified <- classifyReadOnly call
-            readOnly <- case classified of
+    let initialFacts = ApprovalFacts
+            { policy
+            , planActive
+            , planPath
+            , readOnly = Nothing
+            , allowedForSession = Nothing
+            , call
+            }
+    interpret initialFacts (planApproval initialFacts)
+  where
+    interpret facts = \case
+        CompleteApproval result actions -> do
+            mapM_ runAction actions
+            pure result
+        NeedReadOnlyClassification -> do
+            readOnly <- classifyReadOnly call >>= \case
                 Just value -> pure value
                 Nothing -> case lookupRegisteredTool call.name tools of
                     Nothing -> pure False
                     Just tool -> toolAllowsWithoutPrompt tool call
-            -- Plan mode hard-denies writes even under yolo. The dedicated
-            -- write_plan tool and Grok's path-locked plan.md edit are the only
-            -- mutations allowed. Shell tools are blocked entirely because an
-            -- arbitrary shell script cannot be proven read-only.
-            if planModeBlocksCall planActive planPath readOnly call
-                then do
-                    let msg = planModeBlockedEditMessage planPath
-                    report (ApprovalWarning msg)
-                    pure (Left msg)
-                else do
-                    -- plan.md edits are auto-approved while plan mode is active.
-                    if isPlanFileWrite planActive planPath call
-                        then pure (Right True)
-                        else do
-                            allowed <- readIORef allowedToolsRef
-                            if Set.member toolName allowed
-                                then pure (Right True)
-                                else case policy of
-                                    ApproveAll -> pure (Right True)
-                                    DenyMutating -> pure (Right readOnly)
-                                    PromptMutating
-                                        | readOnly -> pure (Right True)
-                                        | otherwise -> do
-                                            requestPermission call >>= \case
-                                                Nothing -> pure (Right False)
-                                                Just PermissionAllowOnce ->
-                                                    pure (Right True)
-                                                Just PermissionAllowAll -> do
-                                                    atomicModifyIORef' policyRef $
-                                                        const (ApproveAll, ())
-                                                    persistAlwaysApprove
-                                                    report $
-                                                        ApprovalSuccess
-                                                            (glyphOk
-                                                                <> "auto-approve on \
-                                                                   \(saved for project)")
-                                                    pure (Right True)
-                                                Just PermissionAllowTool -> do
-                                                    modifyIORef' allowedToolsRef
-                                                        (Set.insert toolName)
-                                                    report $
-                                                        ApprovalSuccess
-                                                            (glyphOk
-                                                                <> "always allow "
-                                                                <> call.name
-                                                                <> " this session")
-                                                    pure (Right True)
-                                                Just PermissionDeny ->
-                                                    pure (Right False)
+            let nextFacts = facts { readOnly = Just readOnly }
+            interpret nextFacts (planApproval nextFacts)
+        NeedSessionAllowance -> do
+            allowed <- readIORef allowedToolsRef
+            let toolName = canonicalToolName call.name
+                nextFacts = facts
+                    { allowedForSession =
+                        Just (Set.member toolName allowed)
+                    }
+            interpret nextFacts (planApproval nextFacts)
+        NeedPermissionPrompt -> do
+            choice <- requestPermission call
+            interpret facts (resolveApprovalPrompt call choice)
 
-planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool
-planModeBlocksCall active planPath readOnly call
-    | not active = False
-    | name == "apply_patch" = True
-    | name == "write_plan" = False
-    | name == "exit_plan_mode" = False
-    | name == "search_replace" =
-        let target = jsonTextFieldDefault "file_path" call.arguments
-        in Text.null target
-            || not (isPlanFileEditTarget planPath (fromText target))
-    | name `elem` ["shell_command", "run_terminal_cmd"] =
-        True
-    | name == "write_stdin" = True
-    | name `elem`
-        [ "spawn_agent", "followup_task", "create_agent_session"
-        , "send_agent_session_message"
-        ] = True
-    | otherwise = not readOnly
-  where
-    name = canonicalToolName call.name
-
-isPlanFileWrite :: Bool -> OsPath -> ToolCall -> Bool
-isPlanFileWrite active planPath call
-    | not active = False
-    | name == "write_plan" = True
-    | name == "search_replace" =
-        let target = jsonTextFieldDefault "file_path" call.arguments
-        in not (Text.null target)
-            && isPlanFileEditTarget planPath (fromText target)
-    | otherwise = False
-  where
-    name = canonicalToolName call.name
+    runAction = \case
+        SetApprovalPolicy next ->
+            atomicModifyIORef' policyRef (const (next, ()))
+        PersistProjectAutoApprove ->
+            persistAlwaysApprove
+        RememberToolForSession toolName ->
+            modifyIORef' allowedToolsRef (Set.insert toolName)
+        ReportApprovalNotice notice ->
+            report notice
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO Text
 toggleAlwaysApprove policyRef projectRoot = do

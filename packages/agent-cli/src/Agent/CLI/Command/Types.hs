@@ -30,14 +30,24 @@ data ReplAction
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
+    | ReplViewPlan
+    | ReplQueue
+    | ReplTranscript
+    | ReplEditPrompt
+    | ReplContext
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
+    | ReplMetaConsole Text
+    -- ^ Interpret a natural-language harness configuration request without
+    -- adding it to the coding conversation.
     | ReplRecap
     -- ^ Generate a display-only "where was I" recap of the current session.
     | ReplRetry
     -- ^ Retry the last failed turn with its original attachments.
     | ReplShowSession
     | ReplShowSessionInfo
+    | ReplDesktop
+    -- ^ Open the current persisted conversation in the native macOS app.
     | ReplAfk (Maybe Text)
     -- ^ Hand the active session to tmux, optionally on @host:path@.
     | ReplWorktree

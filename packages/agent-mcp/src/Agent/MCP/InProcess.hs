@@ -235,6 +235,7 @@ hasJsonSchema = \case
 isStaticallyReadOnly :: ApprovalRule -> Bool
 isStaticallyReadOnly = \case
     AlwaysReadOnly -> True
+    AlwaysAllowed -> False
     AlwaysPrompt -> False
     ClassifyReadOnly _ -> False
 

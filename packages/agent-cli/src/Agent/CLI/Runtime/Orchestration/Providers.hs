@@ -546,6 +546,7 @@ runAgentProviders
                                             (Just tokenProvider)
                                             loaded.loadedOpenAiPool
                                             selectAccount
+                                            (currentModelContextWindow transportModel)
                                             compactRunner)
                                         SessionBackend
                                             { backend = activeBackend
@@ -600,7 +601,6 @@ runAgentProviders
                                     getParams
                                     occupancy
                                     backend
-                        xaiOccupancy <- newIORef Nothing
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -610,7 +610,7 @@ runAgentProviders
                                         ctx.multiSendToRoot
                                         (\childParams ->
                                             protectXaiOverflow
-                                                xaiOccupancy
+                                                contextTokensRef
                                                 (pure childParams)
                                                 (xaiBackend xaiOptions tokenProvider
                                                     (pure childParams)))
@@ -619,7 +619,7 @@ runAgentProviders
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         protectXaiOverflow
-                                            xaiOccupancy
+                                            contextTokensRef
                                             (readIORef paramsRef)
                                             (xaiBackend xaiOptions tokenProvider
                                                 (readIORef paramsRef))
@@ -658,6 +658,8 @@ runAgentProviders
                                 (if isJust customGenericOptions
                                     then Nothing
                                     else Just selectHttpAccount)
+                                (Just . xaiContextWindow
+                                    <$> readIORef paramsRef)
                                 compactRunner)
                             SessionBackend
                                 { backend = activeBackend
@@ -732,6 +734,7 @@ runAgentProviders
                                     Nothing
                                     Nothing
                                     Nothing
+                                    (Just <$> claudeContextWindow)
                                     compactRunner
                         claudeMcpServer <-
                             case MCP.createInProcessMcpServer
@@ -832,7 +835,6 @@ runAgentProviders
                                         }
                                 pure result
                     OpenRouterProvider -> do
-                        openRouterOccupancy <- newIORef Nothing
                         let openRouterContextWindow =
                                 contextWindowForParams transportModel 1_048_576
                             makeBackend params =
@@ -870,7 +872,7 @@ runAgentProviders
                                         ctx.multiSendToRoot
                                         (\childParams ->
                                             protectOverflow
-                                                openRouterOccupancy
+                                                contextTokensRef
                                                 (pure childParams)
                                                 (makeBackend
                                                     (pure childParams)))
@@ -879,7 +881,7 @@ runAgentProviders
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         protectOverflow
-                                            openRouterOccupancy
+                                            contextTokensRef
                                             (readIORef paramsRef)
                                             (makeBackend
                                                 (readIORef paramsRef))
@@ -934,6 +936,8 @@ runAgentProviders
                                 (Just tokenProvider)
                                 loaded.loadedOpenAiPool
                                 (Just selectHttpAccount)
+                                (Just . openRouterContextWindow
+                                    <$> readIORef paramsRef)
                                 compactRunner)
                             SessionBackend
                                 { backend = activeBackend

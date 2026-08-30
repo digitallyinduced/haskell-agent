@@ -68,10 +68,12 @@ library
                     , Agent.OpenAI.Models.Profile
                     , Agent.OpenAI.Models.Types
                     , Agent.OpenAI.WebSocketClient
+                    , Agent.OpenAI.Transcription
                     , Agent.OpenAI.LoopBackend
                     , Agent.OpenAI.CompactClient
                     , Agent.OpenAI.Compaction
                     , Agent.OpenAI.ToolDSL
+                    , Agent.OpenAI.ImageGeneration
     other-modules:    Agent.OpenAI.Compaction.Commands
                     , Agent.OpenAI.Compaction.Request
                     , Agent.OpenAI.Models.Types.Enums
@@ -85,6 +87,8 @@ library
                     , agent-responses-types >= 0.1 && < 0.2
                     , text
                     , bytestring
+                    , base64-bytestring
+                    , async
                     , aeson                 >= 2.0
                     , http-client
                     , http-conduit
@@ -127,6 +131,7 @@ test-suite agent-openai-test
                     , Agent.OpenAI.CredentialSpec
                     , Agent.OpenAI.ErrorSpec
                     , Agent.OpenAI.FunctionalSpec
+                    , Agent.OpenAI.ImageGenerationSpec
                     , Agent.OpenAI.LoginSpec
                     , Agent.OpenAI.LoopBackendSpec
                     , Agent.OpenAI.ModelsClientSpec
@@ -134,6 +139,7 @@ test-suite agent-openai-test
                     , Agent.OpenAI.ModelsTypesSpec
                     , Agent.OpenAI.CompactionSpec
                     , Agent.OpenAI.ToolDSLSpec
+                    , Agent.OpenAI.TranscriptionSpec
                     , Agent.OpenAI.UsageSpec
                     , Agent.OpenAI.WebSocketClientSpec
     ghc-options:      -threaded
@@ -159,5 +165,7 @@ test-suite agent-openai-test
                     , unix
                     , case-insensitive
                     , http-types
+                    , network
+                    , safe-exceptions
                     , wai
                     , warp

@@ -78,6 +78,9 @@ data ToolSchema
 -- | Whether a call may run without generic user approval.
 data ApprovalRule
     = AlwaysReadOnly
+    -- | Host-authorized effect that is intentionally exempt from the generic
+    -- mutation prompt (for example a paid provider capability).
+    | AlwaysAllowed
     | AlwaysPrompt
     | ClassifyReadOnly !(ToolCall -> IO Bool)
 
@@ -404,5 +407,6 @@ appToolHandlers = map (.appToolHandler)
 toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
 toolAllowsWithoutPrompt tool call = case tool.appToolApproval of
     AlwaysReadOnly -> pure True
+    AlwaysAllowed -> pure True
     AlwaysPrompt -> pure False
     ClassifyReadOnly classify -> classify call

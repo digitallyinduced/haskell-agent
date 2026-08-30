@@ -58,7 +58,12 @@ import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..), ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallKind(..)
+    , ToolCallResult(..)
+    , ToolResultImage(..)
+    )
 import Test.Hspec
 
 spec :: Spec
@@ -119,6 +124,34 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                             any isInputFile ps && any isInputImage ps
                     _ -> expectationFailure "expected multimodal message parts"
             other -> expectationFailure ("unexpected items: " <> show other)
+
+    it "encodes rich function outputs as image content followed by the hint" do
+        case toolResultToItem ToolCallResultWithImages
+                { callId = "image-call"
+                , output = "saved under generated_images"
+                , callKind = FunctionCallKind
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/png;base64,AA=="
+                        , imageDetail = Just "high"
+                        }
+                    ]
+                } of
+            FunctionCallOutputItem output ->
+                Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                    [ InputImagePart
+                        { detail = Just "high"
+                        , fileId = Nothing
+                        , imageUrl = Just "data:image/png;base64,AA=="
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    , InputTextPart
+                        { text = "saved under generated_images"
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    ]
+            other -> expectationFailure
+                ("expected function output, got " <> show other)
 
     it "reacquires a credential after an authentication rejection" do
         attempts <- newIORef []

@@ -109,6 +109,12 @@ spec = do
             parseReplLine "/status now"
                 `shouldBe` ReplCommandError "usage: /session-info"
 
+        it "opens the current conversation in the desktop app" do
+            parseReplLine "/desktop" `shouldBe` ReplDesktop
+            parseReplLine "  /Desktop  " `shouldBe` ReplDesktop
+            parseReplLine "/desktop now"
+                `shouldBe` ReplCommandError "usage: /desktop"
+
         it "hands the session to local or remote tmux" do
             parseReplLine "/afk" `shouldBe` ReplAfk Nothing
             parseReplLine "/afk office-builder:~/haskell-agent"
@@ -256,6 +262,26 @@ spec = do
             parseReplLine "/plan   keep  spaces"
                 `shouldBe` ReplPlan (Just "keep  spaces")
 
+        it "parses session inspection and prompt editing commands" do
+            parseReplLine "/view-plan" `shouldBe` ReplViewPlan
+            parseReplLine "/show-plan" `shouldBe` ReplViewPlan
+            parseReplLine "/plan-view" `shouldBe` ReplViewPlan
+            parseReplLine "/queue" `shouldBe` ReplQueue
+            parseReplLine "/transcript" `shouldBe` ReplTranscript
+            parseReplLine "/log" `shouldBe` ReplTranscript
+            parseReplLine "/edit-prompt" `shouldBe` ReplEditPrompt
+            parseReplLine "/context" `shouldBe` ReplContext
+            parseReplLine "/view-plan now"
+                `shouldBe` ReplCommandError "usage: /view-plan"
+            parseReplLine "/queue now"
+                `shouldBe` ReplCommandError "usage: /queue"
+            parseReplLine "/transcript now"
+                `shouldBe` ReplCommandError "usage: /transcript"
+            parseReplLine "/edit-prompt now"
+                `shouldBe` ReplCommandError "usage: /edit-prompt"
+            parseReplLine "/context now"
+                `shouldBe` ReplCommandError "usage: /context"
+
         it "asks a side question with the full suffix" do
             parseReplLine "/btw why this file?"
                 `shouldBe` ReplBtw "why this file?"
@@ -263,6 +289,14 @@ spec = do
                 `shouldBe` ReplBtw "keep  spaces"
             parseReplLine "/btw"
                 `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
+
+        it "opens the portable Meta Console with the full request" do
+            parseReplLine "/meta connect my Grok account"
+                `shouldBe` ReplMetaConsole "connect my Grok account"
+            parseReplLine "/CONFIGURE   add  this MCP"
+                `shouldBe` ReplMetaConsole "add  this MCP"
+            parseReplLine "/meta"
+                `shouldBe` ReplCommandError "usage: /meta <REQUEST>"
 
         it "requests a session recap" do
             parseReplLine "/recap" `shouldBe` ReplRecap
@@ -303,11 +337,18 @@ spec = do
                     , "effort"
                     , "fast"
                     , "plan"
+                    , "view-plan"
+                    , "queue"
+                    , "transcript"
+                    , "edit-prompt"
+                    , "context"
                     , "btw"
+                    , "meta"
                     , "recap"
                     , "retry"
                     , "session"
                     , "session-info"
+                    , "desktop"
                     , "afk"
                     , "worktree"
                     , "rename"
@@ -355,8 +396,16 @@ spec = do
                 `shouldBe` Just "mcp"
             fmap (.slashName) (lookupSlashCommand "/status")
                 `shouldBe` Just "session-info"
+            fmap (.slashName) (lookupSlashCommand "/configure")
+                `shouldBe` Just "meta"
             fmap (.slashName) (lookupSlashCommand "/exit")
                 `shouldBe` Just "quit"
+            fmap (.slashName) (lookupSlashCommand "/show-plan")
+                `shouldBe` Just "view-plan"
+            fmap (.slashName) (lookupSlashCommand "/plan-view")
+                `shouldBe` Just "view-plan"
+            fmap (.slashName) (lookupSlashCommand "/log")
+                `shouldBe` Just "transcript"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
@@ -651,10 +700,10 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /skills [reload]"
 
         it "adds skills to completion, the live menu, and help" do
-            slashCompletionCandidatesWithSkills skills "" "/de"
+            slashCompletionCandidatesWithSkills skills "" "/depl"
                 `shouldBe` ["/deploy"]
             fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
-                (slashMenuForWithSkills skills "/dep" 4)
+                (slashMenuForWithSkills skills "/depl" 5)
                 `shouldBe` Just ["/deploy"]
             let help = formatSlashHelpWithSkills False skills (Just "deploy")
             Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)

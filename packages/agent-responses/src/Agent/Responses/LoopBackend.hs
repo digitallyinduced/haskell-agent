@@ -27,7 +27,7 @@ import Agent.InterAgentMessage
     , renderInterAgentMessage
     , renderInterAgentMessageHeader
     )
-import Agent.Json (rawJsonFromEncoding)
+import Agent.Json (RawJson, rawJsonFromEncoding)
 import Agent.JsonText (jsonTextFieldPartial)
 import Agent.Loop
     ( Backend(..)
@@ -54,7 +54,9 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolResultImage(..)
     , canonicalToolName
+    , toolCallResultImages
     )
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
@@ -385,7 +387,7 @@ toolResultToItem result = case result.callKind of
         , name = Nothing
         , namespace = Nothing
         , provider = Nothing
-        , output = rawJsonFromEncoding (Aeson.toEncoding result.output)
+        , output = toolResultOutput result
         , status = Nothing
 
         }
@@ -393,7 +395,7 @@ toolResultToItem result = case result.callKind of
         { itemId = Nothing
         , callId = result.callId
         , name = Nothing
-        , output = rawJsonFromEncoding (Aeson.toEncoding result.output)
+        , output = toolResultOutput result
         , status = Nothing
         }
     ComputerCallKind -> case Hermes.decodeEither computerCallOutputDecoder
@@ -407,6 +409,25 @@ toolResultToItem result = case result.callKind of
             , acknowledgedChecks = []
             , computerOutputStatus = Nothing
             , computerOutputExtra = KeyMap.empty
+            }
+
+toolResultOutput :: ToolCallResult -> RawJson
+toolResultOutput result =
+    case toolCallResultImages result of
+        [] -> rawJsonFromEncoding (Aeson.toEncoding result.output)
+        images ->
+            rawJsonFromEncoding . Aeson.toEncoding $
+                map imagePart images
+                    <> [ InputTextPart result.output Nothing
+                       | not (Text.null (Text.strip result.output))
+                       ]
+  where
+    imagePart image =
+        InputImagePart
+            { detail = image.imageDetail
+            , fileId = Nothing
+            , imageUrl = Just image.imageUrl
+            , promptCacheBreakpoint = Nothing
             }
 
 transparentPixelDataUrl :: Text

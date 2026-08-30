@@ -69,6 +69,10 @@ withConnectionRecoveryUsing waitMicros (Backend submit) =
                 streamed <- newIORef False
                 result <- submit state previous inputs \event -> do
                     when (isStreamOutput event) (writeIORef streamed True)
+                    -- A lower layer already closed the interrupted attempt
+                    -- with its own boundary; only output streamed afterwards
+                    -- needs another one before the next replay.
+                    when (isRestartBoundary event) (writeIORef streamed False)
                     onEvent event
                 didStream <- readIORef streamed
                 case result of
@@ -121,6 +125,12 @@ isStreamOutput = \case
     -- boundary that text output gets.
     ToolStarted _ -> True
     ToolUpdated _ -> True
+    _ -> False
+
+isRestartBoundary :: LoopEvent -> Bool
+isRestartBoundary = \case
+    ResponseRestarted _ -> True
+    ResponseAttemptDiscarded -> True
     _ -> False
 
 connectionWaitingMessage :: Int -> Text

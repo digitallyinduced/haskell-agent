@@ -4,7 +4,7 @@ module Agent.CLI.Session.Runner.Types
     , SessionRunnerContinuation(..)
     ) where
 
-import Agent.CLI.AgentViewport (AgentStep)
+import Agent.CLI.AgentViewport.Runtime (AgentStepCache(..))
 import Agent.CLI.ProviderTransition (TurnResult)
 import Agent.CLI.Recap (RecapKind)
 import Agent.CLI.Runtime.Types (PendingTurnPresentation, RunResult)
@@ -12,16 +12,7 @@ import Agent.CLI.SessionEnv (SessionEnv)
 import Agent.CLI.Session.Runtime.Types (StartupRuntime)
 import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.Loop (TurnInput)
-import Agent.Responses.Types (ResponseItem)
-import Agent.Subagents (SubagentStatus)
 import Data.Text (Text)
-import System.Mem.StableName (StableName)
-
-data AgentStepCache = AgentStepCache
-    { cachedTranscript :: !(StableName [ResponseItem])
-    , cachedVariant :: !(Maybe SubagentStatus)
-    , cachedSteps :: ![AgentStep]
-    }
 
 data SessionRunnerContinuation = SessionRunnerContinuation
     { runnerFinishStartup :: StartupRuntime -> IO ()

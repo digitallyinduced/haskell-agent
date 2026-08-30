@@ -115,6 +115,7 @@ import Agent.Loop
     , LoopError(..)
     , LoopProgress(..)
     , LoopResult(..)
+    , ImageAttachment
     , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
@@ -172,6 +173,12 @@ runOneTurn = runOneTurnWithContext True
 -- be generated again.
 retryCheckpointedTurn :: SessionEnv -> IO TurnResult
 retryCheckpointedTurn env = runOneTurnWithContext False env "" []
+
+turnInputImages :: TurnInput -> [ImageAttachment]
+turnInputImages = \case
+    UserMultimodal{userImages} -> userImages
+    UserMultimodalFiles{userImages} -> userImages
+    _ -> []
 
 runOneTurnWithContext
     :: Bool
@@ -266,6 +273,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                     <> handle.sessionMeta.metaId))
         PersistenceDisabled -> pure ()
     prev <- readLivePreviousResponseId conversationRef
+    when includeTurnContext $
+        env.sessionRecordImageGenerationInputs
+            (concatMap turnInputImages inputs)
     pendingStartup <-
         if includeTurnContext
             then atomicModifyIORef' startupContext \pendingCtx ->

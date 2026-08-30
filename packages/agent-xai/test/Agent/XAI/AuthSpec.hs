@@ -115,6 +115,15 @@ spec = do
                         tokens.refreshToken `shouldBe` Just "refresh-1"
                         tokens.expiresInSeconds `shouldBe` Just 3600
 
+        it "distinguishes slow_down so interactive clients can back off" do
+            recorded <- newIORef []
+            result <- withMockAuth recorded
+                (respondStatus HTTP.status400 "{\"error\":\"slow_down\"}")
+                \options ->
+                    pollDeviceAuthorizationStatus options sampleDeviceCode
+                        >>= expectRight
+            result `shouldBe` DeviceAuthorizationSlowDown
+
         it "surfaces a denial as an error" do
             recorded <- newIORef []
             result <- withMockAuth recorded

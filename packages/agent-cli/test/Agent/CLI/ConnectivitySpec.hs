@@ -105,6 +105,44 @@ spec = describe "withConnectionRecovery" do
                 }
         readIORef attempts `shouldReturn` 2
 
+    it "does not repeat a restart boundary the backend already emitted" do
+        attempts <- newIORef (0 :: Int)
+        events <- newIORef []
+        let backend = withConnectionRecoveryUsing
+                (const (pure ()))
+                (Backend \state _ _ onEvent -> do
+                    attempt <- atomicModifyIORef' attempts
+                        \n -> (n + 1, n + 1)
+                    if attempt == 1
+                        then do
+                            onEvent (TextDelta "partial")
+                            onEvent (ResponseRestarted "inner restart")
+                            pure (Left (ConnectionError "dropped"))
+                        else
+                            pure (Right
+                                BackendResult
+                                    { backendOutput =
+                                        emptyTurnOutput
+                                            "response" [] (Just "done")
+                                    , backendState = state
+                                    }))
+        result <- backend.submitTurn emptyBackendSnapshot Nothing []
+            (\event -> modifyIORef' events (<> [event]))
+        result `shouldBe`
+            Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "response" [] (Just "done")
+                , backendState = emptyBackendSnapshot
+                }
+        readIORef attempts `shouldReturn` 2
+        readIORef events `shouldReturn`
+            [ TextDelta "partial"
+            , ResponseRestarted "inner restart"
+            , ActivityUpdated
+                "Connection lost; waiting for internet. Retrying automatically in 1s (Esc or Ctrl-C to cancel)…"
+            , ActivityUpdated "Checking internet connection…"
+            ]
+
     it "restarts a submission after visible output streamed" do
         attempts <- newIORef (0 :: Int)
         waits <- newIORef []

@@ -103,7 +103,8 @@ spec = describe "Agent.Tools.PlanMode" do
 
         it "asks structured questions sequentially outside plan mode" do
             seen <- newIORef []
-            answers <- newIORef ["Postgres", "Auth, Logging"]
+            answers <- newIORef
+                ["Postgres", "Auth, Logging", "Submit answers"]
             let hooks = testHooks \question choices -> do
                     modifyIORef' seen (<> [(question, choices)])
                     atomicModifyIORef' answers \case
@@ -139,7 +140,13 @@ spec = describe "Agent.Tools.PlanMode" do
                       , [ "Auth — User authentication"
                         , "Logging — Audit logs"
                         , "Done selecting"
+                        , "← Back to previous question"
                         ]
+                      )
+                    , ( "Review your answers before sending them:\n\n"
+                            <> "1. Which database?\n   Postgres\n\n"
+                            <> "2. Which features?\n   Auth, Logging"
+                      , ["Submit answers", "← Back to last question"]
                       )
                     ]
 
@@ -147,7 +154,11 @@ spec = describe "Agent.Tools.PlanMode" do
             let displayed =
                     "Postgres — Reliable relational database — "
                         <> "Preview: CREATE TABLE users (...);"
-                hooks = testHooks \_ _ -> pure (Just displayed)
+                hooks = testHooks \_ choices ->
+                    pure $ Just $
+                        if "Submit answers" `elem` choices
+                            then "Submit answers"
+                            else displayed
             withTempPlanHooks hooks \env ->
                 runAskTool env
                     ( "{\"questions\":[{\"question\":\"Which database?\","
@@ -160,11 +171,49 @@ spec = describe "Agent.Tools.PlanMode" do
                             <> "\"Which database?\"=\"Postgres\". "
                             <> "You can now continue with the user's answers in mind."
 
+        it "can go back and replace earlier, multi-select, and final answers" do
+            answers <- newIORef
+                [ "Postgres"
+                , "Auth"
+                , "← Back to previous question"
+                , "SQLite"
+                , "Logging"
+                , "Done selecting"
+                , "← Back to last question"
+                , "Auth"
+                , "Done selecting"
+                , "Submit answers"
+                ]
+            let hooks = testHooks \_ _ ->
+                    atomicModifyIORef' answers \case
+                        answer : rest -> (rest, Just answer)
+                        [] -> ([], Nothing)
+            withTempPlanHooks hooks \env -> do
+                output <- runAskTool env $
+                    "{\"questions\":["
+                        <> "{\"question\":\"Which database?\",\"options\":["
+                        <> "{\"label\":\"Postgres\",\"description\":\"\"},"
+                        <> "{\"label\":\"SQLite\",\"description\":\"\"}]},"
+                        <> "{\"question\":\"Which feature?\",\"multi_select\":true,"
+                        <> "\"options\":["
+                        <> "{\"label\":\"Auth\",\"description\":\"\"},"
+                        <> "{\"label\":\"Logging\",\"description\":\"\"}]}"
+                        <> "]}"
+                output `shouldBe`
+                    "User has answered your questions: "
+                        <> "\"Which database?\"=\"SQLite\", "
+                        <> "\"Which feature?\"=\"Auth\". "
+                        <> "You can now continue with the user's answers in mind."
+                readIORef answers `shouldReturn` []
+
         it "keeps accepting the legacy single-question input" do
             seen <- newIORef []
             let hooks = testHooks \question choices -> do
-                    writeIORef seen [(question, choices)]
-                    pure (Just "Postgres")
+                    modifyIORef' seen (<> [(question, choices)])
+                    pure $ Just $
+                        if "Submit answers" `elem` choices
+                            then "Submit answers"
+                            else "Postgres"
             withTempPlanHooks hooks \env -> do
                 output <- runAskTool env
                     ( "{\"question\":\"Which database?\","
@@ -175,7 +224,12 @@ spec = describe "Agent.Tools.PlanMode" do
                         <> "\"Which database?\"=\"Postgres\". "
                         <> "You can now continue with the user's answers in mind."
                 readIORef seen `shouldReturn`
-                    [("Which database?", ["Postgres", "SQLite"])]
+                    [ ("Which database?", ["Postgres", "SQLite"])
+                    , ( "Review your answers before sending them:\n\n"
+                            <> "1. Which database?\n   Postgres"
+                      , ["Submit answers", "← Back to last question"]
+                      )
+                    ]
 
         it "adds structured answers for Claude's native callback" do
             let hooks = testHooks \_ _ -> pure (Just "Blue")

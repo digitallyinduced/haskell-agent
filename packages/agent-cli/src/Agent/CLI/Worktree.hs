@@ -1,14 +1,25 @@
 -- | Create isolated git worktrees under @~/.haskell-agent/worktrees@.
 module Agent.CLI.Worktree
     ( createWorktree
+    , createWorktreeWithFetch
+    , createManagedWorktree
+    , createManagedWorktreeWithProgress
     , removeWorktree
     , isUnderWorktreeRoot
+    , worktreeProgressMessage
     , worktreePath
     , worktreeRoot
+    , WorktreeProgress(..)
     ) where
 
+import Agent.CLI.Config
+    ( HarnessConfig(..)
+    , WorktreeConfig(..)
+    , loadHarnessConfig
+    )
 import Agent.OsPath (unsafeToFilePath)
-import Control.Exception.Safe (mask, onException, tryAny)
+import Control.Applicative ((<|>))
+import Control.Exception.Safe (finally, mask, onException, tryAny)
 import Control.Monad (void)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -17,7 +28,9 @@ import Control.Monad.Trans.Except
     , throwE
     , withExceptT
     )
+import qualified Data.ByteString as ByteString
 import Data.List (isPrefixOf)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
@@ -30,6 +43,7 @@ import System.Directory.OsPath
     , doesPathExist
     , removePathForcibly
     )
+import System.Entropy (getEntropy)
 import System.Exit (ExitCode(..))
 import System.OsPath
     ( OsPath
@@ -41,6 +55,25 @@ import System.OsPath
     , (</>)
     )
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
+
+data WorktreeProgress
+    = WorktreeInspectingRepository
+    | WorktreeCheckingRemote !Text
+    | WorktreeFetchingRemote !Text !Text
+    | WorktreeCreating
+    deriving (Eq, Show)
+
+worktreeProgressMessage :: WorktreeProgress -> Text
+worktreeProgressMessage = \case
+    WorktreeInspectingRepository -> "Inspecting Git repository…"
+    WorktreeCheckingRemote remote ->
+        "Checking Git remote " <> remote <> "…"
+    WorktreeFetchingRemote remote remoteHead ->
+        "Fetching latest from " <> remote <> "/" <> branchName remoteHead <> "…"
+    WorktreeCreating -> "Creating worktree…"
+  where
+    branchName ref =
+        maybe ref id (Text.stripPrefix "refs/heads/" ref)
 
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
 worktreeRoot :: OsPath -> OsPath
@@ -59,17 +92,61 @@ worktreePath :: OsPath -> OsPath -> Day -> String -> OsPath
 worktreePath root repoName day hex8 =
     root </> repoName </> unsafeEncodeUtf (formatDay day <> "-" <> hex8)
 
--- | Add a new worktree of @source@ under @root@. @root@ is injected so tests
--- can use a temp directory instead of the real home.
+-- | Add a new worktree of @source@ under @root@ using the current @HEAD@.
+-- @root@ is injected so tests can use a temp directory instead of the real
+-- home.
 createWorktree :: OsPath -> OsPath -> IO (Either Text OsPath)
-createWorktree source root = runExceptT do
+createWorktree = createWorktreeWithFetch False
+
+-- | Add a new worktree, optionally fetching the selected remote's current
+-- default branch and using that commit as the base.
+createWorktreeWithFetch
+    :: Bool -> OsPath -> OsPath -> IO (Either Text OsPath)
+createWorktreeWithFetch =
+    createWorktreeWithFetchProgress (const (pure ()))
+
+createWorktreeWithFetchProgress
+    :: (WorktreeProgress -> IO ())
+    -> Bool
+    -> OsPath
+    -> OsPath
+    -> IO (Either Text OsPath)
+createWorktreeWithFetchProgress report fetchLatest source root = runExceptT do
+    lift (report WorktreeInspectingRepository)
     repo <- gitToplevel source
     repoName <- gitRepositoryName repo
+    base <-
+        if fetchLatest
+            then fetchLatestUpstream report repo
+            else pure Nothing
+    lift (report WorktreeCreating)
     now <- lift getCurrentTime
     let day = utctDay now
         start = posixMicros now
     lift (createDirectoryIfMissing True (root </> repoName))
-    addUnique repo root repoName day start 0
+    addUnique repo root repoName day start base 0
+
+-- | Create a worktree using the machine-wide policy under the supplied home.
+-- Configuration is read for every creation so startup, slash-command, and
+-- subagent worktrees all follow the same current setting.
+createManagedWorktree :: OsPath -> OsPath -> IO (Either Text OsPath)
+createManagedWorktree =
+    createManagedWorktreeWithProgress (const (pure ()))
+
+createManagedWorktreeWithProgress
+    :: (WorktreeProgress -> IO ())
+    -> OsPath
+    -> OsPath
+    -> IO (Either Text OsPath)
+createManagedWorktreeWithProgress report home source =
+    loadHarnessConfig home >>= \case
+        Left err -> pure (Left err)
+        Right config ->
+            createWorktreeWithFetchProgress
+                report
+                config.configWorktree.worktreeFetchLatestUpstream
+                source
+                (worktreeRoot home)
 
 -- | Remove a managed worktree and the branch created for it.
 removeWorktree :: OsPath -> OsPath -> IO (Either Text ())
@@ -86,24 +163,34 @@ addUnique
     -> OsPath
     -> Day
     -> Integer
+    -> Maybe Text
     -> Int
     -> ExceptT Text IO OsPath
-addUnique repo root repoName day start attempt
+addUnique repo root repoName day start base attempt
     | attempt >= 32 =
         throwE "could not pick a unique worktree path"
     | otherwise = do
         let path = worktreePath root repoName day (hex8 (start + fromIntegral attempt))
         exists <- lift (doesPathExist path)
         if exists
-            then addUnique repo root repoName day start (attempt + 1)
+            then addUnique repo root repoName day start base (attempt + 1)
             else do
+                let branch = unsafeToFilePath (takeFileName path)
+                    addArgs = case base of
+                        Nothing ->
+                            ["worktree", "add", unsafeToFilePath path]
+                        Just commit ->
+                            [ "worktree", "add", "-b", branch
+                            , unsafeToFilePath path, Text.unpack commit
+                            ]
                 added <- lift $ mask \restore ->
-                    restore (git repo ["worktree", "add", unsafeToFilePath path])
+                    restore (git repo addArgs)
                         `onException` cleanupWorktreeCandidate repo path
                 case added of
                     Left err
                         | branchTaken err ->
-                            addUnique repo root repoName day start (attempt + 1)
+                            addUnique
+                                repo root repoName day start base (attempt + 1)
                         | otherwise -> do
                             lift (cleanupWorktreeCandidate repo path)
                             throwE err
@@ -137,6 +224,148 @@ gitRepositoryName repo = do
         if takeFileName path == unsafeEncodeUtf ".git"
             then takeFileName (takeDirectory path)
             else takeFileName path
+
+-- | Fetch and return the commit at the selected remote's advertised default
+-- branch, or use the local @HEAD@ when the repository has no remotes. The
+-- current branch's configured remote wins, followed by conventional @upstream@
+-- and @origin@ names, then a sole remaining remote.
+fetchLatestUpstream
+    :: (WorktreeProgress -> IO ())
+    -> OsPath
+    -> ExceptT Text IO (Maybe Text)
+fetchLatestUpstream report repo = do
+    selectUpstreamRemote repo >>= \case
+        Nothing -> pure Nothing
+        Just remote -> do
+            lift (report (WorktreeCheckingRemote remote))
+            remoteHead <- remoteDefaultBranch repo remote
+            lift (report (WorktreeFetchingRemote remote remoteHead))
+            localRef <- lift freshFetchRef
+            commit <-
+                ExceptT $
+                    runExceptT (fetchIntoRef repo remote remoteHead localRef)
+                        `finally` cleanupFetchRef repo localRef
+            pure (Just commit)
+
+fetchIntoRef :: OsPath -> Text -> Text -> Text -> ExceptT Text IO Text
+fetchIntoRef repo remote remoteHead localRef = do
+    let refspec = remoteHead <> ":" <> localRef
+        context action err =
+            "failed to " <> action <> " from git remote "
+                <> quote remote <> ": " <> Text.strip err
+    -- An empty refmap prevents Git from also updating the configured
+    -- remote-tracking ref, which would reintroduce a shared ref-lock race.
+    void $
+        withExceptT (context "fetch the latest default branch") $
+            ExceptT $
+                git repo
+                    [ "fetch"
+                    , "--no-tags"
+                    , "--no-write-fetch-head"
+                    , "--refmap="
+                    , Text.unpack remote
+                    , Text.unpack refspec
+                    ]
+    commit <-
+        withExceptT (context "resolve the fetched default branch") $
+            ExceptT $
+                git repo
+                    [ "rev-parse"
+                    , "--verify"
+                    , Text.unpack (localRef <> "^{commit}")
+                    ]
+    pure (Text.strip commit)
+
+freshFetchRef :: IO Text
+freshFetchRef = do
+    bytes <- ByteString.unpack <$> getEntropy 16
+    pure $
+        "refs/haskell-agent/worktree-fetches/"
+            <> Text.pack (concatMap hexByte bytes)
+  where
+    hexByte byte =
+        let encoded = showHex byte ""
+        in replicate (2 - length encoded) '0' <> encoded
+
+cleanupFetchRef :: OsPath -> Text -> IO ()
+cleanupFetchRef repo localRef =
+    void $
+        tryAny $
+            git repo ["update-ref", "-d", Text.unpack localRef]
+
+selectUpstreamRemote :: OsPath -> ExceptT Text IO (Maybe Text)
+selectUpstreamRemote repo = do
+    output <- ExceptT (git repo ["remote"])
+    let remotes = filter (not . Text.null) (map Text.strip (Text.lines output))
+    configured <- lift (configuredBranchRemote repo)
+    case
+        listToMaybe
+            [ remote
+            | remote <- maybe [] pure configured <> ["upstream", "origin"]
+            , remote `elem` remotes
+            ]
+        <|> case remotes of
+            [remote] -> Just remote
+            _ -> Nothing
+      of
+        Just remote -> pure (Just remote)
+        Nothing
+            | null remotes -> pure Nothing
+            | otherwise ->
+                throwE
+                    ( "could not choose an upstream git remote; configure the "
+                        <> "current branch's remote or name one 'upstream' or 'origin'"
+                    )
+
+configuredBranchRemote :: OsPath -> IO (Maybe Text)
+configuredBranchRemote repo =
+    git repo ["branch", "--show-current"] >>= \case
+        Right rawBranch
+            | not (Text.null (Text.strip rawBranch)) ->
+                git repo
+                    [ "config"
+                    , "--get"
+                    , "branch." <> Text.unpack (Text.strip rawBranch) <> ".remote"
+                    ] >>= \case
+                        Right rawRemote ->
+                            let remote = Text.strip rawRemote
+                            in pure $
+                                if Text.null remote || remote == "."
+                                    then Nothing
+                                    else Just remote
+                        Left _ -> pure Nothing
+        _ -> pure Nothing
+
+remoteDefaultBranch :: OsPath -> Text -> ExceptT Text IO Text
+remoteDefaultBranch repo remote = do
+    output <-
+        withExceptT
+            (\err ->
+                "failed to inspect git remote " <> quote remote
+                    <> ": " <> Text.strip err)
+            (ExceptT
+                (git repo
+                    [ "ls-remote"
+                    , "--symref"
+                    , Text.unpack remote
+                    , "HEAD"
+                    ]))
+    case
+        [ ref
+        | line <- Text.lines output
+        , ["ref:", ref, "HEAD"] <- [Text.words line]
+        , "refs/heads/" `Text.isPrefixOf` ref
+        ]
+      of
+        ref : _ -> pure ref
+        [] ->
+            throwE
+                ( "git remote " <> quote remote
+                    <> " did not advertise a default branch"
+                )
+
+quote :: Text -> Text
+quote value = "'" <> value <> "'"
 
 git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do

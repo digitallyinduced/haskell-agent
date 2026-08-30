@@ -4,6 +4,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
 import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.GenericClient
+import Agent.Responses.Request (setResponseModel)
 import Agent.Responses.Types
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
@@ -11,6 +12,11 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Char8 as BS
 import Data.IORef
 import Data.Text (Text)
+import qualified Data.Text as Text
+import Network.HTTP.Simple (setRequestHeader)
+import qualified Network.HTTP.Types as HTTP
+import qualified Network.Wai as Wai
+import qualified Network.Wai.Handler.Warp as Warp
 import Test.Hspec
 
 spec :: Spec
@@ -124,6 +130,27 @@ spec = do
             result `shouldBe` Left (ConnectionError "after output")
             readIORef attempts `shouldReturn` 1
             readIORef delivered `shouldReturn` [1]
+
+    describe "createResponseWithProviderPolicy" do
+        it "applies provider hooks through the shared transport and retry path" do
+            attempts <- newIORef (0 :: Int)
+            recordedModels <- newIORef []
+            recordedHeaders <- newIORef []
+            Warp.testWithApplication
+                (pure (providerHookApp attempts recordedModels recordedHeaders))
+                \port -> do
+                    let config = providerHookConfig port
+                    result <- createResponseWithProviderPolicy
+                        (constantDelay 0 <> limitRetries 2)
+                        config
+                        defaultResponseCreateParams
+                        Nothing
+                    response <- expectRight result
+                    response.responseId `shouldBe` "resp-provider-hook"
+            readIORef attempts `shouldReturn` 2
+            readIORef recordedModels
+                `shouldReturn` [Just "provider-model", Just "provider-model"]
+            readIORef recordedHeaders `shouldReturn` [True, True]
   where
     options = GenericClientOptions
         { baseUrl = "http://localhost:8000/v1"
@@ -131,6 +158,65 @@ spec = do
         , bearerToken = Nothing
         , requestTimeoutSeconds = 60
         }
+
+providerHookConfig :: Warp.Port -> ProviderClientConfig
+providerHookConfig port = ProviderClientConfig
+    { providerExceptionPrefix = "Provider hook request failed"
+    , providerBaseUrl = "http://127.0.0.1:" <> show port <> "/v1"
+    , providerRequestTimeoutSeconds = 10
+    , providerBuildRequest = setResponseModel "provider-model"
+    , providerConfigureRequest =
+        setRequestHeader "X-Provider-Hook" ["enabled"]
+    , providerClassifyFailure = \_status _retryAfter body ->
+        ConnectionError ("provider hook: " <> body)
+    , providerBuildResponse = buildResponse
+    , providerRetryableFailure = \case
+        ConnectionError message ->
+            "provider hook:" `Text.isPrefixOf` message
+        _ -> False
+    }
+
+providerHookApp attempts recordedModels recordedHeaders request respond = do
+    body <- Wai.strictRequestBody request
+    let decoded = Codec.decodeResponseCreateParams (LBS.toStrict body)
+        requestModel = either (const Nothing) (.model) decoded
+        hasProviderHeader =
+            lookup "X-Provider-Hook" (Wai.requestHeaders request)
+                == Just "enabled"
+    modifyIORef' recordedModels (<> [requestModel])
+    modifyIORef' recordedHeaders (<> [hasProviderHeader])
+    attempt <- atomicModifyIORef' attempts \current ->
+        let next = current + 1
+        in (next, next)
+    respond $
+        if attempt == 1
+            then Wai.responseLBS HTTP.status418
+                [("Content-Type", "text/plain")]
+                "try again"
+            else providerHookResponse
+
+providerHookResponse :: Wai.Response
+providerHookResponse = Wai.responseLBS HTTP.status200
+    [("Content-Type", "text/event-stream")]
+    ("event: response.completed\ndata: " <> Aeson.encode payload <> "\n\n")
+  where
+    payload = Aeson.object
+        [ "type" Aeson..= ("response.completed" :: Text)
+        , "response" Aeson..= Aeson.object
+            [ "id" Aeson..= ("resp-provider-hook" :: Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("provider-model" :: Text)
+            , "status" Aeson..= ("completed" :: Text)
+            , "output" Aeson..= ([] :: [Aeson.Value])
+            ]
+        ]
+
+expectRight :: Show error => Either error value -> IO value
+expectRight = \case
+    Left err ->
+        expectationFailure ("expected Right, got Left " <> show err)
+            >> fail "unreachable"
+    Right value -> pure value
 
 withTools :: [ResponseTool] -> ResponseCreateParams -> ResponseCreateParams
 withTools value request = request { tools = Just value }
