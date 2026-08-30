@@ -23,12 +23,10 @@ jobs:
         include:
           - system: x86_64-linux
             runner: '["self-hosted", "haskell-agent", "office-builder", "x86_64-linux"]'
-            install-nix: false
             trusted-rebuild: false
             build-cores: 1
           - system: aarch64-darwin
-            runner: '"macos-15"'
-            install-nix: true
+            runner: '["self-hosted", "haskell-agent", "ihp-ci-mac", "aarch64-darwin"]'
             trusted-rebuild: true
             build-cores: 1
     runs-on: ${{ fromJSON(matrix.runner) }}
@@ -42,18 +40,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install Nix on the ephemeral macOS runner
-        if: matrix.install-nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-        with:
-          determinate: false
-          extra-conf: |
-            sandbox = true
-
-      - name: Build install closure
-        id: build
+      - name: Build install and run closures
         shell: bash
         env:
+          SYSTEM: ${{ matrix.system }}
           TRUSTED_REBUILD: ${{ matrix.trusted-rebuild }}
           BUILD_CORES: ${{ matrix.build-cores }}
         run: |
@@ -69,7 +59,10 @@ jobs:
           fi
 
           build_args=(
-            build .#default
+            # `nix profile add` installs packages.default, while `nix run`
+            # executes apps.default, backed by packages.agent-cli. They are
+            # different outputs on Linux, so publish both closures.
+            build .#default .#agent-cli
             --no-link
             --print-out-paths
             --max-jobs 1
@@ -87,14 +80,38 @@ jobs:
             build_args+=(--accept-flake-config)
           fi
 
-          out_path=$("$nix_bin" "${build_args[@]}")
-          printf 'out-path=%s\n' "$out_path" >> "$GITHUB_OUTPUT"
+          out_paths_file="$RUNNER_TEMP/haskell-agent-cache-out-paths"
+          "$nix_bin" "${build_args[@]}" > "$out_paths_file"
+          if [[ ! -s "$out_paths_file" ]]; then
+            echo "::error title=Missing build outputs::Nix did not report any store paths"
+            exit 1
+          fi
 
-      - name: Push install closure to the public IHP cache
+          # Keep this assertion next to the CI targets so a future app/package
+          # remapping cannot silently leave `nix run` uncached again.
+          app_program=$(
+            "$nix_bin" eval \
+              --option accept-flake-config false \
+              --raw ".#apps.$SYSTEM.default.program"
+          )
+          run_out=$(
+            "$nix_bin" eval \
+              --option accept-flake-config false \
+              --raw ".#packages.$SYSTEM.agent-cli.outPath"
+          )
+          if [[ "$app_program" != "$run_out/"* ]]; then
+            echo "::error title=Default app is not cached::apps.default no longer uses packages.agent-cli"
+            exit 1
+          fi
+          if ! grep -Fqx -- "$run_out" "$out_paths_file"; then
+            echo "::error title=Default app is not cached::the packages.agent-cli output was not built"
+            exit 1
+          fi
+
+      - name: Push install and run closures to the public Attic cache
         shell: bash
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-          OUT_PATH: ${{ steps.build.outputs.out-path }}
         run: |
           set -euo pipefail
 
@@ -120,4 +137,7 @@ jobs:
           "$nix_bin" run "$ATTIC_PACKAGE" -- login di \
             https://cache.digitallyinduced.com \
             "$ATTIC_TOKEN"
-          "$nix_bin" run "$ATTIC_PACKAGE" -- push --jobs 4 di:public "$OUT_PATH"
+
+          "$nix_bin" run "$ATTIC_PACKAGE" -- \
+            push --jobs 4 --stdin di:public \
+            < "$RUNNER_TEMP/haskell-agent-cache-out-paths"
