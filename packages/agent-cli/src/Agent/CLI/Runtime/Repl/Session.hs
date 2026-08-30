@@ -16,6 +16,7 @@ import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
     ( currentEffort,
       currentModel,
+      ForkRequest(..),
       ReplAction(ReplRenameAuto, ReplResume, ReplSearch, ReplClear,
                  ReplNew, ReplShowSession, ReplShowSessionInfo, ReplAfk,
                  ReplWorktree, ReplRename, ReplFork),
@@ -29,7 +30,7 @@ import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayBridge ()
-import Agent.CLI.Input ()
+import Agent.CLI.Input ( readChoiceSelection )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -63,14 +64,13 @@ import Agent.CLI.Runtime.HistorySource
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunSwitchWorktree, RunQuit) )
+    ( RunResult(RunForkSession, RunSwitchWorktree, RunQuit) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReset),
       appendTurnKeepTitleIndexed,
       createSession,
-      deleteSession,
-      forkSession,
+      forkSessionAt,
       loadSession,
       removeSessionTemp,
       resetSessionTitleToAuto,
@@ -87,17 +87,14 @@ import Agent.CLI.Session
       SessionMeta(metaTitle, metaLastResponseId, metaUpdatedAt,
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
-                  metaId, metaCwd, metaTitleUserTurns),
+                  metaId, metaCwd),
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
                   turnItems) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
-import Agent.CLI.Session.History
-    ( durableTranscriptCheckpoint
-    , retargetLiveTranscript
-    )
+import Agent.CLI.Session.History ()
 import Agent.CLI.Session.Interaction ()
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types ()
@@ -115,10 +112,13 @@ import Agent.CLI.Startup.Format ()
 import Agent.CLI.StartupContext ()
 import Agent.CLI.Status ( formatTokenUsageOrZero )
 import Agent.CLI.Style
-    ( cliWindowTitle, glyphOk, glyphSession, roleError, roleMuted )
+    ( cliWindowTitle, glyphOk, glyphSession, roleError, roleMuted, rolePrompt )
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
-    ( commitFullscreenHistoryTurn, emitUiEvent )
+    ( commitFullscreenHistoryTurn
+    , emitUiEvent
+    , requestFullscreenChoiceWithBody
+    )
 import Agent.CLI.TUI.SessionHistory ( sessionHistoryTurn )
 import Agent.CLI.TUI.Types ( HistoryCommit(..) )
 import Agent.CLI.Terminal ( resolveColor )
@@ -127,7 +127,10 @@ import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
 import Agent.CLI.Worktree
-    ( createManagedWorktreeWithProgress, worktreeProgressMessage )
+    ( createManagedWorktreeWithProgress
+    , removeWorktree
+    , worktreeProgressMessage
+    )
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect ( dialectId, dialectSlug )
@@ -169,9 +172,8 @@ import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ()
 import Control.Exception ()
-import Control.Exception.Safe
-    ( displayException, finally, mask_, tryAny )
-import Control.Monad ( forM_ )
+import Control.Exception.Safe ( finally, mask, onException )
+import Control.Monad ( forM_, void )
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ()
 import Data.Maybe ( fromMaybe )
@@ -197,7 +199,7 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ( toAscList )
-import qualified Data.Text as Text ( intercalate, pack, unlines )
+import qualified Data.Text as Text ( intercalate, unlines )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -386,69 +388,90 @@ handleSessionAction
                         (roleMuted color
                             (glyphOk <> message))
                 continue
-    ReplFork requestedTitle -> do
+    ReplFork request -> do
         color <- resolveColor stderr
-        case persist of
-            PersistenceDisabled -> do
-                let message =
-                        "session forking requires a persisted session"
+        let failFork message = do
                 displayError message $
-                    Text.hPutStrLn stderr
-                        (roleError color message)
+                    putTextLn stderr (roleError color message)
                 continue
+        case persist of
+            PersistenceDisabled ->
+                failFork "/fork requires a persisted interactive session"
             PersistenceEnabled slotRef ->
                 readIORef slotRef >>= \case
-                    PersistencePending{} -> do
-                        let message =
-                                "a session must contain at least one turn before it can be forked"
-                        displayError message $
-                            Text.hPutStrLn stderr
-                                (roleError color message)
-                        continue
-                    PersistenceActive source -> do
-                        let root = takeDirectory source.sessionDir
-                        result <-
-                            withReplActivity \report -> do
-                                report "Forking session…"
-                                loadSession
-                                    databasePool
-                                    root
-                                    source.sessionMeta.metaId >>= \case
-                                        Left err ->
-                                            pure (Left err)
-                                        Right (meta, turns) ->
-                                            forkSession
-                                                root
-                                                source { sessionMeta = meta }
-                                                turns
-                                                requestedTitle
-                        case result of
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                                continue
-                            Right forked -> do
-                                installed <-
-                                    installFork
-                                        slotRef
-                                        source
-                                        forked
-                                case installed of
-                                    Left err -> do
-                                        displayError err $
-                                            Text.hPutStrLn stderr
-                                                (roleError color err)
-                                        continue
-                                    Right () -> do
-                                        let message =
-                                                "forked session: "
-                                                    <> forked.sessionMeta.metaId
-                                        displayInfo message $
-                                            Text.hPutStrLn stderr
-                                                (roleMuted color
-                                                    (glyphOk <> message))
-                                        continue
+                    PersistencePending{} ->
+                        failFork
+                            "/fork is available after the first persisted turn"
+                    PersistenceActive source ->
+                        chooseForkWorktree color request.forkWorktree >>= \case
+                            Nothing -> continue
+                            Just useWorktree -> mask \restore -> do
+                                destination <-
+                                    restore $
+                                        if useWorktree
+                                            then
+                                                withReplActivity \report ->
+                                                    createManagedWorktreeWithProgress
+                                                        (report
+                                                            . worktreeProgressMessage)
+                                                        env.sessionHome
+                                                        source.sessionMeta.metaCwd
+                                                    >>= pure . fmap
+                                                        (\path ->
+                                                            (path, Just path))
+                                            else
+                                                pure
+                                                    (Right
+                                                        ( source.sessionMeta.metaCwd
+                                                        , Nothing
+                                                        ))
+                                case destination of
+                                    Left err -> failFork err
+                                    Right (newCwd, worktreePath) -> do
+                                        let root =
+                                                takeDirectory source.sessionDir
+                                            cleanup =
+                                                cleanupForkWorktree
+                                                    source.sessionMeta.metaCwd
+                                                    worktreePath
+                                        result <-
+                                            restore
+                                                (withReplActivity \report -> do
+                                                    report "Forking session…"
+                                                    loadSession
+                                                        databasePool
+                                                        root
+                                                        source.sessionMeta.metaId
+                                                        >>= \case
+                                                            Left err ->
+                                                                pure (Left err)
+                                                            Right (meta, turns) ->
+                                                                forkSessionAt
+                                                                    root
+                                                                    source
+                                                                        { sessionMeta =
+                                                                            meta
+                                                                        }
+                                                                    turns
+                                                                    Nothing
+                                                                    newCwd)
+                                                `onException` cleanup
+                                        case result of
+                                            Left err -> do
+                                                cleanup
+                                                failFork err
+                                            Right forked -> do
+                                                let message =
+                                                        "forked session: "
+                                                            <> forked.sessionMeta.metaId
+                                                displayInfo message $
+                                                    putTextLn stderr
+                                                        (roleMuted color
+                                                            (glyphOk <> message))
+                                                pure
+                                                    (RunForkSession
+                                                        forked.sessionMeta.metaId
+                                                        request.forkDirective)
     ReplShowSession -> do
         color <- resolveColor stdout
         case persist of
@@ -709,69 +732,6 @@ handleSessionAction
         continue
     _ -> error "handleSessionAction: unsupported action"
   where
-    installFork slotRef source forked = mask_ do
-        prepared <- tryAny do
-            env.sessionSetTempDir forked.sessionTempDir
-            forM_ fullscreen \runtime ->
-                reloadFullscreenHistoryForHandle runtime forked
-            retargetLiveTranscript
-                env.sessionConversation
-                (durableTranscriptCheckpoint
-                    databasePool
-                    (takeDirectory forked.sessionDir)
-                    forked.sessionMeta.metaId)
-        case prepared of
-            Left err -> rollbackBeforeClaim err
-            Right () ->
-                tryAny (env.sessionOnPersisted forked) >>= \case
-                    Left err -> rollbackBeforeClaim err
-                    Right () -> do
-                        -- With the new lock held, all remaining state changes
-                        -- are non-blocking IORef swaps. Keep the live
-                        -- conversation and response parent unchanged.
-                        writeIORef slotRef (PersistenceActive forked)
-                        writeIORef planMode.planSessionDir
-                            (Just forked.sessionDir)
-                        writeIORef storeRoot (Just forked.sessionDir)
-                        writeIORef
-                            env.sessionTitleTurnCount
-                            forked.sessionMeta.metaTitleUserTurns
-                        _ <- tryAny $
-                            setWindowTitle
-                                (cliWindowTitle
-                                    forked.sessionMeta.metaCwd
-                                    (Just forked.sessionMeta.metaTitle))
-                        pure (Right ())
-      where
-        rollbackBeforeClaim err = do
-            _ <- tryAny
-                (env.sessionSetTempDir source.sessionTempDir)
-            _ <- tryAny $
-                forM_ fullscreen \runtime ->
-                    reloadFullscreenHistoryForHandle runtime source
-            _ <- tryAny $
-                retargetLiveTranscript
-                    env.sessionConversation
-                    (durableTranscriptCheckpoint
-                        databasePool
-                        (takeDirectory source.sessionDir)
-                        source.sessionMeta.metaId)
-            cleanup <-
-                deleteSession
-                    databasePool
-                    (takeDirectory forked.sessionDir)
-                    forked.sessionMeta.metaId
-            let base =
-                    "could not activate forked session: "
-                        <> Text.pack (displayException err)
-            pure $
-                Left $
-                    case cleanup of
-                        Right () -> base
-                        Left cleanupErr ->
-                            base
-                                <> "; cleanup also failed: "
-                                <> cleanupErr
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event
@@ -798,3 +758,39 @@ handleSessionAction
         case fullscreen of
             Nothing -> clearThinking render
             Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
+    chooseForkWorktree color = \case
+        Just value -> pure (Just value)
+        Nothing ->
+            case fullscreen of
+                Just runtime ->
+                    requestFullscreenChoiceWithBody
+                        runtime
+                        "Fork session"
+                        "Should the peer conversation use a fresh git worktree?"
+                        0
+                        [ ( "Use a new worktree"
+                          , "Create an isolated branch and working directory"
+                          )
+                        , ( "Share current workspace"
+                          , "Keep both conversations in the current checkout"
+                          )
+                        ]
+                        >>= pure . \case
+                            Just 0 -> Just True
+                            Just 1 -> Just False
+                            _ -> Nothing
+                Nothing ->
+                    readChoiceSelection
+                        (\selected label ->
+                            if selected
+                                then rolePrompt color label
+                                else roleMuted color label)
+                        [ "Use a new worktree"
+                        , "Share current workspace"
+                        ]
+                        >>= pure . \case
+                            Just "Use a new worktree" -> Just True
+                            Just "Share current workspace" -> Just False
+                            _ -> Nothing
+    cleanupForkWorktree source =
+        mapM_ \path -> void (removeWorktree source path)

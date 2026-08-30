@@ -1,6 +1,7 @@
 -- | Data types shared by slash-command parsing and presentation.
 module Agent.CLI.Command.Types
-    ( ReplAction(..)
+    ( ForkRequest(..)
+    , ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
     , SlashCatalog(..)
@@ -15,6 +16,13 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
 
+-- | Parsed @/fork@ options. A missing worktree choice asks interactively.
+data ForkRequest = ForkRequest
+    { forkWorktree :: !(Maybe Bool)
+    , forkDirective :: !(Maybe Text)
+    }
+    deriving (Eq, Show)
+
 data ReplAction
     = ReplQuit
     | ReplReload
@@ -24,7 +32,7 @@ data ReplAction
     | ReplInit
     | ReplReview (Maybe Text)
     | ReplDiff
-    | ReplFork (Maybe Text)
+    | ReplFork !ForkRequest
     | ReplExport (Maybe Text)
     | ReplPermissions
     | ReplShowEffort
@@ -41,6 +49,8 @@ data ReplAction
     | ReplTranscript
     | ReplEditPrompt
     | ReplContext
+    | ReplHistory
+    | ReplFind !(Maybe Text)
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplMetaConsole Text

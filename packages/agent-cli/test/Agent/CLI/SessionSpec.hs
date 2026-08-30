@@ -722,7 +722,13 @@ spec = describe "Agent.CLI.Session" do
                 LBS.writeFile (toFilePath childPath) "child"
                 LBS.writeFile (toFilePath ignoredPath) "runtime log"
 
-                forkSession root source [sourceTurn] (Just "Fork title") >>= \case
+                let forkCwd = root </> unsafeEncodeUtf "fork-worktree"
+                forkSessionAt
+                    root
+                    source
+                    [sourceTurn]
+                    (Just "Fork title")
+                    forkCwd >>= \case
                     Left err -> expectationFailure (Text.unpack err)
                     Right forked -> do
                         forked.sessionMeta.metaId
@@ -733,6 +739,7 @@ spec = describe "Agent.CLI.Session" do
                             `shouldBe` forked.sessionMeta.metaCreatedAt
                         forked.sessionMeta.metaTitle `shouldBe` "Fork title"
                         forked.sessionMeta.metaTitleIsManual `shouldBe` True
+                        forked.sessionMeta.metaCwd `shouldBe` forkCwd
                         forked.sessionMeta.metaLastResponseId
                             `shouldBe` Just "response-parent"
                         forked.sessionMeta.metaLastRecap `shouldBe` Just "recap"

@@ -38,6 +38,8 @@ data RunResult
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
+    | RunForkSession Text (Maybe Text)
+      -- ^ A newly forked session plus an optional first interactive prompt.
     | RunSwitchWorktree OsPath Provider Text ReasoningEffort
       -- ^ Fresh worktree path. Starts a new session after the current backend
       -- and fullscreen UI have shut down, retaining provider, model, and effort.
