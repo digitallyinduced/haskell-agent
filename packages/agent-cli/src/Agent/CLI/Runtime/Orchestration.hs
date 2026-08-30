@@ -307,8 +307,8 @@ import Agent.Provider
       getNextToken,
       providerSlug,
       runWithTokenProvider,
-      tokenProvider,
-      tokenProviderBillingMode )
+      tokenProviderBillingMode,
+      tokenProviderWithNextToken )
 import Agent.Responses.GenericBackend
     ( genericResponsesBackendWith )
 import Agent.Responses.GenericClient ( GenericClientOptions(..) )
@@ -2822,7 +2822,7 @@ trackCredentialAccount
     -> TokenProvider
     -> TokenProvider
 trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provider =
-    tokenProvider (tokenProviderBillingMode provider) \failed ->
+    tokenProviderWithNextToken provider \failed ->
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do
