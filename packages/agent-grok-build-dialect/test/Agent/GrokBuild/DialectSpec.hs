@@ -22,12 +22,19 @@ import Agent.GrokBuild.Dialect.Runtime
 import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.OsPath (unsafeToFilePath)
-import Agent.ToolDispatch (ToolCall, functionToolCall)
+import Agent.ToolDispatch
+    ( ToolCall
+    , ToolCallResult(..)
+    , ToolDispatchConfig(..)
+    , dispatchToolCall
+    , functionToolCall
+    )
 import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolRegistry
+    , appToolHandlers
     , defaultToolEnv
     , mkToolRegistry
     , setToolSessionTmp
@@ -48,7 +55,7 @@ import System.Directory
     , doesFileExist
     , removeDirectoryRecursive
     )
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath (makeRelative, takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
@@ -94,6 +101,26 @@ spec = describe "Grok Build dialect" do
                 `shouldBe` replicate 7 True
             names `shouldNotContain` ["shell_command", "apply_patch"]
             coding.grokClose
+
+    it "rejects system temp paths relative to the persisted shell cwd" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            typesRef <- newIORef Map.empty
+            let relativeTmp =
+                    Text.pack (makeRelative dir "/tmp/agent-output")
+            bracket
+                (newGrokCodingTools env Nothing Nothing typesRef)
+                (.grokClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.grokAppTools)
+                        (terminalCall
+                            "terminal-relative-system-tmp"
+                            ("cat " <> relativeTmp)
+                            False)
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf "Blocked hardcoded system temp path"
 
     it "derives disjoint search_replace resources from file paths" do
         withGrokRegistry \registry close -> do
@@ -247,6 +274,39 @@ spec = describe "Grok Build dialect" do
                 takeDirectory (unsafeToFilePath shell.shellEnvFile)
                     `shouldBe` scratch
 
+    it "checks temp traversal while holding the persistent shell state" do
+        withTempDir \dir -> do
+            let scratch = dir </> "session-scratch"
+            createDirectory scratch
+            createDirectory (scratch </> "nested")
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                Right moved <- runForegroundStreaming
+                    session
+                    "cd \"$TMPDIR\""
+                    10000
+                    (\_ _ -> pure ())
+                moved.commandExitCode `shouldBe` Just 0
+                nestedEscape <- runForegroundStreaming
+                    session
+                    "cd nested; cat ../../other-session/secret"
+                    10000
+                    (\_ _ -> pure ())
+                nestedEscape `shouldSatisfy`
+                    either
+                        (Text.isInfixOf "Blocked path traversal")
+                        (const False)
+                escaped <- runForegroundStreaming
+                    session
+                    "cat ../other-session/secret"
+                    10000
+                    (\_ _ -> pure ())
+                escaped `shouldSatisfy`
+                    either
+                        (Text.isInfixOf "Blocked path traversal")
+                        (const False)
+
     it "recreates shell state after the session temp directory changes" do
         withTempDir \dir -> do
             let firstScratch = dir </> "first-session"
@@ -256,7 +316,7 @@ spec = describe "Grok Build dialect" do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
             setToolSessionTmp env (Just (unsafeEncodeUtf firstScratch))
             bracket (newGrokSession env) closeGrokSession \session -> do
-                moved <- runForegroundStreaming
+                Right moved <- runForegroundStreaming
                     session
                     "cd \"$TMPDIR\""
                     10000
@@ -280,7 +340,7 @@ spec = describe "Grok Build dialect" do
                 unsafeToFilePath nextShell.shellCwd `shouldBe` dir
                 doesFileExist nextEnvFile `shouldReturn` True
 
-                result <- runForegroundStreaming
+                Right result <- runForegroundStreaming
                     session
                     "printf reset-ok"
                     10000
@@ -375,3 +435,13 @@ terminalCall ident command background =
 jsonString :: Text -> Text
 jsonString text =
     "\"" <> Text.replace "\"" "\\\"" text <> "\""
+
+testDispatchConfig :: ToolDispatchConfig
+testDispatchConfig = ToolDispatchConfig
+    { toolDispatchUnknownTool = \name -> "unknown:" <> name
+    , toolDispatchFormatResult = either ("ERR " <>) id
+    , toolDispatchFormatException = \name _ -> "EX " <> name
+    , toolDispatchOnException = \_ _ -> pure ()
+    , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
+    }

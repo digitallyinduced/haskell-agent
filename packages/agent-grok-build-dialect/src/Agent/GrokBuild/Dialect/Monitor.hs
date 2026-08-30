@@ -6,10 +6,12 @@ module Agent.GrokBuild.Dialect.Monitor
 import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.Dangerous (blockedShellCommandReason)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.GrokBuild.Dialect.Json (optionalBool, optionalIntOrString)
-import Agent.GrokBuild.Dialect.Shell (GrokSession, startMonitor)
+import Agent.GrokBuild.Dialect.Shell
+    ( GrokSession
+    , startMonitor
+    )
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -56,8 +58,6 @@ runMonitor :: GrokSession -> MonitorArgs -> IO (Either Text Text)
 runMonitor session args
     | Text.null (Text.strip args.description) =
         pure (Left "Missing parameter: description")
-    | Just reason <- blockedShellCommandReason args.command =
-        pure (Left reason)
     | not args.persistent
     , Just timeout <- args.timeoutMs
     , timeout > maxMonitorTimeoutMs =
@@ -69,7 +69,11 @@ runMonitor session args
         let timeout
                 | args.persistent = Nothing
                 | otherwise =
-                    Just (max 1 (fromMaybe maxMonitorTimeoutMs args.timeoutMs))
+                    Just
+                        (max 1
+                            (fromMaybe
+                                maxMonitorTimeoutMs
+                                args.timeoutMs))
         startMonitor session args.command timeout >>= \case
             Left err -> pure (Left err)
             Right output ->

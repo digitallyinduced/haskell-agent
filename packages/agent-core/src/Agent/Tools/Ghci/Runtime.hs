@@ -22,7 +22,8 @@ import Agent.Tools.Ghci.Classify
     , defaultGhciExtensions
     , typeLooksEffectful
     )
-import Agent.Tools.IO (configuredProcessEnv, terminateProcessGroup)
+import Agent.Tools.Dangerous (blockedTempAccessReasonAt)
+import Agent.Tools.IO (configuredProcess, terminateProcessGroup)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -204,28 +205,42 @@ closeGhciSession session =
 evalGhci :: GhciSession -> Text -> Int -> IO GhciResult
 evalGhci session expression requestedTimeout =
     withGhciRuntime session do
-        let timeoutMs = normalizeTimeout requestedTimeout
-        started <- liftIO getMonotonicTimeNSec
-        cached <- gets (.runtimeClassificationCache)
-        classification <- case cached of
-            Just (cachedExpression, cls)
-                | cachedExpression == expression -> pure cls
-            _ -> classifyGhciLocked session expression (min 15000 timeoutMs)
-        modify' \runtime ->
-            runtime { runtimeClassificationCache = Nothing }
-        remaining <- liftIO (remainingMillis started timeoutMs)
-        if remaining <= 0
-            then pure $ emptyResult GhciTimedOut classification
-                "Timed out while classifying the GHCi input."
-            else do
-                result <- evalRawGhci session expression remaining
-                pure result { ghciClass = classification }
+        blocked <- liftIO $
+            blockedTempAccessReasonAt session.ghciEnv.toolCwd expression
+        case blocked of
+            Just reason -> do
+                modify' \runtime ->
+                    runtime { runtimeClassificationCache = Nothing }
+                pure $
+                    emptyResult GhciProcessFailed GhciEffectful reason
+            Nothing -> do
+                let timeoutMs = normalizeTimeout requestedTimeout
+                started <- liftIO getMonotonicTimeNSec
+                cached <- gets (.runtimeClassificationCache)
+                classification <- case cached of
+                    Just (cachedExpression, cls)
+                        | cachedExpression == expression -> pure cls
+                    _ -> classifyGhciLocked session expression
+                        (min 15000 timeoutMs)
+                modify' \runtime ->
+                    runtime { runtimeClassificationCache = Nothing }
+                remaining <- liftIO (remainingMillis started timeoutMs)
+                if remaining <= 0
+                    then pure $ emptyResult GhciTimedOut classification
+                        "Timed out while classifying the GHCi input."
+                    else do
+                        result <- evalRawGhci session expression remaining
+                        pure result { ghciClass = classification }
 
 -- | Classify without evaluating. Fail closed on ambiguity.
 classifyGhci :: GhciSession -> Text -> IO GhciClass
 classifyGhci session expression =
     withGhciRuntime session do
-        classification <- classifyGhciLocked session expression 15000
+        blocked <- liftIO $
+            blockedTempAccessReasonAt session.ghciEnv.toolCwd expression
+        classification <- case blocked of
+            Just _ -> pure GhciEffectful
+            Nothing -> classifyGhciLocked session expression 15000
         modify' \runtime -> runtime
             { runtimeClassificationCache =
                 Just (expression, classification)
@@ -530,15 +545,14 @@ ghciArgs =
 
 spawnProcess :: ToolEnv -> IO (Either Text GhciProcess)
 spawnProcess env = do
-    processEnv <- configuredProcessEnv env
-    let spec = (proc "ghci" ghciArgs)
+    let baseSpec = (proc "ghci" ghciArgs)
             { cwd = Just (unsafeToFilePath env.toolCwd)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
             , create_group = True
-            , env = processEnv
             }
+    spec <- configuredProcess env baseSpec
     spawned <- try @_ @SomeException $ mask \restore -> do
         created@(_, _, _, handle) <- createProcess spec
         groupId <- getPid handle

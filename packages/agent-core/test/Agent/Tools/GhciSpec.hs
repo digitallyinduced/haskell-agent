@@ -34,10 +34,12 @@ import Data.Either (isRight)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
+    , createDirectoryIfMissing
     , getTemporaryDirectory
     , removeDirectoryRecursive
     )
 import System.FilePath ((</>))
+import System.Info (os)
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Types (ProcessID)
@@ -187,6 +189,56 @@ spec = describe "Agent.Tools.Ghci" do
                 result.ghciOk `shouldBe` True
                 result.ghciOutput `shouldSatisfy`
                     Text.isInfixOf (Text.pack (toFilePath env.toolCwd))
+
+    it "rejects direct and variable-based shared temp access before evaluation" do
+        withTempGhci \ghci -> do
+            direct <- evalGhci ghci
+                "readFile \"/tmp/other-session/secret\""
+                10000
+            direct.ghciOutcome `shouldBe` GhciProcessFailed
+            direct.ghciOk `shouldBe` False
+            direct.ghciOutput `shouldSatisfy`
+                Text.isInfixOf "Blocked hardcoded system temp path"
+
+            traversal <- evalGhci ghci
+                "cmd \"sh\" [\"-c\", \"cat \\\"$TMPDIR/../other-session/secret\\\"\"]"
+                10000
+            traversal.ghciOutcome `shouldBe` GhciProcessFailed
+            traversal.ghciOk `shouldBe` False
+            traversal.ghciOutput `shouldSatisfy`
+                Text.isInfixOf "Blocked path traversal"
+
+    it "isolates GHCi from managed sibling scratch directories" do
+        if os /= "darwin"
+            then pendingWith "the process-level Seatbelt boundary is macOS-only"
+            else withTempEnv \env -> do
+                let workspace = toFilePath env.toolCwd
+                    sessions =
+                        workspace
+                            </> ".haskell-agent"
+                            </> "tmp"
+                            </> "sessions"
+                    scratch = sessions </> "current"
+                    sibling = sessions </> "other"
+                    secret = sibling </> "secret"
+                mapM_ (createDirectoryIfMissing True) [scratch, sibling]
+                writeFile secret "sibling-secret"
+                setToolSessionTmp env (Just (fromFilePath scratch))
+                bracket (newGhciSession env) closeGhciSession \ghci -> do
+                    importedEnvironment <- evalGhci ghci
+                        "import System.Environment (getEnv)"
+                        10000
+                    importedEnvironment.ghciOk `shouldBe` True
+                    importedFilePath <- evalGhci ghci
+                        "import System.FilePath (takeDirectory, (</>))"
+                        10000
+                    importedFilePath.ghciOk `shouldBe` True
+                    result <- evalGhci ghci
+                        "getEnv \"TMPDIR\" >>= \\path -> readFile (takeDirectory path </> \"other\" </> \"secret\")"
+                        10000
+                    result.ghciOk `shouldBe` False
+                    result.ghciOutput `shouldNotSatisfy`
+                        Text.isInfixOf "sibling-secret"
 
     it "refreshes the private temp environment after suspension" do
         withTempEnv \env -> do
