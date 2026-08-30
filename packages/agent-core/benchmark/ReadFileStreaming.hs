@@ -121,4 +121,3 @@ median values =
         }
   where
     middle xs = sort xs !! (length xs `div` 2)
-
