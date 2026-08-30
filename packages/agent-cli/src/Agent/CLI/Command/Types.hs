@@ -30,6 +30,11 @@ data ReplAction
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
+    | ReplViewPlan
+    | ReplQueue
+    | ReplTranscript
+    | ReplEditPrompt
+    | ReplContext
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplMetaConsole Text

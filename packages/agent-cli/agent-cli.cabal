@@ -151,6 +151,7 @@ library
                     , Agent.CLI.Clipboard
                     , Agent.CLI.CodeModeRuntime
                     , Agent.CLI.Compaction
+                    , Agent.CLI.Context
                     , Agent.CLI.Connectivity
                     , Agent.CLI.Command
                     , Agent.CLI.ComputerUse
@@ -166,6 +167,7 @@ library
                     , Agent.CLI.Dialects
                     , Agent.CLI.Environment
                     , Agent.CLI.Error
+                    , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
@@ -226,6 +228,7 @@ library
                     , Agent.CLI.Terminal
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
+                    , Agent.CLI.Transcript
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
@@ -407,12 +410,14 @@ test-suite agent-cli-test
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.ContextSpec
                     , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.ErrorSpec
+                    , Agent.CLI.ExternalProgramSpec
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.ImagePreviewSpec
@@ -451,6 +456,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.TextLayoutSpec
+                    , Agent.CLI.TranscriptSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionHistorySpec

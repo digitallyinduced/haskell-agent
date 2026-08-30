@@ -12,6 +12,7 @@ import Agent.CLI.Command (ShellMode)
 import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary
     , CompactOutcome
+    , OccupancySnapshot
     )
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
@@ -58,6 +59,8 @@ data SessionEnv = SessionEnv
     , sessionAutomaticCompaction
         :: !(IORef (Maybe AutomaticCompactionBoundary))
     , sessionParams :: !(IORef ResponseCreateParams)
+    , sessionContextOccupancy :: !(IORef (Maybe OccupancySnapshot))
+    , sessionContextWindow :: !(IO (Maybe Int))
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionPersist :: !Persistence
     , sessionDatabasePool :: !StorePool

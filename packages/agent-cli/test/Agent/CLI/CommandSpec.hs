@@ -256,6 +256,26 @@ spec = do
             parseReplLine "/plan   keep  spaces"
                 `shouldBe` ReplPlan (Just "keep  spaces")
 
+        it "parses session inspection and prompt editing commands" do
+            parseReplLine "/view-plan" `shouldBe` ReplViewPlan
+            parseReplLine "/show-plan" `shouldBe` ReplViewPlan
+            parseReplLine "/plan-view" `shouldBe` ReplViewPlan
+            parseReplLine "/queue" `shouldBe` ReplQueue
+            parseReplLine "/transcript" `shouldBe` ReplTranscript
+            parseReplLine "/log" `shouldBe` ReplTranscript
+            parseReplLine "/edit-prompt" `shouldBe` ReplEditPrompt
+            parseReplLine "/context" `shouldBe` ReplContext
+            parseReplLine "/view-plan now"
+                `shouldBe` ReplCommandError "usage: /view-plan"
+            parseReplLine "/queue now"
+                `shouldBe` ReplCommandError "usage: /queue"
+            parseReplLine "/transcript now"
+                `shouldBe` ReplCommandError "usage: /transcript"
+            parseReplLine "/edit-prompt now"
+                `shouldBe` ReplCommandError "usage: /edit-prompt"
+            parseReplLine "/context now"
+                `shouldBe` ReplCommandError "usage: /context"
+
         it "asks a side question with the full suffix" do
             parseReplLine "/btw why this file?"
                 `shouldBe` ReplBtw "why this file?"
@@ -311,6 +331,11 @@ spec = do
                     , "effort"
                     , "fast"
                     , "plan"
+                    , "view-plan"
+                    , "queue"
+                    , "transcript"
+                    , "edit-prompt"
+                    , "context"
                     , "btw"
                     , "meta"
                     , "recap"
@@ -368,6 +393,12 @@ spec = do
                 `shouldBe` Just "meta"
             fmap (.slashName) (lookupSlashCommand "/exit")
                 `shouldBe` Just "quit"
+            fmap (.slashName) (lookupSlashCommand "/show-plan")
+                `shouldBe` Just "view-plan"
+            fmap (.slashName) (lookupSlashCommand "/plan-view")
+                `shouldBe` Just "view-plan"
+            fmap (.slashName) (lookupSlashCommand "/log")
+                `shouldBe` Just "transcript"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"

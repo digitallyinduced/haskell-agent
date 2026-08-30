@@ -21,6 +21,7 @@ import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary
     , CompactOutcome
     , CompactionInstall
+    , OccupancySnapshot
     )
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Interrupt (InterruptState)
@@ -127,6 +128,8 @@ data SessionRequest = SessionRequest
     , startupUnavailable :: !(Maybe (STM ApiError))
     , paramsRef :: !(IORef ResponseCreateParams)
     , conversationRef :: !(IORef LiveConversation)
+    , contextOccupancyRef :: !(IORef (Maybe OccupancySnapshot))
+    , currentContextWindow :: !(IO (Maybe Int))
     , automaticCompactionRef
         :: !(IORef (Maybe AutomaticCompactionBoundary))
     , needsInitialContext :: !Bool
