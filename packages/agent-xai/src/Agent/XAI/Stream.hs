@@ -5,6 +5,7 @@ module Agent.XAI.Stream
     , feedSseDecoder
     , finishSseDecoder
     , parseSseEvents
+    , streamAssemblyConfig
     , buildResponse
     ) where
 
@@ -29,7 +30,10 @@ import Control.Applicative ((<|>))
 
 -- | Merge streamed output-item events into the terminal completed response.
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response
-buildResponse = buildStreamResponse StreamAssemblyConfig
+buildResponse = buildStreamResponse streamAssemblyConfig
+
+streamAssemblyConfig :: StreamAssemblyConfig
+streamAssemblyConfig = StreamAssemblyConfig
     { missingCompletionMessage =
         "No terminal response event found in xAI SSE stream"
     , classifyStreamError

@@ -9,6 +9,7 @@ module Agent.Responses.GenericClient
     , retryTransientResultWithPolicy
     , classifyFailure
     , classifyStreamError
+    , streamAssemblyConfig
     , buildResponse
     ) where
 
@@ -100,7 +101,7 @@ createResponseWithEventsPolicy policy options request onEvent =
                 , clientBaseUrl = options.baseUrl
                 , clientTimeoutSeconds = options.requestTimeoutSeconds
                 , clientClassifyFailure = classifyFailure
-                , clientBuildResponse = buildResponse
+                , clientAssemblyConfig = streamAssemblyConfig
                 }
             (buildRequest options request)
             configureRequest
@@ -142,7 +143,10 @@ classifyStreamError streamError =
         streamError.retryAfter
 
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response
-buildResponse = buildStreamResponse StreamAssemblyConfig
+buildResponse = buildStreamResponse streamAssemblyConfig
+
+streamAssemblyConfig :: StreamAssemblyConfig
+streamAssemblyConfig = StreamAssemblyConfig
     { missingCompletionMessage =
         "No terminal response event found in Responses SSE stream"
     , classifyStreamError

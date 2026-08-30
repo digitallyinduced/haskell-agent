@@ -28,7 +28,7 @@ import Agent.XAI.Error
     )
 import Agent.XAI.Options
 import Agent.XAI.Request (buildRequest)
-import Agent.XAI.Stream (buildResponse)
+import Agent.XAI.Stream (streamAssemblyConfig)
 import Control.Retry
     ( RetryPolicyM
     , constantDelay
@@ -127,7 +127,7 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
                 , clientBaseUrl = options.baseUrl
                 , clientTimeoutSeconds = options.requestTimeoutSeconds
                 , clientClassifyFailure = classifyFailure
-                , clientBuildResponse = buildResponse
+                , clientAssemblyConfig = streamAssemblyConfig
                 }
             (buildRequest options request)
             configureRequest

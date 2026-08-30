@@ -4,13 +4,17 @@ module Main (main) where
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.StreamAssembly
-    ( applyStreamEvent
+    ( StreamAssemblyConfig(..)
+    , applyStreamEvent
+    , buildStreamResponse
     , emptyStreamAssemblyState
+    , failedStreamResponseMessage
     , finishStreamResponse
     )
+import Agent.Error (ApiError(..))
 import Agent.Responses.Types
 import Control.Exception (evaluate)
-import Control.Monad (forM)
+import Control.Monad (forM, (>=>))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Pair)
 import qualified Data.ByteString as BS
@@ -29,6 +33,7 @@ data Sample = Sample
     { wallMillis :: !Double
     , cpuMillis :: !Double
     , allocatedBytes :: !Integer
+    , maxLiveBytes :: !Integer
     , checksum :: !Int
     }
 main :: IO ()
@@ -36,7 +41,8 @@ main = do
     enabled <- getRTSStatsEnabled
     if enabled then pure () else die "run with +RTS -T"
     getArgs >>= \case
-        ["stream", eventArg, deltaArg, sampleArg] -> do
+        [mode, eventArg, deltaArg, sampleArg]
+            | mode `elem` ["stream", "stream-online", "stream-list"] -> do
             eventCount <- positive "event count" eventArg
             deltaBytes <- positive "delta bytes" deltaArg
             sampleCount <- positive "sample count" sampleArg
@@ -44,8 +50,11 @@ main = do
             _ <- evaluate (sum (map BS.length payloads))
             Codec.withResponseStreamEventDecoder \decode -> do
                 samples <- forM [1 .. sampleCount] \_ ->
-                    measure (runStream decode payloads)
-                report "stream" eventCount deltaBytes samples
+                    measure
+                        (if mode == "stream-list"
+                            then runStreamList decode payloads
+                            else runStream decode payloads)
+                report mode eventCount deltaBytes samples
         ["request", iterationArg, sampleArg] -> do
             iterations <- positive "iteration count" iterationArg
             sampleCount <- positive "sample count" sampleArg
@@ -53,7 +62,8 @@ main = do
                 measure (runRequests iterations)
             report "request" iterations 0 samples
         _ -> die $
-            "usage: responses-json-bench stream EVENTS DELTA_BYTES SAMPLES\n"
+            "usage: responses-json-bench stream-online EVENTS DELTA_BYTES SAMPLES\n"
+                <> "   or: responses-json-bench stream-list EVENTS DELTA_BYTES SAMPLES\n"
                 <> "   or: responses-json-bench request ITERATIONS SAMPLES"
 positive :: String -> String -> IO Int
 positive label raw = case reads raw of
@@ -61,11 +71,12 @@ positive label raw = case reads raw of
     _ -> die ("invalid " <> label <> ": " <> raw)
 report :: String -> Int -> Int -> [Sample] -> IO ()
 report mode count bytes samples =
-    printf "%s,%d,%d,%d,%.3f,%.3f,%d,%d\n"
+    printf "%s,%d,%d,%d,%.3f,%.3f,%d,%d,%d\n"
         mode count bytes (length samples)
         (median (map (.wallMillis) samples))
         (median (map (.cpuMillis) samples))
         (median (map (.allocatedBytes) samples))
+        (median (map (.maxLiveBytes) samples))
         (median (map (.checksum) samples))
 median :: Ord value => [value] -> value
 median values = sort values !! (length values `div` 2)
@@ -84,6 +95,28 @@ runStream decode = go emptyStreamAssemblyState
                 Left err -> error (show err)
                 Right response -> evaluate (responseChecksum response)
             _ -> go next rest
+
+-- Compatibility/list baseline: decode and retain every event before assembly,
+-- matching the former shared HTTP transport's memory shape.
+runStreamList
+    :: (BS.ByteString -> IO (Either String ResponseStreamEvent))
+    -> [BS.ByteString]
+    -> IO Int
+runStreamList decode payloads = do
+    events <- mapM (decode >=> either error pure) payloads
+    case buildStreamResponse benchmarkAssemblyConfig events of
+        Left err -> error (show err)
+        Right response -> evaluate (responseChecksum response)
+
+benchmarkAssemblyConfig :: StreamAssemblyConfig
+benchmarkAssemblyConfig = StreamAssemblyConfig
+    { missingCompletionMessage = "benchmark stream has no terminal event"
+    , classifyStreamError =
+        \streamError -> ConnectionError streamError.message
+    , classifyFailedResponse =
+        ConnectionError . failedStreamResponseMessage
+    , incompleteAsFailure = False
+    }
 runRequests :: Int -> IO Int
 runRequests count = go count checksumSeed
   where
@@ -295,5 +328,6 @@ measure action = do
         , cpuMillis = fromIntegral (afterCPU - beforeCPU) / 1.0e9
         , allocatedBytes = fromIntegral
             (afterStats.allocated_bytes - beforeStats.allocated_bytes)
+        , maxLiveBytes = fromIntegral afterStats.max_live_bytes
         , checksum = result
         }

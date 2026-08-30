@@ -24,7 +24,7 @@ import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenRouter.Error (classifyFailure)
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request (buildRequest)
-import Agent.OpenRouter.Stream (buildResponse)
+import Agent.OpenRouter.Stream (streamAssemblyConfig)
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
@@ -88,7 +88,7 @@ createResponseWithEventsPolicy policy options credential request onEvent
                 , clientBaseUrl = options.baseUrl
                 , clientTimeoutSeconds = options.requestTimeoutSeconds
                 , clientClassifyFailure = classifyFailure
-                , clientBuildResponse = buildResponse
+                , clientAssemblyConfig = streamAssemblyConfig
                 }
             (buildRequest options request)
             configureRequest

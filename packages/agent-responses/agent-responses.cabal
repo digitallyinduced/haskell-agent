@@ -80,6 +80,7 @@ test-suite agent-responses-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Responses.ClientSpec
+                    , Agent.Responses.HttpSSESpec
                     , Agent.Responses.LoopBackendSpec
                     , Agent.Responses.GenericClientSpec
                     , Agent.Responses.ResponseMergeSpec
@@ -94,9 +95,13 @@ test-suite agent-responses-test
                     , bytestring
                     , containers
                     , hspec
+                    , http-conduit
+                    , http-types
                     , QuickCheck >= 2.14 && < 2.16
                     , retry
                     , text
+                    , wai
+                    , warp
 
 benchmark responses-json-bench
     import:           common-opts
@@ -105,6 +110,7 @@ benchmark responses-json-bench
     main-is:          JsonDecoding.hs
     ghc-options:      -O2 -rtsopts
     build-depends:    aeson >= 2.0
+                    , agent-core
                     , agent-json
                     , agent-responses
                     , agent-responses-types

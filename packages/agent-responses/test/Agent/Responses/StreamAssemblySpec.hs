@@ -182,6 +182,40 @@ spec = describe "buildStreamResponse" do
             other -> expectationFailure
                 ("expected one function call, got " <> show other)
 
+    it "assembles many tiny argument deltas without retaining the event list" do
+        let deltaCount = 10_000
+            events =
+                [ ResponseCreatedEvent
+                    (responseFragment "resp-many-deltas")
+                    Nothing
+                , ResponseOutputItemAddedEvent
+                    (FunctionCallItem FunctionCall
+                        { itemId = Just "fc-many"
+                        , callId = "call-many"
+                        , name = "echo"
+                        , namespace = Nothing
+                        , provider = Nothing
+                        , arguments = ""
+                        , encryptedFunctionArgs = Nothing
+                        , status = Nothing
+                        })
+                    (Just 0)
+                    Nothing
+                ]
+                <> replicate deltaCount
+                    (ResponseFunctionCallArgumentsDeltaEvent
+                        (Just "x")
+                        (Just "fc-many")
+                        (Just 0)
+                        Nothing)
+                <> [ResponseCompletedEvent
+                    (responseFragment "resp-many-deltas")
+                    Nothing]
+        response <- expectRight (consumeIncrementally events)
+        [Text.length arguments
+            | FunctionCallItem FunctionCall { arguments } <- response.output
+            ] `shouldBe` [deltaCount]
+
     it "assembles a function call after a reasoning item from argument events" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"
@@ -392,6 +426,14 @@ spec = describe "buildStreamResponse" do
                     ("failed: " <> failedStreamResponseMessage failure)
         , incompleteAsFailure = True
         }
+
+    consumeIncrementally = go emptyStreamAssemblyState
+      where
+        go state [] = finishStreamWithoutTerminal config state
+        go state (event : rest) =
+            case stepStreamResponse config Nothing state event of
+                StreamContinue next -> go next rest
+                StreamFinished result -> result
 
 responseFragment :: Text -> Response
 responseFragment responseId =
