@@ -16,10 +16,7 @@ concurrency:
 jobs:
   publish:
     name: Publish ${{ matrix.system }}
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/master' &&
-      github.repository == 'digitallyinduced/haskell-agent'
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'digitallyinduced/haskell-agent' }}
     strategy:
       fail-fast: false
       matrix:
