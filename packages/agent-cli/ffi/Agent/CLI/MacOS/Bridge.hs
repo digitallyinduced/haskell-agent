@@ -5,6 +5,7 @@ module Agent.CLI.MacOS.Bridge
     , PendingInteraction(..)
     , cancelPendingInteractions
     , discardStagedTurn
+    , discardStagedTurnById
     , resolvePendingInteraction
     , turnStartCleanupId
     ) where
@@ -462,9 +463,19 @@ discardStagedTurn
     -> TVar (Map Text b)
     -> STM ()
 discardStagedTurn requestId params stagedImages stagedOptions = do
-    let cleanupId = turnStartCleanupId requestId params
-    modifyTVar' stagedImages (Map.delete cleanupId)
-    modifyTVar' stagedOptions (Map.delete cleanupId)
+    discardStagedTurnById
+        (turnStartCleanupId requestId params)
+        stagedImages
+        stagedOptions
+
+discardStagedTurnById
+    :: Text
+    -> TVar (Map Text a)
+    -> TVar (Map Text b)
+    -> STM ()
+discardStagedTurnById turnId stagedImages stagedOptions = do
+    modifyTVar' stagedImages (Map.delete turnId)
+    modifyTVar' stagedOptions (Map.delete turnId)
 
 data TurnReference = TurnReference
     { turnReferenceId :: !Text
@@ -663,6 +674,9 @@ foreign export ccall ha_engine_stage_turn_images
 
 foreign export ccall ha_engine_stage_turn_options
     :: Ptr () -> Ptr Word8 -> CSize -> CInt -> CInt -> IO CInt
+
+foreign export ccall ha_engine_discard_turn_staging
+    :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
 
 foreign export ccall ha_engine_set_interaction_callback
     :: Ptr () -> FunPtr InteractionCallback -> Ptr () -> IO CInt
@@ -1155,6 +1169,7 @@ ha_engine_stage_turn_images
 ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
     | pointer == nullPtr = pure 1
     | turnID == nullPtr || turnIDLength == 0 = pure 2
+    | toInteger turnIDLength > maxNativeTurnIDBytes = pure 2
     | imagePointer == nullPtr && imageCount > 0 = pure 4
     | toInteger imageCount > toInteger (maxBound :: Int) = pure 4
     | otherwise = do
@@ -1268,6 +1283,7 @@ ha_engine_stage_turn_options
 ha_engine_stage_turn_options pointer turnID (CSize turnIDLength) rawMode rawShell
     | pointer == nullPtr = pure 1
     | turnID == nullPtr || turnIDLength == 0 = pure 2
+    | toInteger turnIDLength > maxNativeTurnIDBytes = pure 2
     | otherwise =
         case (interactionModeFromCode rawMode, shellModeFromCode rawShell) of
             (Just interactionMode, Just shellMode) -> do
@@ -1297,6 +1313,36 @@ ha_engine_stage_turn_options pointer turnID (CSize turnIDLength) rawMode rawShel
                     Right False -> 2
                     Right True -> 0
             _ -> pure 4
+
+ha_engine_discard_turn_staging
+    :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
+ha_engine_discard_turn_staging pointer turnID (CSize turnIDLength)
+    | pointer == nullPtr = pure 1
+    | turnID == nullPtr || turnIDLength == 0 = pure 2
+    | toInteger turnIDLength > maxNativeTurnIDBytes = pure 2
+    | otherwise = do
+        result <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            bytes <- BS.packCStringLen
+                (castPtr turnID, fromIntegral turnIDLength)
+            case TextEncoding.decodeUtf8' bytes of
+                Left _ -> pure False
+                Right turnIDText
+                    | Text.null turnIDText -> pure False
+                    | otherwise -> do
+                        atomically $ discardStagedTurnById
+                            turnIDText
+                            engine.engineStagedImages
+                            engine.engineStagedTurnOptions
+                        pure True
+        pure $ case result of
+            Left _ -> 3
+            Right False -> 2
+            Right True -> 0
+
+maxNativeTurnIDBytes :: Integer
+maxNativeTurnIDBytes = 1_024
 
 ha_engine_set_interaction_callback
     :: Ptr () -> FunPtr InteractionCallback -> Ptr () -> IO CInt
@@ -1520,6 +1566,8 @@ idleLoop
                                     store
                                     root
                                     commands
+                                    stagedImages
+                                    stagedTurnOptions
                                     control
                                     running >>= \case
                                         ActiveContinue -> continue
@@ -1556,10 +1604,14 @@ activeLoop
     -> MVar (Maybe Store)
     -> OsPath
     -> TQueue EngineCommand
+    -> TVar (Map Text [ImageAttachment])
+    -> TVar (Map Text NativeTurnOptions)
     -> TurnControl
     -> Async TurnOutcome
     -> IO ActiveExit
-activeLoop callback context config store root commands control running =
+activeLoop
+        callback context config store root commands stagedImages
+        stagedTurnOptions control running =
     atomically
         ((Left <$> readTQueue commands)
             `orElse` (Right <$> waitCatchSTM running)) >>= \case
@@ -1574,12 +1626,14 @@ activeLoop callback context config store root commands control running =
             runConversationSearch
                 config store query limit searchCallback searchContext
             activeLoop
-                callback context config store root commands control running
+                callback context config store root commands stagedImages
+                stagedTurnOptions control running
         Left (EngineSessionMutation mutation resultCallback resultContext) -> do
             runSessionMutation
                 config store root mutation resultCallback resultContext
             activeLoop
-                callback context config store root commands control running
+                callback context config store root commands stagedImages
+                stagedTurnOptions control running
         Left (EngineRequest request) -> do
             if request.requestMethod == "turn.cancel"
               then
@@ -1602,7 +1656,12 @@ activeLoop callback context config store root commands control running =
                 activeAgentSnapshot control request
                     >>= sendEvent callback context
               else if request.requestMethod == "turn.start"
-              then
+              then do
+                atomically $ discardStagedTurn
+                    request.requestId
+                    request.requestParams
+                    stagedImages
+                    stagedTurnOptions
                 sendEvent callback context $
                     failureEvent request.requestId "a turn is already running"
               else
@@ -1615,6 +1674,8 @@ activeLoop callback context config store root commands control running =
                 store
                 root
                 commands
+                stagedImages
+                stagedTurnOptions
                 control
                 running
 

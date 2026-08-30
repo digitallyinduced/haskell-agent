@@ -134,6 +134,105 @@ int ha_image_attachment_stage_smoke(void) {
     return status;
 }
 
+int ha_turn_staging_discard_smoke(void) {
+    const uint8_t options_only[] = "options-only";
+    const uint8_t images_only[] = "images-only";
+    const uint8_t both[] = "both";
+    const uint8_t rejected[] = "rejected";
+    const uint8_t invalid_utf8[] = {0xff};
+    const uint8_t mime[] = "image/png";
+    const uint8_t bytes[] = {0x89, 0x50, 0x4e, 0x47};
+    const ha_image_attachment image = {
+        .mime = mime,
+        .mime_length = sizeof(mime) - 1,
+        .bytes = bytes,
+        .bytes_length = sizeof(bytes),
+    };
+    const uint8_t malformed_start[] =
+        "{\"id\":\"request-id\",\"method\":\"turn.start\","
+        "\"params\":{\"turnId\":\"rejected\"}}";
+    if (ha_runtime_init() != 0) {
+        return 20;
+    }
+    void *engine = ha_engine_create(image_stage_callback, NULL);
+    if (engine == NULL) {
+        ha_runtime_exit();
+        return 21;
+    }
+    int32_t status = ha_engine_stage_turn_options(
+        engine, options_only, sizeof(options_only) - 1,
+        HA_INTERACTION_MODE_ASK, HA_SHELL_MODE_BASH);
+    if (status == 0) {
+        status = ha_engine_discard_turn_staging(
+            engine, options_only, sizeof(options_only) - 1);
+    }
+    if (status == 0) {
+        status = ha_engine_stage_turn_images(
+            engine, images_only, sizeof(images_only) - 1, &image, 1);
+    }
+    if (status == 0) {
+        status = ha_engine_discard_turn_staging(
+            engine, images_only, sizeof(images_only) - 1);
+    }
+    if (status == 0) {
+        status = ha_engine_stage_turn_images(
+            engine, both, sizeof(both) - 1, &image, 1);
+    }
+    if (status == 0) {
+        status = ha_engine_stage_turn_options(
+            engine, both, sizeof(both) - 1,
+            HA_INTERACTION_MODE_PLAN, HA_SHELL_MODE_BOTH);
+    }
+    if (status == 0) {
+        status = ha_engine_discard_turn_staging(
+            engine, both, sizeof(both) - 1);
+    }
+    if (status == 0) {
+        status = ha_engine_discard_turn_staging(
+            engine, both, sizeof(both) - 1);
+    }
+    if (status == 0
+            && ha_engine_discard_turn_staging(engine, NULL, 1) != 2) {
+        status = 22;
+    }
+    if (status == 0
+            && ha_engine_discard_turn_staging(
+                engine, invalid_utf8, sizeof(invalid_utf8)) != 2) {
+        status = 23;
+    }
+    if (status == 0
+            && ha_engine_discard_turn_staging(engine, both, SIZE_MAX) != 2) {
+        status = 24;
+    }
+    if (status == 0
+            && ha_engine_stage_turn_images(
+                engine, both, SIZE_MAX, &image, 1) != 2) {
+        status = 25;
+    }
+    if (status == 0
+            && ha_engine_stage_turn_options(
+                engine, both, SIZE_MAX,
+                HA_INTERACTION_MODE_ASK, HA_SHELL_MODE_NONE) != 2) {
+        status = 26;
+    }
+    if (status == 0) {
+        status = ha_engine_stage_turn_images(
+            engine, rejected, sizeof(rejected) - 1, &image, 1);
+    }
+    if (status == 0) {
+        status = ha_engine_stage_turn_options(
+            engine, rejected, sizeof(rejected) - 1,
+            HA_INTERACTION_MODE_YOLO, HA_SHELL_MODE_NONE);
+    }
+    if (status == 0) {
+        status = ha_engine_send_json(
+            engine, malformed_start, sizeof(malformed_start) - 1);
+    }
+    ha_engine_destroy(engine);
+    ha_runtime_exit();
+    return status;
+}
+
 int ha_native_turn_options_stage_smoke(void) {
     const uint8_t turn_id[] = "native-options-turn";
     const uint8_t interaction_id[] = "not-active";

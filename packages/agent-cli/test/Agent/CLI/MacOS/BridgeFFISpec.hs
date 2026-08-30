@@ -9,6 +9,7 @@ import Agent.CLI.MacOS.Bridge
     , PendingInteraction(..)
     , cancelPendingInteractions
     , discardStagedTurn
+    , discardStagedTurnById
     , resolvePendingInteraction
     , turnStartCleanupId
     )
@@ -37,6 +38,9 @@ foreign import ccall "ha_image_attachment_stage_smoke"
 
 foreign import ccall "ha_native_turn_options_stage_smoke"
     nativeTurnOptionsStageSmoke :: IO CInt
+
+foreign import ccall "ha_turn_staging_discard_smoke"
+    turnStagingDiscardSmoke :: IO CInt
 #else
 import Test.Hspec (Spec, describe, it, pendingWith)
 #endif
@@ -46,6 +50,13 @@ spec = describe "native bridge FFI" do
     it "accepts copied image buffers through the exported bridge" do
 #ifdef darwin_HOST_OS
         imageAttachmentStageSmoke `shouldReturn` 0
+#else
+        pendingWith "the native bridge smoke test only links on macOS"
+#endif
+
+    it "discards staged turns through the C ABI and destroys cleanly" do
+#ifdef darwin_HOST_OS
+        turnStagingDiscardSmoke `shouldReturn` 0
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif
@@ -72,6 +83,27 @@ spec = describe "native bridge FFI" do
             `shouldReturn` Map.singleton "request-1" 2
         readTVarIO stagedOptions
             `shouldReturn` Map.singleton "request-1" 2
+
+    it "atomically discards options-only, images-only, both, and repeatedly" do
+        stagedImages <- newTVarIO $ Map.fromList
+            [("images-only", 1 :: Int), ("both", 2)]
+        stagedOptions <- newTVarIO $ Map.fromList
+            [("options-only", 1 :: Int), ("both", 2)]
+        atomically $ discardStagedTurnById
+            "options-only" stagedImages stagedOptions
+        readTVarIO stagedImages `shouldReturn` Map.fromList
+            [("images-only", 1), ("both", 2)]
+        readTVarIO stagedOptions `shouldReturn` Map.singleton "both" 2
+        atomically $ discardStagedTurnById
+            "images-only" stagedImages stagedOptions
+        readTVarIO stagedImages `shouldReturn` Map.singleton "both" 2
+        readTVarIO stagedOptions `shouldReturn` Map.singleton "both" 2
+        atomically $ discardStagedTurnById
+            "both" stagedImages stagedOptions
+        atomically $ discardStagedTurnById
+            "both" stagedImages stagedOptions
+        (Map.null <$> readTVarIO stagedImages) `shouldReturn` True
+        (Map.null <$> readTVarIO stagedOptions) `shouldReturn` True
 
     it "resolves a pending callback answer exactly once" do
         waiter <- newEmptyTMVarIO
