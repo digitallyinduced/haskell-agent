@@ -15,7 +15,7 @@ module Agent.CLI.Timestamp
     , timeContextGuidance
     ) where
 
-import Agent.Loop (TurnInput(..))
+import Agent.Loop (TurnInput, mapTurnInputUserText)
 import Data.Char (isAsciiUpper, isDigit)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -66,28 +66,16 @@ stampUserTextAt tz now text =
             then stripped
             else stripped <> " " <> stamp
 
--- | Stamp every human 'UserMessage' / 'UserMultimodal' payload. Tool results
--- and other turn inputs are left unchanged.
+-- | Stamp every human user payload. Tool results and other turn inputs are
+-- left unchanged.
 stampTurnInputs :: [TurnInput] -> IO [TurnInput]
 stampTurnInputs inputs = do
     now <- getCurrentTime
     tz <- getCurrentTimeZone
-    pure (map (stampOne tz now) inputs)
-  where
-    stampOne tz now = \case
-        UserMessage text -> UserMessage (stampUserTextAt tz now text)
-        UserMultimodal{userText, userImages} ->
-            UserMultimodal
-                { userText = stampUserTextAt tz now userText
-                , userImages
-                }
-        UserMultimodalFiles{userText, userImages, userFiles} ->
-            UserMultimodalFiles
-                { userText = stampUserTextAt tz now userText
-                , userImages
-                , userFiles
-                }
-        other -> other
+    pure
+        (map
+            (mapTurnInputUserText (stampUserTextAt tz now))
+            inputs)
 
 hasTrailingTimestamp :: Text -> Bool
 hasTrailingTimestamp text =

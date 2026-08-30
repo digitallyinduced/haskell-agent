@@ -60,6 +60,10 @@ spec = describe "runLoop" do
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "secret-file-bytes"
 
+    it "normalizes an empty attachment list to a text-only message" do
+        userMessageWithAttachments "hello" []
+            `shouldBe` UserMessage "hello"
+
     it "combines TokenUsage component-wise" do
         TokenUsage 10 4 6 <> TokenUsage 3 2 1
             `shouldBe` TokenUsage 13 6 7
@@ -113,10 +117,9 @@ spec = describe "runLoop" do
             ]
         let image = ImageAttachment "image/png" "abc"
             inputs =
-                [ UserMultimodal
-                    { userText = "see this"
-                    , userImages = [image]
-                    }
+                [ userMessageWithAttachments
+                    "see this"
+                    [ImageAttachmentItem image]
                 ]
         config <- testConfig backend
         result <- runLoopInputs config Nothing inputs
@@ -137,11 +140,11 @@ spec = describe "runLoop" do
         let image = ImageAttachment "image/png" "abc"
             file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
             inputs =
-                [ UserMultimodalFiles
-                    { userText = "see this"
-                    , userImages = [image]
-                    , userFiles = [file]
-                    }
+                [ userMessageWithAttachments
+                    "see this"
+                    [ ImageAttachmentItem image
+                    , FileAttachmentItem file
+                    ]
                 ]
         config <- testConfig backend
         result <- runLoopInputs config Nothing inputs
