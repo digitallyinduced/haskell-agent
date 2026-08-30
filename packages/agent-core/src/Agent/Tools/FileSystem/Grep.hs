@@ -24,6 +24,11 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Control.Applicative ((<|>))
+import Control.Concurrent.Async (withAsync, wait)
+import Control.Exception.Safe (finally, tryIO)
+import Control.Monad (forM_)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -36,11 +41,24 @@ import System.FilePath
     , splitDirectories
     )
 import System.Process
-    ( CreateProcess(cwd)
+    ( CreateProcess(cwd, std_err, std_in, std_out)
+    , ProcessHandle
+    , StdStream(CreatePipe)
     , proc
-    , readCreateProcessWithExitCode
+    , createProcess
+    , terminateProcess
+    , waitForProcess
     )
 import System.OsPath (OsPath)
+import System.IO
+    ( BufferMode(NoBuffering)
+    , Handle
+    , hClose
+    , hGetLine
+    , hSetBuffering
+    , hSetEncoding
+    , utf8
+    )
 
 data GrepOutputMode = GrepContent | GrepFilesWithMatches | GrepCount
     deriving (Eq, Show)
@@ -193,16 +211,74 @@ runRipgrep rgPath workspace path args = do
             , ["--regexp", Text.unpack args.pattern, "--", searchPath]
             ]
         process = (proc rgPath rgArgs) { cwd = processCwd }
-    (code, stdout, stderr) <- readCreateProcessWithExitCode process ""
+    (mIn, mOut, mErr, ph) <- createProcess process
+        { std_in = CreatePipe
+        , std_out = CreatePipe
+        , std_err = CreatePipe
+        }
+    forM_ mIn hClose
+    stdoutHandle <- maybe (ioError (userError "rg stdout pipe unavailable")) pure mOut
+    stderrHandle <- maybe (ioError (userError "rg stderr pipe unavailable")) pure mErr
+    hSetEncoding stdoutHandle utf8
+    hSetEncoding stderrHandle utf8
+    hSetBuffering stdoutHandle NoBuffering
+    hSetBuffering stderrHandle NoBuffering
+    -- Keep only one line beyond the requested limit.  The producer is
+    -- terminated as soon as that line arrives, rather than allowing a slow
+    -- renderer to retain the complete ripgrep output in a String.
+    ((stdout, truncated), stderr) <-
+        withAsync (readLimitedLines ph stdoutHandle (effectiveHeadLimit args + 1)) \out ->
+            withAsync (readLimitedBytes stderrHandle diagnosticLimit) \err -> do
+                output <- wait out
+                diagnostics <- wait err
+                pure (output, diagnostics)
+    code <- waitForProcess ph
+    hClose stdoutHandle `finally` hClose stderrHandle
     let raw = Text.pack stdout
     case code of
         ExitSuccess -> pure $ Right raw
+        -- terminateProcess is deliberate once the output limit is known.
+        -- ripgrep may report a signal exit on that path; preserve the
+        -- bounded, truncated result as a successful search.
+        ExitFailure _ | truncated -> pure $ Right raw
         ExitFailure 1 | null stdout ->
             if null stderr
                 then pure (Right "")
                 else pure (Left (Text.pack stderr))
         ExitFailure _ ->
             pure $ Left $ Text.pack (if null stderr then stdout else stderr)
+
+diagnosticLimit :: Int
+diagnosticLimit = 1024 * 1024
+
+readLimitedLines :: ProcessHandle -> Handle -> Int -> IO (String, Bool)
+readLimitedLines ph handle maxLines = go [] 0
+  where
+    go acc count
+        | count >= maxLines = do
+            terminateProcess ph
+            pure (concat (reverse acc), True)
+        | otherwise = do
+            result <- tryIO (hGetLine handle)
+            case result of
+                Left _ -> pure (concat (reverse acc), False)
+                Right line -> go ((line <> "\n") : acc) (count + 1)
+
+readLimitedBytes :: Handle -> Int -> IO String
+readLimitedBytes handle limit = go [] 0
+  where
+    go acc total
+        | total >= limit = drain
+        | otherwise = do
+            chunk <- BS.hGetSome handle (min 8192 (limit - total))
+            if BS.null chunk
+                then pure (concat (reverse acc))
+                else go (BSC.unpack chunk : acc) (total + BS.length chunk)
+    -- Keep draining after the diagnostic budget is reached so the child
+    -- cannot block on a full stderr pipe while stdout is still being read.
+    drain = do
+        chunk <- BS.hGetSome handle 8192
+        if BS.null chunk then pure (concat (reverse acc)) else drain
 
 formatGrepCard :: OsPath -> Text -> Int -> Text
 formatGrepCard cwd raw limit
