@@ -344,9 +344,15 @@ spec = describe "Agent.Telegram" do
             markdownToTelegramHtml
                 "**Bold** and *italic*\n`code` ~~gone~~ [site](https://example.com)"
                 `shouldBe`
-                    "<b>Bold</b> and <i>italic</i><br>\
+                    "<b>Bold</b> and <i>italic</i>\n\
                     \<code>code</code> <s>gone</s> \
                     \<a href=\"https://example.com\">site</a>"
+
+        it "uses Telegram-supported newlines instead of HTML break tags" do
+            let html = markdownToTelegramHtml
+                    "Aktuell frei:\n\n- **Festplatte:** 129 GB frei"
+            html `shouldSatisfy` Text.isInfixOf "\n\n"
+            html `shouldNotSatisfy` Text.isInfixOf "<br>"
 
         it "escapes literal HTML and link attributes" do
             markdownToTelegramHtml
@@ -358,14 +364,14 @@ spec = describe "Agent.Telegram" do
         it "renders fenced code without interpreting its Markdown" do
             markdownToTelegramHtml "before\n```haskell\nx < y && **raw**\n```\nafter"
                 `shouldBe`
-                    "before<br><pre>x &lt; y &amp;&amp; **raw**\n</pre><br>after"
+                    "before\n<pre>x &lt; y &amp;&amp; **raw**\n</pre>\nafter"
 
         it "renders ATX headings with native bold entities" do
             markdownToTelegramHtml
                 "# Summary\n#### Details with *emphasis*\nnot# a heading"
                 `shouldBe`
-                    "<b>Summary</b><br>\
-                    \<b>Details with <i>emphasis</i></b><br>\
+                    "<b>Summary</b>\n\
+                    \<b>Details with <i>emphasis</i></b>\n\
                     \not# a heading"
 
         it "renders Markdown tables as aligned preformatted text" do
@@ -382,7 +388,7 @@ spec = describe "Agent.Telegram" do
 
         it "does not mistake ordinary pipe-separated text for a table" do
             markdownToTelegramHtml "one | two\nstill | text"
-                `shouldBe` "one | two<br>still | text"
+                `shouldBe` "one | two\nstill | text"
 
         it "leaves unmatched delimiters literal" do
             markdownToTelegramHtml "unfinished **bold and `code"

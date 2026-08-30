@@ -38,7 +38,7 @@ data ColumnAlignment
     | AlignRight
 
 renderBlocks :: Text -> Text
-renderBlocks = Text.intercalate "<br>" . go . Text.splitOn "\n"
+renderBlocks = Text.intercalate "\n" . go . Text.splitOn "\n"
   where
     go [] = []
     go (header : separator : rest)
@@ -144,8 +144,6 @@ telegramRenderedLength = go 0 . markdownToTelegramHtml
   where
     go count html
         | Text.null html = count
-        | Just rest <- Text.stripPrefix "<br>" html =
-            go (count + 1) rest
         | Just rest <- Text.stripPrefix "<" html =
             case Text.breakOn ">" rest of
                 (_, afterTag)
