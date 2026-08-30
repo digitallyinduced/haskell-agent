@@ -14,6 +14,7 @@ import Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime(..),
       CodexCatalogSession(..),
       codeModeSessionRuntimeFor,
+      imageGenerationCodeModeRuntimeFor,
       loadCodexCatalogModelInfo )
 import Agent.CLI.Command ()
 import Agent.CLI.Compaction
@@ -37,13 +38,16 @@ import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ( catalogContextWindowForTransport )
 import Agent.CLI.Models ()
 import Agent.CLI.Options
-    ( isOneShot, CliOptions(optShowRawReasoning, optCompactThreshold) )
+    ( isOneShot
+    , CliOptions(optCodeMode, optShowRawReasoning, optCompactThreshold)
+    )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
-import Agent.CLI.Project ()
+import Agent.CLI.Project ( ModelSwitchScope(..) )
 import Agent.CLI.Prompt
     ( codexEnvironmentContext,
       subscriptionSubagentModelGuidance,
+      appendMcpInstructions,
       systemPromptForCatalogModel,
       systemPromptForTools )
 import Agent.CLI.PromptHooks ()
@@ -94,11 +98,14 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policy, allTools,
+                     recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
+                     mcpInstructions, mcpFleet,
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
                      conversationRef, needsInitialContext, persist,
+                     contextOccupancyRef, currentContextWindow,
                      startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
                      automaticCompactionHookRef, skillsRef, skillInvocationsRef,
@@ -123,6 +130,7 @@ import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
                       subagentOptions, subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
+                      subagentAllowedRoots, subagentRootAccessRequest,
                       subagentParams, subagentMcpTools, subagentRegistry,
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
@@ -149,8 +157,10 @@ import Agent.GrokBuild.Dialect.Task ()
 import Agent.GrokBuild.Dialect.Workflow ()
 import Agent.Loop ( addTokenUsage, emptyTokenUsage )
 import Agent.OpenAI.Compaction ()
+import Agent.OpenAI.ImageGeneration ( imageGenerationToolName )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
+import Agent.OpenAI.Models.Types ( resolvedContextWindow )
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ()
 import Agent.Provider ( tokenProviderBillingMode )
@@ -170,9 +180,11 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
 import Agent.Tools.Types
-    ( AppTool(appToolName), ToolEnv(toolSkillRoots, toolSessionTmp) )
+    ( AppTool(appToolName)
+    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
+    )
 import Agent.XAI.LoopBackend ()
-import Control.Applicative ()
+import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( waitSTM, withAsync )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
@@ -201,7 +213,7 @@ import System.OsPath ()
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
-import qualified Agent.MCP as MCP ()
+import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter ()
@@ -226,6 +238,8 @@ runAgentSession
     activeSelectionRef
     agentTypesRef
     allTools
+    recordImageGenerationInputs
+    clearImageGenerationHistory
     bashEnabledRef
     catalog
     checkStartupUsageInBackground
@@ -313,9 +327,12 @@ runAgentSession
                         ("Failed to initialize MCP tools: " <> Text.unpack err)
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
-        -- Catalog models: per-model instructions template and, when the
-        -- catalog selects code_mode_only, the exec/wait tool surface. The
-        -- offline lookup never blocks startup on the network.
+        mcpInstructions <- MCP.mcpFleetInstructions mcpFleet
+        -- Catalog models provide the per-model instructions template. Full
+        -- code mode remains opt-in, but code_mode_only models still route the
+        -- reserved image-generation tool through exec because Responses Lite
+        -- rejects its direct namespace. The offline lookup never blocks
+        -- startup on the network.
         codexModelInfo <-
             loadCodexCatalogModelInfo
                 stateDirectory
@@ -323,17 +340,33 @@ runAgentSession
                 dialect
                 (Just loaded.loadedTokenProvider)
                 model
-        codeModeRuntime <-
-            codeModeSessionRuntimeFor codexModelInfo tools >>= \case
+        let initializeCodeMode =
+                if options.optCodeMode
+                    then codeModeSessionRuntimeFor codexModelInfo tools
+                    else imageGenerationCodeModeRuntimeFor codexModelInfo tools
+            codeModeFallbackWarning
+                | options.optCodeMode =
+                    "code mode unavailable; falling back to compatible \
+                    \direct tools: "
+                | otherwise =
+                    "image generation code mode unavailable; \
+                    \disabling image generation: "
+        (codeModeRuntime, suppressDirectImageGeneration) <-
+            initializeCodeMode >>= \case
                 Left err -> do
                     reportStartupWarning startup
-                        ("code mode unavailable; falling back to direct tools: "
-                            <> err)
-                    pure Nothing
-                Right runtime -> pure runtime
+                        (codeModeFallbackWarning <> err)
+                    pure (Nothing, True)
+                Right runtime -> pure (runtime, False)
         writeIORef codeModeCloseRef
             (maybe (pure ()) (.codeModeClose) codeModeRuntime)
-        let catalogSession = codexModelInfo <&> \info ->
+        let providerTools
+                | suppressDirectImageGeneration =
+                    filter
+                        ((/= imageGenerationToolName) . (.appToolName))
+                        tools
+                | otherwise = tools
+            catalogSession = codexModelInfo <&> \info ->
                 CodexCatalogSession
                     { catalogInstructionsFor = \toolNames sessionTmpDir ->
                         systemPromptForCatalogModel
@@ -344,19 +377,20 @@ runAgentSession
                     , catalogEnvironmentContext =
                         codexEnvironmentContext cwd today Nothing Nothing
                     }
-            instructions = case catalogSession of
-                Just catalog ->
-                    catalog.catalogInstructionsFor
-                        (map (.appToolName) tools)
-                        (Just sessionTmp)
-                Nothing ->
-                    systemPromptForTools
-                        dialect
-                        (map (.appToolName) tools)
-                        cwd
-                        (Just sessionTmp)
-                        today
-                        (isOneShot options)
+            instructions =
+                appendMcpInstructions mcpInstructions case catalogSession of
+                    Just catalog ->
+                        catalog.catalogInstructionsFor
+                            (map (.appToolName) providerTools)
+                            (Just sessionTmp)
+                    Nothing ->
+                        systemPromptForTools
+                            dialect
+                            (map (.appToolName) providerTools)
+                            cwd
+                            (Just sessionTmp)
+                            today
+                            (isOneShot options)
             wireSchemas = case codeModeRuntime of
                 Just codeMode ->
                     schemasFromAppToolsCodeMode
@@ -364,7 +398,7 @@ runAgentSession
                         ( codeMode.codeModeWireTools
                             <> codeMode.codeModeDirectTools
                         )
-                Nothing -> schemasFromAppTools dialect tools
+                Nothing -> schemasFromAppTools dialect providerTools
             environmentContextBlock =
                 (.catalogEnvironmentContext) <$> catalogSession
             registryTools =
@@ -410,6 +444,8 @@ runAgentSession
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentSkillRoots = toolEnv.toolSkillRoots
+                , subagentAllowedRoots = toolEnv.toolAllowedRoots
+                , subagentRootAccessRequest = toolEnv.toolRootAccessRequest
                 , subagentParams = paramsRef
                 , subagentMcpTools = mcpTools
                 , subagentRegistry = registry
@@ -508,8 +544,8 @@ runAgentSession
                 | startup.startupBackground = action
                 | otherwise =
                     withCtrlCHandler interrupt $
-                        withInterruptResume
-                            fullscreen progName persist RunQuit action
+                        withResumeHintOnQuit
+                            fullscreen progName persist action
         runWithInterruptHandling do
                 let shouldProbeAtStartup =
                         checkStartupUsageInBackground
@@ -519,6 +555,7 @@ runAgentSession
                         sessionTokenProvider
                         sessionOpenAiPool
                         sessionSelectAccount
+                        sessionContextWindow
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
@@ -530,11 +567,15 @@ runAgentSession
                                 , dialect
                                 , policy
                                 , allTools = registryTools
+                                , recordImageGenerationInputs
+                                , clearImageGenerationHistory
                                 , suspendGhci = coding.codingSuspendGhci
                                 , grokRuntime = coding.codingGrokRuntime
                                 , mcpRegistrations =
                                     mcpFleet.mcpFleetRegistrations
                                 , mcpWarnings = mcpFleet.mcpFleetWarnings
+                                , mcpInstructions
+                                , mcpFleet = Just mcpFleet
                                 , ghciEnabledRef
                                 , bashEnabledRef
                                 , toolEnv
@@ -548,6 +589,13 @@ runAgentSession
                                 , startupUnavailable
                                 , paramsRef
                                 , conversationRef
+                                , contextOccupancyRef = contextTokensRef
+                                , currentContextWindow = do
+                                    configured <- sessionContextWindow
+                                    pure $
+                                        configured
+                                            <|> (resolvedContextWindow
+                                                =<< codexModelInfo)
                                 , automaticCompactionRef
                                 , needsInitialContext =
                                     resumeNeedsFreshContext
@@ -604,6 +652,9 @@ runAgentSession
                         | otherwise = action Nothing
                 withStartupAvailability \startupUnavailable ->
                     runAgentProviders
+                        (if startup.startupBackground
+                            then SessionLocalSwitch
+                            else TopLevelSwitch)
                         loaded
                         sessionRequest
                         activeAccountIdRef
@@ -647,28 +698,30 @@ runAgentSession
                         transportModel
                         unavailableProviders
 
--- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
-withInterruptResume
+-- | Print a copy-pasteable --resume line whenever the CLI session quits.
+-- Ctrl-C is normalized to the same graceful 'RunQuit' result as :q/Ctrl-D so
+-- every exit path reports the persisted session exactly once.
+withResumeHintOnQuit
     :: Maybe FullscreenRuntime
     -> String
     -> Persistence
-    -> a
-    -> IO a
-    -> IO a
-withInterruptResume fullscreen progName persist interrupted action =
-    catchUserInterrupt action finishInterrupt
-  where
-    finishInterrupt = do
-        case fullscreen of
-            Nothing -> printResumeHint progName persist
-            Just runtime ->
-                withFullscreenSuspended runtime
-                    (printResumeHint progName persist)
-        -- The interrupt is the requested, graceful end of the CLI session.
-        -- Returning lets the surrounding brackets restore the SIGINT handler
-        -- and close tools without GHC's top-level exception handler printing
-        -- "user interrupt" and a backtrace.
-        pure interrupted
+    -> IO RunResult
+    -> IO RunResult
+withResumeHintOnQuit fullscreen progName persist action = do
+    result <- catchUserInterrupt action (pure RunQuit)
+    case result of
+        RunQuit -> do
+            case fullscreen of
+                Nothing -> printResumeHint progName persist
+                Just runtime ->
+                    withFullscreenSuspended runtime
+                        (printResumeHint progName persist)
+        _ -> pure ()
+    -- An interrupt is the requested, graceful end of the CLI session.
+    -- Returning lets the surrounding brackets restore the SIGINT handler
+    -- and close tools without GHC's top-level exception handler printing
+    -- "user interrupt" and a backtrace.
+    pure result
 
 printResumeHint
     :: String

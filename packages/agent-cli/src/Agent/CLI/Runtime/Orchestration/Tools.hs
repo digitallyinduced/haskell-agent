@@ -49,8 +49,10 @@ import Agent.CLI.Lsp
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
+import Agent.CLI.McpElicitation (cliMcpElicitation)
 import Agent.CLI.McpStatus
-    ( formatMcpModelNoticeFor,
+    ( formatMcpInstructionsNotice,
+      formatMcpModelNoticeFor,
       formatMcpProgress,
       summarizeMcpStatuses )
 import Agent.CLI.ModelConfig ( builtinConnectionId )
@@ -75,10 +77,9 @@ import Agent.CLI.Plan
     ( cliPlanHooks
     , resumedPlanNeedsApproval
     )
-import Agent.CLI.Project ( saveRememberedModel )
 import Agent.CLI.Prompt ( subscriptionSubagentModelGuidance )
 import Agent.CLI.PromptHooks
-    ( fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
+    ( fullscreenAwareImageHooks, fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
 import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch ()
 import Agent.CLI.ProviderAvailability ()
@@ -99,7 +100,7 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Session ( runAgentSession )
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
-import Agent.CLI.Runtime.Orchestration.Types ()
+import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..))
 import Agent.CLI.Runtime.Persistence ( preparePersistence )
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -116,13 +117,14 @@ import Agent.CLI.Session
       SessionMeta(metaId, metaTransportModel, metaProvider,
                   metaConnection, metaModel, metaDialect, metaEffort),
       SessionTurn(turnAssistantText) )
-import Agent.CLI.Session.Attachments ()
+import Agent.CLI.Session.Attachments ( putImagePreview )
 import Agent.CLI.Session.Choices ()
-import Agent.CLI.Session.History ()
+import Agent.CLI.Session.History (foldSessionItems)
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
-                     startupFinished, startupDatabaseStore) )
+                     startupFinished, startupDatabaseStore,
+                     startupSessionState) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, loadPrompt, reservedSessionId )
 import Agent.CLI.SessionAdmin ()
@@ -132,7 +134,7 @@ import Agent.CLI.SessionLock
       releaseSessionLock,
       sessionLockFilePath,
       sessionLockPath )
-import Agent.CLI.SessionState ()
+import Agent.CLI.SessionState ( SessionState(sessionPreviewId) )
 import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth
@@ -158,10 +160,13 @@ import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
     ( closeWebFetchRuntime, newWebFetchRuntime, webFetchRuntimeTool )
 import Agent.CLI.Worktree
-    ( createWorktree, removeWorktree, worktreeRoot )
+    ( createManagedWorktree, removeWorktree )
 import Agent.Cancel ()
 import Agent.Claude ()
-import Agent.Dialect ( dialectForId, DialectId(GrokBuildDialect) )
+import Agent.Dialect
+    ( dialectForId
+    , DialectId(CodexDialect, GrokBuildDialect)
+    )
 import Agent.Error ()
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
@@ -171,13 +176,21 @@ import Agent.Loop
     ( TurnInput(UserMessage, AgentMessage),
       LoopError(LoopNoResponseId) )
 import Agent.OpenAI.Compaction ()
+import Agent.OpenAI.ImageGeneration
+    ( clearImageGenerationHistory
+    , imageGenerationTool
+    , newImageGenerationHistory
+    , recordImageGenerationImages
+    , recordImageGenerationResponseItems
+    )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( unsafeToFilePath )
 import Agent.Provider
-    ( Provider(XAIProvider, OpenRouterProvider, OpenAIProvider),
-      tokenProviderBillingMode )
+    ( Provider(XAIProvider, OpenRouterProvider, OpenAIProvider)
+    , tokenProviderBillingMode
+    )
 import Agent.ReasoningEffort
     ( parseReasoningEffort, reasoningEffortText )
 import Agent.Responses.GenericBackend ()
@@ -210,6 +223,8 @@ import Agent.Tools.PlanMode
       PlanDecision(PlanCancel) )
 import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
+import Agent.Tools.ShowImage
+    ( ImageDisplayHooks(..), ImageDisplayRequest(..) )
 import Agent.Tools.Types ( setToolSessionTmp )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
@@ -242,14 +257,16 @@ import qualified Agent.MCP as MCP
     ( acquireMcpFleetProgressive,
       acquireMcpFleetWithProgress,
       mcpFleetGrokMetaTools,
+      mcpFleetInstructions,
       mcpFleetMetaTools,
+      mcpFleetResourceTools,
       mcpFleetTools,
       releaseMcpFleetLease,
       McpFleet(mcpFleetRegistrations, mcpFleetWarnings),
       McpFleetLease(mcpLeaseFleet),
       McpServerConfig(mcpServerRequestTimeoutSeconds, McpServerConfig,
                       mcpServerName, mcpServerUrl, mcpServerCommand, mcpServerArgs, mcpServerCwd,
-                      mcpServerEnv, mcpServerStartupTimeoutSeconds) )
+                      mcpServerEnv, mcpServerStartupTimeoutSeconds, mcpServerProtocol) )
 import qualified Data.Map.Strict as Map
     ( toAscList, empty, lookup, notMember )
 import qualified Agent.OpenAI.Auth as OpenAI ()
@@ -327,7 +344,8 @@ runAgentTools
                     , planAskQuestion = \_ _ -> pure Nothing
                     }
             | otherwise =
-                cliPlanHooks interrupt escPaused (resolveColor stderrHandle)
+                cliPlanHooks
+                    provider interrupt escPaused (resolveColor stderrHandle)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
         baseSecretHooks = SecretPromptHooks \request ->
             Right <$> promptSecretLine
@@ -338,6 +356,19 @@ runAgentTools
             | isOneShot options || not isTty = Nothing
             | otherwise =
                 Just (fullscreenAwareSecretHooks uiRuntimeRef baseSecretHooks)
+        -- Outside the retained TUI, agent-displayed images print inline with
+        -- the same graphics path as pasted attachments.
+        baseImageHooks = ImageDisplayHooks \request -> do
+            color <- resolveColor stderrHandle
+            putImagePreview
+                startup.startupSessionState.sessionPreviewId
+                color
+                [request.displayImage]
+            pure (Right ())
+        imageHooks
+            | not isTty = Nothing
+            | otherwise =
+                Just (fullscreenAwareImageHooks uiRuntimeRef baseImageHooks)
         provider = loaded.loadedProvider
         fallbackModel =
             fromMaybe
@@ -460,11 +491,9 @@ runAgentTools
     -- is durable in the session transcript. Reconstruct the approval phase
     -- before entering the REPL so a resumed Codex session cannot interpret
     -- the user's approval as ordinary steering input.
-    -- Provider transitions commit their selection separately: manual switches
-    -- immediately, automatic fallbacks only after the replacement succeeds.
-    when (isNothing transition) $
-        saveRememberedModel home projectRoot
-            inferredTarget { targetDialect = dialectId }
+    -- Keep inferred startup, resume, and delegated-agent targets session-local.
+    -- Live top-level model/provider switches persist their selection in
+    -- Agent.CLI.Provider.Switch instead.
     activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
@@ -504,7 +533,7 @@ runAgentTools
             enqueuePendingInput pendingNotices (AgentMessage message)
             pure (Right "queued")
         createSubagentWorktree source =
-            createWorktree source (worktreeRoot home) >>= \case
+            createManagedWorktree home source >>= \case
                 Left err -> pure (Left err)
                 Right path -> pure $ Right SubagentWorktree
                     { subagentWorktreePath = path
@@ -580,6 +609,11 @@ runAgentTools
                 (sessionId, tempDir) <- allocateSessionTemp root
                 pure (tempDir, Just sessionId)
     setToolSessionTmp baseToolEnv (Just sessionTmp)
+    imageGenerationHistory <- newImageGenerationHistory
+    forM_ resumed \(_, turns) ->
+        recordImageGenerationResponseItems
+            imageGenerationHistory
+            (foldSessionItems turns)
     home <- getHomeDirectory
     let cleanupScratch = do
             cleanupPendingPersistence persist
@@ -608,6 +642,7 @@ runAgentTools
                     config.mcpStartupTimeoutSeconds
                 , MCP.mcpServerRequestTimeoutSeconds =
                     config.mcpRequestTimeoutSeconds
+                , MCP.mcpServerProtocol = config.mcpProtocol
                 }
             | (label, config) <-
                 Map.toAscList harnessConfig.configMcpServers
@@ -618,6 +653,11 @@ runAgentTools
                 harnessConfig.configMcpInitStrategy
                 (isOneShot options)
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
+    mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
+    writeIORef processRuntime.processMcpElicitation
+        (if isOneShot options || not isTty
+            then Nothing
+            else Just (cliMcpElicitation escPaused uiRuntimeRef))
     let reportProgressiveMcp statuses = do
             finished <- readIORef startup.startupFinished
             unless finished do
@@ -634,9 +674,14 @@ runAgentTools
             settled <-
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
-            when (settled && not (null statuses)) $
+            when (settled && not (null statuses)) do
+                instructions <-
+                    readIORef mcpFleetRef
+                        >>= maybe (pure []) MCP.mcpFleetInstructions
                 enqueuePendingInput pendingNotices
-                    (UserMessage (formatMcpModelNoticeFor dialectId statuses))
+                    (UserMessage
+                        (formatMcpModelNoticeFor dialectId statuses
+                            <> formatMcpInstructionsNotice instructions))
     mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
@@ -663,6 +708,7 @@ runAgentTools
                     ("Failed to initialize MCP tools: " <> show exception)
             Right lease -> pure lease
     let mcpFleet = mcpLease.mcpLeaseFleet
+    writeIORef mcpFleetRef (Just mcpFleet)
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
     coding <-
@@ -671,6 +717,7 @@ runAgentTools
             toolEnv
             (Just planHooks)
             secretHooks
+            imageHooks
             multiCtx
             agentTypesRef
             `onException`
@@ -792,11 +839,13 @@ runAgentTools
         mcpTools =
             if null mcpServerConfigs
                 then []
-                else if dialectId == GrokBuildDialect
-                    then MCP.mcpFleetGrokMetaTools mcpFleet
-                    else if progressiveMcp
-                        then MCP.mcpFleetMetaTools mcpFleet
-                        else MCP.mcpFleetTools mcpFleet
+                else
+                    (if dialectId == GrokBuildDialect
+                        then MCP.mcpFleetGrokMetaTools mcpFleet
+                        else if progressiveMcp
+                            then MCP.mcpFleetMetaTools mcpFleet
+                            else MCP.mcpFleetTools mcpFleet)
+                        <> MCP.mcpFleetResourceTools mcpFleet
         databaseToolsEnv =
             databaseToolsEnvForStore
                 startup.startupDatabaseStore
@@ -814,6 +863,17 @@ runAgentTools
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
         computerTools =
             [ComputerUse.computerUseTool | options.optComputerUse, provider == OpenAIProvider]
+        imageGenerationTools =
+            [ imageGenerationTool
+                tokenProvider
+                toolEnv
+                imageGenerationHistory
+                imageHooks
+            | provider == OpenAIProvider
+            , dialectId == CodexDialect
+            , inferredTarget.targetConnectionId
+                == builtinConnectionId OpenAIProvider
+            ]
         allTools =
             coding.codingAppTools
                 ++ extraTools
@@ -822,7 +882,7 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
-                ++ computerTools
+                ++ imageGenerationTools
                 ++ computerTools
         tools =
             filterGhciTools options.optGhci
@@ -833,6 +893,7 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ imageGenerationTools
         planMode = coding.codingPlanMode
         resumedPlanPending =
             case resumed of
@@ -877,6 +938,8 @@ runAgentTools
         activeSelectionRef
         agentTypesRef
         allTools
+        (recordImageGenerationImages imageGenerationHistory)
+        (clearImageGenerationHistory imageGenerationHistory)
         bashEnabledRef
         catalog
         checkStartupUsageInBackground

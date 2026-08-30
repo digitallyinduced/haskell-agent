@@ -5,10 +5,12 @@ import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolHandler
     , customToolCall
     , dispatchToolCall
+    , textTool
     , typedTool
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -19,6 +21,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     )
 import Control.Concurrent
@@ -27,8 +30,8 @@ import Control.Concurrent
     , readMVar
     , threadDelay
     )
-import Control.Concurrent.Async (async, wait)
-import Control.Exception.Safe (bracket)
+import Control.Concurrent.Async (async, cancel, wait, withAsync)
+import Control.Exception.Safe (bracket, finally)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -38,6 +41,7 @@ import qualified Data.Text as Text
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import System.Directory (doesFileExist)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -125,6 +129,31 @@ spec = describe "code-mode Bun host" do
                         ]
                     ]
                 }
+
+    it "stops a cell and its nested tool when execution is cancelled" do
+        started <- newEmptyMVar
+        stopped <- newEmptyMVar
+        let handler _ _ =
+                finally
+                    (putMVar started () >> threadDelay maxBound >> pure (Right Null))
+                    (putMVar stopped ())
+            config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                handler
+        host <- newCodeModeHost config
+        withAsync
+            (execCodeCell
+                host
+                "await tools.slow({});"
+                ["slow"]
+                60000)
+            \running -> do
+                readMVar started
+                cancel running
+                timeout 1000000 (readMVar stopped) `shouldReturn` Just ()
+                terminateCodeCell host "1" `shouldReturn`
+                    Left (CodeModeUnknownCell "1")
+        closeCodeModeHost host
 
     it "keeps JavaScript globals isolated when reusing a pooled worker" do
         let config = defaultCodeModeConfig
@@ -579,7 +608,7 @@ spec = describe "code-mode Bun host" do
                     defaultLoopDispatch
                     [toolHandlerOf doubleTool]
                     call
-                pure (Right result.output)
+                pure (Right result)
         created <- newCodeModeToolSet
             CodeOnlyToolMode
             ImageDetailVisible
@@ -597,6 +626,41 @@ spec = describe "code-mode Bun host" do
         readIORef approvals `shouldReturn` 1
         toolSet.closeCodeModeToolSet
 
+    it "passes freeform nested tool input without JSON encoding" do
+        received <- newIORef Nothing
+        worker <- codeModeWorkerPath
+        let patch = "*** Begin Patch\n*** End Patch"
+            patchTool = freeformApplyPatchAppToolWithExecution
+                "apply_patch"
+                "Apply a patch."
+                AlwaysReadOnly
+                TurnSequential
+                (textTool "apply_patch" \input -> do
+                    writeIORef received (Just input)
+                    pure (Right "applied"))
+            invoke call = do
+                call.callKind `shouldBe` CustomCallKind
+                result <- dispatchToolCall
+                    defaultLoopDispatch
+                    [toolHandlerOf patchTool]
+                    call
+                pure (Right result)
+        created <- newCodeModeToolSet
+            CodeOnlyToolMode
+            ImageDetailVisible
+            worker
+            invoke
+            [plainNested patchTool]
+        toolSet <- either
+            (\err -> expectationFailure (show err) >> fail "unreachable")
+            pure
+            created
+        result <- runRegisteredExec toolSet
+            "text(await tools.apply_patch(\"*** Begin Patch\\n*** End Patch\"));"
+        result `shouldSatisfy` Text.isInfixOf "applied"
+        readIORef received `shouldReturn` Just patch
+        toolSet.closeCodeModeToolSet
+
     it "expands nested declarations only in code-only mode" do
         worker <- codeModeWorkerPath
         let lookupTool = jsonAppToolWithExecution
@@ -606,7 +670,8 @@ spec = describe "code-mode Bun host" do
                 AlwaysReadOnly
                 ParallelSafe
                 (typedTool "lookup" emptyObjectDecoder \() -> pure (Right "value"))
-            invoke _ = pure (Right "value")
+            invoke _ = pure
+                (Right (ToolCallResult "nested" "value" FunctionCallKind))
         codeOnly <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [plainNested lookupTool]
@@ -633,7 +698,8 @@ spec = describe "code-mode Bun host" do
             (not . Text.isInfixOf "### `lookup`")
 
     it "fails closed before advertising a missing worker" do
-        let invoke _ = pure (Right "value")
+        let invoke _ = pure
+                (Right (ToolCallResult "nested" "value" FunctionCallKind))
         unavailable <- newCodeModeToolSet
             CodeOnlyToolMode
             ImageDetailVisible
@@ -664,7 +730,7 @@ spec = describe "code-mode Bun host" do
                     defaultLoopDispatch
                     [toolHandlerOf (mkTool "look-up"), toolHandlerOf (mkTool "look_up")]
                     call
-                pure (Right result.output)
+                pure (Right result)
         created <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [plainNested (mkTool "look-up"), plainNested (mkTool "look_up")]
@@ -694,7 +760,7 @@ spec = describe "code-mode Bun host" do
                     defaultLoopDispatch
                     [toolHandlerOf lookupTool]
                     call
-                pure (Right result.output)
+                pure (Right result)
         created <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [ CodeModeNestedSpec

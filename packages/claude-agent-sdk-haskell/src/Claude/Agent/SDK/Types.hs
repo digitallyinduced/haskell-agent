@@ -105,8 +105,25 @@ data ClaudeAgentOptions = ClaudeAgentOptions
     , streamInactivityTimeoutMicros :: !Int
     , turnTimeoutMicros :: !Int
     -- | Maximum size of one newline-delimited structured-output record.
+    --
+    -- Claude Code runs its own tools and echoes every tool result on stdout
+    -- as a single NDJSON record. Reading an image or PDF therefore produces
+    -- a record that embeds the whole file as base64, and multi-megabyte
+    -- records are routine. The limit only guards against a runaway process,
+    -- so it should stay far above any legitimate record.
     , maxBufferSizeBytes :: !Int
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+-- The exact child environment can contain provider credentials. Keep the
+-- useful process identity in diagnostics without rendering environment
+-- values (or the many prompt/session options that may contain user data).
+instance Show ClaudeAgentOptions where
+    show options =
+        "ClaudeAgentOptions { executable = "
+            <> show options.executable
+            <> ", cwd = "
+            <> show options.cwd
+            <> ", environment = <redacted>, ... }"
 
 defaultClaudeAgentOptions :: FilePath -> FilePath -> ClaudeAgentOptions
 defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions
@@ -137,7 +154,7 @@ defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions
     , streamStartupTimeoutMicros = 60 * 1_000_000
     , streamInactivityTimeoutMicros = 15 * 60 * 1_000_000
     , turnTimeoutMicros = 2 * 60 * 60 * 1_000_000
-    , maxBufferSizeBytes = 1_048_576
+    , maxBufferSizeBytes = 1_073_741_824
     }
 
 data Usage = Usage

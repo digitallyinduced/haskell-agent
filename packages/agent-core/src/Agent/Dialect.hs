@@ -31,6 +31,7 @@ module Agent.Dialect
     , providerSupportsDialect
     , grokBuildPublicToolName
     , grokBuildCanonicalToolName
+    , claudeCodeCanonicalToolName
     , dialectSlug
     , parseDialect
     ) where
@@ -261,6 +262,25 @@ grokBuildCanonicalToolName = \case
     "get_command_or_subagent_output" -> "get_task_output"
     "wait_commands_or_subagents" -> "wait_tasks"
     "kill_command_or_subagent" -> "kill_task"
+    name -> name
+
+-- | Resolve Claude Code's built-in tool names to the stable internal names
+-- whose argument shapes they share. Claude Code executes these tools itself;
+-- the mapping only lets host chrome (verbs, paths, diffs, todo panels) treat
+-- them like the equivalent host tools. Names without a compatible host tool
+-- (@Write@, @Glob@, @WebFetch@, @Agent@, …) stay on their wire names.
+claudeCodeCanonicalToolName :: Text -> Text
+claudeCodeCanonicalToolName = \case
+    "Bash" -> "run_terminal_cmd"
+    "Read" -> "read_file"
+    "Edit" -> "search_replace"
+    "Grep" -> "grep"
+    "TodoWrite" -> "todo_write"
+    "EnterPlanMode" -> "enter_plan_mode"
+    "ExitPlanMode" -> "exit_plan_mode"
+    "AskUserQuestion" -> "ask_user_question"
+    "TaskOutput" -> "get_task_output"
+    "TaskStop" -> "kill_task"
     name -> name
 
 dialectSlug :: DialectId -> Text

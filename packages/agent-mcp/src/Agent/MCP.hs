@@ -1,0 +1,155 @@
+-- | Model Context Protocol clients over stdio and Streamable HTTP.
+--
+-- Each configured server is started once, its protocol era negotiated
+-- (@server/discover@ for revision 2026-07-28, the @initialize@ handshake for
+-- earlier revisions), and queried for its tools and (when negotiated)
+-- Skills-over-MCP metadata. The returned handlers share the retained client;
+-- 'closeMcpFleet' must run after all loops and subagents using those handlers
+-- have stopped.
+module Agent.MCP
+    ( McpServerConfig(..)
+    , McpProtocolPreference(..)
+    , McpProtocolEra(..)
+    , McpServerInfo(..)
+    , McpServerCapabilities(..)
+    , McpListCapability(..)
+    , McpResourcesCapability(..)
+    , McpHostHooks(..)
+    , defaultMcpHostHooks
+    , McpElicitRequest(..)
+    , McpElicitMode(..)
+    , McpElicitResult(..)
+    , McpInitState(..)
+    , McpServerStatus(..)
+    , McpToolRegistration(..)
+    , McpSkillsCapability(..)
+    , McpSkillRegistration(..)
+    , McpSkillEntry(..)
+    , McpSkillResources(..)
+    , McpSkillResource(..)
+    , McpResourceContent(..)
+    , McpResource(..)
+    , McpResourceTemplate(..)
+    , McpPrompt(..)
+    , McpPromptArgument(..)
+    , McpPromptMessage(..)
+    , McpPromptResult(..)
+    , McpCompletion(..)
+    , McpCompletionRef(..)
+    , McpProgress(..)
+    , McpError(..)
+    , renderMcpError
+    , McpFleet(..)
+    , McpSupervisor
+    , McpFleetLease(..)
+    , newMcpSupervisor
+    , newMcpSupervisorWith
+    , acquireMcpFleet
+    , acquireMcpFleetWithProgress
+    , acquireMcpFleetProgressive
+    , releaseMcpFleetLease
+    , closeMcpSupervisor
+    , startMcpFleet
+    , startMcpFleetWithProgress
+    , startMcpFleetWithProgressHooks
+    , startMcpFleetProgressive
+    , startMcpFleetProgressiveHooks
+    , closeMcpFleet
+    , mcpFleetTools
+    , mcpFleetMetaTools
+    , mcpFleetGrokMetaTools
+    , mcpFleetResourceTools
+    , mcpFleetStatuses
+    , mcpFleetServerInfos
+    , mcpFleetInstructions
+    , mcpFleetSkillRegistrations
+    , mcpFleetGetSkill
+    , mcpFleetReadResource
+    , mcpFleetListResources
+    , mcpFleetListResourceTemplates
+    , mcpFleetListPrompts
+    , mcpFleetGetPrompt
+    , mcpFleetComplete
+    , normalizeMcpToolResult
+    , renderMcpPromptResult
+    , decodeHttpMcpResponse
+    , modernProtocolVersion
+    , supportedLegacyVersions
+    ) where
+
+import Agent.MCP.Client
+    ( McpCompletionRef(..)
+    , decodeHttpMcpResponse
+    , modernProtocolVersion
+    , normalizeMcpToolResult
+    , renderMcpPromptResult
+    , supportedLegacyVersions
+    )
+import Agent.MCP.Fleet
+    ( closeMcpFleet
+    , mcpFleetComplete
+    , mcpFleetGetPrompt
+    , mcpFleetGetSkill
+    , mcpFleetGrokMetaTools
+    , mcpFleetInstructions
+    , mcpFleetListPrompts
+    , mcpFleetListResourceTemplates
+    , mcpFleetListResources
+    , mcpFleetMetaTools
+    , mcpFleetReadResource
+    , mcpFleetResourceTools
+    , mcpFleetServerInfos
+    , mcpFleetSkillRegistrations
+    , mcpFleetStatuses
+    , mcpFleetTools
+    , startMcpFleet
+    , startMcpFleetProgressive
+    , startMcpFleetProgressiveHooks
+    , startMcpFleetWithProgress
+    , startMcpFleetWithProgressHooks
+    )
+import Agent.MCP.Supervisor
+    ( acquireMcpFleet
+    , acquireMcpFleetProgressive
+    , acquireMcpFleetWithProgress
+    , closeMcpSupervisor
+    , newMcpSupervisor
+    , newMcpSupervisorWith
+    , releaseMcpFleetLease
+    )
+import Agent.MCP.Types
+    ( McpCompletion(..)
+    , McpElicitMode(..)
+    , McpElicitRequest(..)
+    , McpElicitResult(..)
+    , McpError(..)
+    , McpFleet(..)
+    , McpFleetLease(..)
+    , McpHostHooks(..)
+    , McpInitState(..)
+    , McpListCapability(..)
+    , McpProgress(..)
+    , McpPrompt(..)
+    , McpPromptArgument(..)
+    , McpPromptMessage(..)
+    , McpPromptResult(..)
+    , McpProtocolEra(..)
+    , McpProtocolPreference(..)
+    , McpResource(..)
+    , McpResourceContent(..)
+    , McpResourceTemplate(..)
+    , McpResourcesCapability(..)
+    , McpServerCapabilities(..)
+    , McpServerConfig(..)
+    , McpServerInfo(..)
+    , McpServerStatus(..)
+    , McpSkillEntry(..)
+    , McpSkillRegistration(..)
+    , McpSkillResource(..)
+    , McpSkillResources(..)
+    , McpSkillsCapability(..)
+    , McpSupervisor
+    , McpToolRegistration(..)
+    , defaultMcpHostHooks
+    , renderMcpError
+    )

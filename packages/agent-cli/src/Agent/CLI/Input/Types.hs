@@ -17,6 +17,9 @@ import Data.Text (Text)
 data ReplLine
     = ReplEof
     | ReplText Text
+    -- | A private configuration request submitted by the fullscreen Meta
+    -- Console. It is interpreted separately from the coding conversation.
+    | ReplMeta Text
     | ReplPasted Text
     | ReplClipboardPaste !Text !(Maybe [ImageAttachment])
     -- | Classify a bracketed paste off the UI thread. The fields are the draft
@@ -52,6 +55,7 @@ data EditorState = EditorState
     , editorSlashDismissed :: !Bool
     , editorSlashCatalog :: !SlashCatalog
     }
+    deriving (Eq, Show)
 
 data DisplayCell = DisplayCell
     { displayCellText :: !Text

@@ -18,6 +18,7 @@ import Agent.CLI.Config
     , loadHarnessConfig
     , saveHarnessConfig
     )
+import Agent.CLI.ExternalProgram (parseProgramWords)
 import Agent.CLI.Input (readApprovalLine)
 import Agent.CLI.Picker
     ( PickerKey(..)
@@ -32,7 +33,8 @@ import Agent.CLI.Style
     )
 import Agent.MCP (McpToolRegistration(..))
 import Agent.Tools.Types (AppTool(..))
-import Data.Char (isAlphaNum, isSpace, toLower)
+import Agent.MCP (McpProtocolPreference(..))
+import Data.Char (isAlphaNum, toLower)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -320,13 +322,21 @@ promptNewServer config =
                                         , mcpEnv = Map.empty
                                         , mcpStartupTimeoutSeconds = 30
                                         , mcpRequestTimeoutSeconds = 60
+                                        , mcpOAuth = Nothing
+                                        , mcpProtocol = McpProtocolAuto
                                         }
                                     )
 
 parseMcpCommand :: Text -> Either Text (Text, [Text])
 parseMcpCommand input = do
-    arguments <- parseWords (Text.unpack input)
-    case map Text.pack arguments of
+    arguments <- case parseProgramWords input of
+        Left "program specification ends with an incomplete escape" ->
+            Left "MCP command ends with an incomplete escape"
+        Left "program specification contains an unterminated quote" ->
+            Left "MCP command contains an unterminated quote"
+        Left err -> Left ("MCP command " <> err)
+        Right values -> Right values
+    case arguments of
         command : rest
             | not (Text.null (Text.strip command)) ->
                 Right (command, rest)
@@ -507,46 +517,6 @@ confirm prompt =
         Just answer ->
             pure (Text.toLower (Text.strip answer) `elem` ["y", "yes"])
         Nothing -> pure False
-
-parseWords :: String -> Either Text [String]
-parseWords = go WordUnquoted False False [] []
-  where
-    go quote escaped started current completed = \case
-        []
-            | escaped -> Left "MCP command ends with an incomplete escape"
-            | quote /= WordUnquoted ->
-                Left "MCP command contains an unterminated quote"
-            | started -> Right (reverse (reverse current : completed))
-            | otherwise -> Right (reverse completed)
-        char : rest
-            | escaped ->
-                go quote False True (char : current) completed rest
-            | quote == WordSingle ->
-                if char == '\''
-                    then go WordUnquoted False True current completed rest
-                    else go quote False True (char : current) completed rest
-            | quote == WordDouble ->
-                case char of
-                    '"' -> go WordUnquoted False True current completed rest
-                    '\\' -> go quote True True current completed rest
-                    _ -> go quote False True (char : current) completed rest
-            | isSpace char ->
-                if started
-                    then
-                        go WordUnquoted False False []
-                            (reverse current : completed) rest
-                    else go WordUnquoted False False [] completed rest
-            | otherwise -> case char of
-                '\'' -> go WordSingle False True current completed rest
-                '"' -> go WordDouble False True current completed rest
-                '\\' -> go WordUnquoted True True current completed rest
-                _ -> go WordUnquoted False True (char : current) completed rest
-
-data WordQuote
-    = WordUnquoted
-    | WordSingle
-    | WordDouble
-    deriving (Eq)
 
 firstLine :: Text -> Text
 firstLine = Text.strip . Text.takeWhile (/= '\n')

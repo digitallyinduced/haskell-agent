@@ -12,6 +12,7 @@ import Agent.CLI.Command (ShellMode)
 import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary
     , CompactOutcome
+    , OccupancySnapshot
     )
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
@@ -23,8 +24,8 @@ import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
-import Agent.Loop (LoopConfig, TokenUsage)
-import Agent.MCP (McpToolRegistration)
+import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
+import Agent.MCP (McpFleet, McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.OpenAI.Models.Types (ModelInfo)
@@ -51,12 +52,15 @@ data SessionEnv = SessionEnv
     , sessionConnection :: !Text
     , sessionModelCatalog :: !ModelCatalog
     , sessionDialect :: !Dialect
+    , sessionRecordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , sessionUnavailableProviders :: !(IORef (Set Provider))
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionConversation :: !(IORef LiveConversation)
     , sessionAutomaticCompaction
         :: !(IORef (Maybe AutomaticCompactionBoundary))
     , sessionParams :: !(IORef ResponseCreateParams)
+    , sessionContextOccupancy :: !(IORef (Maybe OccupancySnapshot))
+    , sessionContextWindow :: !(IO (Maybe Int))
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionPersist :: !Persistence
     , sessionDatabasePool :: !StorePool
@@ -68,6 +72,7 @@ data SessionEnv = SessionEnv
     , sessionHome :: !OsPath
     , sessionMcpRegistrations :: ![McpToolRegistration]
     , sessionMcpWarnings :: ![Text]
+    , sessionMcpFleet :: !(Maybe McpFleet)
     , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)

@@ -8,6 +8,7 @@ module Agent.CLI.Picker
     , decodeMouseEvent
     , mouseKeysForFrame
     , runOverlay
+    , runOverlayWithDecoder
     , runOverlayWithUpdates
     , withRawTty
     ) where
@@ -182,8 +183,19 @@ safeLast xs = Just (last xs)
 
 -- | Draw @render@, then feed keys through @step@ until it returns @Left@.
 runOverlay :: (state -> Text) -> (PickerKey -> state -> Either result state) -> state -> IO (Maybe result)
-runOverlay render step state =
-    fmap (fmap fst) (runOverlayInternal render step Nothing state)
+runOverlay = runOverlayWithDecoder decodePickerKey
+
+-- | Run an overlay with a caller-specific keyboard decoder. This is useful
+-- for searchable overlays where printable @j@, @k@, or @q@ must remain text
+-- rather than the default navigation shortcuts.
+runOverlayWithDecoder
+    :: (String -> Maybe PickerKey)
+    -> (state -> Text)
+    -> (PickerKey -> state -> Either result state)
+    -> state
+    -> IO (Maybe result)
+runOverlayWithDecoder decode render step state =
+    fmap (fmap fst) (runOverlayInternal decode render step Nothing state)
 
 -- | Like 'runOverlay', but also redraw when an external update arrives.
 runOverlayWithUpdates
@@ -194,15 +206,20 @@ runOverlayWithUpdates
     -> state
     -> IO (Maybe (result, state))
 runOverlayWithUpdates render step awaitUpdate applyUpdate =
-    runOverlayInternal render step (Just (awaitUpdate, applyUpdate))
+    runOverlayInternal
+        decodePickerKey
+        render
+        step
+        (Just (awaitUpdate, applyUpdate))
 
 runOverlayInternal
-    :: (state -> Text)
+    :: (String -> Maybe PickerKey)
+    -> (state -> Text)
     -> (PickerKey -> state -> Either result state)
     -> Maybe (IO update, update -> state -> state)
     -> state
     -> IO (Maybe (result, state))
-runOverlayInternal render step updates state0 =
+runOverlayInternal decodeKey render step updates state0 =
     withRawTty do
         terminal <- detectTerminalCapabilities stderr
         let frame0 = render state0
@@ -222,7 +239,7 @@ runOverlayInternal render step updates state0 =
             Left (Just raw) ->
                 let keys = case decodeMouseEvent raw of
                         Just mouse -> mouseKeysForFrame top frame mouse
-                        Nothing -> maybe [] pure (decodePickerKey raw)
+                        Nothing -> maybe [] pure (decodeKey raw)
                 in applyKeys terminal h state drawnLines frame top keys
             Right update -> case updates of
                 Nothing -> loop terminal h state drawnLines frame top

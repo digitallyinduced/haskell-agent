@@ -213,6 +213,7 @@ import qualified Agent.XAI.Request as XAIRequest ( mapModel )
 import qualified Agent.XAI.Usage as XAIUsage ()
 
 runAgentProviders
+    modelSwitchScope
     loaded
     sessionRequest
     activeAccountIdRef
@@ -518,7 +519,8 @@ runAgentProviders
                                                 resetCodexTurnState turnState
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        home projectRoot transition persist noticingBackend
+                                        modelSwitchScope home projectRoot
+                                        transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
                                     runSession
@@ -527,6 +529,7 @@ runAgentProviders
                                             (Just tokenProvider)
                                             loaded.loadedOpenAiPool
                                             selectAccount
+                                            (currentModelContextWindow transportModel)
                                             compactRunner)
                                         SessionBackend
                                             { backend = activeBackend
@@ -580,7 +583,6 @@ runAgentProviders
                                     getParams
                                     occupancy
                                     backend
-                        xaiOccupancy <- newIORef Nothing
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -590,7 +592,7 @@ runAgentProviders
                                         ctx.multiSendToRoot
                                         (\childParams ->
                                             protectXaiOverflow
-                                                xaiOccupancy
+                                                contextTokensRef
                                                 (pure childParams)
                                                 (xaiBackend xaiOptions tokenProvider
                                                     (pure childParams)))
@@ -599,7 +601,7 @@ runAgentProviders
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         protectXaiOverflow
-                                            xaiOccupancy
+                                            contextTokensRef
                                             (readIORef paramsRef)
                                             (xaiBackend xaiOptions tokenProvider
                                                 (readIORef paramsRef))
@@ -628,7 +630,8 @@ runAgentProviders
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                home projectRoot transition persist backend
+                                modelSwitchScope home projectRoot
+                                transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable
@@ -637,6 +640,8 @@ runAgentProviders
                                 (if isJust customGenericOptions
                                     then Nothing
                                     else Just selectHttpAccount)
+                                (Just . xaiContextWindow
+                                    <$> readIORef paramsRef)
                                 compactRunner)
                             SessionBackend
                                 { backend = activeBackend
@@ -657,6 +662,7 @@ runAgentProviders
                                     (unsafeToFilePath cwd))
                                     { permission
                                     , safeMode = True
+                                    , transport = claudeAuth.transport
                                     }
                             compactRunner _ =
                                 pure $ Left
@@ -702,13 +708,15 @@ runAgentProviders
                             \backend -> do
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        home projectRoot transition persist backend
+                                        modelSwitchScope home projectRoot
+                                        transition persist backend
                                 result <- runSession
                                     (sessionRequest
                                         startupUnavailable
                                         Nothing
                                         Nothing
                                         Nothing
+                                        (pure Nothing)
                                         compactRunner)
                                     SessionBackend
                                         { backend = activeBackend
@@ -720,7 +728,6 @@ runAgentProviders
                                     =<< readIORef claudeTranscriptRef
                                 pure result
                     OpenRouterProvider -> do
-                        openRouterOccupancy <- newIORef Nothing
                         let openRouterContextWindow =
                                 contextWindowForParams transportModel 1_048_576
                             makeBackend params =
@@ -758,7 +765,7 @@ runAgentProviders
                                         ctx.multiSendToRoot
                                         (\childParams ->
                                             protectOverflow
-                                                openRouterOccupancy
+                                                contextTokensRef
                                                 (pure childParams)
                                                 (makeBackend
                                                     (pure childParams)))
@@ -767,7 +774,7 @@ runAgentProviders
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         protectOverflow
-                                            openRouterOccupancy
+                                            contextTokensRef
                                             (readIORef paramsRef)
                                             (makeBackend
                                                 (readIORef paramsRef))
@@ -814,13 +821,16 @@ runAgentProviders
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                home projectRoot transition persist backend
+                                modelSwitchScope home projectRoot
+                                transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable
                                 (Just tokenProvider)
                                 loaded.loadedOpenAiPool
                                 (Just selectHttpAccount)
+                                (Just . openRouterContextWindow
+                                    <$> readIORef paramsRef)
                                 compactRunner)
                             SessionBackend
                                 { backend = activeBackend

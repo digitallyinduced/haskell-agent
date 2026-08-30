@@ -3,6 +3,7 @@ packages:
     packages/agent-cli
     packages/agent-telegram
     packages/agent-core
+    packages/agent-mcp
     packages/agent-codex-dialect
     packages/agent-grok-build-dialect
     packages/agent-json

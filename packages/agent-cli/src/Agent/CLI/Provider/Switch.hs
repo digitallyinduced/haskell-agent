@@ -49,11 +49,12 @@ import Agent.CLI.Models
     , resolveModelOptionDialect
     )
 import Agent.CLI.Project
-    ( ProjectAccount(..)
+    ( ModelSwitchScope(..)
+    , ProjectAccount(..)
     , loadProjectSettings
     , projectAccountFor
     , resolveProjectRoot
-    , saveRememberedModel
+    , persistModelSwitch
     )
 import Agent.CLI.Request (setRequestModel)
 import Agent.CLI.ProviderAvailability
@@ -229,7 +230,7 @@ applyModelChange
         paramsRef render previous persist = do
     modifyIORef' paramsRef (setRequestModel provider name)
     writeIORef render.renderModelRef name
-    saveRememberedModel home projectRoot ModelTarget
+    persistModelSwitch TopLevelSwitch home projectRoot ModelTarget
         { targetProvider = provider
         , targetConnectionId = connection
         , targetModelId = name
@@ -791,14 +792,15 @@ ensureTransitionSessionId (PersistenceEnabled slotRef) = do
     pure (Just handle.sessionMeta.metaId)
 
 commitProviderTransition
-    :: OsPath
+    :: ModelSwitchScope
+    -> OsPath
     -> OsPath
     -> Maybe ProviderTransition
     -> Persistence
     -> IO ()
-commitProviderTransition _ _ Nothing _ = pure ()
-commitProviderTransition home projectRoot (Just transition) persist = do
-    saveRememberedModel home projectRoot transition.transitionTarget
+commitProviderTransition _ _ _ Nothing _ = pure ()
+commitProviderTransition scope home projectRoot (Just transition) persist = do
+    persistModelSwitch scope home projectRoot transition.transitionTarget
     case persist of
         PersistenceDisabled -> pure ()
         PersistenceEnabled slotRef -> do
@@ -835,32 +837,35 @@ commitProviderTransition home projectRoot (Just transition) persist = do
                         (PersistenceActive handle { sessionMeta = meta })
 
 prepareTransitionBackend
-    :: OsPath
+    :: ModelSwitchScope
+    -> OsPath
     -> OsPath
     -> Maybe ProviderTransition
     -> Persistence
     -> Backend
     -> IO Backend
-prepareTransitionBackend _ _ Nothing _ backend = pure backend
-prepareTransitionBackend home projectRoot (Just transition) persist backend
+prepareTransitionBackend _ _ _ Nothing _ backend = pure backend
+prepareTransitionBackend scope home projectRoot (Just transition) persist backend
     | transitionCommitsImmediately transition = do
-        commitProviderTransition home projectRoot (Just transition) persist
+        commitProviderTransition scope home projectRoot (Just transition) persist
         pure backend
     | otherwise = do
         committed <- newIORef False
         pure $
             commitBackendOnSuccess
-                home projectRoot committed transition persist backend
+                scope home projectRoot committed transition persist backend
 
 commitBackendOnSuccess
-    :: OsPath
+    :: ModelSwitchScope
+    -> OsPath
     -> OsPath
     -> IORef Bool
     -> ProviderTransition
     -> Persistence
     -> Backend
     -> Backend
-commitBackendOnSuccess home projectRoot committed transition persist (Backend submit) =
+commitBackendOnSuccess
+        scope home projectRoot committed transition persist (Backend submit) =
     Backend \state previous inputs onEvent -> do
         result <- submit state previous inputs onEvent
         case result of
@@ -869,7 +874,7 @@ commitBackendOnSuccess home projectRoot committed transition persist (Backend su
                     (True, not done)
                 when shouldCommit $
                     commitProviderTransition
-                        home projectRoot (Just transition) persist
+                        scope home projectRoot (Just transition) persist
             Left _ -> pure ()
         pure result
 

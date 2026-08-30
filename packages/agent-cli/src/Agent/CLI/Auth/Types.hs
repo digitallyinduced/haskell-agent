@@ -36,7 +36,6 @@ import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -158,9 +157,9 @@ grokDocumentDecoder = Hermes.object do
     direct <- grokFieldsFieldsDecoder
     nested <- Hermes.liftObjectDecoder $
         Hermes.objectFold Nothing \_ found ->
-            Hermes.withRawJsonByteString \raw ->
+            Hermes.withOwnedRawJson \raw ->
                 pure $ found <|> validGrokFields
-                    (Hermes.decodeEither grokFieldsDecoder (BS.copy raw))
+                    (Hermes.decodeEither grokFieldsDecoder raw)
     case validFields direct <|> nested of
         Just fields -> pure fields
         Nothing -> fail "authentication object has no access token"
@@ -175,10 +174,10 @@ validFields fields
 
 timestampDecoder :: Hermes.Decoder UTCTime
 timestampDecoder =
-    Hermes.withRawJsonByteString \raw ->
-        case Hermes.decodeEither Hermes.utcTime (BS.copy raw) of
+    Hermes.withOwnedRawJson \raw ->
+        case Hermes.decodeEither Hermes.utcTime raw of
             Right value -> pure value
-            Left _ -> case Hermes.decodeEither Hermes.scientific (BS.copy raw) of
+            Left _ -> case Hermes.decodeEither Hermes.scientific raw of
                 Right seconds ->
                     pure (posixSecondsToUTCTime (realToFrac seconds))
                 Left _ -> fail "expected an ISO timestamp or epoch seconds"
@@ -361,12 +360,12 @@ grokEmailDocumentDecoder =
         fields <- grokFieldsFieldsDecoder
         nested <- Hermes.liftObjectDecoder $
             Hermes.objectFold Nothing \_ found ->
-                Hermes.withRawJsonByteString \raw ->
+                Hermes.withOwnedRawJson \raw ->
                     pure $ found <|>
                         either (const Nothing) id
                             (Hermes.decodeEither
                                 grokEmailDocumentDecoder
-                                (BS.copy raw))
+                                raw)
         pure $
             fields.grokFieldEmail
                 <|> (fields.grokFieldIdToken >>= XAIAuth.emailFromToken)

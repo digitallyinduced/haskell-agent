@@ -193,6 +193,18 @@
                     ];
                 };
 
+                agentMcpSource = nix-filter.lib {
+                    root = ./packages/agent-mcp;
+                    include = [
+                        "src"
+                        "test"
+                        "benchmark"
+                        "agent-mcp.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentResponsesSource = nix-filter.lib {
                     root = ./packages/agent-responses;
                     include = [
@@ -372,6 +384,11 @@
                                 bun_1_4
                                 pkgs.ripgrep
                             ]);
+                        agent-mcp = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-mcp/package.nix { })
+                            {
+                                src = agentMcpSource;
+                            });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
@@ -462,6 +479,7 @@
                 haskellPackages = mkHaskellPackages true;
                 productionHaskellPackages = mkHaskellPackages false;
                 agentCorePackage = productionHaskellPackages.agent-core;
+                agentMcpPackage = productionHaskellPackages.agent-mcp;
                 agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
@@ -644,6 +662,7 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-mcp = agentMcpPackage;
                 packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
@@ -679,6 +698,7 @@
                         packages.agent-cli
                         packages.agent-telegram
                         packages.agent-core
+                        packages.agent-mcp
                         packages.agent-json
                         packages.agent-process
                         packages.agent-codex-dialect
@@ -729,6 +749,7 @@
                     agent-cli = haskellPackages.agent-cli;
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;
+                    agent-mcp = haskellPackages.agent-mcp;
                     agent-json = haskellPackages.agent-json;
                     agent-process = haskellPackages.agent-process;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;
@@ -752,9 +773,11 @@
                     agent-cli-functional-openai-hello-world =
                         agentCliHelloWorldFunctional "openai"
                             (functionalTestModel "OPENAI" "gpt-5.6-terra");
-                    agent-cli-functional-xai-hello-world =
-                        agentCliHelloWorldFunctional "xai"
-                            (functionalTestModel "XAI" "grok-4.6");
+                    # Temporarily disabled while the CI Grok account has no
+                    # verified available usage. Keep package/unit checks enabled.
+                    # agent-cli-functional-xai-hello-world =
+                    #     agentCliHelloWorldFunctional "xai"
+                    #         (functionalTestModel "XAI" "grok-4.6");
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;

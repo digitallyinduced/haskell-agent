@@ -45,6 +45,8 @@ data SubagentRuntime = SubagentRuntime
     , subagentPolicy :: !ApprovalPolicy
     , subagentPlanHooks :: !PlanModeHooks
     , subagentSkillRoots :: !(IORef [OsPath])
+    , subagentAllowedRoots :: !(IORef [OsPath])
+    , subagentRootAccessRequest :: !(IORef (Maybe (OsPath -> IO Bool)))
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
     , subagentMcpTools :: ![AppTool]
     , subagentParams :: !(IORef ResponseCreateParams)

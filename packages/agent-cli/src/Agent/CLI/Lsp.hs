@@ -42,8 +42,10 @@ import Agent.Json.Decode
 import Agent.Json.Decode qualified as Hermes
 import Agent.GrokBuild.Dialect.Lsp
     ( LspOperation(..)
+    , LspPosition(..)
+    , LspPositionOperation(..)
     , LspRequest(..)
-    , lspOperationName
+    , lspPositionOperation
     , lspTool
     )
 import Agent.OsPath (unsafeToFilePath)
@@ -63,7 +65,8 @@ import Control.Concurrent.MVar
     , withMVar
     )
 import Control.Exception.Safe
-    ( finally
+    ( bracketOnError
+    , finally
     , mask
     , onException
     , tryAny
@@ -286,7 +289,10 @@ startLspClient workspace logDirectory name config = do
                                 )
                         Right client -> do
                             initialized <-
-                                initializeClient client
+                                bracketOnError
+                                    (pure client)
+                                    forceCloseLspClient
+                                    initializeClient
                             case initialized of
                                 Left err -> do
                                     forceCloseLspClient client
@@ -445,175 +451,185 @@ initializeClient client = do
                                                         ("settings notification failed: "
                                                             <> err))
                                             Right () -> pure (Right ())
+
 runLsp :: LspRuntime -> LspRequest -> IO (Either Text Text)
-runLsp runtime request =
-    case request.lspOperation of
-        WorkspaceSymbol -> runWorkspaceSymbol runtime request
-        operation -> do
-            prepared <- prepareFileRequest runtime request
-            case prepared of
-                Left err -> pure (Left err)
-                Right (client, path, uri) ->
-                    dispatchFileOperation client path uri request operation
-runWorkspaceSymbol
+runLsp runtime = \case
+    LspWorkspaceSymbols query ->
+        runWorkspaceSymbols runtime query
+    LspDocumentSymbols filePath ->
+        runFileOperation runtime filePath runDocumentSymbols
+    LspAtPosition operation filePath position ->
+        runFileOperation runtime filePath \client uri ->
+            runPositionOperation client uri operation position
+
+runWorkspaceSymbols
     :: LspRuntime
-    -> LspRequest
+    -> Text
     -> IO (Either Text Text)
-runWorkspaceSymbol runtime request =
-    case Text.strip <$> request.lspQuery of
-        Nothing -> pure (Left "workspaceSymbol requires query")
-        Just query | Text.null query ->
-            pure (Left "workspaceSymbol requires a non-empty query")
-        Just query -> do
-            results <-
-                forM
-                    (Map.toAscList runtime.runtimeClients)
-                    \(name, client) -> do
-                        result <-
-                            requestClient client requestTimeoutMilliseconds
-                                "workspace/symbol"
-                                (Aeson.object ["query" .= query])
-                        pure (name, result)
-            let successes =
-                    [ (name, value)
-                    | (name, Right value) <- results
+runWorkspaceSymbols runtime rawQuery
+    | Text.null query =
+        pure (Left "workspaceSymbol requires a non-empty query")
+    | otherwise = do
+        results <-
+            forM
+                (Map.toAscList runtime.runtimeClients)
+                \(name, client) -> do
+                    result <-
+                        requestClient client requestTimeoutMilliseconds
+                            "workspace/symbol"
+                            (Aeson.object ["query" .= query])
+                    pure (name, result)
+        let successes =
+                [ (name, value)
+                | (name, Right value) <- results
+                ]
+        if null successes
+            then
+                pure . Left $
+                    "workspaceSymbol failed for every configured server: "
+                        <> Text.intercalate "; "
+                            [ name <> ": " <> err
+                            | (name, Left err) <- results
+                            ]
+            else
+                pure . Right . Text.intercalate "\n\n" $
+                    [ "## " <> name <> "\n"
+                        <> formatLspResult WorkspaceSymbol value
+                    | (name, value) <- successes
                     ]
-            if null successes
-                then
-                    pure . Left $
-                        "workspaceSymbol failed for every configured server: "
-                            <> Text.intercalate "; "
-                                [ name <> ": " <> err
-                                | (name, Left err) <- results
-                                ]
-                else
-                    pure . Right . Text.intercalate "\n\n" $
-                        [ "## " <> name <> "\n"
-                            <> formatLspResult WorkspaceSymbol value
-                        | (name, value) <- successes
-                        ]
+  where
+    query = Text.strip rawQuery
+
+runFileOperation
+    :: LspRuntime
+    -> Text
+    -> (LspClient -> Text -> IO (Either Text Text))
+    -> IO (Either Text Text)
+runFileOperation runtime rawPath operation =
+    prepareFileRequest runtime rawPath >>= \case
+        Left err -> pure (Left err)
+        Right (client, path, uri) ->
+            withMVar client.clientOperationLock \() ->
+                synchronizeDocument client path uri >>= \case
+                    Left err -> pure (Left err)
+                    Right () -> operation client uri
+
 prepareFileRequest
     :: LspRuntime
-    -> LspRequest
-    -> IO (Either Text (LspClient, FilePath, Text))
-prepareFileRequest runtime request =
-    case request.lspFilePath of
-        Nothing ->
-            pure
-                (Left
-                    ( lspOperationName request.lspOperation
-                        <> " requires file_path"
-                    ))
-        Just rawPath -> do
-            let path = Text.unpack rawPath
-            if not (FilePath.isAbsolute path)
-                then pure (Left "lsp file_path must be absolute")
-                else do
-                    canonicalResult <-
-                        tryAny $
-                            (,)
-                                <$> canonicalizePath runtime.runtimeWorkspace
-                                <*> canonicalizePath path
-                    case canonicalResult of
-                        Left exception ->
-                            pure . Left $
-                                "lsp could not resolve file_path: "
-                                    <> exceptionText exception
-                        Right (workspace, canonical)
-                            | not
-                                (pathWithin
-                                    workspace
-                                    canonical) ->
-                                pure
-                                    (Left
-                                        "lsp file_path must be inside the \
-                                        \active workspace")
-                            | otherwise ->
-                                case clientForPath
-                                    runtime.runtimeClients canonical
-                                of
-                                    Nothing ->
-                                        pure . Left $
-                                            "No initialized LSP server is \
-                                            \configured for "
-                                                <> Text.pack
-                                                    (FilePath.takeExtension
-                                                        canonical)
-                                    Just client
-                                        | not
-                                            (pathWithin
-                                                client.clientWorkspace
-                                                canonical) ->
-                                            pure . Left $
-                                                "lsp file_path is outside the \
-                                                \configured server workspace for "
-                                                    <> client.clientName
-                                    Just client ->
-                                        pure
-                                            (Right
-                                                ( client
-                                                , canonical
-                                                , fileUri canonical
-                                                ))
-dispatchFileOperation
-    :: LspClient
-    -> FilePath
     -> Text
-    -> LspRequest
-    -> LspOperation
+    -> IO (Either Text (LspClient, FilePath, Text))
+prepareFileRequest runtime rawPath = do
+    let path = Text.unpack rawPath
+    if not (FilePath.isAbsolute path)
+        then pure (Left "lsp file_path must be absolute")
+        else do
+            canonicalResult <-
+                tryAny $
+                    (,)
+                        <$> canonicalizePath runtime.runtimeWorkspace
+                        <*> canonicalizePath path
+            case canonicalResult of
+                Left exception ->
+                    pure . Left $
+                        "lsp could not resolve file_path: "
+                            <> exceptionText exception
+                Right (workspace, canonical)
+                    | not
+                        (pathWithin
+                            workspace
+                            canonical) ->
+                        pure
+                            (Left
+                                "lsp file_path must be inside the \
+                                \active workspace")
+                    | otherwise ->
+                        case clientForPath
+                            runtime.runtimeClients canonical
+                        of
+                            Nothing ->
+                                pure . Left $
+                                    "No initialized LSP server is \
+                                    \configured for "
+                                        <> Text.pack
+                                            (FilePath.takeExtension canonical)
+                            Just client
+                                | not
+                                    (pathWithin
+                                        client.clientWorkspace
+                                        canonical) ->
+                                    pure . Left $
+                                        "lsp file_path is outside the \
+                                        \configured server workspace for "
+                                            <> client.clientName
+                            Just client ->
+                                pure
+                                    (Right
+                                        ( client
+                                        , canonical
+                                        , fileUri canonical
+                                        ))
+
+runDocumentSymbols
+    :: LspClient
+    -> Text
     -> IO (Either Text Text)
-dispatchFileOperation client path uri request operation =
-    withMVar client.clientOperationLock \() ->
-        synchronizeDocument client path uri >>= \case
-            Left err -> pure (Left err)
-            Right () ->
-                case operation of
-                    DocumentSymbol ->
-                        run "textDocument/documentSymbol"
-                            (Aeson.object
-                                [ "textDocument" .=
-                                    Aeson.object ["uri" .= uri]
-                                ])
-                    GoToDefinition ->
-                        position "textDocument/definition"
-                    FindReferences ->
-                        positionWith
-                            "textDocument/references"
-                            ["context" .=
-                                Aeson.object
-                                    ["includeDeclaration" .= True]]
-                    Hover -> position "textDocument/hover"
-                    GoToImplementation ->
-                        position "textDocument/implementation"
-                    WorkspaceSymbol ->
-                        pure (Left "internal LSP dispatch error")
+runDocumentSymbols client uri =
+    runClientOperation
+        client
+        DocumentSymbol
+        "textDocument/documentSymbol"
+        (Aeson.object
+            [ "textDocument" .=
+                Aeson.object ["uri" .= uri]
+            ])
+
+runPositionOperation
+    :: LspClient
+    -> Text
+    -> LspPositionOperation
+    -> LspPosition
+    -> IO (Either Text Text)
+runPositionOperation client uri positionOperation position =
+    runClientOperation client operation method $
+        Aeson.object
+            ( [ "textDocument" .=
+                    Aeson.object ["uri" .= uri]
+              , "position" .= Aeson.object
+                    [ "line" .= position.positionLine
+                    , "character" .= position.positionCharacter
+                    ]
+              ]
+                <> extras
+            )
   where
-    position method = positionWith method []
-    positionWith method extras =
-        case (request.lspLine, request.lspCharacter) of
-            (Just line, Just character)
-                | line >= 0 && character >= 0 ->
-                    run method
-                        (Aeson.object
-                            ( [ "textDocument" .=
-                                    Aeson.object ["uri" .= uri]
-                              , "position" .= Aeson.object
-                                    [ "line" .= line
-                                    , "character" .= character
-                                    ]
-                              ]
-                                <> extras
-                            ))
-            _ ->
-                pure . Left $
-                    lspOperationName operation
-                        <> " requires non-negative line and character"
-    run method params =
-        requestClient client requestTimeoutMilliseconds method params
-            >>= \case
-                Left err -> pure (Left err)
-                Right value ->
-                    pure (Right (formatLspResult operation value))
+    operation = lspPositionOperation positionOperation
+    (method, extras) = case positionOperation of
+        LspGoToDefinition ->
+            ("textDocument/definition", [])
+        LspFindReferences ->
+            ( "textDocument/references"
+            , [ "context" .=
+                    Aeson.object ["includeDeclaration" .= True]
+              ]
+            )
+        LspHover ->
+            ("textDocument/hover", [])
+        LspGoToImplementation ->
+            ("textDocument/implementation", [])
+
+runClientOperation
+    :: LspClient
+    -> LspOperation
+    -> Text
+    -> Aeson.Value
+    -> IO (Either Text Text)
+runClientOperation client operation method params =
+    requestClient client requestTimeoutMilliseconds method params
+        >>= \case
+            Left err -> pure (Left err)
+            Right value ->
+                pure (Right (formatLspResult operation value))
+
 synchronizeDocument
     :: LspClient
     -> FilePath

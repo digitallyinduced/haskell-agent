@@ -57,6 +57,8 @@ initialUiState = UiState
     , uiGenerating = False
     , uiGenerationChars = 0
     , uiGenerationMillis = 0
+    , uiGenerationLastDeltaMillis = 0
+    , uiResponseMillis = 0
     , uiLastTokensPerSecond = Nothing
     }
 

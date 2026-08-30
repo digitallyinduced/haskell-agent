@@ -204,9 +204,10 @@ spec = describe "requestParams" do
         restored.input `shouldBe` Just (ResponseInputItems [pending])
 
     it "clears Fast mode when switching models" do
-        let params =
+        let params :: ResponseCreateParams
+            params =
                 (requestParams OpenAIProvider "gpt-generic"
-                    "instructions" [] "high")
+                    "instructions" [] "high" :: ResponseCreateParams)
                     { serviceTier = Just "priority" }
         setRequestModel OpenAIProvider "gpt-5.6-terra" params
             `shouldSatisfy` \result -> result.serviceTier == Nothing

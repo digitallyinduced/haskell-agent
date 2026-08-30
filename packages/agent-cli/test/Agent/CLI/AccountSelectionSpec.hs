@@ -1,6 +1,10 @@
 module Agent.CLI.AccountSelectionSpec (spec) where
 
 import Agent.CLI.AccountSelection
+import Agent.CLI.AccountPicker
+    ( AccountPickerOption(..)
+    , accountPickerMatchesRequest
+    )
 import Agent.CLI.CredentialStore (ManagedAuthKind(..))
 import Agent.CLI.Login
     ( AccountBilling(..)
@@ -58,6 +62,51 @@ spec = describe "account selection" do
                 { loginUsage = UsageUnavailable "offline" }
             ]
             `shouldBe` Nothing
+
+    describe "Meta Console account matching" do
+        let workAccount =
+                AccountPickerAccount
+                    OpenAIProvider
+                    SubscriptionBilled
+                    "external:openai:work"
+                    "acct-work"
+                    "Work Account"
+                    "usage"
+
+        it "filters every candidate to the requested provider" do
+            accountPickerMatchesRequest OpenAIProvider Nothing workAccount
+                `shouldBe` True
+            accountPickerMatchesRequest XAIProvider Nothing workAccount
+                `shouldBe` False
+            accountPickerMatchesRequest
+                OpenAIProvider
+                Nothing
+                (AccountPickerConnect OpenAIProvider)
+                `shouldBe` False
+
+        it "matches exact labels and ids case-insensitively" do
+            accountPickerMatchesRequest
+                OpenAIProvider
+                (Just " work account ")
+                workAccount
+                `shouldBe` True
+            accountPickerMatchesRequest
+                OpenAIProvider
+                (Just "ACCT-WORK")
+                workAccount
+                `shouldBe` True
+            accountPickerMatchesRequest
+                OpenAIProvider
+                (Just "EXTERNAL:OPENAI:WORK")
+                workAccount
+                `shouldBe` True
+
+        it "does not treat a partial label as an account match" do
+            accountPickerMatchesRequest
+                OpenAIProvider
+                (Just "Work")
+                workAccount
+                `shouldBe` False
 
     it "keeps discovery order for equal-capacity login accounts" do
         fmap (.selectedSelectionId)

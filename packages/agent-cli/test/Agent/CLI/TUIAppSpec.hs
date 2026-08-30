@@ -6,10 +6,11 @@ import Agent.CLI.AgentViewport
     , AgentStepState(..)
     , AgentTarget(..)
     )
-import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
+    , applyMetaConsoleEdit
     , applyTextPromptEdit
     , advanceCompletionFlashes
     , agentEntryWindow
@@ -28,6 +29,7 @@ import Agent.CLI.TUI.App
     , fullscreenSurface
     , fullscreenApp
     , initialFullscreenAppState
+    , isMetaConsoleToggle
     , mergeConversationView
     , newFullscreenInputBuffer
     , newFullscreenRuntime
@@ -50,16 +52,22 @@ import Agent.CLI.TUI.App
     , setFullscreenWindowTitle
     , syntaxLanguagesForBlocks
     , textOverlayDisplayText
+    , toolImageBlockId
     , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     )
 import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
+    , AppState(appConversationReflowQueued, appMetaConsole, appUi)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , FullscreenInput(..)
+    , choiceVisibleRows
+    , selectedChoiceIndex
     , FullscreenRuntime(..)
     , HistoryCommit(..)
+    , MetaConsoleOverlay(..)
     , Name(..)
     , TerminalFocus(..)
     , TextInputMode(..)
@@ -67,7 +75,9 @@ import Agent.CLI.TUI.Types
     )
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
+    , HistoryDirection(..)
     , HistoryGeneration(..)
+    , HistoryPage(..)
     , HistoryTurn(..)
     )
 import Agent.CLI.Terminal
@@ -81,6 +91,7 @@ import Brick
     , VScrollbarRenderer(..)
     , Widget
     , customMain
+    , halt
     , hLimit
     , renderWidget
     , txt
@@ -101,7 +112,12 @@ import Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     )
 import Agent.TUI.Motion
-import Control.Concurrent.STM (atomically, newTChanIO, retry)
+import Control.Concurrent.STM
+    ( atomically
+    , newEmptyTMVarIO
+    , newTChanIO
+    , retry
+    )
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
@@ -113,11 +129,47 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Output.Mock as VMock
+import qualified Agent.CLI.TUI.Composer as Composer
 import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "toolImageBlockId" do
+        let started callId name =
+                reduceUi
+                    (UiLoop (ToolStarted (functionToolCall callId name "{}")))
+            finished callId =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            (ToolCallResult callId "done" FunctionCallKind)))
+            firstBlock = BlockId initialUiState.uiNextBlockId
+            secondBlock = BlockId (initialUiState.uiNextBlockId + 1)
+
+        it "attaches to the block of the originating call" do
+            let ui =
+                    started "call-2" "show_image" $
+                        started "call-1" "shell_command" initialUiState
+            toolImageBlockId "call-1" ui `shouldBe` Just firstBlock
+            toolImageBlockId "call-2" ui `shouldBe` Just secondBlock
+
+        it "falls back to the newest running tool block for nested code-mode calls" do
+            let ui =
+                    started "exec-1" "exec" $
+                        finished "call-1" $
+                            started "call-1" "shell_command" initialUiState
+            toolImageBlockId "code-mode:1:show_image" ui
+                `shouldBe` Just secondBlock
+
+        it "ignores unknown calls once no tool is running" do
+            let ui =
+                    finished "call-1" $
+                        started "call-1" "shell_command" initialUiState
+            toolImageBlockId "code-mode:1:show_image" ui `shouldBe` Nothing
+            toolImageBlockId "code-mode:1:show_image" initialUiState
+                `shouldBe` Nothing
+
     describe "background activity status" do
         it "names a running agent and its current step" do
             backgroundActivityText
@@ -280,6 +332,61 @@ spec = do
                 `shouldBe` Just
                     (Text.singleton regionalU <> regionalS <> "x", 3)
 
+    describe "Meta Console" do
+        it "recognizes Command/Meta+K and Alt+K without stealing plain K" do
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [V.MMeta])
+                `shouldBe` True
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [V.MAlt])
+                `shouldBe` True
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [])
+                `shouldBe` False
+            isMetaConsoleToggle
+                (V.EvKey (V.KChar 'k') [V.MCtrl])
+                `shouldBe` False
+
+        it "edits multi-code-point glyphs as one grapheme" do
+            let emoji = Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                overlay = MetaConsoleOverlay
+                    { metaConsoleDraft = "a" <> emoji <> "b"
+                    , metaConsoleCursor = 4
+                    }
+                edited =
+                    applyMetaConsoleEdit
+                        (V.EvKey V.KBS [])
+                        overlay
+            (fmap
+                (\current ->
+                    ( current.metaConsoleDraft
+                    , current.metaConsoleCursor
+                    ))
+                edited)
+                `shouldBe` Just ("ab", 1)
+
+        it "queues a private request during a turn without changing the composer draft" do
+            (state, inputs) <- runMetaConsoleSubmission True
+            state.appUi.uiDraft `shouldBe` "unfinished composer draft"
+            (() <$ state.appMetaConsole) `shouldBe` Nothing
+            map
+                (\input ->
+                    ( input.fullscreenInputLine
+                    , input.fullscreenInputQueued
+                    , input.fullscreenInputDisplay
+                    ))
+                inputs
+                `shouldBe`
+                    [ ( ReplMeta "connect my Grok account"
+                      , True
+                      , Nothing
+                      )
+                    ]
+
+        it "submits immediately at an idle REPL boundary" do
+            (_, inputs) <- runMetaConsoleSubmission False
+            map (.fullscreenInputQueued) inputs `shouldBe` [False]
+
     describe "choice overlay lifecycle" do
         it "closes a running-turn choice on success or cancellation" do
             let running =
@@ -333,6 +440,29 @@ spec = do
                 continuing
                 (choiceOverlay True)
                 `shouldBe` False
+
+    describe "searchable choice rows" do
+        let searchable = (choiceOverlay False)
+                { choiceSearch = True
+                , choiceQuery = "claude"
+                , choiceRows =
+                    [ ("gpt-5.6", "Vendor: OpenAI")
+                    , ("anthropic/claude-sonnet", "Anthropic")
+                    , ("google/gemini", "Google")
+                    ]
+                }
+        it "matches title and detail case-insensitively" do
+            choiceVisibleRows searchable
+                `shouldBe` [(1, ("anthropic/claude-sonnet", "Anthropic"))]
+            choiceVisibleRows searchable { choiceQuery = "VENDOR" }
+                `shouldBe` [(0, ("gpt-5.6", "Vendor: OpenAI"))]
+        it "returns the source index after filtering" do
+            selectedChoiceIndex searchable
+                `shouldBe` Just 1
+        it "returns no selection when a query has no matches" do
+            selectedChoiceIndex
+                searchable { choiceQuery = "missing" }
+                `shouldBe` Nothing
 
     describe "prompt model refresh" do
         it "preserves the live draft and cursor across a provider restart" do
@@ -399,6 +529,14 @@ spec = do
                 , ( Nothing
                   , "\ESC[118:86:86;9:1u"
                   , V.EvKey (V.KChar 'v') [V.MMeta]
+                  )
+                , ( Nothing
+                  , "\ESC[107;9u"
+                  , V.EvKey (V.KChar 'k') [V.MMeta]
+                  )
+                , ( Nothing
+                  , "\ESC[107:75:75;9:1u"
+                  , V.EvKey (V.KChar 'k') [V.MMeta]
                   )
                 , ( Nothing
                   , "\ESC[114;5u"
@@ -765,12 +903,51 @@ spec = do
     describe "history replacement viewport" do
         it "shows the new durable tail immediately while focused" do
             timeout 2_000_000
-                (replacementLeavesDurableTailVisible ReplaceWhileFocused)
+                (fst <$> replacementAfterHistoryReplacement ReplaceWhileFocused)
                 `shouldReturn` Just True
 
         it "shows the new durable tail immediately when focus returns" do
             timeout 2_000_000
-                (replacementLeavesDurableTailVisible ReplaceWhileHidden)
+                (fst <$> replacementAfterHistoryReplacement ReplaceWhileHidden)
+                `shouldReturn` Just True
+
+        it "reflows native placements after focus returns" do
+            timeout 2_000_000
+                (snd <$> replacementAfterHistoryReplacement ReplaceWhileHidden)
+                `shouldReturn` Just True
+
+        it "shows the durable tail without relying on a focus-gained event" do
+            timeout 2_000_000
+                (replacementLeavesDurableTailVisible ReplaceWhileHiddenNoFocus)
+                `shouldReturn` Just True
+
+    describe "unfocused terminal recovery" do
+        it "treats paste input as proof that focus returned" do
+            timeout 2_000_000 unfocusedPasteRendersDraft
+                `shouldReturn` Just True
+
+        it "renders a blocking text prompt without a focus-gained event" do
+            timeout 2_000_000 unfocusedTextPromptIsVisible
+                `shouldReturn` Just True
+
+        it "renders a submitted prompt without a focus-gained event" do
+            timeout 2_000_000 unfocusedSubmissionIsVisible
+                `shouldReturn` Just True
+
+        it "renders reset durable history without a focus-gained event" do
+            timeout 2_000_000 unfocusedHistoryResetIsVisible
+                `shouldReturn` Just True
+
+        it "halts when the worker stops while unfocused" do
+            timeout 2_000_000 unfocusedStopHalts
+                `shouldReturn` Just ()
+
+        it "runs a suspension requested while unfocused" do
+            timeout 2_000_000 unfocusedSuspendRuns
+                `shouldReturn` Just True
+
+        it "keeps high-frequency streaming redraws throttled" do
+            timeout 2_000_000 unfocusedStreamingRemainsThrottled
                 `shouldReturn` Just True
 
     describe "motion demand" do
@@ -1100,30 +1277,51 @@ spec = do
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
     | FullscreenScriptVty !V.Event
+    | FullscreenScriptHalt
 
 data ReplacementScenario
     = ReplaceWhileFocused
     | ReplaceWhileHidden
+    | ReplaceWhileHiddenNoFocus
+
+runMetaConsoleSubmission :: Bool -> IO (AppState, [FullscreenInput])
+runMetaConsoleSubmission running = do
+    let draft = "unfinished composer draft"
+        baseUi = reduceUi (UiSetDraft draft (Text.length draft)) initialUiState
+        ui =
+            if running
+                then reduceUi (UiLoop TurnStarted) baseUi
+                else baseUi
+    runtime <- newScriptRuntime ui
+    let request = "connect my Grok account"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptVty
+                (V.EvKey (V.KChar 'k') [V.MMeta])
+            , FullscreenScriptVty
+                (V.EvPaste (encoded request))
+            , FullscreenScriptVty
+                (V.EvKey V.KEnter [])
+            , FullscreenScriptHalt
+            ]
+    (_, finalState) <-
+        runFullscreenScriptWithState initialState script
+    inputs <-
+        toList <$>
+            atomically
+                (Composer.readFullscreenInputs runtime.runtimeInput)
+    pure (finalState, inputs)
 
 replacementLeavesDurableTailVisible :: ReplacementScenario -> IO Bool
-replacementLeavesDurableTailVisible scenario = do
-    input <- newFullscreenInputBuffer
+replacementLeavesDurableTailVisible scenario =
+    fst <$> replacementAfterHistoryReplacement scenario
+
+replacementAfterHistoryReplacement :: ReplacementScenario -> IO (Bool, Bool)
+replacementAfterHistoryReplacement scenario = do
     let liveTranscript =
             Text.unlines (replicate 200 "live transcript line")
-    runtime <- newFullscreenRuntime
-        input
-        (pure ())
-        (const (pure ()))
-        (pure WarnExit)
-        (const (pure True))
-        (const (pure ()))
-        (const (pure ()))
-        (pure (AgentRoot, []))
-        (const (pure ()))
-        (pure ())
-        (const (pure ()))
-        MotionFull
-        False
+    runtime <- newScriptRuntime
         (initialUiState { uiFollow = True })
     let
         durableTail = "FINAL DURABLE ANSWER"
@@ -1147,29 +1345,9 @@ replacementLeavesDurableTailVisible scenario = do
             }
         initialState =
             initialFullscreenAppState runtime [] AgentRoot [] 0
-        scriptedApp = App
-            { appDraw = fullscreenApp.appDraw
-            , appChooseCursor = fullscreenApp.appChooseCursor
-            , appHandleEvent = \case
-                AppEvent (FullscreenScriptApp event) ->
-                    fullscreenApp.appHandleEvent (AppEvent event)
-                AppEvent (FullscreenScriptVty event) ->
-                    fullscreenApp.appHandleEvent (VtyEvent event)
-                VtyEvent event ->
-                    fullscreenApp.appHandleEvent (VtyEvent event)
-                MouseDown name button modifiers location ->
-                    fullscreenApp.appHandleEvent
-                        (MouseDown name button modifiers location)
-                MouseUp name button location ->
-                    fullscreenApp.appHandleEvent
-                        (MouseUp name button location)
-            , appStartEvent = fullscreenApp.appStartEvent
-            , appAttrMap = fullscreenApp.appAttrMap
-            }
 
     -- A single custom-event channel makes each focus/history sequence
     -- deterministic while still running the real Brick event handler.
-    events <- newBChan 8
     let commit = FullscreenScriptApp
             (AppHistoryCommitted
                 (HistoryGeneration 0)
@@ -1194,8 +1372,205 @@ replacementLeavesDurableTailVisible scenario = do
                 , FullscreenScriptVty V.EvGainedFocus
                 , FullscreenScriptApp AppStop
                 ]
-    mapM_ (writeBChan events) script
+            ReplaceWhileHiddenNoFocus ->
+                [ FullscreenScriptVty V.EvLostFocus
+                , commit
+                -- Some terminal tabs omit focus gain; the durable replacement
+                -- must still reach the terminal's backing screen.
+                , FullscreenScriptApp AppConversationReflow
+                , FullscreenScriptHalt
+                ]
+    (rendered, finalState) <- runFullscreenScriptWithState initialState script
+    pure
+        ( encoded durableTail `ByteString.isInfixOf` rendered
+        , finalState.appConversationReflowQueued
+        )
 
+unfocusedPasteRendersDraft :: IO Bool
+unfocusedPasteRendersDraft = do
+    runtime <- newScriptRuntime initialUiState
+    let marker = "IMPLICIT_FOCUS_DRAFT"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptVty V.EvLostFocus
+            , FullscreenScriptVty (V.EvPaste (encoded marker))
+            , FullscreenScriptHalt
+            ]
+    rendered <- runFullscreenScript initialState script
+    pure $ encoded marker `ByteString.isInfixOf` rendered
+
+unfocusedTextPromptIsVisible :: IO Bool
+unfocusedTextPromptIsVisible = do
+    runtime <- newScriptRuntime initialUiState
+    reply <- newEmptyTMVarIO
+    let marker = "HIDDEN_TEXT_PROMPT_MARKER"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptVty V.EvLostFocus
+            , FullscreenScriptApp
+                (AppAskText
+                    TextInputPlain
+                    "Hidden text prompt"
+                    marker
+                    ""
+                    reply)
+            , FullscreenScriptHalt
+            ]
+    rendered <- runFullscreenScript initialState script
+    pure $ encoded marker `ByteString.isInfixOf` rendered
+
+unfocusedSubmissionIsVisible :: IO Bool
+unfocusedSubmissionIsVisible = do
+    runtime <- newScriptRuntime initialUiState
+    let marker = "HIDDEN_SUBMITTED_PROMPT"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptVty V.EvLostFocus
+            , FullscreenScriptApp (AppUi (UiUserSubmitted marker))
+            , FullscreenScriptHalt
+            ]
+    rendered <- runFullscreenScript initialState script
+    pure $ encoded marker `ByteString.isInfixOf` rendered
+
+unfocusedHistoryResetIsVisible :: IO Bool
+unfocusedHistoryResetIsVisible = do
+    runtime <- newScriptRuntime (initialUiState { uiFollow = True })
+    let marker = "HIDDEN_RESET_HISTORY"
+        liveTranscript =
+            Text.unlines (replicate 200 "reset live transcript line")
+        generation = HistoryGeneration 1
+        cursor = HistoryCursor 0
+        durableTurn = HistoryTurn
+            { historyTurnCursor = cursor
+            , historyTurnBlocks =
+                Seq.singleton
+                    (markerBlock
+                        (BlockId 1001)
+                        (Text.unlines
+                            (replicate 35 "reset durable transcript line"
+                                <> [marker])))
+            }
+        page = HistoryPage
+            { historyPageGeneration = generation
+            , historyPageDirection = HistoryNewer
+            , historyPageTurns = Seq.singleton durableTurn
+            , historyPageGenerationStart = cursor
+            , historyPageTotalTurns = 1
+            , historyPageHasOlder = False
+            , historyPageHasNewer = False
+            }
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptApp
+                (AppUi (UiAssistantHistory liveTranscript))
+            , FullscreenScriptVty V.EvLostFocus
+            , FullscreenScriptApp (AppHistoryReset page)
+            , FullscreenScriptApp AppConversationReflow
+            , FullscreenScriptHalt
+            ]
+    rendered <- runFullscreenScript initialState script
+    pure $ encoded marker `ByteString.isInfixOf` rendered
+
+unfocusedStopHalts :: IO ()
+unfocusedStopHalts = do
+    runtime <- newScriptRuntime initialUiState
+    let initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+    _ <- runFullscreenScript
+        initialState
+        [ FullscreenScriptVty V.EvLostFocus
+        , FullscreenScriptApp AppStop
+        ]
+    pure ()
+
+unfocusedSuspendRuns :: IO Bool
+unfocusedSuspendRuns = do
+    runtime <- newScriptRuntime initialUiState
+    actionRan <- newIORef False
+    reply <- newEmptyTMVarIO
+    let initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+    _ <- runFullscreenScript
+        initialState
+        [ FullscreenScriptVty V.EvLostFocus
+        , FullscreenScriptApp
+            (AppSuspend (writeIORef actionRan True) reply)
+        , FullscreenScriptApp AppStop
+        ]
+    readIORef actionRan
+
+unfocusedStreamingRemainsThrottled :: IO Bool
+unfocusedStreamingRemainsThrottled = do
+    runtime <- newScriptRuntime initialUiState
+    let marker = "HIDDEN_STREAMING_DELTA"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptVty V.EvLostFocus
+            , FullscreenScriptApp (AppUi (UiLoop (TextDelta marker)))
+            , FullscreenScriptHalt
+            ]
+    rendered <- runFullscreenScript initialState script
+    pure $ not (encoded marker `ByteString.isInfixOf` rendered)
+
+newScriptRuntime :: UiState -> IO FullscreenRuntime
+newScriptRuntime ui = do
+    input <- newFullscreenInputBuffer
+    newFullscreenRuntime
+        input
+        (pure ())
+        (const (pure ()))
+        (pure WarnExit)
+        (const (pure True))
+        (const (pure ()))
+        (const (pure ()))
+        (pure (AgentRoot, []))
+        (const (pure ()))
+        (pure ())
+        (const (pure ()))
+        MotionFull
+        False
+        ui
+
+runFullscreenScript
+    :: AppState
+    -> [FullscreenScriptEvent]
+    -> IO ByteString.ByteString
+runFullscreenScript initialState script =
+    fst <$> runFullscreenScriptWithState initialState script
+
+runFullscreenScriptWithState
+    :: AppState
+    -> [FullscreenScriptEvent]
+    -> IO (ByteString.ByteString, AppState)
+runFullscreenScriptWithState initialState script = do
+    let scriptedApp = App
+            { appDraw = fullscreenApp.appDraw
+            , appChooseCursor = fullscreenApp.appChooseCursor
+            , appHandleEvent = \case
+                AppEvent (FullscreenScriptApp event) ->
+                    fullscreenApp.appHandleEvent (AppEvent event)
+                AppEvent (FullscreenScriptVty event) ->
+                    fullscreenApp.appHandleEvent (VtyEvent event)
+                AppEvent FullscreenScriptHalt ->
+                    halt
+                VtyEvent event ->
+                    fullscreenApp.appHandleEvent (VtyEvent event)
+                MouseDown name button modifiers location ->
+                    fullscreenApp.appHandleEvent
+                        (MouseDown name button modifiers location)
+                MouseUp name button location ->
+                    fullscreenApp.appHandleEvent
+                        (MouseUp name button location)
+            , appStartEvent = fullscreenApp.appStartEvent
+            , appAttrMap = fullscreenApp.appAttrMap
+            }
+    events <- newBChan (max 1 (length script))
+    mapM_ (writeBChan events) script
     let bounds = (80, 24)
     (_, mockOutput) <- VMock.mockTerminal bounds
     outputBytes <- newIORef ByteString.empty
@@ -1220,9 +1595,26 @@ replacementLeavesDurableTailVisible scenario = do
             , V.shutdown = pure ()
             , V.isShutdown = pure False
             }
-    _ <- customMain vty (pure vty) (Just events) scriptedApp initialState
+    finalState <-
+        customMain vty (pure vty) (Just events) scriptedApp initialState
     rendered <- readIORef outputBytes
-    pure $ TextEncoding.encodeUtf8 durableTail `ByteString.isInfixOf` rendered
+    pure (rendered, finalState)
+
+markerBlock :: BlockId -> Text -> UiBlock
+markerBlock blockId body = UiBlock
+    { blockId
+    , blockKind = BlockAssistant
+    , blockTitle = "Assistant"
+    , blockBody = body
+    , blockTimestamp = ""
+    , blockDetail = ""
+    , blockState = BlockComplete
+    , blockExpanded = False
+    , blockCallId = Nothing
+    }
+
+encoded :: Text -> ByteString.ByteString
+encoded = TextEncoding.encodeUtf8
 
 mockVty :: V.Output -> IO () -> IO Bool -> IO V.Vty
 mockVty output shutdownAction isShutdownAction = do
@@ -1251,6 +1643,8 @@ choiceOverlay closeOnTurnEnd = ChoiceOverlay
     , choiceBody = ""
     , choiceIndex = 0
     , choiceRows = [("one", "")]
+    , choiceSearch = False
+    , choiceQuery = ""
     , choiceCloseOnTurnEnd = closeOnTurnEnd
     }
 

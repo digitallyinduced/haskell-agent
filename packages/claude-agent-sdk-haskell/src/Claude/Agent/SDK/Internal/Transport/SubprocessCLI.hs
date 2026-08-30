@@ -10,6 +10,12 @@ import Claude.Agent.SDK.Errors
 import Claude.Agent.SDK.Internal.Process
     ( terminateProcessGroup
     )
+import Claude.Agent.SDK.Internal.Transport.OutputBuffer
+    ( OutputBuffer
+    , OutputReadResult(..)
+    , emptyOutputBuffer
+    , readOutputLine
+    )
 import Claude.Agent.SDK.Transport
     ( Transport(..)
     , TransportMode(..)
@@ -47,13 +53,11 @@ import Control.Exception.Safe
     , mask
     , onException
     , throwIO
-    , try
     , tryAny
     )
 import Control.Monad (void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Char8 as ByteString8
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -79,7 +83,7 @@ import System.IO
     , hSetBinaryMode
     , hSetBuffering
     )
-import System.IO.Error (isDoesNotExistError, isEOFError)
+import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (ProcessGroupID)
 import System.Process
     ( CreateProcess(..)
@@ -100,7 +104,7 @@ data RunningTransport = RunningTransport
     , processHandle :: !ProcessHandle
     , groupId :: !(Maybe ProcessGroupID)
     , diagnosticBytes :: !(IORef ByteString.ByteString)
-    , outputBytes :: !(IORef ByteString.ByteString)
+    , outputBytes :: !(IORef OutputBuffer)
     , outputReaderState :: !(MVar OutputReaderState)
     , inputWriterState :: !(MVar InputWriterState)
     , inputOpen :: !(IORef Bool)
@@ -239,7 +243,7 @@ startTransport options mode model effort =
                 [inputHandle, outputHandle, errorHandle])
             `onException` stopCreated processGroupId
         diagnosticRef <- newIORef ByteString.empty
-        outputRef <- newIORef ByteString.empty
+        outputRef <- newIORef emptyOutputBuffer
         outputReaderState <-
             newMVar OutputReaderState
                 { outputReaderClosing = False
@@ -493,79 +497,25 @@ readBoundedLine
     -> Int
     -> IO (Either ClaudeSDKError (Maybe ByteString.ByteString))
 readBoundedLine running maximumBytes =
-    go
+    readOutputLine
+        running.outputBytes
+        maximumBytes
+        (ByteString.hGetSome running.outputHandle)
+        >>= \case
+            OutputReadLine line ->
+                pure (Right (Just line))
+            OutputReadEnd ->
+                pure (Right Nothing)
+            OutputReadTooLarge ->
+                pure (Left oversizedRecordError)
+            OutputReadFailure exception ->
+                pure $
+                    Left $
+                        CLIConnectionError
+                            ( "Failed to read Claude Code output: "
+                                <> Text.pack (show exception)
+                            )
   where
-    go = do
-        buffered <- readIORef running.outputBytes
-        case ByteString8.elemIndex '\n' buffered of
-            Just newlineIndex -> do
-                let (line, withNewline) =
-                        ByteString.splitAt newlineIndex buffered
-                writeIORef
-                    running.outputBytes
-                    (ByteString.drop 1 withNewline)
-                if ByteString.length line > maximumBytes
-                    then pure (Left oversizedRecordError)
-                    else pure (Right (Just line))
-            Nothing
-                | ByteString.length buffered > maximumBytes ->
-                    pure (Left oversizedRecordError)
-                | otherwise -> do
-                    let remainingBytes =
-                            maximumBytes - ByteString.length buffered
-                        readSize =
-                            min 8_192 (remainingBytes + 1)
-                    result <-
-                        try
-                            (ByteString.hGetSome
-                                running.outputHandle
-                                readSize)
-                            :: IO
-                                (Either
-                                    IOException
-                                    ByteString.ByteString)
-                    case result of
-                        Right chunk
-                            | ByteString.null chunk ->
-                                if ByteString.null buffered
-                                    then pure (Right Nothing)
-                                    else do
-                                        writeIORef
-                                            running.outputBytes
-                                            ByteString.empty
-                                        if ByteString.length buffered
-                                                > maximumBytes
-                                            then
-                                                pure
-                                                    (Left
-                                                        oversizedRecordError)
-                                            else
-                                                pure
-                                                    (Right
-                                                        (Just buffered))
-                            | otherwise -> do
-                                writeIORef
-                                    running.outputBytes
-                                    (buffered <> chunk)
-                                go
-                        Left exception
-                            | isEOFError exception ->
-                                if ByteString.null buffered
-                                    then pure (Right Nothing)
-                                    else do
-                                        writeIORef
-                                            running.outputBytes
-                                            ByteString.empty
-                                        pure (Right (Just buffered))
-                            | otherwise ->
-                                pure $
-                                    Left $
-                                        CLIConnectionError
-                                            ( "Failed to read Claude Code output: "
-                                                <> Text.pack
-                                                    (show exception)
-                                            )
-
     oversizedRecordError =
         CLIProtocolError
             ( "Claude Code emitted a structured output record larger than "

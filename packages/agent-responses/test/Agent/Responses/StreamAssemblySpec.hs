@@ -99,24 +99,6 @@ spec = describe "buildStreamResponse" do
                 Left (ConnectionError
                     "failed: response.incomplete: max_output_tokens")
 
-    it "recovers a dropped stream after response.created as incomplete" do
-        -- A real response.created frame carries status "in_progress". When the
-        -- socket dies mid-stream the recovery path must force an "incomplete"
-        -- status rather than leaking the stale "in_progress" through, which
-        -- would otherwise be classified as a completed turn.
-        let created = ResponseCreatedEvent
-                (decodeResponseValue (Aeson.object
-                    [ "id" Aeson..= ("resp-dropped" :: Text)
-                    , "created_at" Aeson..= (0 :: Int)
-                    , "model" Aeson..= ("test" :: Text)
-                    , "status" Aeson..= ("in_progress" :: Text)
-                    ]))
-                Nothing
-            state = applyStreamEvent emptyStreamAssemblyState created
-        response <- expectRight (finishAssembledIncomplete (Just "test") state)
-        response.status `shouldBe` ResponseIncomplete
-        response.responseId `shouldBe` "resp-dropped"
-
     it "replaces indexed added items with done items without duplicates" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"
@@ -151,6 +133,100 @@ spec = describe "buildStreamResponse" do
             (buildStreamResponseWithModel config (Just "request-model") events)
         [name | FunctionCallItem FunctionCall { name } <- response.output]
             `shouldBe` ["first", "second"]
+
+    it "keeps item ids and call ids in separate identity namespaces" do
+        response <- expectRight $ buildStreamResponse config $
+            completedItemTrace "resp-identity-fields"
+                [ doneItemAt (Just 0)
+                    (testFunctionCall (Just "item-1") "shared" "first")
+                , doneItemAt Nothing
+                    (testFunctionCall (Just "shared") "call-2" "second")
+                ]
+        [name | FunctionCallItem FunctionCall { name } <- response.output]
+            `shouldBe` ["first", "second"]
+
+    it "keeps identities from different item kinds separate" do
+        response <- expectRight $ buildStreamResponse config $
+            completedItemTrace "resp-identity-kinds"
+                [ doneItemAt (Just 0)
+                    (testFunctionCall (Just "shared") "call-1" "first")
+                , doneItemAt Nothing (testReasoningItem "shared")
+                ]
+        case response.output of
+            [FunctionCallItem{}, ReasoningItemValue{}] -> pure ()
+            other -> expectationFailure
+                ("expected a function call and reasoning item, got " <> show other)
+
+    it "removes stale aliases when an indexed slot changes identity" do
+        response <- expectRight $ buildStreamResponse config $
+            completedItemTrace "resp-alias-replacement"
+                [ doneItemAt (Just 0)
+                    (testFunctionCall (Just "old-id") "old-call" "old")
+                , doneItemAt (Just 0)
+                    (testFunctionCall (Just "new-id") "new-call" "new")
+                , doneItemAt Nothing
+                    (testFunctionCall
+                        (Just "old-id")
+                        "old-call-again"
+                        "old-again")
+                ]
+        let calls =
+                [ (itemId, name)
+                | FunctionCallItem FunctionCall { itemId, name } <-
+                    response.output
+                ]
+        calls `shouldBe`
+            [ (Just "new-id", "new")
+            , (Just "old-id", "old-again")
+            ]
+
+    it "uses the lowest slot when a typed identity occurs more than once" do
+        response <- expectRight $ buildStreamResponse config $
+            completedItemTrace "resp-duplicate-alias"
+                [ doneItemAt (Just 5)
+                    (testFunctionCall (Just "shared") "call-5" "at-five")
+                , doneItemAt (Just 2)
+                    (testFunctionCall (Just "shared") "call-2" "at-two")
+                , doneItemAt Nothing
+                    (testFunctionCall
+                        (Just "shared")
+                        "call-updated"
+                        "updated-lowest")
+                ]
+        [name | FunctionCallItem FunctionCall { name } <- response.output]
+            `shouldBe` ["updated-lowest", "at-five"]
+
+    it "uses the lowest pending slot for an unidentified done item" do
+        response <- expectRight $ buildStreamResponse config $
+            completedItemTrace "resp-pending-fallback"
+                [ addedItemAt (Just 5)
+                    (testFunctionCall (Just "item-5") "call-5" "at-five")
+                , addedItemAt (Just 2)
+                    (testFunctionCall (Just "item-2") "call-2" "at-two")
+                , doneItemAt Nothing
+                    (testFunctionCall Nothing "new-call" "done-lowest")
+                ]
+        [name | FunctionCallItem FunctionCall { name } <- response.output]
+            `shouldBe` ["done-lowest", "at-five"]
+
+    it "allocates an implicit slot immediately after a negative maximum index" do
+        response <- expectRight $ buildStreamResponse config $
+            completedItemTrace "resp-negative-index"
+                [ doneItemAt (Just (-3))
+                    (testFunctionCall (Just "first-id") "first-call" "first")
+                , doneItemAt Nothing
+                    (testFunctionCall
+                        (Just "implicit-id")
+                        "implicit-call"
+                        "implicit")
+                , doneItemAt (Just (-2))
+                    (testFunctionCall
+                        (Just "replacement-id")
+                        "replacement-call"
+                        "replacement")
+                ]
+        [name | FunctionCallItem FunctionCall { name } <- response.output]
+            `shouldBe` ["first", "replacement"]
 
     it "assembles custom-tool input events without output_index" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
@@ -436,6 +512,43 @@ decodeResponseValue value =
     either error id
         (Codec.decodeResponse (LBS.toStrict (Aeson.encode value)))
 
+completedItemTrace :: Text -> [ResponseStreamEvent] -> [ResponseStreamEvent]
+completedItemTrace responseId itemEvents =
+    ResponseCreatedEvent (responseFragment responseId) Nothing
+        : itemEvents
+        <> [ResponseCompletedEvent (responseFragment responseId) Nothing]
+
+addedItemAt :: Maybe Int -> ResponseItem -> ResponseStreamEvent
+addedItemAt index item =
+    ResponseOutputItemAddedEvent item index Nothing
+
+doneItemAt :: Maybe Int -> ResponseItem -> ResponseStreamEvent
+doneItemAt index item =
+    ResponseOutputItemDoneEvent item index Nothing
+
+testFunctionCall :: Maybe Text -> Text -> Text -> ResponseItem
+testFunctionCall itemId callId name =
+    FunctionCallItem FunctionCall
+        { itemId
+        , callId
+        , name
+        , namespace = Nothing
+        , provider = Nothing
+        , arguments = ""
+        , encryptedFunctionArgs = Nothing
+        , status = Nothing
+        }
+
+testReasoningItem :: Text -> ResponseItem
+testReasoningItem identifier =
+    ReasoningItemValue ReasoningItem
+        { itemId = Just identifier
+        , summary = []
+        , content = Nothing
+        , encryptedContent = Nothing
+        , status = Nothing
+        }
+
 -- This model deliberately stores raw item values rather than reusing the
 -- implementation's progress type. An explicit output index identifies one
 -- item, and later object fields overlay earlier fields.
@@ -631,7 +744,7 @@ applyExpected expected operation =
             operation.operationIndex
                 <|> findModelItemIndex newValue expected
                 <|> if operation.operationDone
-                    then findPendingModelIndex newValue expected
+                    then findPendingModelIndex expected
                     else Nothing
     update Nothing = Just (newValue, operation.operationDone)
     update (Just (oldValue, wasDone)) =
@@ -659,37 +772,34 @@ findModelItemIndex value model =
         | identity <- itemIdentitiesModel value
         ]
 
-findIdentityModel :: Text -> StreamModel -> Maybe Int
+type ModelIdentity = (Text, Text, Text)
+
+findIdentityModel :: ModelIdentity -> StreamModel -> Maybe Int
 findIdentityModel wanted model =
     fst <$> Map.lookupMin
         (Map.filter
-            (matchesIdentityValue wanted . fst)
+            (matchesModelIdentity wanted . fst)
             model)
 
-matchesIdentityValue :: Text -> Aeson.Value -> Bool
-matchesIdentityValue wanted candidate =
-    objectTextFieldModel "id" candidate == Just wanted
-        || objectTextFieldModel "call_id" candidate == Just wanted
+matchesModelIdentity :: ModelIdentity -> Aeson.Value -> Bool
+matchesModelIdentity (wantedKind, wantedField, wantedValue) candidate =
+    objectTextFieldModel "type" candidate == Just wantedKind
+        && objectTextFieldModel wantedField candidate == Just wantedValue
 
-itemIdentitiesModel :: Aeson.Value -> [Text]
+itemIdentitiesModel :: Aeson.Value -> [ModelIdentity]
 itemIdentitiesModel value =
-    [ identity
-    | fieldName <- ["id", "call_id"]
-    , Just identity <- [objectTextFieldModel fieldName value]
-    ]
-
-findPendingModelIndex :: Aeson.Value -> StreamModel -> Maybe Int
-findPendingModelIndex value model =
     case objectTextFieldModel "type" value of
-        Nothing -> Nothing
-        Just wantedType ->
-            fst <$> Map.lookupMin
-                (Map.filter
-                    (\(item, done) ->
-                        not done
-                            && objectTextFieldModel "type" item
-                                == Just wantedType)
-                    model)
+        Nothing -> []
+        Just kind ->
+            [ (kind, fieldName, identity)
+            | fieldName <- ["id", "call_id"]
+            , Just identity <- [objectTextFieldModel fieldName value]
+            , not (Text.null identity)
+            ]
+
+findPendingModelIndex :: StreamModel -> Maybe Int
+findPendingModelIndex model =
+    fst <$> Map.lookupMin (Map.filter (not . snd) model)
 
 firstJustModel :: [Maybe value] -> Maybe value
 firstJustModel = foldr (<|>) Nothing

@@ -1,7 +1,10 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
-    ( codexEnvironmentContext
+    ( appendMcpInstructions
+    , codexEnvironmentContext
+    , mcpInstructionsGuidance
     , secretInputGuidance
+    , imageDisplayGuidance
     , subscriptionSubagentModelGuidance
     , sessionTempGuidance
     , systemPrompt
@@ -94,6 +97,7 @@ systemPromptForTools
             [ base
             , sessionTempGuidance sessionTmp
             , secretInputGuidance available
+            , imageDisplayGuidance available
             , learnedSkillGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
@@ -139,6 +143,7 @@ systemPromptForCatalogModel dialect info toolNames sessionTmp =
                 (renderModelInstructions ModelPersonalityDefault info)
             , sessionTempGuidance sessionTmp
             , secretInputGuidance available
+            , imageDisplayGuidance available
             , learnedSkillGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
@@ -203,6 +208,34 @@ secretInputGuidance available
             , "- Pass that path to a consumer that supports file input and delete the file promptly after use."
             , "- Never read, print, summarize, or otherwise expose the secret file contents."
             ]
+
+-- | Point the model at inline image display when the host can present one.
+imageDisplayGuidance :: Set Text -> Text
+imageDisplayGuidance available
+    | "show_image" `Set.notMember` available = ""
+    | otherwise =
+        Text.unlines
+            [ "Image display:"
+            , "- Use show_image to present an image file (PNG, JPEG, GIF, BMP, TIFF) inline to the user, for example screenshots, rendered previews, charts, or icons."
+            , "- Convert other formats such as SVG or PDF to PNG first."
+            , "- The user sees the image; it is not added to your own context."
+            ]
+
+-- | Natural-language guidance advertised by MCP servers, appended verbatim
+-- under a heading per server.
+mcpInstructionsGuidance :: [(Text, Text)] -> Text
+mcpInstructionsGuidance [] = ""
+mcpInstructionsGuidance instructions =
+    Text.intercalate "\n\n" $
+        "MCP server instructions:"
+            : [ "## " <> name <> "\n" <> body
+              | (name, body) <- instructions
+              ]
+
+appendMcpInstructions :: [(Text, Text)] -> Text -> Text
+appendMcpInstructions [] base = base
+appendMcpInstructions instructions base =
+    base <> "\n\n" <> mcpInstructionsGuidance instructions
 
 learnedSkillGuidance :: Set Text -> Text
 learnedSkillGuidance available

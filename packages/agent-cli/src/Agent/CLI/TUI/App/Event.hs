@@ -194,6 +194,19 @@ handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
     stateBeforeEvent <- get
+    imagePreviewRevisionBefore <-
+        liftIO $
+            readIORef
+                stateBeforeEvent.appRuntime.runtimeImagePreviewRevision
+    when
+        ( stateBeforeEvent.appTerminalFocus == TerminalUnfocused
+            && terminalInteractionImpliesFocus event
+        ) do
+        -- A key, paste, or pointer event can only come from the active
+        -- terminal. Recover when a tab transition omitted EvGainedFocus;
+        -- otherwise every interaction would keep mutating state invisibly.
+        noteTerminalFocusGained
+        resolveConversationFollow
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
     when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
@@ -202,6 +215,7 @@ handleEvent event = do
             isNothing state.appTextPrompt
                 && isNothing state.appChoice
                 && isNothing state.appResume
+                && isNothing state.appMetaConsole
                 && isNothing state.appUi.uiPermission
                 && isNothing state.appAgentHover
     liftIO do
@@ -216,8 +230,21 @@ handleEvent event = do
                 (+ 1)
     syncMotionDemand
     stateAfterMotionSync <- get
+    imagePreviewRevisionAfter <-
+        liftIO $
+            readIORef
+                stateAfterMotionSync.appRuntime.runtimeImagePreviewRevision
     when
         ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && eventMaySkipUnfocusedRedraw event
+            && imagePreviewRevisionBefore == imagePreviewRevisionAfter
+            && not
+                (userActionPending stateBeforeEvent
+                    /= userActionPending stateAfterMotionSync)
+            && not
+                (agentStructureRequiresUnfocusedRedraw
+                    stateBeforeEvent
+                    stateAfterMotionSync)
             && not
                 (completionRequiresRedraw
                     stateBeforeEvent.appUi
@@ -227,6 +254,78 @@ handleEvent event = do
         ) $
         continueWithoutRedraw
   where
+    -- Suppression is deliberately opt-in. continueWithoutRedraw is Brick's
+    -- final EventM action, so applying it to an unknown event can overwrite a
+    -- halt/suspend request or hide a new blocking/structural UI state. Only
+    -- known high-frequency and cosmetic events are safe to throttle.
+    eventMaySkipUnfocusedRedraw = \case
+        AppEvent appEvent ->
+            appEventMaySkipUnfocusedRedraw appEvent
+        VtyEvent V.EvLostFocus -> True
+        VtyEvent V.EvResize{} -> True
+        -- The patched backend represents pointer motion as a no-button mouse
+        -- release; it is not proof that the hidden terminal regained focus.
+        VtyEvent (V.EvMouseUp _ _ Nothing) -> True
+        MouseUp _ Nothing _ -> True
+        _ -> False
+
+    appEventMaySkipUnfocusedRedraw = \case
+        AppUi uiEvent ->
+            uiEventMaySkipUnfocusedRedraw uiEvent
+        AppUiBatch uiEvents ->
+            all uiEventMaySkipUnfocusedRedraw uiEvents
+        AppDictationPartial{} -> True
+        AppAgentSnapshot{} -> True
+        AppSetWindowTitle{} -> True
+        AppSyntaxHighlighterChanged -> True
+        AppHistoryLiveStarted -> True
+        AppConversationReflow -> True
+        AppSyncSubmittedImagePlacements -> True
+        AppMotionTick -> True
+        AppRecapPoll -> True
+        _ -> False
+
+    uiEventMaySkipUnfocusedRedraw = \case
+        UiLoop loopEvent ->
+            loopEventMaySkipUnfocusedRedraw loopEvent
+        _ -> False
+
+    loopEventMaySkipUnfocusedRedraw = \case
+        TextDelta{} -> True
+        ReasoningDelta{} -> True
+        ActivityUpdated{} -> True
+        ToolUpdated{} -> True
+        ToolArgumentsUpdated{} -> True
+        ToolOutputUpdated{} -> True
+        NativeAgentOutput{} -> True
+        _ -> False
+
+    agentStructureRequiresUnfocusedRedraw previous next =
+        previous.appAgentSelected /= next.appAgentSelected
+            || agentChromeSignature previous.appAgentEntries
+                /= agentChromeSignature next.appAgentEntries
+
+    -- Snapshot steps and conversations can update at streaming cadence. The
+    -- sorted chrome fields change only for low-rate lifecycle/layout updates.
+    agentChromeSignature entries =
+        sortOn id
+            [ ( entry.agentTarget
+              , entry.agentPath
+              , entry.agentStatus
+              , entry.agentModel
+              )
+            | entry <- entries
+            ]
+
+    terminalInteractionImpliesFocus = \case
+        MouseDown{} -> True
+        MouseUp _ (Just _) _ -> True
+        VtyEvent V.EvKey{} -> True
+        VtyEvent V.EvMouseDown{} -> True
+        VtyEvent (V.EvMouseUp _ _ (Just _)) -> True
+        VtyEvent V.EvPaste{} -> True
+        _ -> False
+
     isMotionTick = \case
         AppEvent AppMotionTick -> True
         _ -> False
@@ -357,6 +456,24 @@ handleEventInner event = case event of
                 , appSubmittedImagePreviews = submitted
                 }
         queueConversationReflow
+    AppEvent (AppToolImage callId preview) -> do
+        state <- get
+        case toolImageBlockId callId state.appUi of
+            Nothing -> pure ()
+            Just blockId -> do
+                modify' \current ->
+                    current
+                        { appSubmittedImagePreviews =
+                            Map.insertWith
+                                (flip (<>))
+                                blockId
+                                [preview]
+                                current.appSubmittedImagePreviews
+                        }
+                -- Running tool bodies are cached while empty; the new image
+                -- section must not be served from that entry.
+                invalidateCache
+                queueConversationReflow
     AppEvent (AppDictationPartial text) -> do
         state <- get
         when (isJust state.appDictation) $
@@ -412,6 +529,7 @@ handleEventInner event = case event of
     AppEvent (AppHistoryReset page) -> do
         modify' (resetHistoryPage page)
         invalidateCache
+        resolveConversationFollow
         queueConversationReflow
     AppEvent (AppHistoryLoaded request result) -> do
         state <- get
@@ -560,6 +678,28 @@ handleEventInner event = case event of
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
+                    , choiceSearch = False
+                    , choiceQuery = ""
+                    , choiceCloseOnTurnEnd = False
+                    }
+                , appChoiceReply = Just (atomically . putTMVar reply)
+                , appAgentHover = Nothing
+                }
+        vScrollToBeginning (viewportScroll OverlayViewport)
+    AppEvent (AppAskFilterChoice title initial rows reply) -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
+        modify' \state ->
+            state
+                { appChoice = Just ChoiceOverlay
+                    { choicePresentation = ChoiceDialog
+                    , choiceTitle = title
+                    , choiceBody = ""
+                    , choiceIndex =
+                        max 0 (min (max 0 (length rows - 1)) initial)
+                    , choiceRows = rows
+                    , choiceSearch = True
+                    , choiceQuery = ""
                     , choiceCloseOnTurnEnd = False
                     }
                 , appChoiceReply = Just (atomically . putTMVar reply)
@@ -631,8 +771,9 @@ handleEventInner event = case event of
                 case ( state.appTextPrompt
                      , state.appChoice
                      , state.appUi.uiPermission
+                     , state.appMetaConsole
                      ) of
-                    (Just _, _, _) ->
+                    (Just _, _, _, _) ->
                         case button of
                             V.BScrollUp ->
                                 vScrollBy
@@ -643,7 +784,9 @@ handleEventInner event = case event of
                                     (viewportScroll OverlayViewport)
                                     mouseScrollLines
                             _ -> pure ()
-                    (Nothing, Nothing, Nothing) ->
+                    (Nothing, Nothing, Nothing, Just _) ->
+                        pure ()
+                    (Nothing, Nothing, Nothing, Nothing) ->
                         case (name, button) of
                             (ComposerModel, V.BLeft) ->
                                 Composer.handleControlMouseDown ComposerModel
@@ -688,7 +831,7 @@ handleEventInner event = case event of
                             (link@MarkdownLink{}, V.BLeft) ->
                                 Composer.handleControlMouseDown link
                             _ -> handleMouseDown name button
-                    (Nothing, Just _, _) ->
+                    (Nothing, Just _, _, _) ->
                         case (name, button) of
                             (ChoiceRow index, V.BLeft) ->
                                 Composer.handleControlMouseDown (ChoiceRow index)
@@ -705,7 +848,7 @@ handleEventInner event = case event of
                                     (viewportScroll OverlayViewport)
                                     mouseScrollLines
                             _ -> pure ()
-                    (Nothing, Nothing, Just _) ->
+                    (Nothing, Nothing, Just _, _) ->
                         case (name, button) of
                             (PermissionRow index, V.BLeft) ->
                                 resolvePermission (permissionChoiceAt index)
@@ -748,7 +891,9 @@ handleEventInner event = case event of
     VtyEvent V.EvLostFocus ->
         noteTerminalFocusLost
     VtyEvent V.EvGainedFocus ->
-        noteTerminalFocusGained >> resolveConversationFollow
+        noteTerminalFocusGained
+            >> resolveConversationFollow
+            >> queueConversationReflow
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
@@ -761,15 +906,39 @@ handleEventInner event = case event of
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
-        case state.appResume of
-            Just _ -> handleResumeKey vtyEvent
-            Nothing ->
-                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-                    (Just _, _, _) -> handleTextPromptKey vtyEvent
-                    (Nothing, Just _, _) -> handleChoiceKey vtyEvent
-                    (Nothing, Nothing, Just _) -> handlePermissionKey vtyEvent
-                    (Nothing, Nothing, Nothing) -> handleNormalKey vtyEvent
+        if isMetaConsoleToggle vtyEvent && metaConsoleToggleAvailable state
+            then
+                case state.appMetaConsole of
+                    Just _ -> closeMetaConsole
+                    Nothing -> openMetaConsole
+            else
+                case state.appResume of
+                    Just _ -> handleResumeKey vtyEvent
+                    Nothing ->
+                        case
+                            ( state.appTextPrompt
+                            , state.appChoice
+                            , state.appUi.uiPermission
+                            , state.appMetaConsole
+                            )
+                        of
+                            (Just _, _, _, _) -> handleTextPromptKey vtyEvent
+                            (Nothing, Just _, _, _) -> handleChoiceKey vtyEvent
+                            (Nothing, Nothing, Just _, _) ->
+                                handlePermissionKey vtyEvent
+                            (Nothing, Nothing, Nothing, Just _) ->
+                                handleMetaConsoleKey vtyEvent
+                            (Nothing, Nothing, Nothing, Nothing) ->
+                                handleNormalKey vtyEvent
     _ -> pure ()
+
+metaConsoleToggleAvailable :: AppState -> Bool
+metaConsoleToggleAvailable state =
+    isNothing state.appResume
+        && isNothing state.appTextPrompt
+        && isNothing state.appChoice
+        && isNothing state.appUi.uiPermission
+        && isNothing state.appDictation
 
 handlePermissionKey :: V.Event -> EventM Name AppState ()
 handlePermissionKey = \case

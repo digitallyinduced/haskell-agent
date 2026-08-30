@@ -8,12 +8,15 @@ module Agent.CLI.TUI.Types
     , DictationSession(..)
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
+    , choiceVisibleRows
+    , selectedChoiceIndex
     , FullscreenInput(..)
     , FullscreenInputBuffer(..)
     , FullscreenHistorySource(..)
     , HistoryCommit(..)
     , FullscreenRuntime(..)
     , FullscreenSessionActions(..)
+    , MetaConsoleOverlay(..)
     , Name(..)
     , PendingAppEvent(..)
     , PendingUiEvent(..)
@@ -43,6 +46,7 @@ import Agent.CLI.TUI.History
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
+import Agent.Provider (Provider)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
 import Agent.Syntax (SyntaxHighlighter)
 import Agent.TUI.Motion (MotionDemand, MotionMode)
@@ -58,6 +62,7 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime)
 import Data.Word (Word64)
 import qualified Graphics.Vty as V
@@ -104,6 +109,7 @@ data Name
     | PermissionRow !Int
     | SlashRow !Int
     | OverlayCursor
+    | MetaConsoleCursor
     | AgentPane
     | AgentRow !AgentTarget
     | AgentPopover !AgentTarget
@@ -116,6 +122,11 @@ data AppEvent
     | AppAskChoice
         !ChoicePresentation
         !Text
+        !Text
+        !Int
+        ![(Text, Text)]
+        !(TMVar (Maybe Int))
+    | AppAskFilterChoice
         !Text
         !Int
         ![(Text, Text)]
@@ -141,6 +152,9 @@ data AppEvent
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppCommitImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppToolImage !Text !TuiImagePreview
+      -- ^ An image the agent displayed through @show_image@, keyed by the
+      -- originating tool call id.
     | AppDictationPartial !Text
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
@@ -261,7 +275,8 @@ data DictationSession = DictationSession
 -- Replacing the record atomically prevents the retained UI from calling into
 -- resources belonging to a backend that has already shut down.
 data FullscreenSessionActions = FullscreenSessionActions
-    { sessionCancel :: !(IO ())
+    { sessionProvider :: !(Maybe Provider)
+    , sessionCancel :: !(IO ())
     , sessionSteer :: !(Text -> IO ())
     , sessionBtw :: !(Text -> IO ())
     , sessionRecap :: !(IO ())
@@ -289,6 +304,7 @@ data AppState = AppState
     , appResumeSearch :: !(Maybe (Text -> IO (Either Text [ResumeEntry])))
     , appTextPrompt :: !(Maybe TextOverlay)
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
+    , appMetaConsole :: !(Maybe MetaConsoleOverlay)
     , appSlashDismissed :: !Bool
     , appPasted :: !Bool
     , appHistory :: ![Text]
@@ -303,6 +319,10 @@ data AppState = AppState
     , appDictation :: !(Maybe DictationSession)
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
+      -- | Previews attached to conversation blocks: images the user
+      -- submitted with a prompt and images the agent displayed from a tool
+      -- call. Native placements are synchronized from this map after each
+      -- reflow.
     , appSubmittedImagePreviews :: !(Map.Map BlockId [TuiImagePreview])
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
@@ -353,8 +373,42 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceBody :: !Text
     , choiceIndex :: !Int
     , choiceRows :: ![(Text, Text)]
+    , choiceSearch :: !Bool
+    , choiceQuery :: !Text
     , choiceCloseOnTurnEnd :: !Bool
     }
+
+-- | Rows currently visible in a choice overlay.  Searchable overlays retain
+-- each row's source index so callers can return the original choice even
+-- after filtering; ordinary overlays expose the identity mapping.
+choiceVisibleRows :: ChoiceOverlay -> [(Int, (Text, Text))]
+choiceVisibleRows choice
+    | not choice.choiceSearch = zip [0 ..] choice.choiceRows
+    | otherwise =
+        filter (matches choice.choiceQuery . snd)
+            (zip [0 ..] choice.choiceRows)
+  where
+    matches query (label, detail)
+        | Text.null needle = True
+        | otherwise =
+            needle `Text.isInfixOf` Text.toCaseFold label
+                || needle `Text.isInfixOf` Text.toCaseFold detail
+      where
+        needle = Text.toCaseFold query
+
+-- | Resolve the selected row to its source index.  Empty searchable results
+-- have no selection; static choices retain their historical index behavior.
+selectedChoiceIndex :: ChoiceOverlay -> Maybe Int
+selectedChoiceIndex choice
+    | not choice.choiceSearch = Just choice.choiceIndex
+    | otherwise =
+        fst <$> listAt choice.choiceIndex (choiceVisibleRows choice)
+  where
+    listAt index values
+        | index < 0 = Nothing
+        | otherwise = case drop index values of
+            value : _ -> Just value
+            [] -> Nothing
 
 data ResumeOverlay = ResumeOverlay
     { resumeOverlayBrowser :: !ResumeBrowser
@@ -366,6 +420,11 @@ data TextOverlay = TextOverlay
     , textDraft :: !Text
     , textCursor :: !Int
     , textInputMode :: !TextInputMode
+    }
+
+data MetaConsoleOverlay = MetaConsoleOverlay
+    { metaConsoleDraft :: !Text
+    , metaConsoleCursor :: !Int
     }
 
 data TextInputMode

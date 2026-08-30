@@ -59,7 +59,7 @@ data GatewayCommand
     deriving (Eq, Show)
 
 data McpCommand
-    = McpLogin Text
+    = McpLogin Text [Text]
     | McpLogout Text
     deriving (Eq, Show)
 
@@ -140,6 +140,8 @@ data CliOptions = CliOptions
       -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optComputerUse :: !Bool
       -- ^ Allow the model to control the local macOS desktop (default: False).
+    , optCodeMode :: !Bool
+      -- ^ Honor catalog-selected JavaScript code mode (default: False).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -168,6 +170,7 @@ defaultCliOptions = CliOptions
     , optGhci = False
     , optBash = True
     , optComputerUse = False
+    , optCodeMode = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -331,7 +334,14 @@ mcpParser :: Options.Parser Command
 mcpParser = Mcp <$> Options.hsubparser
     ( Options.command "login"
         (Options.info
-            (McpLogin . Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+            (McpLogin
+                <$> (Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+                <*> Options.many
+                    (Text.pack
+                        <$> Options.strOption
+                            (Options.long "scope"
+                                <> Options.metavar "SCOPE"
+                                <> Options.help "Additional OAuth scope to request (repeatable; unioned with granted scopes)")))
             (Options.progDesc "Authorize an MCP server with OAuth PKCE"))
     <> Options.command "logout"
         (Options.info
@@ -420,6 +430,10 @@ optionUpdateParser = asum
         (\value options -> options { optComputerUse = value })
     , boolFlagUpdate "no-computer-use" False "Disable local computer use"
         (\value options -> options { optComputerUse = value })
+    , boolFlagUpdate "code-mode" True "Enable catalog-selected code mode"
+        (\value options -> options { optCodeMode = value })
+    , boolFlagUpdate "no-code-mode" False "Use conventional tool calling"
+        (\value options -> options { optCodeMode = value })
     , screenFlagUpdate "fullscreen" ScreenFullscreen
         "Use the retained full-screen TUI"
     , screenFlagUpdate "minimal" ScreenMinimal
@@ -563,7 +577,7 @@ usage = unlines
     , "       agent-cli gateway <status|disconnect>"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
-    , "       agent-cli mcp login <url>"
+    , "       agent-cli mcp login <url> [--scope SCOPE]..."
     , "       agent-cli mcp logout <url>"
     , "       agent-cli storage <status|start|stop|migrate|doctor>"
     , ""
@@ -633,6 +647,7 @@ usage = unlines
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."
     , "/resume [ID] resumes a persisted session (TTY: two-pane picker)."
+    , "/desktop opens the current persisted conversation in the macOS app."
     , "/paste [TEXT] attaches a clipboard image to the next"
     , "message and draws an in-terminal preview (Kitty/Ghostty/WezTerm/iTerm2);"
     , "/paste --send [TEXT] sends immediately. Cmd+V of a Finder image path also"
@@ -642,10 +657,10 @@ usage = unlines
     , "/clear resets the live conversation; /new starts a fresh session id."
     , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
     , "auth failures also reload once and retry automatically."
-    , "Ctrl-D or :q exits."
-    , "Ctrl-C cancels the current turn (or warns at the idle prompt);"
-    , "a second Ctrl-C exits and prints a --resume command when a"
+    , "Ctrl-D or :q exits. Graceful exits print a --resume command when a"
     , "session has been persisted."
+    , "Ctrl-C cancels the current turn (or warns at the idle prompt);"
+    , "a second Ctrl-C exits."
     , "Under `repl` (nix develop), first open passes --worktree unless the"
     , "cwd is already under ~/.haskell-agent/worktrees. :reload returns to"
     , "GHCi, reloads modules, and resumes the same session."

@@ -5,6 +5,7 @@ import Agent.MCP
     , McpFleetLease(..)
     , McpInitState(..)
     , McpServerConfig(..)
+    , McpProtocolPreference(..)
     , McpServerStatus(..)
     , acquireMcpFleet
     , closeMcpFleet
@@ -185,6 +186,7 @@ fakeConfig script delayMillis index = McpServerConfig
     , mcpServerEnv = []
     , mcpServerStartupTimeoutSeconds = 30
     , mcpServerRequestTimeoutSeconds = 30
+    , mcpServerProtocol = McpProtocolAuto
     }
 
 withFakeServer :: (FilePath -> IO a) -> IO a

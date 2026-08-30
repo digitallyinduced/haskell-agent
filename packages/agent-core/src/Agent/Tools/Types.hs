@@ -5,7 +5,9 @@ module Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
+    , addToolAllowedRoot
     , defaultToolEnv
+    , setToolRootAccessRequest
     , setToolSkillRoots
     , setToolSessionTmp
     , jsonTool
@@ -48,11 +50,15 @@ import Agent.Tools.Scheduling
 import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
-import Data.IORef (IORef, newIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.OsPath (OsPath, dropTrailingPathSeparator)
+import System.OsPath
+    ( OsPath
+    , dropTrailingPathSeparator
+    , equalFilePath
+    )
 
 -- | Provider-facing schema. The sum prevents freeform tools from carrying
 -- meaningless JSON parameters.
@@ -69,6 +75,9 @@ data ToolSchema
 -- | Whether a call may run without generic user approval.
 data ApprovalRule
     = AlwaysReadOnly
+    -- | Host-authorized effect that is intentionally exempt from the generic
+    -- mutation prompt (for example a paid provider capability).
+    | AlwaysAllowed
     | AlwaysPrompt
     | ClassifyReadOnly !(ToolCall -> IO Bool)
 
@@ -107,6 +116,10 @@ data ToolEnv = ToolEnv
     , toolAllowedRoots :: !(IORef [OsPath])
       -- | Additional non-session filesystem roots. The current
       -- 'toolSessionTmp' is always allowed implicitly.
+    , toolRootAccessRequest :: !(IORef (Maybe (OsPath -> IO Bool)))
+      -- | Optional session-local callback used when a path falls outside
+      -- the configured roots. An approved path is added to
+      -- 'toolAllowedRoots' by the filesystem resolver.
     , toolSkillRoots :: !(IORef [OsPath])
       -- | Directories belonging to the currently discovered skill catalog.
       -- Kept separate so catalog refreshes can replace them without
@@ -124,11 +137,13 @@ defaultToolEnv :: OsPath -> IO ToolEnv
 defaultToolEnv cwd = do
     cancel <- newCancelFlag
     allowedRoots <- newIORef []
+    rootAccessRequest <- newIORef Nothing
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
         , toolAllowedRoots = allowedRoots
+        , toolRootAccessRequest = rootAccessRequest
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
         , toolOutputInlineCap = 50 * 1024
@@ -137,6 +152,19 @@ defaultToolEnv cwd = do
         , toolStdoutCap = 16 * 1024
         , toolCancel = cancel
         }
+
+-- | Install the session-local callback used to request access to an
+-- additional filesystem root. The callback should perform any human-facing
+-- approval and return whether the requested root may be added.
+setToolRootAccessRequest :: ToolEnv -> Maybe (OsPath -> IO Bool) -> IO ()
+setToolRootAccessRequest env = writeIORef env.toolRootAccessRequest
+
+-- | Add a canonical directory to the roots available for this session.
+-- Duplicate roots are ignored so repeated approvals remain idempotent.
+addToolAllowedRoot :: ToolEnv -> OsPath -> IO ()
+addToolAllowedRoot env root =
+    atomicModifyIORef' env.toolAllowedRoots \roots ->
+        (if any (equalFilePath root) roots then roots else roots <> [root], ())
 
 -- | Replace the directories exposed for the current skill catalog.
 setToolSkillRoots :: ToolEnv -> [OsPath] -> IO ()
@@ -366,5 +394,6 @@ appToolHandlers = map (.appToolHandler)
 toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
 toolAllowsWithoutPrompt tool call = case tool.appToolApproval of
     AlwaysReadOnly -> pure True
+    AlwaysAllowed -> pure True
     AlwaysPrompt -> pure False
     ClassifyReadOnly classify -> classify call

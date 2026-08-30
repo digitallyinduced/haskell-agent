@@ -11,6 +11,7 @@ import Agent.CLI.PendingInputs
     , withPendingInputs
     )
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.ToolDispatch (functionToolCall)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -103,6 +104,44 @@ spec = describe "withConnectionRecovery" do
                 }
         readIORef attempts `shouldReturn` 2
 
+    it "does not repeat a restart boundary the backend already emitted" do
+        attempts <- newIORef (0 :: Int)
+        events <- newIORef []
+        let backend = withConnectionRecoveryUsing
+                (const (pure ()))
+                (Backend \state _ _ onEvent -> do
+                    attempt <- atomicModifyIORef' attempts
+                        \n -> (n + 1, n + 1)
+                    if attempt == 1
+                        then do
+                            onEvent (TextDelta "partial")
+                            onEvent (ResponseRestarted "inner restart")
+                            pure (Left (ConnectionError "dropped"))
+                        else
+                            pure (Right
+                                BackendResult
+                                    { backendOutput =
+                                        emptyTurnOutput
+                                            "response" [] (Just "done")
+                                    , backendState = state
+                                    }))
+        result <- backend.submitTurn [] Nothing []
+            (\event -> modifyIORef' events (<> [event]))
+        result `shouldBe`
+            Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "response" [] (Just "done")
+                , backendState = []
+                }
+        readIORef attempts `shouldReturn` 2
+        readIORef events `shouldReturn`
+            [ TextDelta "partial"
+            , ResponseRestarted "inner restart"
+            , ActivityUpdated
+                "Connection lost; waiting for internet. Retrying automatically in 1s (Esc or Ctrl-C to cancel)…"
+            , ActivityUpdated "Checking internet connection…"
+            ]
+
     it "restarts a submission after visible output streamed" do
         attempts <- newIORef (0 :: Int)
         waits <- newIORef []
@@ -146,6 +185,34 @@ spec = describe "withConnectionRecovery" do
                 "Connection interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
             , TextDelta "complete"
             ]
+
+    it "restarts a submission after a streamed tool call was announced" do
+        attempts <- newIORef (0 :: Int)
+        events <- newIORef []
+        let call = functionToolCall "call-1" "shell" "{}"
+            backend = withConnectionRecoveryUsing
+                (\_ -> pure ())
+                (Backend \state _ _ onEvent -> do
+                    attempt <- atomicModifyIORef' attempts
+                        \n -> (n + 1, n + 1)
+                    if attempt == 1
+                        then do
+                            onEvent (ToolStarted call)
+                            pure (Left (ConnectionError "dropped"))
+                        else pure (Right
+                            BackendResult
+                                { backendOutput =
+                                    emptyTurnOutput "response" [] (Just "done")
+                                , backendState = state
+                                }))
+        _ <- backend.submitTurn [] Nothing []
+            (\event -> modifyIORef' events (<> [event]))
+        readIORef attempts `shouldReturn` 2
+        recorded <- readIORef events
+        [message | ResponseRestarted message <- recorded]
+            `shouldBe`
+                [ "Connection interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+                ]
 
     it "does not duplicate queued inputs across reconnect attempts" do
         attempts <- newIORef (0 :: Int)

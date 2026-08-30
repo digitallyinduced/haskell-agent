@@ -12,11 +12,18 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
+    , cmd "view-plan" ["show-plan", "plan-view"] "/view-plan" "Show the saved session plan" False
+    , cmd "queue" [] "/queue" "Show prompts waiting in the input queue" False
+    , cmd "transcript" ["log"] "/transcript" "Open the session transcript in a pager" False
+    , cmd "edit-prompt" [] "/edit-prompt" "Edit a prompt draft without submitting it" False
+    , cmd "context" [] "/context" "Show context-window usage and estimates" False
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
+    , cmd "meta" ["configure"] "/meta <REQUEST>" "Configure the harness without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
     , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
+    , cmd "desktop" [] "/desktop" "Open this conversation in the Haskell Agent desktop app" False
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
     , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
@@ -38,13 +45,14 @@ slashCommands =
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
     , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
-    , cmd "mcp" ["mcps"] "/mcp" "Manage local MCP servers" False
+    , cmd "mcp" ["mcps"] "/mcp [prompt <server> <name> [key=value…]]" "Manage MCP servers or run a server prompt" False
     , grokToolCmd "scheduler_create" "loop" [] "/loop [interval] <prompt>" "Run a prompt on a recurring interval" True
     , grokToolCmd "update_goal" "goal" [] "/goal <objective> [--budget N] | status | pause | resume | clear" "Set, manage, or check an autonomous goal" True
     , grokToolCmd "workflow" "workflow" [] "/workflow runs | <name> [input]" "Launch a named workflow or list workflow runs" True
     , grokToolCmd "workflow" "deep-research" [] "/deep-research <query>" "Run bounded background research, cross-check evidence, and write a cited report" True
     , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
     , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
+    , cmd "codemod" ["code-mode"] "/codemod" "Enable JavaScript code mode for this session" False
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     , cmd "quit" ["exit"] "/quit" "Exit the current session" False
     ]

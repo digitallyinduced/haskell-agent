@@ -12,17 +12,18 @@ import Agent.CLI.Compaction
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.CLI.Session.Runner.Types
-    ( AgentStepCache(..)
-    , SessionRunnerContinuation(..)
-    )
-import Agent.CLI.AgentViewport
-import Agent.CLI.NativeAgents
+    ( SessionRunnerContinuation(..) )
+import Agent.CLI.AgentViewport.Runtime
 import Agent.Tools.OutputArtifact
 import Agent.CLI.SessionTitle
-import Agent.Concurrent
 import Agent.CLI.ManagedTurn
 import Agent.CLI.GatewayBridge
+import Agent.CLI.Notification
+    ( AttentionRequest(PermissionRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Approval
+import Agent.CLI.Permission (promptRootAccess)
 import Agent.CLI.Recap
 import Agent.CLI.CancelWatch
 import Agent.CLI.Clipboard
@@ -37,7 +38,6 @@ import Agent.CLI.Interrupt
 import Agent.Store.Postgres
 import Agent.CLI.Project
 import Agent.CLI.Prompt
-import Agent.CLI.ProviderTransition
 import Agent.CLI.SessionState
 import Agent.CLI.Render
 import Agent.CLI.Session
@@ -55,7 +55,6 @@ import Agent.CLI.Tools
 import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.TUI.App
-import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import Agent.CLI.WindowTitle
@@ -64,7 +63,6 @@ import Agent.Cancel
 import Agent.Loop
 import Agent.Dialect
 import Agent.Skills
-import Agent.Responses.Types
 import Agent.Subagents
 import Agent.Subagents.TaskPath
 import Agent.ToolDispatch
@@ -80,11 +78,9 @@ import Control.Monad (forM_, unless, void, when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust, isNothing)
-import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Set as Set
 import Data.Time.Clock (getCurrentTime, utctDay)
-import System.Mem.StableName (makeStableName)
 runSession
     :: SessionRunnerContinuation
     -> SessionRequest
@@ -93,6 +89,7 @@ runSession
 runSession callbacks SessionRequest{..} SessionBackend{..} = do
   initialPrevious <- readLivePreviousResponseId conversationRef
   ioLock <- newMVar ()
+  policyRef <- newIORef policy
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
       stdoutHandle = startup.startupStdout
@@ -105,6 +102,29 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
       withIoLock action = withMVar ioLock (const action)
+      requestRootAccess root =
+          approveFilesystemRootAccess policyRef $
+              withMVar ioLock \_ ->
+                  case promptRequest of
+                      Just request
+                          | isJust request.managedTurnBridgeDirectory ->
+                              requestManagedRootAccess request root
+                      _ -> case fullscreen of
+                          Just runtime -> do
+                              notifyAttention stderrHandle PermissionRequested
+                              maybe False (== 0)
+                                  <$> requestFullscreenChoiceWithBody
+                                      runtime
+                                      "Filesystem access requested"
+                                      ("Allow access to " <> toText root
+                                          <> " for this session?")
+                                      0
+                                      [ ("Allow directory for this session", "")
+                                      , ("Deny", "")
+                                      ]
+                          Nothing ->
+                              withStdinPaused escPaused
+                                  (promptRootAccess useColor root)
       reportSessionError message =
           case fullscreen of
               Just runtime ->
@@ -118,6 +138,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
       startupWindowTitle
       withIoLock
       writeWindowTitle
+  setToolRootAccessRequest toolEnv (Just requestRootAccess)
   let setWindowTitle = windowTitle.windowTitleSet
       beginWindowTitleBusy = windowTitle.windowTitleBeginBusy
       endWindowTitleBusy = windowTitle.windowTitleEndBusy
@@ -171,183 +192,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     restartEffortRef <- newIORef Nothing
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
-    selectedAgent <- newIORef AgentRoot
-    nativeAgentsRef <- newIORef (Map.empty :: Map.Map Text NativeAgentView)
-    agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
-    let cachedAgentSteps target variant items build = do
-            transcriptName <- makeStableName items
-            cache <- readIORef agentStepCache
-            case Map.lookup target cache of
-                Just cached
-                    | cached.cachedTranscript == transcriptName
-                    , cached.cachedVariant == variant ->
-                        pure cached.cachedSteps
-                _ -> do
-                    let steps = build items
-                    atomicModifyIORef' agentStepCache \current ->
-                        ( Map.insert target (AgentStepCache
-                            { cachedTranscript = transcriptName
-                            , cachedVariant = variant
-                            , cachedSteps = steps
-                            })
-                            current
-                        , ()
-                        )
-                    pure steps
-        loadAgentSnapshot includeSummaries = do
-            rootItems <- readLiveTranscript conversationRef
-            nativeAgents <-
-                atomicModifyIORef' nativeAgentsRef \current ->
-                    let restored = restoreNativeAgents rootItems current
-                    in (restored, restored)
-            agents <- case multiCtx of
-                Nothing -> pure []
-                Just ctx -> listAgents ctx.multiRegistry Nothing
-            let availableTargets =
-                    AgentRoot
-                        : [ AgentChild agentId
-                          | (_, agentId, _) <- agents
-                          ]
-                        <> map (\view -> AgentNative view.nativeAgentId)
-                            (Map.elems nativeAgents)
-            selected <-
-                atomicModifyIORef' selectedAgent \current ->
-                    let reconciled =
-                            TuiBridge.reconcileAgentSelection
-                                availableTargets
-                                current
-                    in (reconciled, reconciled)
-            sessions <- readIORef subagentSessions
-            let transcriptLines target items
-                    | null agents = []
-                    | target == selected = case target of
-                        AgentRoot ->
-                            responseItemPreviewLines 12 items
-                        AgentChild _
-                            | includeSummaries ->
-                                responseItemPreviewLines 12 items
-                            | otherwise ->
-                                []
-                        AgentNative nativeId ->
-                            maybe [] (.nativeAgentTranscript)
-                                (Map.lookup nativeId nativeAgents)
-                    | includeSummaries =
-                        responseItemPreviewLines 0 items
-                    | otherwise = []
-                conversationFor target status items
-                    | includeSummaries = initialUiState
-                    | target /= selected = initialUiState
-                    | target == AgentRoot = initialUiState
-                    | AgentNative nativeId <- target =
-                        maybe initialUiState (.nativeAgentConversation)
-                            (Map.lookup nativeId nativeAgents)
-                    | otherwise =
-                        settleConversation items status $
-                            responseItemsToUiStateRelative
-                                options.optShowRawReasoning
-                                (toText cwd)
-                                items
-                settleConversation items status conversation =
-                    case status of
-                        Pending -> conversation
-                        Running -> conversation
-                        Completed result ->
-                            let settled =
-                                    finalizeAll BlockComplete conversation
-                            in case result of
-                                Just text
-                                    | null items
-                                    , not (Text.null (Text.strip text)) ->
-                                        reduceUi
-                                            (UiAssistantHistory
-                                                (Text.strip text))
-                                            settled
-                                _ -> settled
-                        Errored message ->
-                            reduceUi
-                                (UiErrorMessage
-                                    (if Text.null (Text.strip message)
-                                        then "Agent failed."
-                                        else Text.strip message))
-                                (finalizeAll BlockFailed conversation)
-                        Interrupted ->
-                            finalizeAll BlockCancelled conversation
-                        Closed ->
-                            finalizeAll BlockComplete conversation
-                        NotFound ->
-                            reduceUi
-                                (UiErrorMessage
-                                    "Agent transcript is unavailable.")
-                                (finalizeAll BlockFailed conversation)
-                  where
-                    finalizeAll terminal ui =
-                        reduceUi
-                            (UiTurnEnded terminal)
-                            ui { uiTurnStartBlock = 0 }
-            rootSteps <-
-                if null agents
-                    then pure []
-                    else cachedAgentSteps
-                        AgentRoot
-                        Nothing
-                        rootItems
-                        (responseItemStepPreviewsRelative (toText cwd) 2)
-            let rootEntry = AgentEntry
-                    { agentTarget = AgentRoot
-                    , agentPath = "/root"
-                    , agentStatus = "active"
-                    , agentModel = Nothing
-                    , agentSteps = rootSteps
-                    , agentTranscript =
-                        transcriptLines AgentRoot rootItems
-                    , agentConversation = initialUiState
-                    }
-            children <- mapConcurrentlyBounded 8
-                (materializeChild
-                    transcriptLines
-                    conversationFor
-                    sessions)
-                agents
-            let nativeEntries = nativeAgentEntries nativeAgents
-            pure (selected, rootEntry : children <> nativeEntries)
-          where
-            materializeChild
-                    transcriptLines
-                    conversationFor
-                    sessions
-                    (path, agentId, status) = do
-                let target = AgentChild agentId
-                items <- case Map.lookup agentId sessions of
-                    Nothing -> pure []
-                    Just session -> readIORef session.subSessionTranscript
-                steps <- cachedAgentSteps
-                    target
-                    (Just status)
-                    items
-                    (agentStepsForStatusRelative (toText cwd) 2 status)
-                let transcript =
-                        transcriptLines target items
-                            <> case status of
-                                Completed (Just result)
-                                    | null items
-                                    , not (Text.null (Text.strip result)) ->
-                                        ["assistant: " <> Text.strip result]
-                                Errored message ->
-                                    ["error: " <> Text.strip message]
-                                _ -> []
-                pure AgentEntry
-                    { agentTarget = target
-                    , agentPath = taskPathText path
-                    , agentStatus = formatAgentStatus status
-                    , agentModel =
-                        (.subSessionEffectiveModel)
-                            <$> Map.lookup agentId sessions
-                    , agentSteps = steps
-                    , agentTranscript = transcript
-                    , agentConversation =
-                        conversationFor target status items
-                    }
-        hydrateSelectedAgent agentId = do
+    let hydrateSelectedAgent agentId = do
             effectiveModel <- readIORef modelRef
             lookupOrCreateSubagentSession
                 subagentSessions
@@ -359,56 +204,74 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 effectiveModel
                 (dialectId dialect)
                 agentId
-        selectAgent target = do
-            previous <- readIORef selectedAgent
-            when (previous /= target) $
-                releaseSelectedAgent previous
-            case target of
-                AgentRoot -> pure ()
-                AgentNative _ -> pure ()
-                AgentChild agentId -> do
-                    session <-
-                        (Just <$>
-                            hydrateSelectedAgent agentId)
-                            `catchAny` \err -> do
-                                reportSessionError
-                                    ("failed to load selected agent: "
-                                        <> formatException err)
-                                pure Nothing
-                    forM_ session \selectedSession -> do
-                        withMVar selectedSession.subSessionHydrated \_ ->
-                            writeIORef selectedSession.subSessionPinned True
-                        void
-                            (hydrateSelectedAgent agentId)
-                            `catchAny` \err ->
-                                reportSessionError
-                                    ("failed to pin selected agent: "
-                                        <> formatException err)
-            writeIORef selectedAgent target
-        releaseSelectedAgent = \case
-            AgentRoot -> pure ()
-            AgentNative _ -> pure ()
-            AgentChild agentId -> do
-                sessions <- readIORef subagentSessions
-                forM_ (Map.lookup agentId sessions) \session -> do
-                    withMVar session.subSessionHydrated \_ ->
-                        writeIORef session.subSessionPinned False
-                    case multiCtx of
-                        Nothing -> pure ()
-                        Just ctx -> do
-                            status <- getStatus ctx.multiRegistry agentId
-                            void $
-                                persistAndEvictSubagentSessionWithStatus
-                                    storeRoot ctx.multiRegistry agentTypes
-                                    agentId status session
-        agentViewport = AgentViewportEnv
-            { viewportSelected = selectedAgent
-            , viewportSelect = selectAgent
-            , viewportEntries = snd <$> loadAgentSnapshot True
+        selectChild agentId = do
+            session <-
+                (Just <$> hydrateSelectedAgent agentId)
+                    `catchAny` \err -> do
+                        reportSessionError
+                            ("failed to load selected agent: "
+                                <> formatException err)
+                        pure Nothing
+            forM_ session \selectedSession -> do
+                withMVar selectedSession.subSessionHydrated \_ ->
+                    writeIORef selectedSession.subSessionPinned True
+                void
+                    (hydrateSelectedAgent agentId)
+                    `catchAny` \err ->
+                        reportSessionError
+                            ("failed to pin selected agent: "
+                                <> formatException err)
+        releaseChild agentId = do
+            sessions <- readIORef subagentSessions
+            forM_ (Map.lookup agentId sessions) \session -> do
+                withMVar session.subSessionHydrated \_ ->
+                    writeIORef session.subSessionPinned False
+                case multiCtx of
+                    Nothing -> pure ()
+                    Just ctx -> do
+                        status <- getStatus ctx.multiRegistry agentId
+                        void $
+                            persistAndEvictSubagentSessionWithStatus
+                                storeRoot ctx.multiRegistry agentTypes
+                                agentId status session
+        listChildAgents =
+            case multiCtx of
+                Nothing -> pure []
+                Just ctx ->
+                    map
+                        (\(path, agentId, status) -> AgentChildListing
+                            { childListingPath = taskPathText path
+                            , childListingId = agentId
+                            , childListingStatus = status
+                            })
+                        <$> listAgents ctx.multiRegistry Nothing
+        readChildSources =
+            Map.map
+                (\session -> AgentChildSource
+                    { childSourceModel =
+                        session.subSessionEffectiveModel
+                    , childSourceTranscript =
+                        readIORef session.subSessionTranscript
+                    })
+                <$> readIORef subagentSessions
+    agentViewportRuntime <-
+        newAgentViewportRuntime AgentViewportRuntimeConfig
+            { viewportConfigShowRawReasoning =
+                options.optShowRawReasoning
+            , viewportConfigWorkspace = toText cwd
+            , viewportConfigReadRootTranscript =
+                readLiveTranscript conversationRef
+            , viewportConfigListChildren = listChildAgents
+            , viewportConfigReadChildSources = readChildSources
+            , viewportConfigSelectChild = selectChild
+            , viewportConfigReleaseChild = releaseChild
             }
+    let agentViewport =
+            agentViewportEnvironment agentViewportRuntime
     writeIORef startup.startupAgentSnapshot
-        (loadAgentSnapshot False)
-    writeIORef startup.startupAgentSelect selectAgent
+        (loadAgentSnapshot agentViewportRuntime False)
+    writeIORef startup.startupAgentSelect
+        (selectAgentViewport agentViewportRuntime)
     let installSkills context queueContext skills = do
             before <- readIORef context
             installSkillToolRoots toolEnv skills
@@ -467,12 +330,12 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 resetBackendState
                 conversationRef
                 planMode
+            clearImageGenerationHistory
             writeIORef usageRef emptyTokenUsage
             modifyIORef' renderStateRef clearRenderTokenRate
             writeIORef lastAssistantRef Nothing
             writeIORef subagentSessions Map.empty
-            writeIORef selectedAgent AgentRoot
-            writeIORef agentStepCache Map.empty
+            resetAgentViewport agentViewportRuntime
             case multiCtx of
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
@@ -545,7 +408,6 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     when (omitted > 0) $
                         emitUiEvent runtime
                             (UiSystemMessage (formatSkillOmission omitted))
-    policyRef <- newIORef policy
     managedLoopPublisher <-
         maybe
             (pure (const (pure ())))
@@ -575,8 +437,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , renderWorkspace = toText cwd
             }
         emitLoop event = do
-            atomicModifyIORef' nativeAgentsRef \current ->
-                (applyNativeAgentEvent event current, ())
+            recordAgentViewportEvent agentViewportRuntime event
             managedLoopPublisher event
             case fullscreen of
                 Nothing -> renderEvent render event
@@ -745,18 +606,19 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 today <- utctDay <$> getCurrentTime
                 let enabledTools = activeShellTools ghciEnabled bashEnabled
                     enabledNames = map (.appToolName) enabledTools
-                    instructionText = case codexCatalogSession of
-                        Just catalog ->
-                            catalog.catalogInstructionsFor
-                                enabledNames sessionTmp
-                        Nothing ->
-                            systemPromptForTools
-                                dialect
-                                enabledNames
-                                cwd
-                                sessionTmp
-                                today
-                                (isOneShot options)
+                    instructionText =
+                        appendMcpInstructions mcpInstructions case codexCatalogSession of
+                            Just catalog ->
+                                catalog.catalogInstructionsFor
+                                    enabledNames sessionTmp
+                            Nothing ->
+                                systemPromptForTools
+                                    dialect
+                                    enabledNames
+                                    cwd
+                                    sessionTmp
+                                    today
+                                    (isOneShot options)
                     toolSchemas = schemasFromAppTools dialect enabledTools
                 modifyIORef' paramsRef
                     (setRequestInstructionsAndTools
@@ -804,7 +666,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             toolRegistry
                             call
                         emitLoop (ToolFinished result)
-                        pure (Right result.output)
+                        pure (Right result)
     btwRequests <- newChan
     recapRequests <- newChan
     let
@@ -877,11 +739,15 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionConnection = connectionId
             , sessionModelCatalog = catalog
             , sessionDialect = dialect
+            , sessionRecordImageGenerationInputs =
+                recordImageGenerationInputs
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
             , sessionConversation = conversationRef
             , sessionAutomaticCompaction = automaticCompactionRef
             , sessionParams = paramsRef
+            , sessionContextOccupancy = contextOccupancyRef
+            , sessionContextWindow = currentContextWindow
             , sessionPolicy = policyRef
             , sessionPersist = persist
             , sessionDatabasePool =
@@ -894,6 +760,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionHome = home
             , sessionMcpRegistrations = mcpRegistrations
             , sessionMcpWarnings = mcpWarnings
+            , sessionMcpFleet = mcpFleet
             , sessionSetTempDir = setSessionTempDir
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
@@ -942,6 +809,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     forM_ fullscreen \runtime ->
         setFullscreenSessionActions
             runtime
+            (Just provider)
             (requestCancel toolEnv.toolCancel)
             (\text -> do
                 images <- loadImagesFromPastedText text

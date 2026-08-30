@@ -5,6 +5,7 @@ import Test.Hspec (hspec)
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
+import qualified Agent.CLI.AgentViewportRuntimeSpec as AgentViewportRuntimeSpec
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
@@ -14,13 +15,16 @@ import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
+import qualified Agent.CLI.ContextSpec as ContextSpec
 import qualified Agent.CLI.ConversationStoreSpec as ConversationStoreSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
+import qualified Agent.CLI.DesktopSpec as DesktopSpec
 import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
+import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
@@ -32,6 +36,8 @@ import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.LearnedSkillsSpec as LearnedSkillsSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
+import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
+import qualified Agent.CLI.MetaConsoleRuntimeSpec as MetaConsoleRuntimeSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
@@ -62,6 +68,7 @@ import qualified Agent.CLI.SkillsSpec as SkillsSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
+import qualified Agent.CLI.TranscriptSpec as TranscriptSpec
 import qualified Agent.CLI.TurnSpec as TurnSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
@@ -82,6 +89,7 @@ main :: IO ()
 main = hspec do
     AccountSelectionSpec.spec
     AgentViewportSpec.spec
+    AgentViewportRuntimeSpec.spec
     AgentSessionsSpec.spec
     ApprovalSpec.spec
     ArtifactSpec.spec
@@ -92,13 +100,16 @@ main = hspec do
     CommandSpec.spec
     ConfigSpec.spec
     CompactionSpec.spec
+    ContextSpec.spec
     ConversationStoreSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
     DialectsSpec.spec
     DatabaseSpec.spec
+    DesktopSpec.spec
     EnvironmentSpec.spec
     ErrorSpec.spec
+    ExternalProgramSpec.spec
     FileUriSpec.spec
     GatewayBridgeSpec.spec
     GatewayClientSpec.spec
@@ -110,6 +121,8 @@ main = hspec do
     LearnedSkillsSpec.spec
     MarkdownSpec.spec
     McpManagerSpec.spec
+    MetaConsoleSpec.spec
+    MetaConsoleRuntimeSpec.spec
     ModelConfigSpec.spec
     ModelPickerSpec.spec
     NativeAgentsSpec.spec
@@ -135,6 +148,7 @@ main = hspec do
     StyleSpec.spec
     SessionHistorySpec.spec
     TimestampSpec.spec
+    TranscriptSpec.spec
     TurnSpec.spec
     TerminalSpec.spec
     TextLayoutSpec.spec

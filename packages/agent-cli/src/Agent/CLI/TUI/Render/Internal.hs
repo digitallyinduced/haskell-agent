@@ -56,7 +56,10 @@ import Agent.CLI.Resume
       groupResumeEntries,
       resumeRelativeAge )
 import Agent.CLI.Secret ()
-import Agent.CLI.Status ( formatTokensPerSecond, formatUsageWithRate )
+import Agent.CLI.Status
+    ( formatEstimatedTokensPerSecond
+    , formatUsageWithRate
+    )
 import Agent.CLI.Style ( motionGlyphSet )
 import Agent.CLI.TUI.History
     ( HistoryWindow(historyWindowTurns, historyWindowTotalTurns,
@@ -90,7 +93,7 @@ import Agent.CLI.TUI.Types
                  agentHoverPaneWidth, agentHoverUpperLeft),
       AppState(appRuntime, appHistorySelectedBlock, appSyntaxHighlighter,
                appImagePreviews, appSubmittedImagePreviews, appResume,
-               appDictation, appTextPrompt, appChoice,
+               appDictation, appTextPrompt, appChoice, appMetaConsole,
                appMotionElapsedMillis, appCompletionFlashes, appHoveredControl,
                appPressedControl, appAgentSelected, appConversationAnchor,
                appAgentEntries, appUi, appHistoryWindow, appAgentHover,
@@ -136,7 +139,8 @@ import Agent.TUI.Model
               uiCompletionRemainingMillis, uiRunning, uiElapsedMillis, uiFocus,
               uiSelectedBlock, uiPermission, uiFollow, uiRetryCountdown,
               uiNotice, uiBranch, uiCwd, uiPrompt),
-      uiTokensPerSecond )
+      uiTokensPerSecond,
+      uiTokensPerSecondEstimated )
 import Agent.TUI.Motion
     ( backgroundIndicator,
       foregroundIndicator,
@@ -308,7 +312,8 @@ import qualified Graphics.Vty.CrossPlatform as Vty ()
 import Agent.CLI.TUI.Render.Blocks (todoStatusAttr)
 import Agent.CLI.TUI.Render.Overlays
     ( drawNotice, drawFollowStatus, drawFooter, drawPermission, drawResume
-    , drawChoice, drawTextPrompt, choiceRowColumns, onboardingVisibleRowIndices
+    , drawChoice, drawTextPrompt, drawMetaConsole, choiceRowColumns
+    , onboardingVisibleRowIndices
     , normalizeTextOverlayInsertion, maskedSecretText, textOverlayDisplayText
     , resumeSearchCursorColumn )
 import Agent.CLI.TUI.Render.Transcript
@@ -334,7 +339,11 @@ drawApp state =
                         drawChoice state choice : dimmedMainLayers
                     (Nothing, Nothing, Just permission) ->
                         drawPermission state permission : dimmedMainLayers
-                    (Nothing, Nothing, Nothing) -> interactiveLayers
+                    (Nothing, Nothing, Nothing) ->
+                        case state.appMetaConsole of
+                            Just overlay ->
+                                drawMetaConsole state overlay : dimmedMainLayers
+                            Nothing -> interactiveLayers
   where
     mainLayers = stickyPromptLayers state <> [drawMain state]
     interactiveLayers =
@@ -536,9 +545,7 @@ drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
         terminalTxt
-            (formatUsageWithRate
-                state.appUi.uiPrompt.promptUsage
-                (uiTokensPerSecond state.appUi))
+            (formatUiUsageWithRate state.appUi)
 
 drawLiveTodos :: UiState -> Widget Name
 drawLiveTodos ui =
@@ -639,12 +646,26 @@ drawPromptActivity state
             <> formatElapsed (fromIntegral ui.uiElapsedMillis / 1000)
     right
         | ui.uiRunning =
-            formatUsageWithRate
-                ui.uiPrompt.promptUsage
-                (uiTokensPerSecond ui)
+            formatUiUsageWithRate ui
         | ui.uiCompletionRemainingMillis > 0 =
-            maybe "" formatTokensPerSecond (uiTokensPerSecond ui)
+            maybe
+                ""
+                (formatEstimatedTokensPerSecond
+                    (uiTokensPerSecondEstimated ui))
+                (uiTokensPerSecond ui)
         | otherwise = ""
+
+formatUiUsageWithRate :: UiState -> Text
+formatUiUsageWithRate ui =
+    Text.intercalate " · " $
+        filter (not . Text.null)
+            [ formatUsageWithRate ui.uiPrompt.promptUsage Nothing
+            , maybe
+                ""
+                (formatEstimatedTokensPerSecond
+                    (uiTokensPerSecondEstimated ui))
+                (uiTokensPerSecond ui)
+            ]
 
 -- | Describe the child agents which keep the session alive after the root
 -- agent has finished. Prefer their current running step so the status line

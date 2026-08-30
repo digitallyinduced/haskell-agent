@@ -17,6 +17,7 @@ import Agent.Dialect
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.ToolDispatch (noArgsTool)
 import Agent.Tools.Secret (SecretPromptHooks(..))
+import Agent.Tools.ShowImage (ImageDisplayHooks(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(AlwaysReadOnly)
@@ -69,7 +70,7 @@ spec = describe "Agent.CLI.Dialects" do
 
     it "does not allocate host tools for Claude Code" do
         env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
-        coding <- codingToolsFor claudeCodeDialect env Nothing Nothing Nothing
+        coding <- codingToolsFor claudeCodeDialect env Nothing Nothing Nothing Nothing
         length coding.codingAppTools `shouldBe` 0
         coding.codingClose
 
@@ -77,7 +78,7 @@ spec = describe "Agent.CLI.Dialects" do
         withTempToolEnv \env ->
             forM_ [codexDialect, grokBuildDialect] \dialect -> do
                 withoutSecret <-
-                    codingToolsFor dialect env Nothing Nothing Nothing
+                    codingToolsFor dialect env Nothing Nothing Nothing Nothing
                 map (.appToolName) withoutSecret.codingAppTools
                     `shouldNotContain` ["ask_secret"]
                 withoutSecret.codingClose
@@ -85,15 +86,31 @@ spec = describe "Agent.CLI.Dialects" do
                 let hooks = SecretPromptHooks
                         (const (pure (Right Nothing)))
                 withSecret <-
-                    codingToolsFor dialect env Nothing (Just hooks) Nothing
+                    codingToolsFor dialect env Nothing (Just hooks) Nothing Nothing
                 (map (.appToolName) withSecret.codingAppTools
                     `shouldContain` ["ask_secret"])
                     `finally` withSecret.codingClose
 
+    it "registers show_image only when image display hooks are supplied" do
+        withTempToolEnv \env ->
+            forM_ [codexDialect, grokBuildDialect] \dialect -> do
+                withoutImages <-
+                    codingToolsFor dialect env Nothing Nothing Nothing Nothing
+                map (.appToolName) withoutImages.codingAppTools
+                    `shouldNotContain` ["show_image"]
+                withoutImages.codingClose
+
+                let hooks = ImageDisplayHooks (const (pure (Right ())))
+                withImages <-
+                    codingToolsFor dialect env Nothing Nothing (Just hooks) Nothing
+                (map (.appToolName) withImages.codingAppTools
+                    `shouldContain` ["show_image"])
+                    `finally` withImages.codingClose
+
     it "registers bounded artifact readers on coding tool surfaces" do
         withTempToolEnv \env ->
             forM_ [codexDialect, grokBuildDialect] \dialect -> do
-                coding <- codingToolsFor dialect env Nothing Nothing Nothing
+                coding <- codingToolsFor dialect env Nothing Nothing Nothing Nothing
                 let names = map (.appToolName) coding.codingAppTools
                 names `shouldContain`
                     ["read_tool_output", "search_tool_output"]

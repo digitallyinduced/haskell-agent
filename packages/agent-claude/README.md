@@ -33,6 +33,20 @@ Anthropic API-key and third-party-provider routing environment variables are
 removed from both the authentication probe and the child session environment.
 No credential file is read by this package.
 
+An explicit gateway mode keeps the Claude Code subprocess and its tools local
+while sending model traffic through an Anthropic-compatible gateway. Set both
+variables (or neither):
+
+```sh
+export HASKELL_AGENT_GATEWAY_URL=https://gateway.example
+export HASKELL_AGENT_GATEWAY_TOKEN='...'
+```
+
+Gateway mode sanitizes all ambient Anthropic/Claude provider overrides and
+injects only `ANTHROPIC_BASE_URL=$HASKELL_AGENT_GATEWAY_URL/anthropic` and the
+gateway token into Claude Code. It does not require a local Claude login. The
+token is redacted from `Show` and status output.
+
 Thinking blocks are ignored and never surfaced. Claude Code executes its own
 tools; tool records are emitted only as display events and are never returned
 to the harness for dispatch.

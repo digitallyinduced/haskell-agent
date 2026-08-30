@@ -5,8 +5,10 @@ import qualified Agent.Json.Decode as Json
 import Control.Concurrent.Async (concurrently)
 import qualified Data.Aeson.Encoding.Internal as Aeson
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
+import qualified Data.Text.Encoding as Text
 import Test.Hspec
 
 data Person = Person
@@ -55,6 +57,33 @@ main = hspec do
             Json.decodeEither optionalPersonDecoder
                 "{\"nickname\":null,\"score\":null}"
                 `shouldBe` Right (Nothing, 0)
+
+        it "keeps owned raw JSON valid after the parse buffer is released" do
+            -- Hermes exposes a view into simdjson's padded input, which is
+            -- freed when the parse returns. Decode lazily, churn the
+            -- allocator with same-sized documents, then force the result.
+            let document = "{\"k\":\"" <> BS.replicate 300 0x41 <> "\"}"
+                churn = "{\"k\":\"" <> BS.replicate 300 0x42 <> "\"}"
+                lazyRaw =
+                    Json.withOwnedRawJson (pure . Text.decodeUtf8)
+                        :: Json.Decoder Text
+                result = Json.decodeEither lazyRaw document
+            either (expectationFailure . show) (const (pure ())) result
+            mapM_
+                (\_ ->
+                    Json.decodeEither
+                        (Json.withOwnedRawJson (pure . BS.length))
+                        churn
+                        `shouldBe` Right (BS.length churn))
+                [1 .. 20 :: Int]
+            fmap Text.encodeUtf8 result `shouldBe` Right document
+
+        it "re-decodes owned raw JSON captured inside a decoder" do
+            let nested = Json.object $
+                    Json.atKey "items" $ Json.withOwnedRawJson \raw ->
+                        pure (Json.decodeEither (Json.list Json.int) raw)
+            Json.decodeEither nested "{\"items\":[1,2,3]}"
+                `shouldBe` Right (Right [1, 2, 3])
 
         it "rejects malformed and trailing input" do
             Json.decodeEither personDecoder

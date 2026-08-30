@@ -17,6 +17,8 @@ module Agent.CLI.CodeModeRuntime
     , codexCatalogDefaultEffort
     , projectCodeModeTools
     , codeModeSessionRuntimeFor
+    , imageGenerationCodeModeRuntimeFor
+    , imageGenerationCodeModeProjection
     ) where
 
 import Agent.CLI.Models (modelsCacheFilePath)
@@ -24,6 +26,11 @@ import Agent.Dialect
     ( Dialect
     , PromptStyle(..)
     , dialectPromptStyle
+    )
+import Agent.OpenAI.ImageGeneration
+    ( imageGenerationNamespace
+    , imageGenerationNamespaceDescription
+    , imageGenerationToolName
     )
 import Agent.OpenAI.Models
     ( ModelInfo(..)
@@ -49,7 +56,7 @@ import Agent.Provider
     , getNextToken
     , tokenProviderBillingMode
     )
-import Agent.ToolDispatch (ToolCall(..))
+import Agent.ToolDispatch (ToolCall(..), ToolCallResult)
 import Agent.Tools.CodeMode.Host
     ( ImageDetailVisibility(..)
     , codeModeWorkerPath
@@ -78,7 +85,8 @@ import System.OsPath (OsPath)
 
 -- | Late-bound nested dispatcher for code-mode tool calls.
 newtype CodeModeNestedSlot =
-    CodeModeNestedSlot (IORef (ToolCall -> IO (Either Text Text)))
+    CodeModeNestedSlot
+        (IORef (ToolCall -> IO (Either Text ToolCallResult)))
 
 newCodeModeNestedSlot :: IO CodeModeNestedSlot
 newCodeModeNestedSlot =
@@ -88,14 +96,14 @@ newCodeModeNestedSlot =
 
 setCodeModeNestedInvoke
     :: CodeModeNestedSlot
-    -> (ToolCall -> IO (Either Text Text))
+    -> (ToolCall -> IO (Either Text ToolCallResult))
     -> IO ()
 setCodeModeNestedInvoke (CodeModeNestedSlot ref) = writeIORef ref
 
 invokeThroughSlot
     :: CodeModeNestedSlot
     -> ToolCall
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolCallResult)
 invokeThroughSlot (CodeModeNestedSlot ref) call = do
     invoke <- readIORef ref
     invoke call
@@ -236,6 +244,45 @@ codeModeSessionRuntimeFor maybeInfo tools =
                         CodeOnlyToolMode
                         (projectCodeModeTools CodeOnlyToolMode tools)
 
+-- | Catalog @code_mode_only@ models reserve @image_gen.imagegen@ but expect it
+-- behind the @exec@ surface. When the user has not enabled full code mode,
+-- project only image generation through @exec@ and leave every other tool
+-- directly provider-visible.
+imageGenerationCodeModeRuntimeFor
+    :: Maybe ModelInfo
+    -> [AppTool]
+    -> IO (Either Text (Maybe CodeModeSessionRuntime))
+imageGenerationCodeModeRuntimeFor maybeInfo tools =
+    case maybeInfo of
+        Just info
+            | Just projection <-
+                imageGenerationCodeModeProjection
+                    (toolModeForInfo ConventionalToolMode info)
+                    tools ->
+                buildRuntime
+                    info
+                    CodeOnlyToolMode
+                    projection
+        _ -> pure (Right Nothing)
+
+imageGenerationCodeModeProjection
+    :: ToolMode
+    -> [AppTool]
+    -> Maybe CodeModeToolProjection
+imageGenerationCodeModeProjection mode tools
+    | mode == CodeOnlyToolMode
+    , any isImageGenerationTool tools =
+        Just CodeModeToolProjection
+            { directCodeModeTools =
+                filter (not . isImageGenerationTool) tools
+            , nestedCodeModeTools =
+                filter isImageGenerationTool tools
+            }
+    | otherwise = Nothing
+  where
+    isImageGenerationTool tool =
+        tool.appToolName == imageGenerationToolName
+
 buildRuntime
     :: ModelInfo
     -> ToolMode
@@ -267,11 +314,16 @@ nestedSpecFor :: AppTool -> CodeModeNestedSpec
 nestedSpecFor tool = CodeModeNestedSpec
     { nestedSpecTool = tool
     , nestedSpecNamespace =
-        if tool.appToolName `elem` multiAgentToolNames
+        if tool.appToolName == imageGenerationToolName
             then Just CodeModeNamespace
+                { namespaceName = imageGenerationNamespace
+                , namespaceDescription = imageGenerationNamespaceDescription
+                }
+            else if tool.appToolName `elem` multiAgentToolNames
+                then Just CodeModeNamespace
                 { namespaceName = multiAgentNamespace
                 , namespaceDescription =
                     "Tools for spawning and managing sub-agents."
                 }
-            else Nothing
+                else Nothing
     }

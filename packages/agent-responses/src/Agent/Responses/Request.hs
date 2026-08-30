@@ -4,6 +4,8 @@ module Agent.Responses.Request
     , mapResponseTools
     , selectConfiguredModel
     , setResponseModel
+    , stripReplayedItemStatus
+    , stripReplayedInputStatus
     ) where
 
 import Agent.Responses.Types
@@ -59,3 +61,39 @@ selectConfiguredModel overrides isNative defaultModel = \case
         Nothing
             | isNative model -> model
             | otherwise -> defaultModel
+
+-- | Drop the provider lifecycle @status@ from transcript items that are
+-- replayed as request input.
+--
+-- Providers stamp @status@ (@completed@, @in_progress@, ...) on the items
+-- they return. It is output metadata, not input: Codex never serializes it
+-- when it replays a transcript, because its message, function-call,
+-- tool-output, and reasoning item structs have no such field. Responses Lite
+-- validates replayed input strictly and rejects it as an unknown parameter
+-- (@input[N].status@) on reasoning items, which fails remote compaction,
+-- resume without a response chain, and side calls for any transcript that
+-- persisted the status. The in-memory transcript keeps its status for the UI;
+-- only the wire projection changes.
+--
+-- Items whose @status@ Codex does send on input (local shell calls, custom
+-- tool calls, hosted tool calls) keep theirs.
+stripReplayedItemStatus :: ResponseItem -> ResponseItem
+stripReplayedItemStatus = \case
+    MessageItem ResponseMessage { status = _, .. } ->
+        MessageItem ResponseMessage { status = Nothing, .. }
+    FunctionCallItem FunctionCall { status = _, .. } ->
+        FunctionCallItem FunctionCall { status = Nothing, .. }
+    FunctionCallOutputItem FunctionCallOutput { status = _, .. } ->
+        FunctionCallOutputItem FunctionCallOutput { status = Nothing, .. }
+    CustomToolCallOutputItem CustomToolCallOutput { status = _, .. } ->
+        CustomToolCallOutputItem CustomToolCallOutput { status = Nothing, .. }
+    ReasoningItemValue ReasoningItem { status = _, .. } ->
+        ReasoningItemValue ReasoningItem { status = Nothing, .. }
+    item -> item
+
+-- | 'stripReplayedItemStatus' over a whole request input.
+stripReplayedInputStatus :: ResponseInput -> ResponseInput
+stripReplayedInputStatus = \case
+    ResponseInputItems items ->
+        ResponseInputItems (map stripReplayedItemStatus items)
+    other -> other

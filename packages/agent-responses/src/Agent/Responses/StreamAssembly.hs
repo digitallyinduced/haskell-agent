@@ -6,7 +6,6 @@ module Agent.Responses.StreamAssembly
     , emptyStreamAssemblyState
     , applyStreamEvent
     , finishStreamResponse
-    , finishAssembledIncomplete
     , buildStreamResponse
     , buildStreamResponseWithModel
     , assembleDoneResponse
@@ -19,14 +18,19 @@ module Agent.Responses.StreamAssembly
 import Agent.Error (ApiError(..))
 import Agent.Responses.ResponseMerge
     ( mergeDoneResponse
-    , mergeResponseFragments
+    , mergeResponseFragment
     , responseItemIdentities
+    , responseItemKind
     )
 import Agent.Responses.Types
 import Control.Applicative ((<|>))
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
-import Data.List (find)
+import qualified Data.IntSet as IntSet
+import Data.IntSet (IntSet)
+import qualified Data.List as List
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -52,13 +56,38 @@ data ItemProgress = ItemProgress
     , itemDone  :: !Bool
     }
 
+-- | Provider item ids and tool call ids occupy separate namespaces, as do
+-- identities belonging to different output item kinds.
+data ItemIdentity
+    = ProviderItemId !Text !Text
+    | ToolCallId !Text !Text
+    deriving (Eq, Ord)
+
+-- | Output items retain provider order while supporting the alternate
+-- identities used by streaming events. An identity may occur in more than one
+-- slot in a malformed stream; retaining every slot preserves the historical
+-- rule that the lowest output index for that identity wins.
+data OutputItemStore = OutputItemStore
+    { outputSlots     :: !(IntMap ItemProgress)
+    , outputAliases   :: !(Map ItemIdentity IntSet)
+    , outputPending   :: !IntSet
+    }
+
 data StreamAssemblyState = StreamAssemblyState
-    { lifecycleResponses :: ![Response]
-    , outputItems        :: !(IntMap ItemProgress)
+    { lifecycleResponse :: !(Maybe Response)
+    , outputItems       :: !OutputItemStore
     }
 
 emptyStreamAssemblyState :: StreamAssemblyState
-emptyStreamAssemblyState = StreamAssemblyState [] IntMap.empty
+emptyStreamAssemblyState =
+    StreamAssemblyState Nothing emptyOutputItemStore
+
+emptyOutputItemStore :: OutputItemStore
+emptyOutputItemStore = OutputItemStore
+    { outputSlots = IntMap.empty
+    , outputAliases = Map.empty
+    , outputPending = IntSet.empty
+    }
 
 applyStreamEvent :: StreamAssemblyState -> ResponseStreamEvent -> StreamAssemblyState
 applyStreamEvent state = \case
@@ -75,13 +104,15 @@ applyStreamEvent state = \case
         updateItem outputIndex True item state
     ResponseFunctionCallArgumentsDeltaEvent
         { delta = Just value, streamItemId, streamOutputIndex } ->
-            updateResolved streamOutputIndex [streamItemId]
+            updateResolved streamOutputIndex
+                [streamItemIdentity "function_call" streamItemId]
                 (mapFunctionCall streamItemId
                     \call -> call { arguments = call.arguments <> value })
                 state
     ResponseFunctionCallArgumentsDoneEvent
         { arguments, functionName, streamItemId, streamOutputIndex } ->
-            updateResolved streamOutputIndex [streamItemId]
+            updateResolved streamOutputIndex
+                [streamItemIdentity "function_call" streamItemId]
                 (mapFunctionCall streamItemId \call -> call
                     { arguments = fromMaybe call.arguments arguments
                     , name = fromMaybe call.name functionName
@@ -90,13 +121,19 @@ applyStreamEvent state = \case
     ResponseCustomToolInputDeltaEvent
         { delta = Just value, streamItemId, streamCallId
         , streamOutputIndex } ->
-            updateResolved streamOutputIndex [streamItemId, streamCallId]
+            updateResolved streamOutputIndex
+                [ streamItemIdentity "custom_tool_call" streamItemId
+                , streamCallIdentity "custom_tool_call" streamCallId
+                ]
                 (mapCustomCall streamItemId streamCallId
                     \call -> call { input = call.input <> value })
                 state
     ResponseCustomToolInputDoneEvent
         { inputText, streamItemId, streamCallId, streamOutputIndex } ->
-            updateResolved streamOutputIndex [streamItemId, streamCallId]
+            updateResolved streamOutputIndex
+                [ streamItemIdentity "custom_tool_call" streamItemId
+                , streamCallIdentity "custom_tool_call" streamCallId
+                ]
                 (mapCustomCall streamItemId streamCallId
                     \call -> call
                         { input = fromMaybe call.input inputText })
@@ -104,7 +141,8 @@ applyStreamEvent state = \case
     ResponseReasoningSummaryTextDoneEvent
         { text = Just value, streamItemId, streamOutputIndex
         , summaryIndex = Just index } ->
-            updateResolved streamOutputIndex [streamItemId]
+            updateResolved streamOutputIndex
+                [streamItemIdentity "reasoning" streamItemId]
                 (mapReasoning streamItemId index
                     \part -> part { text = Just value })
                 state
@@ -112,14 +150,20 @@ applyStreamEvent state = \case
         { otherEventType = EventReasoningSummaryTextDelta
         , eventDelta = Just value, streamItemId, streamOutputIndex
         , summaryIndex = Just index } ->
-            updateResolved streamOutputIndex [streamItemId]
+            updateResolved streamOutputIndex
+                [streamItemIdentity "reasoning" streamItemId]
                 (mapReasoning streamItemId index \part -> part
                     { text = Just (fromMaybe "" part.text <> value) })
                 state
     _ -> state
   where
     lifecycle response =
-        state { lifecycleResponses = state.lifecycleResponses <> [response] }
+        merged `seq` state { lifecycleResponse = Just merged }
+      where
+        merged =
+            maybe response
+                (`mergeResponseFragment` response)
+                state.lifecycleResponse
 
 finishStreamResponse
     :: Maybe Text
@@ -143,7 +187,7 @@ finishStreamResponse modelHint state terminalEvent = do
         _ -> Left $ JsonDecodeError
             "Cannot assemble a non-terminal response event"
             (Text.pack (show terminalEvent))
-    let base = mergeResponseFragments state.lifecycleResponses
+    let base = state.lifecycleResponse
         terminalWithOutput =
             setResponseOutput (assembledTerminalOutput terminal state) terminal
         response = mergeDoneResponse base [] terminalWithOutput
@@ -156,19 +200,6 @@ finishStreamResponse modelHint state terminalEvent = do
             "Streamed response did not contain a response id"
             (Text.pack (show terminalEvent))
         else Right withModel
-
-finishAssembledIncomplete
-    :: Maybe Text
-    -> StreamAssemblyState
-    -> Either ApiError Response
-finishAssembledIncomplete modelHint state =
-    case mergeResponseFragments state.lifecycleResponses of
-        Nothing -> Left $ JsonDecodeError
-            "Streamed response did not contain a lifecycle response"
-            ""
-        Just response ->
-            finishStreamResponse modelHint state
-                (ResponseIncompleteEvent response Nothing)
 
 buildStreamResponse
     :: StreamAssemblyConfig
@@ -185,7 +216,7 @@ buildStreamResponseWithModel
 buildStreamResponseWithModel config modelHint = go emptyStreamAssemblyState
   where
     go state [] =
-        case mergeResponseFragments state.lifecycleResponses of
+        case state.lifecycleResponse of
             Just response
                 | response.status `elem`
                     [ResponseFailed, ResponseIncomplete] ->
@@ -260,7 +291,7 @@ failedStreamResponseMessage failure =
 responseFailureFromState :: StreamAssemblyState -> ResponseFailure
 responseFailureFromState state =
     maybe emptyFailure responseFailure
-        (mergeResponseFragments state.lifecycleResponses)
+        state.lifecycleResponse
 
 responseFailure :: Response -> ResponseFailure
 responseFailure response = ResponseFailure
@@ -285,10 +316,6 @@ statusText = \case
     ResponseIncomplete -> "incomplete"
     ResponseStatusUnknown value -> value
 
-assembledOutput :: StreamAssemblyState -> [ResponseItem]
-assembledOutput =
-    map (.itemValue) . IntMap.elems . (.outputItems)
-
 updateItem
     :: Maybe Int
     -> Bool
@@ -297,17 +324,21 @@ updateItem
     -> StreamAssemblyState
 updateItem explicitIndex done item state =
     state
-        { outputItems = IntMap.alter merge index state.outputItems }
+        { outputItems =
+            setOutputSlot index progress state.outputItems
+        }
   where
-    index = fromMaybe (nextOutputIndex state) $
+    index = fromMaybe (nextOutputIndex state.outputItems) $
         explicitIndex
             <|> findItemIndex item state
             <|> if done then findPendingIndex state else Nothing
-    merge Nothing = Just (ItemProgress item done)
-    merge (Just old) = Just
-        (ItemProgress
-            (mergeResponseItem old.itemValue item)
-            (old.itemDone || done))
+    progress =
+        case IntMap.lookup index state.outputItems.outputSlots of
+            Nothing -> ItemProgress item done
+            Just old ->
+                ItemProgress
+                    (mergeResponseItem old.itemValue item)
+                    (old.itemDone || done)
 
 mergeResponseItem :: ResponseItem -> ResponseItem -> ResponseItem
 mergeResponseItem old new =
@@ -328,7 +359,7 @@ mergeResponseItem old new =
 
 updateResolved
     :: Maybe Int
-    -> [Maybe Text]
+    -> [Maybe ItemIdentity]
     -> (ResponseItem -> ResponseItem)
     -> StreamAssemblyState
     -> StreamAssemblyState
@@ -336,45 +367,139 @@ updateResolved explicitIndex identities update state =
     case explicitIndex <|> findIdentityIndex identities state of
         Nothing -> state
         Just index -> state
-            { outputItems = IntMap.adjust
-                (\progress -> progress
-                    { itemValue = update progress.itemValue })
-                index
-                state.outputItems
+            { outputItems =
+                adjustOutputSlot index update state.outputItems
             }
 
 findItemIndex :: ResponseItem -> StreamAssemblyState -> Maybe Int
 findItemIndex item =
-    findIdentityIndex (map (Just . snd) (responseItemIdentities item))
+    findIdentityIndex (map Just (itemAliases item))
 
-findIdentityIndex :: [Maybe Text] -> StreamAssemblyState -> Maybe Int
+findIdentityIndex
+    :: [Maybe ItemIdentity]
+    -> StreamAssemblyState
+    -> Maybe Int
 findIdentityIndex identities state =
     foldr (<|>) Nothing (map findValue values)
   where
-    values = [value | Just value <- identities, not (Text.null value)]
-    findValue value =
-        fst <$> find
-            (elem value . map snd
-                . responseItemIdentities . (.itemValue) . snd)
-            (IntMap.toList state.outputItems)
-
-nextOutputIndex :: StreamAssemblyState -> Int
-nextOutputIndex state =
-    maybe 0 ((+ 1) . fst) (IntMap.lookupMax state.outputItems)
+    values = [identity | Just identity <- identities]
+    findValue identity =
+        Map.lookup identity state.outputItems.outputAliases
+            >>= minimumIndex
 
 findPendingIndex :: StreamAssemblyState -> Maybe Int
 findPendingIndex state =
-    fst <$> find (not . (.itemDone) . snd)
-        (IntMap.toList state.outputItems)
+    minimumIndex state.outputItems.outputPending
+
+minimumIndex :: IntSet -> Maybe Int
+minimumIndex = fmap fst . IntSet.minView
 
 assembledTerminalOutput :: Response -> StreamAssemblyState -> [ResponseItem]
 assembledTerminalOutput terminal state =
     IntMap.elems (IntMap.unionWith
         mergeResponseItem
         finalItems
-        (fmap (.itemValue) state.outputItems))
+        (fmap (.itemValue) state.outputItems.outputSlots))
   where
     finalItems = IntMap.fromList (zip [0..] terminal.output)
+
+adjustOutputSlot
+    :: Int
+    -> (ResponseItem -> ResponseItem)
+    -> OutputItemStore
+    -> OutputItemStore
+adjustOutputSlot index update store =
+    case IntMap.lookup index store.outputSlots of
+        Nothing -> store
+        Just progress ->
+            setOutputSlot
+                index
+                progress { itemValue = update progress.itemValue }
+                store
+
+-- Keep all three projections synchronized in this sole store mutation point.
+setOutputSlot
+    :: Int
+    -> ItemProgress
+    -> OutputItemStore
+    -> OutputItemStore
+setOutputSlot index progress store =
+    OutputItemStore
+        { outputSlots = IntMap.insert index progress store.outputSlots
+        , outputAliases =
+            addItemAliases index progress.itemValue aliasesWithoutOld
+        , outputPending =
+            if progress.itemDone
+                then IntSet.delete index store.outputPending
+                else IntSet.insert index store.outputPending
+        }
+  where
+    aliasesWithoutOld =
+        case IntMap.lookup index store.outputSlots of
+            Nothing -> store.outputAliases
+            Just old -> removeItemAliases index old.itemValue store.outputAliases
+
+addItemAliases
+    :: Int
+    -> ResponseItem
+    -> Map ItemIdentity IntSet
+    -> Map ItemIdentity IntSet
+addItemAliases index item aliases =
+    List.foldl'
+        (\current identity ->
+            Map.insertWith IntSet.union
+                identity
+                (IntSet.singleton index)
+                current)
+        aliases
+        (itemAliases item)
+
+removeItemAliases
+    :: Int
+    -> ResponseItem
+    -> Map ItemIdentity IntSet
+    -> Map ItemIdentity IntSet
+removeItemAliases index item aliases =
+    List.foldl'
+        (\current identity ->
+            Map.update
+                (\indexes ->
+                    let remaining = IntSet.delete index indexes
+                    in if IntSet.null remaining
+                        then Nothing
+                        else Just remaining)
+                identity
+                current)
+        aliases
+        (itemAliases item)
+
+itemAliases :: ResponseItem -> [ItemIdentity]
+itemAliases item =
+    [ identity
+    | (field, value) <- responseItemIdentities item
+    , Just identity <- [itemIdentity (responseItemKind item) field value]
+    ]
+
+itemIdentity
+    :: Text
+    -> Text
+    -> Text
+    -> Maybe ItemIdentity
+itemIdentity kind field value
+    | Text.null value = Nothing
+    | field == "id" = Just (ProviderItemId kind value)
+    | field == "call_id" = Just (ToolCallId kind value)
+    | otherwise = Nothing
+
+streamItemIdentity :: Text -> Maybe Text -> Maybe ItemIdentity
+streamItemIdentity kind = fmap (ProviderItemId kind) . nonEmpty
+
+streamCallIdentity :: Text -> Maybe Text -> Maybe ItemIdentity
+streamCallIdentity kind = fmap (ToolCallId kind) . nonEmpty
+
+nextOutputIndex :: OutputItemStore -> Int
+nextOutputIndex store =
+    maybe 0 ((+ 1) . fst) (IntMap.lookupMax store.outputSlots)
 
 mapFunctionCall
     :: Maybe Text

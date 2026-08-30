@@ -77,11 +77,15 @@ have to be.
 - **Built-in coding tools:** run shell commands, opt into a persistent GHCi
   workspace, search the web, and connect local MCP servers. Approval policies
   keep mutating operations under user control.
+- **Natural-language Meta Console:** press `Cmd+K` (`Alt+K` on terminals that
+  report it that way), or use `/meta <request>`, to preview and apply typed
+  model, account, MCP, web-fetch, LSP, shell, and concurrency configuration
+  changes without adding the request to the coding conversation.
 - **Guided agent workflows:** use plan mode, reusable skills, and scoped learned
   guidance for repeatable tasks and project or user preferences.
 - **Multimodal input and live voice dictation:** attach images and files, or
-  press `Ctrl+R` on macOS to stream microphone audio to xAI and insert the live
-  transcript into the prompt.
+  press `Ctrl+R` on macOS to stream microphone audio to OpenAI or xAI and
+  insert the transcript into the prompt.
 - **Telegram access:** run a durable, allowlisted Telegram gateway with
   per-conversation sessions, multimodal messages, approvals, retries, and
   bounded concurrent processing.
@@ -142,6 +146,25 @@ Start in an isolated Git worktree:
 agent-cli --worktree
 ```
 
+By default, managed worktrees fetch and branch from the selected remote's latest
+default commit. Repositories without remotes instead branch from the current
+local `HEAD`. To disable fetching, add this to `~/.haskell-agent/config.json`:
+
+```json
+{
+  "version": 1,
+  "worktree": {
+    "fetchLatestUpstream": false
+  }
+}
+```
+
+This policy applies to `--worktree`, `/worktree`, and subagent worktrees. The
+remote is selected from the current branch's configured remote, then
+`upstream`, `origin`, or the repository's sole remote. When a remote exists, a
+fetch failure aborts worktree creation rather than falling back to a stale
+commit.
+
 Use `--provider openai`, `--provider xai`, `--provider openrouter`, or
 `--provider claude-code` to override automatic provider detection. Claude Code
 is selected explicitly rather than by auto-detection.
@@ -186,9 +209,21 @@ Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
 
 Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop
 (or `Esc` to cancel). Recording stays in the TUI; it does not suspend or close
-the session. On macOS, audio is streamed to xAI and the live transcript is
-inserted at the cursor. Dictation uses the configured xAI credentials; set
-`XAI_STT_LANGUAGE` to override the default `en`.
+the session. On macOS, the resulting transcript is inserted at the cursor.
+Dictation follows the active model provider: OpenAI models use OpenAI and Grok
+models use xAI. ChatGPT/Codex OAuth uses the subscription-backed streaming
+protocol used by the official desktop app and falls back to its buffered
+ChatGPT transcription route with the same recording if streaming fails. API
+keys use the public OpenAI Realtime API. Both OpenAI paths can update the
+composer while recording. Subscription auth is preferred when both OpenAI
+credential types are configured. OpenAI credentials can come from
+`CODEX_ACCESS_TOKEN`, `CODEX_AUTH_JSON`, `$CODEX_HOME/auth.json` (defaulting to
+`~/.codex/auth.json`),
+`OPENAI_API_KEY`, `CODEX_API_KEY`, or a managed OpenAI account.
+For Grok models, dictation uses the configured xAI subscription or API-key
+credential; set `XAI_STT_LANGUAGE` to override xAI's default `en`.
+Dictation is currently unavailable for providers without a speech-to-text
+integration.
 
 ### Claude Code subscription
 
@@ -223,11 +258,33 @@ Use `/mcp` to manage local stdio MCP servers, or configure them in
 `~/.haskell-agent/config.json`. See the [MCP guide](docs/mcp.md) for the
 configuration schema, startup strategies, and tool exposure rules.
 
+### Meta Console
+
+Press `Cmd+K` to open a compact configuration prompt over the current session,
+then describe a change such as “add the MCP server at
+`https://example.com/mcp`” or “connect my Grok account”. `/meta <request>` is
+the keyboard-independent fallback.
+
+Meta Console uses a private, tool-free planner with no coding transcript. Its
+typed plan is validated and previewed before execution, and the normal
+approval policy still applies. Secrets are requested only through masked
+host-owned prompts and are never returned to the planner. See the
+[Meta Console guide](docs/meta-console.md) for supported actions and safety
+details.
+
 ### Secret entry
 
 The built-in `ask_secret` tool reads secrets through a masked prompt and gives
 the model only a private temporary-file path, keeping values out of chat and
 tool arguments. Files are removed when the tool runtime closes.
+
+### Inline images
+
+The built-in `show_image` tool displays an image file (PNG, JPEG, GIF, BMP,
+TIFF) inline in the conversation next to the tool call: Kitty, Ghostty,
+WezTerm, and iTerm2 draw the bitmap natively, other terminals get a
+true-colour text approximation. The image is shown to the user only; it is
+not added to the model context.
 
 ## Ideas and direction
 

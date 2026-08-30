@@ -50,10 +50,10 @@ usageSnapshotDecoder :: Json.Decoder UsageSnapshot
 usageSnapshotDecoder = Json.object do
     planType <- Json.atKey "plan_type" Json.text
     rateLimit <- optionalNullable "rate_limit" usageLimitDecoder
-    additionalRateLimits <-
-        maybe [] id <$> Json.atKeyOptional
-            "additional_rate_limits"
-            (Json.list additionalUsageLimitDecoder)
+    additionalRateLimits <- Json.defaultKey
+        []
+        "additional_rate_limits"
+        (Json.list additionalUsageLimitDecoder)
     pure UsageSnapshot{..}
 
 usageLimitDecoder :: Json.Decoder UsageLimit

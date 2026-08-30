@@ -448,6 +448,7 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                         prepared.preparedToolEnv
                         (Just runtime.subagentPlanHooks)
                         Nothing
+                        Nothing
                         (Just prepared.preparedMultiContext)
                 syncStoreRootFromPlan
                     runtime.subagentStoreRoot
@@ -630,6 +631,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         prepared.preparedToolEnv
                         (Just runtime.subagentPlanHooks)
                         Nothing
+                        Nothing
                         (Just prepared.preparedMultiContext)
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
@@ -736,7 +738,12 @@ prepareChild
     -> IO PreparedChild
 prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoot = do
     parentParams <- readIORef runtime.subagentParams
-    childEnv <- defaultToolEnv env.subCwd
+    childEnv <- do
+        freshEnv <- defaultToolEnv env.subCwd
+        pure freshEnv
+            { toolAllowedRoots = runtime.subagentAllowedRoots
+            , toolRootAccessRequest = runtime.subagentRootAccessRequest
+            }
     skillRoots <- readIORef runtime.subagentSkillRoots
     writeIORef childEnv.toolSkillRoots skillRoots
     sessionTmp <- readIORef runtime.subagentSessionTmp

@@ -43,6 +43,7 @@ library
                     , Agent.OpenRouter.Credential
                     , Agent.OpenRouter.Error
                     , Agent.OpenRouter.LoopBackend
+                    , Agent.OpenRouter.Models
                     , Agent.OpenRouter.Options
                     , Agent.OpenRouter.Request
                     , Agent.OpenRouter.Stream
@@ -74,6 +75,7 @@ test-suite agent-openrouter-test
                     , Agent.OpenRouter.CredentialSpec
                     , Agent.OpenRouter.ErrorSpec
                     , Agent.OpenRouter.FunctionalSpec
+                    , Agent.OpenRouter.ModelsSpec
                     , Agent.OpenRouter.RequestSpec
                     , Agent.OpenRouter.UsageSpec
     ghc-options:      -threaded

@@ -2,11 +2,13 @@
 module Agent.CLI.Runtime.Repl.Selection
     ( handleSelectionAction
     , handleSelectionInput
+    , selectRequestedAccount
     ) where
 
 import Agent.CLI.AccountPicker
     ( AccountPickerOption(..),
       accountPickerMatches,
+      accountPickerMatchesRequest,
       accountPickerRow,
       loadAllAccountPickerOptions )
 import Agent.CLI.AccountSelection ()
@@ -158,7 +160,7 @@ import Control.Monad ()
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ( findIndex )
 import Data.Maybe ( fromMaybe, listToMaybe )
-import Data.Text ()
+import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
@@ -180,7 +182,6 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
-import qualified Data.Text as Text ()
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -192,6 +193,164 @@ handleSelectionInput env continue input =
 handleSelectionAction :: SessionEnv -> IO RunResult -> ReplAction -> IO RunResult
 handleSelectionAction env continue action =
     handleSelection env continue (Right action)
+
+-- | Select an account requested by a trusted, typed Meta Console action.
+--
+-- Unlike the general account picker, this omits connect rows and filters every
+-- candidate to the requested provider and optional exact label/id.  Returning
+-- cancellation as 'Left' prevents the caller from reporting that the plan was
+-- applied.
+selectRequestedAccount
+    :: SessionEnv
+    -> Provider
+    -> Maybe Text
+    -> IO (Either Text (Maybe RunResult))
+selectRequestedAccount env requestedProvider selector =
+    case env.sessionFullscreen of
+        Nothing ->
+            pure
+                (Left
+                    "Account selection needs the fullscreen account picker; use /login in minimal mode")
+        Just runtime -> do
+            currentSelectionId <- readIORef env.sessionAccountSelectionId
+            currentAccountId <- readIORef env.sessionAccountId
+            loaded <- withActivity runtime $
+                loadAllAccountPickerOptions env.sessionProvider
+            let options =
+                    filter
+                        (accountPickerMatchesRequest
+                            requestedProvider
+                            selector)
+                        loaded
+                initial =
+                    fromMaybe 0 $
+                        findIndex
+                            (accountPickerMatches
+                                env.sessionProvider
+                                currentSelectionId
+                                currentAccountId)
+                            options
+            case options of
+                [] -> pure (Left (noMatchingAccountMessage selector))
+                _ ->
+                    requestFullscreenChoiceWithBody
+                        runtime
+                        (providerSlug requestedProvider <> " accounts")
+                        "Choose the requested account. Only exact provider, label, and id matches are shown."
+                        initial
+                        (map
+                            (accountPickerRow
+                                env.sessionProvider
+                                currentSelectionId
+                                currentAccountId)
+                            options)
+                        >>= \case
+                            Nothing ->
+                                pure (Left "Account selection was cancelled.")
+                            Just index ->
+                                case atMay index options of
+                                    Just option@(AccountPickerAccount
+                                        selectedProvider
+                                        selectedBilling
+                                        selectedSelectionId
+                                        selectedAccountId
+                                        selectedLabel
+                                        _) ->
+                                            applySelectedAccount
+                                                runtime
+                                                currentSelectionId
+                                                currentAccountId
+                                                option
+                                                selectedProvider
+                                                selectedBilling
+                                                selectedSelectionId
+                                                selectedAccountId
+                                                selectedLabel
+                                    _ ->
+                                        pure
+                                            (Left
+                                                "The requested account selection is no longer available.")
+  where
+    withActivity runtime action = do
+        emitUiEvent runtime
+            (UiSetNotice
+                (Just (progressNotice "Loading account usage…")))
+        action `finally`
+            emitUiEvent runtime (UiSetNotice Nothing)
+    noMatchingAccountMessage = \case
+        Nothing ->
+            "No connected "
+                <> providerSlug requestedProvider
+                <> " account is available; connect one first."
+        Just requested ->
+            "No connected "
+                <> providerSlug requestedProvider
+                <> " account exactly matches '"
+                <> requested
+                <> "'."
+    applySelectedAccount
+            runtime
+            currentSelectionId
+            currentAccountId
+            option
+            selectedProvider
+            selectedBilling
+            selectedSelectionId
+            selectedAccountId
+            selectedLabel
+        | selectedProvider /= ClaudeCodeProvider
+        , accountPickerMatches
+            env.sessionProvider
+            currentSelectionId
+            currentAccountId
+            option = do
+                emitUiEvent runtime
+                    (UiSystemMessage ("account: " <> selectedLabel))
+                pure (Right Nothing)
+        | selectedProvider == env.sessionProvider
+        , Just selectedBilling
+            == (tokenProviderBillingMode <$> env.sessionTokenProvider)
+        , Just select <- env.sessionSelectAccount =
+            let liveSelectionId =
+                    case selectedProvider of
+                        OpenAIProvider -> selectedAccountId
+                        _ -> selectedSelectionId
+            in select liveSelectionId >>= \case
+                Left err -> do
+                    now <- getCurrentTime
+                    pure
+                        (Left
+                            ("could not select account: "
+                                <> formatApiErrorInlineAt now err))
+                Right label -> do
+                    emitUiEvent runtime
+                        (UiSystemMessage
+                            ("account switched to " <> label))
+                    pure (Right Nothing)
+        | otherwise = do
+            params <- readIORef env.sessionParams
+            requestAccountProviderSwitch
+                env.sessionModelCatalog
+                (Just runtime)
+                env.sessionProvider
+                env.sessionConnection
+                (currentModel params)
+                (dialectId env.sessionDialect)
+                selectedProvider
+                selectedSelectionId
+                selectedAccountId
+                env.sessionPersist
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right result -> do
+                        emitUiEvent runtime
+                            (UiSystemMessage
+                                ("switching to "
+                                    <> selectedLabel
+                                    <> " ("
+                                    <> providerSlug selectedProvider
+                                    <> ")"))
+                        pure (Right (Just result))
 
 handleSelection
     :: SessionEnv

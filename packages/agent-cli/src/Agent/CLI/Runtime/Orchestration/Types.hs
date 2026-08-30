@@ -16,6 +16,7 @@ import System.IO ( Handle, stderr, stdout )
 import System.OsPath ( OsPath )
 
 import qualified Agent.MCP as MCP
+import Data.IORef (IORef)
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -30,6 +31,10 @@ data AccountSwitchRequest
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
     , processSessionThreads :: !SessionThreadManager
+    , processMcpElicitation
+        :: !(IORef (Maybe (MCP.McpElicitRequest -> IO MCP.McpElicitResult)))
+    -- ^ Interactive elicitation UI installed by the active session, shared by
+    -- every MCP fleet the supervisor starts.
     }
 
 data AgentRunMode = AgentRunMode

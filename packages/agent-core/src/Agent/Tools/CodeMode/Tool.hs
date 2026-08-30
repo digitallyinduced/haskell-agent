@@ -36,8 +36,12 @@ import Agent.ToolDSL
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
-    , streamingTextTool
-    , typedStreamingTool
+    , ToolCallResult(..)
+    , ToolHandlerResult(..)
+    , ToolResultImage(..)
+    , streamingRichTextTool
+    , toolCallResultImages
+    , typedStreamingRichTool
     )
 import Agent.Tools.CodeMode.Host
     ( CodeModeConfig(..)
@@ -75,7 +79,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -93,8 +97,9 @@ data ToolMode
 
 -- | Run one nested tool call through the host application's registry,
 -- authorization, and dispatch. 'Left' rejects the nested JavaScript promise
--- with the given message; 'Right' resolves it with the tool output text.
-type CodeModeNestedInvoke = ToolCall -> IO (Either Text Text)
+-- with the given message; 'Right' resolves it with the tool output and any
+-- supplemental media.
+type CodeModeNestedInvoke = ToolCall -> IO (Either Text ToolCallResult)
 
 -- | A namespaced nested-tool group, mirroring provider tool namespaces such
 -- as @collaboration@.
@@ -282,27 +287,45 @@ runNestedTool invoke nextInvocation nested codeName arguments =
     case Map.lookup codeName nested of
         Nothing -> pure (Left
             ("tool is not available in this cell: " <> codeName))
-        Just tool -> do
-            invocation <- atomicModifyIORef' nextInvocation
-                \current ->
-                    let next = current + 1
-                    in (next, next)
-            let call = ToolCall
-                    { callId =
-                        "code-mode:"
-                            <> Text.pack (show invocation)
-                            <> ":"
-                            <> codeName
-                    , name = tool.nestedRuntimeName
-                    , arguments =
-                        TextEncoding.decodeUtf8 . LBS.toStrict $
-                            encode arguments
-                    , callKind = tool.nestedCallKind
-                    , argumentsEncrypted = False
-                    }
-            invoke call >>= \case
-                Left err -> pure (Left err)
-                Right output -> pure (Right (String output))
+        Just tool -> either (pure . Left) (invokeTool tool)
+            (nestedToolArguments tool.nestedCallKind arguments)
+  where
+    invokeTool :: NestedTool -> Text -> IO (Either Text Value)
+    invokeTool tool callArguments = do
+        invocation <- atomicModifyIORef' nextInvocation
+            \current ->
+                let next = current + 1
+                in (next, next)
+        result <- invoke ToolCall
+            { callId =
+                "code-mode:"
+                    <> Text.pack (show invocation)
+                    <> ":"
+                    <> codeName
+            , name = tool.nestedRuntimeName
+            , arguments = callArguments
+            , callKind = tool.nestedCallKind
+            , argumentsEncrypted = False
+            }
+        pure (nestedResultValue <$> result)
+
+nestedResultValue :: ToolCallResult -> Value
+nestedResultValue result =
+    case toolCallResultImages result of
+        [] -> String result.output
+        image : _ ->
+            Object . KeyMap.fromList $
+                [ ("image_url", String image.imageUrl) ]
+                    <> [ ("output_hint", String result.output)
+                       | not (Text.null (Text.strip result.output))
+                       ]
+
+nestedToolArguments :: ToolCallKind -> Value -> Either Text Text
+nestedToolArguments CustomCallKind = \case
+    String input -> Right input
+    _ -> Left "freeform tool calls require a string input"
+nestedToolArguments _ =
+    Right . TextEncoding.decodeUtf8 . LBS.toStrict . encode
 
 newtype ExecArgs = ExecArgs { source :: Text }
 
@@ -339,14 +362,14 @@ execTool host nestedTools description =
         -- wrapper as an exclusive call; concurrency requested inside the
         -- cell remains explicit in the JavaScript (for example Promise.all).
         TurnSequential
-        (streamingTextTool "exec" \_emit source ->
+        (streamingRichTextTool "exec" \_emit source ->
             runExec host nestedTools (ExecArgs source))
 
 runExec
     :: CodeModeHost
     -> [CodeModeToolMetadata]
     -> ExecArgs
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolHandlerResult)
 runExec host nestedTools args =
     case parseExecSource args.source of
         Left err -> pure (Left err)
@@ -374,10 +397,12 @@ runExec host nestedTools args =
                     (resolveYieldTimeoutMs
                         (fromMaybe defaultExecYieldTimeMs pragma.yieldTimeMs))
                 finished <- getCurrentTime
-                pure $ renderCodeModeResult
-                    pragma.maxOutputTokens
-                    (elapsedSeconds started finished)
-                    result
+                pure $
+                    withResultImages result
+                        <$> renderCodeModeResult
+                            pragma.maxOutputTokens
+                            (elapsedSeconds started finished)
+                            result
 
 -- | Codex grants a one-second grace period on top of yields of ten seconds or
 -- more, so a script that finishes just past its yield window still returns a
@@ -453,9 +478,9 @@ waitTool host =
         ]
         AlwaysReadOnly
         ParallelSafe
-        (typedStreamingTool "wait" waitArgsDecoder (\_emit -> runWait host))
+        (typedStreamingRichTool "wait" waitArgsDecoder (\_emit -> runWait host))
 
-runWait :: CodeModeHost -> WaitArgs -> IO (Either Text Text)
+runWait :: CodeModeHost -> WaitArgs -> IO (Either Text ToolHandlerResult)
 runWait host args
     | maybe False (< 0) args.yieldTimeMs =
         pure (Left "yield_time_ms must be non-negative")
@@ -470,10 +495,48 @@ runWait host args
                     (resolveYieldTimeoutMs
                         (fromMaybe defaultWaitYieldTimeMs args.yieldTimeMs))
         finished <- getCurrentTime
-        pure $ renderCodeModeResult
-            args.maxTokens
-            (elapsedSeconds started finished)
-            result
+        pure $
+            withResultImages result
+                <$> renderCodeModeResult
+                    args.maxTokens
+                    (elapsedSeconds started finished)
+                    result
+
+withResultImages
+    :: Either CodeModeError CodeModeResult
+    -> Text
+    -> ToolHandlerResult
+withResultImages result text =
+    ToolHandlerResult
+        { resultText = text
+        , resultImages = codeModeResultImages result
+        }
+
+codeModeResultImages
+    :: Either CodeModeError CodeModeResult
+    -> [ToolResultImage]
+codeModeResultImages = \case
+    Right CodeModeRunning { cellOutput } -> valueImages cellOutput
+    Right CodeModeTerminated { cellValue } -> valueImages cellValue
+    Right CodeModeFinished { cellValue } -> valueImages cellValue
+    Right CodeModeFailed { cellValue } -> valueImages cellValue
+    Left _ -> []
+  where
+    valueImages (Object result)
+        | Just (Array content) <- KeyMap.lookup "content" result =
+            mapMaybe contentImage (Vector.toList content)
+    valueImages _ = []
+
+    contentImage (Object content)
+        | Just (String "image") <- KeyMap.lookup "type" content
+        , Just (String imageUrl) <- KeyMap.lookup "image_url" content =
+            Just ToolResultImage
+                { imageUrl
+                , imageDetail = case KeyMap.lookup "detail" content of
+                    Just (String detail) -> Just detail
+                    _ -> Nothing
+                }
+    contentImage _ = Nothing
 
 renderCodeModeResult
     :: Maybe Int
@@ -526,7 +589,7 @@ renderCodeModeResult budget wallTime = \case
         , Just (String text) <- KeyMap.lookup "text" content =
             text
         | Just (String "image") <- KeyMap.lookup "type" content =
-            "[image output item]"
+            "[image output item; call tools.show_image to display an image to the user]"
         | Just (String "audio") <- KeyMap.lookup "type" content =
             "[audio output item]"
         | otherwise = renderValue value

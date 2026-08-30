@@ -4,6 +4,8 @@ module Agent.CLI.Status
     , cycleReplInteraction
     , formatReplStatusLine
     , formatTokenUsage
+    , formatTokenUsageOrZero
+    , formatEstimatedTokensPerSecond
     , formatTokensPerSecond
     , formatUsageWithRate
     ) where
@@ -31,7 +33,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Idle prompt chrome: model, reasoning effort, interaction mode, and active
--- account on the left; session token totals and last tok/s right-aligned
+-- account on the left; session token totals and last generation rate right-aligned
 -- when possible.
 formatReplStatusLine
     :: Bool
@@ -96,24 +98,32 @@ cycleReplInteraction :: PlanModeState -> ApprovalPolicy -> ReplMode
 cycleReplInteraction planState policy =
     cycleReplMode (replModeFromState planState policy)
 
--- | Compact session totals: @1.2k in · 340 out@. Cached tokens are shown
+-- | Compact session totals: @1.2k ↓ · 340 ↑@. Cached tokens are shown
 -- only when the provider reported a non-zero cache hit.
 formatTokenUsage :: TokenUsage -> Text
 formatTokenUsage usage
     | usage == emptyTokenUsage = ""
     | otherwise =
         formatTokenCount usage.inputTokens
-            <> " in · "
+            <> " ↓ · "
             <> formatTokenCount usage.outputTokens
-            <> " out"
+            <> " ↑"
             <> cachedSuffix
   where
     cachedSuffix
         | usage.cachedTokens > 0 =
-            " · " <> formatTokenCount usage.cachedTokens <> " cached"
+            " · " <> formatTokenCount usage.cachedTokens <> " ↻"
         | otherwise = ""
 
--- | Session totals plus a generation rate: @1.2k in · 340 out · 42 tok/s@.
+-- | Format token totals for contexts that must show fresh-session zeroes.
+formatTokenUsageOrZero :: TokenUsage -> Text
+formatTokenUsageOrZero usage =
+    let formatted = formatTokenUsage usage
+    in if Text.null formatted
+        then "0 ↓ · 0 ↑"
+        else formatted
+
+-- | Session totals plus a generation rate: @1.2k ↓ · 340 ↑ · 42 ◈/s@.
 formatUsageWithRate :: TokenUsage -> Maybe Double -> Text
 formatUsageWithRate usage rate =
     Text.intercalate " · " $
@@ -122,17 +132,22 @@ formatUsageWithRate usage rate =
             , maybe "" formatTokensPerSecond rate
             ]
 
--- | Compact generation speed: @4.2 tok/s@, @42 tok/s@, @1.2k tok/s@.
+-- | Prefix a character-derived generation rate with an approximation marker.
+formatEstimatedTokensPerSecond :: Bool -> Double -> Text
+formatEstimatedTokensPerSecond estimated rate =
+    (if estimated then "~" else "") <> formatTokensPerSecond rate
+
+-- | Compact generation speed: @4.2 ◈/s@, @42 ◈/s@, @1.2k ◈/s@.
 formatTokensPerSecond :: Double -> Text
 formatTokensPerSecond rate
-    | rate < 0.05 = "<0.1 tok/s"
+    | rate < 0.05 = "<0.1 ◈/s"
     | rate < 9.95 =
         let tenths = round (rate * 10) :: Int
             whole = tenths `div` 10
             frac = tenths `mod` 10
-        in Text.pack (show whole <> "." <> show frac <> " tok/s")
+        in Text.pack (show whole <> "." <> show frac <> " ◈/s")
     | otherwise =
-        formatTokenCount (round rate) <> " tok/s"
+        formatTokenCount (round rate) <> " ◈/s"
 
 formatTokenCount :: Int -> Text
 formatTokenCount n
