@@ -15,7 +15,8 @@ import Agent.Loop
     )
 import qualified Agent.OpenAI.Client as OpenAIClient
 import Agent.OpenAI.LoopBackend
-    ( isOpenAiWebSocketTransportFailure
+    ( isOpenAiReplayUnsafeWebSocketTransportFailure
+    , isOpenAiWebSocketTransportFailure
     , openAiAuxiliaryResponseSenderReconnecting
     , openAiBackendWithReasoningVisibility
     , openAiBackendWithTransportFallback
@@ -141,6 +142,14 @@ lockedOpenAiSession gatewayOnly compactThreshold showRawReasoning wsLock fallbac
                         sendAuxiliary request Nothing (const (pure ()))
                     case result of
                         Left err
+                            | not gatewayOnly
+                            , isOpenAiReplayUnsafeWebSocketTransportFailure err -> do
+                                -- The socket is dead, so route later work over
+                                -- HTTP. Do not replay this compaction: an
+                                -- opaque checkpoint already arrived and the
+                                -- provider may have committed/billed it.
+                                writeIORef fallbackActive True
+                                pure result
                             | not gatewayOnly
                             , isOpenAiWebSocketTransportFailure err -> do
                                 writeIORef fallbackActive True

@@ -302,6 +302,51 @@ spec = do
             encoded `shouldSatisfy`
                 (not . ("large-private-payload" `Text.isInfixOf`))
 
+        it "redacts reserved computer function arguments and screenshot output" do
+            let call = FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-function"
+                    , name = computerFunctionName
+                    , namespace = Just computerFunctionNamespace
+                    , arguments =
+                        "{\"actions\":[{\"type\":\"type\",\
+                        \\"text\":\"top secret\"}]}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                output = FunctionCallOutput
+                    { itemId = Nothing
+                    , callId = "call-function"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , output = Aeson.toJSON
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_image" :: Text.Text)
+                            , "image_url" Aeson..=
+                                ("data:image/png;base64,large-private-payload"
+                                    :: Text.Text)
+                            ]
+                        ]
+                    , status = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                encoded =
+                    TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                        [ sessionToolEvent (FunctionCallItem call)
+                        , sessionToolEvent (FunctionCallOutputItem output)
+                        ]
+            encoded `shouldSatisfy`
+                ("\"name\":\"computer\"" `Text.isInfixOf`)
+            encoded `shouldSatisfy`
+                ("type 10 characters" `Text.isInfixOf`)
+            encoded `shouldSatisfy`
+                ("\"output\":\"Screenshot captured\"" `Text.isInfixOf`)
+            encoded `shouldSatisfy`
+                (not . ("top secret" `Text.isInfixOf`))
+            encoded `shouldSatisfy`
+                (not . ("large-private-payload" `Text.isInfixOf`))
+
 toolCall :: ComputerCall -> ToolCall
 toolCall call = ToolCall
     { callId = call.computerCallId

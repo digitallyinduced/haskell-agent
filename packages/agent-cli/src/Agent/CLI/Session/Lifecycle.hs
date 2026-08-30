@@ -141,11 +141,12 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
         if exitAfter
             then pure RunQuit
             else continuation.resumeSession env
-    TurnFailed ->
+    TurnFailed message ->
         if exitAfter
             then
                 if env.sessionBackground
-                    then throwIO (StartupFailure "agent turn failed")
+                    then
+                        throwIO (StartupFailure (Text.unpack message))
                     else exitFailure
             else do
                 case env.sessionFullscreen of

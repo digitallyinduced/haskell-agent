@@ -34,8 +34,7 @@ import Agent.Provider
     , Provider(OpenAIProvider)
     , TokenProvider
     , getNextToken
-    , tokenProvider
-    , tokenProviderBillingMode
+    , tokenProviderWithNextToken
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
@@ -74,7 +73,7 @@ preferredOpenAiTokenProvider
     -> TokenProvider
     -> TokenProvider
 preferredOpenAiTokenProvider preferredAccount pool fallback =
-    tokenProvider (tokenProviderBillingMode fallback) \failed ->
+    tokenProviderWithNextToken fallback \failed ->
         case failed of
             Just reportedFailure -> do
                 fallbackResult <-
