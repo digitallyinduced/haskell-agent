@@ -2,10 +2,11 @@
 
 module Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
+    , encodeNativeUsageEvent
     ) where
 
 import Agent.CLI.Render (summarizeToolCall)
-import Agent.Loop (LoopEvent(..))
+import Agent.Loop (LoopEvent(..), TokenUsage(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
@@ -54,10 +55,33 @@ encodeNativeLoopEvent turnId event =
             (output, truncated) = boundedEventText result.output
             flags = if truncated then 2 else 0
             finishedFields = [Just result.callId, Just output]
+        TurnFinished output ->
+            encodeNativeUsageEvent
+                False
+                turnId
+                output.tokenUsage
+                Nothing
         _ -> Nothing
   where
     textEvent kind id text = frame kind 0 id [Just text]
     toolEvent kind flags fields = frame kind flags turnId fields
+
+encodeNativeUsageEvent
+    :: Bool
+    -> Text
+    -> TokenUsage
+    -> Maybe Double
+    -> Maybe BS.ByteString
+encodeNativeUsageEvent aggregate turnId usage providerCost =
+    frame
+        (if aggregate then 7 else 6)
+        0
+        turnId
+        [ Just (Text.pack (show usage.inputTokens))
+        , Just (Text.pack (show usage.outputTokens))
+        , Just (Text.pack (show usage.cachedTokens))
+        , Text.pack . show <$> providerCost
+        ]
 
 frame :: Word8 -> Word16 -> Text -> [Maybe Text] -> Maybe BS.ByteString
 frame kind flags turnId fields =
