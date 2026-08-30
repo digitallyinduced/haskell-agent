@@ -313,8 +313,13 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                                                     \errorReader -> do
                                                         exitCode <-
                                                             waitForProcess process
-                                                        _ <- wait outputReader
-                                                        _ <- wait errorReader
+                                                        -- Reader failures
+                                                        -- (including callback
+                                                        -- failures) must not
+                                                        -- suppress the one
+                                                        -- terminal callback.
+                                                        _ <- waitCatch outputReader
+                                                        _ <- waitCatch errorReader
                                                         wasCancelled <-
                                                             readIORef cancelled
                                                         onExit
@@ -343,12 +348,22 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                         Right check -> Right check
   where
     drainCheckOutput stream handle =
-        let drain = do
+        let drain callbackEnabled = do
                 bytes <- BS.hGetSome handle (64 * 1024)
                 if BS.null bytes
                     then pure ()
-                    else onOutput stream bytes >> drain
-        in drain `finally` closeQuietly handle
+                    else do
+                        nextEnabled <-
+                            if callbackEnabled
+                                then
+                                    tryAny (onOutput stream bytes) >>= \case
+                                        Left _ -> pure False
+                                        Right () -> pure True
+                                else pure False
+                        -- A failed foreign callback is disabled for this
+                        -- stream, but the pipe remains actively drained.
+                        drain nextEnabled
+        in drain True `finally` closeQuietly handle
 
 cancelRepositoryCheck :: RepositoryCheck -> IO ()
 cancelRepositoryCheck check = do

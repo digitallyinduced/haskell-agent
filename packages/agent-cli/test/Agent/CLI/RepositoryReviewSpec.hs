@@ -6,7 +6,7 @@ import Control.Concurrent.MVar
     , putMVar
     , takeMVar
     )
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, throwString)
 import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as BS8
 import Data.Either (isLeft)
@@ -316,10 +316,30 @@ spec = describe "repository review service" do
             takeMVar terminal `shouldReturn` (False, ExitSuccess)
             readIORef byteCounts `shouldReturn` (1048576, 1048576)
 
+    it "reports one terminal result when an output callback throws" $
+        withRepository \root -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            terminalCount <- newIORef (0 :: Int)
+            terminal <- newEmptyMVar
+            check <- expectRight
+                =<< startRepositoryCheck
+                    root
+                    snapshot.snapshotId
+                    "/bin/sh"
+                    ["-c", "printf callback-value; exit 9"]
+                    (\_ _ -> throwString "callback failed")
+                    (\cancelled exitCode -> do
+                        modifyIORef' terminalCount (+ 1)
+                        putMVar terminal (cancelled, exitCode))
+            waitRepositoryCheck check
+            takeMVar terminal `shouldReturn` (False, ExitFailure 9)
+            readIORef terminalCount `shouldReturn` 1
+
     it "cancels and joins a running check" $
         withRepository \root -> do
             snapshot <- expectRight =<< repositorySnapshot root
             terminal <- newEmptyMVar
+            terminalCount <- newIORef (0 :: Int)
             check <- expectRight
                 =<< startRepositoryCheck
                     root
@@ -330,7 +350,8 @@ spec = describe "repository review service" do
                         <> "(trap '' TERM; exec /bin/sleep 30) & wait"
                     ]
                     (\_ _ -> pure ())
-                    (\cancelled exitCode ->
+                    (\cancelled exitCode -> do
+                        modifyIORef' terminalCount (+ 1)
                         putMVar terminal (cancelled, exitCode))
             cancelRepositoryCheck check
             waitRepositoryCheck check
@@ -338,6 +359,7 @@ spec = describe "repository review service" do
             result `shouldSatisfy` \case
                 Just (True, ExitFailure _) -> True
                 _ -> False
+            readIORef terminalCount `shouldReturn` 1
 
 withRepository :: (FilePath -> IO value) -> IO value
 withRepository action = withTempDirectory "repository-review" \root -> do

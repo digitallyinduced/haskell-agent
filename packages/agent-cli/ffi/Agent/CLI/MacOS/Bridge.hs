@@ -678,32 +678,41 @@ ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
                             Right (Left err) ->
                                 emitRepositoryError resultCallback context err
                             Right (Right snapshot) -> do
-                                withRepositorySnapshot snapshot $
-                                    invokeRepositorySnapshotCallback
-                                        snapshotCallback
-                                        context
-                                forM_ snapshot.snapshotFiles \file ->
-                                    withText (Text.pack file.repositoryFilePath) $
-                                        \pathPtr pathSize ->
-                                    withOptionalText
-                                        (Text.pack
-                                            <$> file.repositoryFileOriginalPath)
-                                        \originalPtr originalSize ->
-                                            invokeRepositoryFileCallback
-                                                fileCallback
-                                                context
-                                                pathPtr pathSize
-                                                originalPtr originalSize
-                                                (fromIntegral
-                                                    (ord
-                                                        file.repositoryFileIndexStatus))
-                                                (fromIntegral
-                                                    (ord
-                                                        file.repositoryFileWorktreeStatus))
-                                emitRepositorySuccess
-                                    resultCallback
-                                    context
-                                    snapshot.snapshotId
+                                streamed <- tryAny do
+                                    withRepositorySnapshot snapshot $
+                                        invokeRepositorySnapshotCallback
+                                            snapshotCallback
+                                            context
+                                    forM_ snapshot.snapshotFiles \file ->
+                                        withText
+                                            (Text.pack file.repositoryFilePath)
+                                            \pathPtr pathSize ->
+                                        withOptionalText
+                                            (Text.pack
+                                                <$> file.repositoryFileOriginalPath)
+                                            \originalPtr originalSize ->
+                                                invokeRepositoryFileCallback
+                                                    fileCallback
+                                                    context
+                                                    pathPtr pathSize
+                                                    originalPtr originalSize
+                                                    (fromIntegral
+                                                        (ord
+                                                            file.repositoryFileIndexStatus))
+                                                    (fromIntegral
+                                                        (ord
+                                                            file.repositoryFileWorktreeStatus))
+                                case streamed of
+                                    Left exception ->
+                                        emitRepositoryFailure
+                                            resultCallback
+                                            context
+                                            (Text.pack (show exception))
+                                    Right () ->
+                                        emitRepositorySuccess
+                                            resultCallback
+                                            context
+                                            snapshot.snapshotId
                 pure (if started then 0 else 3)
 
 ha_repository_diff
@@ -745,35 +754,51 @@ ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
                                             emitRepositoryError
                                                 resultCallback context err
                                         Right (Right diff) -> do
-                                            forM_
-                                                (byteStringChunks
-                                                    (64 * 1024)
-                                                    diff.repositoryDiffPatch)
-                                                \chunk ->
-                                                    BS.useAsCStringLen chunk
-                                                        \(pointer, length) ->
-                                                            invokeRepositoryDiffCallback
-                                                                diffCallback
-                                                                context
-                                                                (castPtr pointer)
-                                                                (fromIntegral length)
-                                                                (if
-                                                                    diff.repositoryDiffBinary
-                                                                    then 1
-                                                                    else 0)
-                                            forM_ diff.repositoryDiffHunks \hunk ->
-                                                withText hunk.hunkHeader $
-                                                    \headerPtr headerLength ->
-                                                        invokeRepositoryHunkCallback
-                                                            hunkCallback
-                                                            context
-                                                            (fromIntegral hunk.hunkOldStart)
-                                                            (fromIntegral hunk.hunkOldCount)
-                                                            (fromIntegral hunk.hunkNewStart)
-                                                            (fromIntegral hunk.hunkNewCount)
-                                                            headerPtr headerLength
-                                            emitRepositorySuccess
-                                                resultCallback context expected
+                                            streamed <- tryAny do
+                                                forM_
+                                                    (byteStringChunks
+                                                        (64 * 1024)
+                                                        diff.repositoryDiffPatch)
+                                                    \chunk ->
+                                                        BS.useAsCStringLen chunk
+                                                            \(pointer, length) ->
+                                                                invokeRepositoryDiffCallback
+                                                                    diffCallback
+                                                                    context
+                                                                    (castPtr pointer)
+                                                                    (fromIntegral length)
+                                                                    (if
+                                                                        diff.repositoryDiffBinary
+                                                                        then 1
+                                                                        else 0)
+                                                forM_
+                                                    diff.repositoryDiffHunks
+                                                    \hunk ->
+                                                        withText
+                                                            hunk.hunkHeader
+                                                            \headerPtr
+                                                                headerLength ->
+                                                                    invokeRepositoryHunkCallback
+                                                                        hunkCallback
+                                                                        context
+                                                                        (fromIntegral hunk.hunkOldStart)
+                                                                        (fromIntegral hunk.hunkOldCount)
+                                                                        (fromIntegral hunk.hunkNewStart)
+                                                                        (fromIntegral hunk.hunkNewCount)
+                                                                        headerPtr
+                                                                        headerLength
+                                            case streamed of
+                                                Left exception ->
+                                                    emitRepositoryFailure
+                                                        resultCallback
+                                                        context
+                                                        (Text.pack
+                                                            (show exception))
+                                                Right () ->
+                                                    emitRepositorySuccess
+                                                        resultCallback
+                                                        context
+                                                        expected
                             pure (if started then 0 else 3)
                 Right _ -> pure 3
 
@@ -952,10 +977,11 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                         Right arguments -> do
                             checkRef <- newIORef Nothing
                             cancelRef <- newIORef False
+                            gate <- newEmptyMVar
                             owner <- asyncWithUnmask \unmask ->
-                                unmask do
-                                    result <-
-                                        RepositoryReview.startRepositoryCheck
+                                readMVar gate >> unmask do
+                                    started <- tryAny
+                                        (RepositoryReview.startRepositoryCheck
                                             (Text.unpack path)
                                             expected
                                             (Text.unpack executable)
@@ -980,16 +1006,24 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                                                         System.Exit.ExitSuccess -> 0
                                                         System.Exit.ExitFailure code ->
                                                             fromIntegral code)
-                                                    nullPtr 0)
-                                    case result of
-                                        Left err ->
+                                                    nullPtr 0))
+                                    case started of
+                                        Left exception ->
                                             withText
-                                                (RepositoryReview.repositoryErrorText err)
+                                                (Text.pack (show exception))
                                                 \errorPtr errorLength ->
                                                     invokeRepositoryCheckExitCallback
                                                         exitCallback context 0 (-1)
                                                         errorPtr errorLength
-                                        Right check -> do
+                                        Right (Left err) ->
+                                            withText
+                                                (RepositoryReview.repositoryErrorText
+                                                    err)
+                                                \errorPtr errorLength ->
+                                                    invokeRepositoryCheckExitCallback
+                                                        exitCallback context 0 (-1)
+                                                        errorPtr errorLength
+                                        Right (Right check) -> do
                                             writeIORef checkRef (Just check)
                                             cancelRequested <- readIORef cancelRef
                                             when cancelRequested
@@ -1002,6 +1036,9 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                                 , repositoryCheckOwner = owner
                                 }
                             poke outCheck (castStablePtrToPtr stable)
+                            -- No callback can begin before the owned handle is
+                            -- visible through out_check.
+                            putMVar gate ()
                             pure 0
                 Right _ -> pure 3
 

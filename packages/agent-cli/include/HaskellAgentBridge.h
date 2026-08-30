@@ -360,8 +360,11 @@ void ha_engine_destroy(void *engine);
  *
  * ha_repository_cancel_all cancels and joins accepted snapshot, diff, and
  * mutation operations before returning. Checks are owned and cancelled by
- * their explicit handles. Cancelled operations do not invoke a terminal
- * callback; after cancel_all returns, their callback contexts may be released.
+ * their explicit handles. Cancellation does not synthesize a terminal result;
+ * an operation may already have completed one before cancellation wins. No
+ * callback starts after cancel_all returns, so contexts may then be released.
+ * A streaming callback failure stops that stream and is followed by one
+ * failure terminal attempt; terminal callbacks are never retried.
  */
 int32_t ha_repository_snapshot(
     const uint8_t *path,
@@ -432,14 +435,19 @@ void ha_repository_cancel_all(void);
  * 8 MiB total argument bytes are accepted. stream is 1 for stdout and 2 for
  * stderr. Output
  * buffers are callback-scoped and ordered within each stream; the two streams
- * may interleave. exit_callback is invoked once with the process exit code,
- * or -1 plus an error if launch fails.
+ * may interleave. Output callback failures are not retried and do not prevent
+ * pipe draining. exit_callback is invoked exactly once with the process exit
+ * code, or -1 plus an error if launch fails. Its failure is not retried.
  *
  * On status 0, out_check receives an owned opaque handle. Cancel is
  * asynchronous and targets the check's process group (including descendants).
+ * The handle is stored before callbacks can begin; callbacks may begin before
+ * ha_repository_check_start itself returns and must return promptly.
  * Destroy waits for readers/process completion, frees the
  * handle, and must be called exactly once; no callbacks occur after it
- * returns. Status values match the other repository functions.
+ * returns. Cancel uses a short termination-escalation grace period; destroy
+ * also assumes callbacks return promptly. Status values match the other
+ * repository functions.
  */
 int32_t ha_repository_check_start(
     const uint8_t *path,
