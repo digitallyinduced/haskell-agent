@@ -13,6 +13,7 @@ module Agent.CLI.Input
     , readModalText
     , readApprovalLine
     , readChoiceSelection
+    , readChoiceSelectionAt
     , approvalKeyText
     , ChoiceKey(..)
     , parseChoiceKey

@@ -15,6 +15,7 @@ module Agent.CLI.Command
     , formatSlashHelpWithCatalog
     , formatSlashHelpWithSkills
     , goalInstruction
+    , initInstruction
     , lookupSlashCommand
     , lookupSlashCommandIn
     , loopScheduleInstruction
@@ -48,6 +49,7 @@ import Agent.CLI.Command.Catalog (slashCommands)
 import Agent.CLI.Command.Instructions
     ( deepResearchInstruction
     , goalInstruction
+    , initInstruction
     , loopScheduleInstruction
     , workflowInstruction
     )

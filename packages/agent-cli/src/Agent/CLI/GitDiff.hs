@@ -6,6 +6,7 @@
 module Agent.CLI.GitDiff
     ( GitCommandOutput(..)
     , GitDiffResult(..)
+    , colorizeGitDiff
     , getGitDiff
     , gitOutputText
     , runSafeGit
@@ -13,14 +14,19 @@ module Agent.CLI.GitDiff
 
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Process (terminateProcessGroup)
+import Agent.TUI.TextWidth (displayTerminalText)
+import Agent.CLI.Style (roleError, roleMuted, roleSuccess)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (void)
+import qualified Data.ByteString as ByteString
 import Data.List (intercalate, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode(..))
-import System.IO (Handle, hGetContents)
+import System.IO (Handle)
 import System.OsPath (OsPath)
 import System.Process
     ( CreateProcess(..)
@@ -61,7 +67,7 @@ getGitDiff cwd = do
                 Right overrides -> do
                     (tracked, untracked) <-
                         concurrently
-                            (runDiff cwd overrides trackedDiffArguments)
+                            (runTrackedDiff cwd overrides)
                             (runGitSuccess cwd [] untrackedListArguments)
                     case (tracked, untracked) of
                         (Left err, _) -> pure (Left err)
@@ -145,6 +151,27 @@ runUntrackedDiff cwd overrides path =
         (commonDiffArguments
             <> ["--no-index", "--", "/dev/null", path])
 
+runTrackedDiff
+    :: OsPath
+    -> [(Text, Text)]
+    -> IO (Either Text Text)
+runTrackedDiff cwd overrides =
+    runSafeGit cwd [] ["rev-parse", "--verify", "--quiet", "HEAD"] >>= \case
+        Left err -> pure (Left err)
+        Right output
+            | output.gitCommandExitCode == ExitSuccess ->
+                runDiff cwd overrides (commonDiffArguments <> ["HEAD", "--"])
+            | output.gitCommandExitCode == ExitFailure 1 -> do
+                -- In an unborn repository, staged files are compared with the
+                -- empty index while unstaged edits are compared with the index.
+                (staged, unstaged) <-
+                    concurrently
+                        (runDiff cwd overrides cachedDiffArguments)
+                        (runDiff cwd overrides trackedDiffArguments)
+                pure ((<>) <$> staged <*> unstaged)
+            | otherwise ->
+                pure (Left (gitFailure "git rev-parse HEAD" output))
+
 runDiff
     :: OsPath
     -> [(Text, Text)]
@@ -156,7 +183,7 @@ runDiff cwd overrides arguments =
         Right output
             | output.gitCommandExitCode == ExitSuccess
                 || output.gitCommandExitCode == ExitFailure 1 ->
-                    pure (Right (gitOutputText output))
+                    pure (Right (displayTerminalText (gitOutputText output)))
             | otherwise ->
                 pure (Left (gitFailure (renderGitCommand arguments) output))
 
@@ -252,6 +279,10 @@ baseConfigArguments =
 trackedDiffArguments :: [String]
 trackedDiffArguments = commonDiffArguments
 
+cachedDiffArguments :: [String]
+cachedDiffArguments =
+    "diff" : "--cached" : drop 1 commonDiffArguments
+
 commonDiffArguments :: [String]
 commonDiffArguments =
     [ "diff"
@@ -259,7 +290,7 @@ commonDiffArguments =
     , "--no-ext-diff"
     , "--submodule=short"
     , "--ignore-submodules=dirty"
-    , "--color"
+    , "--no-color"
     ]
 
 untrackedListArguments :: [String]
@@ -286,16 +317,35 @@ gitOutputText = Text.pack . (.gitCommandStdout)
 
 gitFailure :: Text -> GitCommandOutput -> Text
 gitFailure command output =
-    command
+    displayTerminalText command
         <> " failed with "
         <> Text.pack (show output.gitCommandExitCode)
         <> case Text.strip (Text.pack output.gitCommandStderr) of
             "" -> ""
-            stderr -> ": " <> stderr
+            stderr -> ": " <> displayTerminalText stderr
 
 renderGitCommand :: [String] -> Text
 renderGitCommand arguments =
-    Text.pack (intercalate " " ("git" : arguments))
+    displayTerminalText (Text.pack (intercalate " " ("git" : arguments)))
+
+-- | Add inert terminal color after Git output has been stripped of all
+-- repository-controlled escape and control characters.
+colorizeGitDiff :: Bool -> Text -> Text
+colorizeGitDiff False = id
+colorizeGitDiff True =
+    Text.intercalate "\n" . map colorLine . Text.splitOn "\n"
+  where
+    colorLine line
+        | "+++ " `Text.isPrefixOf` line
+            || "--- " `Text.isPrefixOf` line =
+                roleMuted True line
+        | "+" `Text.isPrefixOf` line = roleSuccess True line
+        | "-" `Text.isPrefixOf` line = roleError True line
+        | "@@" `Text.isPrefixOf` line
+            || "diff --git " `Text.isPrefixOf` line
+            || "index " `Text.isPrefixOf` line =
+                roleMuted True line
+        | otherwise = line
 
 gitCommandTimeoutMicros :: Int
 gitCommandTimeoutMicros = 30 * 1_000_000
@@ -305,6 +355,7 @@ processCleanupTimeoutMicros = 2 * 1_000_000
 
 readHandleStrict :: Handle -> IO String
 readHandleStrict handle = do
-    contents <- hGetContents handle
-    let size = length contents
-    size `seq` pure contents
+    contents <- ByteString.hGetContents handle
+    pure
+        (Text.unpack
+            (Text.decodeUtf8With lenientDecode contents))

@@ -16,7 +16,7 @@ import Agent.CLI.Session
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.TUI.History (HistoryTurn(historyTurnBlocks))
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
-import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.OsPath (unsafeToFilePath)
 import Agent.TUI.Model
     ( BlockKind(..)
     , UiBlock(..)
@@ -26,11 +26,12 @@ import Control.Exception.Safe
     , displayException
     , tryAny
     )
+import qualified Data.ByteString as ByteString
 import Data.Foldable (toList)
 import Data.List (findIndex)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Directory.OsPath
     ( doesDirectoryExist
     , getHomeDirectory
@@ -65,7 +66,8 @@ renderTranscriptMarkdown :: [SessionTurn] -> Text
 renderTranscriptMarkdown turns =
     let blocks =
             concat
-                [ toList (historyTurnBlocks (sessionHistoryTurn index turn))
+                [ toList
+                    ((sessionHistoryTurn index turn).historyTurnBlocks)
                 | (index, turn) <- zip [0 :: Int ..] (visibleSessionTurns turns)
                 ]
         sections = map renderBlock (filter useful blocks)
@@ -135,11 +137,12 @@ saveTranscriptNoClobber target markdown = do
                         _ <- tryAny (removeFile (unsafeEncodeUtf tmp))
                         pure ())
                     \(tmp, handle) -> do
-                        Text.hPutStr handle markdown
+                        ByteString.hPut handle
+                            (TextEncoding.encodeUtf8 markdown)
                         hClose handle
                         createLink tmp (unsafeToFilePath target)
-                        removeFile (unsafeEncodeUtf tmp)
+                        _ <- tryAny (removeFile (unsafeEncodeUtf tmp))
+                        pure ()
             pure $ case result of
                 Left err -> Left (Text.pack (displayException err))
                 Right () -> Right ()
-

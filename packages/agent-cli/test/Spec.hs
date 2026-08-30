@@ -28,6 +28,7 @@ import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
+import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
@@ -58,6 +59,7 @@ import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
+import qualified Agent.CLI.ReviewSpec as ReviewSpec
 import qualified Agent.CLI.SecretSpec as SecretSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SessionHistorySpec as SessionHistorySpec
@@ -68,6 +70,7 @@ import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TranscriptSpec as TranscriptSpec
+import qualified Agent.CLI.TranscriptExportSpec as TranscriptExportSpec
 import qualified Agent.CLI.TurnSpec as TurnSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
@@ -112,6 +115,7 @@ main = hspec do
     FileUriSpec.spec
     GatewayBridgeSpec.spec
     GatewayClientSpec.spec
+    GitDiffSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
     InterruptSpec.spec
@@ -142,11 +146,13 @@ main = hspec do
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
+    ReviewSpec.spec
     SecretSpec.spec
     StyleSpec.spec
     SessionHistorySpec.spec
     TimestampSpec.spec
     TranscriptSpec.spec
+    TranscriptExportSpec.spec
     TurnSpec.spec
     TerminalSpec.spec
     TextLayoutSpec.spec

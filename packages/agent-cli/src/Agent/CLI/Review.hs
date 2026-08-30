@@ -13,6 +13,7 @@ import Agent.CLI.GitDiff
     , gitOutputText
     , runSafeGit
     )
+import Agent.TUI.TextWidth (displayTerminalText)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -171,7 +172,8 @@ parseCommit raw =
                 Just ReviewCommit
                     { reviewCommitHash = hash
                     , reviewCommitShortHash = shortHash
-                    , reviewCommitSubject = Text.strip subject
+                    , reviewCommitSubject =
+                        displayTerminalText (Text.strip subject)
                     }
         _ -> Nothing
 
@@ -193,4 +195,4 @@ commandFailure command output =
         <> Text.pack (show output.gitCommandExitCode)
         <> case Text.strip (Text.pack output.gitCommandStderr) of
             "" -> ""
-            stderr -> ": " <> stderr
+            stderr -> ": " <> displayTerminalText stderr

@@ -33,6 +33,7 @@ spec = describe "Agent.CLI.GitDiff" do
     it "includes tracked changes and NUL-delimited untracked paths" $
         withTempGitRepo \repo -> do
             writeUtf8 (repo </> fromText "README") "changed\n"
+            git repo ["add", "README"]
             writeUtf8 (repo </> fromText "new file.txt") "new\n"
             writeUtf8 (repo </> fromText "line\nbreak.txt") "odd\n"
 
@@ -43,6 +44,16 @@ spec = describe "Agent.CLI.GitDiff" do
             diff `shouldSatisfy` Text.isInfixOf "new file.txt"
             diff `shouldSatisfy` Text.isInfixOf "break.txt"
             diff `shouldSatisfy` Text.isInfixOf "odd"
+
+    it "includes staged files in an unborn repository" $
+        withTempDir "agent-git-diff-unborn-" \repo -> do
+            git repo ["init"]
+            writeUtf8 (repo </> fromText "first") "staged\n"
+            git repo ["add", "first"]
+
+            diff <- expectDiff =<< getGitDiff repo
+            diff `shouldSatisfy` Text.isInfixOf "first"
+            diff `shouldSatisfy` Text.isInfixOf "+staged"
 
     it "does not execute configured clean or textconv helpers" $
         withTempGitRepo \repo -> do
@@ -69,6 +80,18 @@ spec = describe "Agent.CLI.GitDiff" do
             _ <- expectDiff result
             Directory.doesPathExist (unsafeToFilePath marker)
                 `shouldReturn` False
+
+    it "renders repository-controlled terminal escapes inert" $
+        withTempGitRepo \repo -> do
+            writeUtf8
+                (repo </> fromText "README")
+                "hello\n\ESC]52;c;ZXZpbA==\BEL\rhidden\n"
+
+            diff <- expectDiff =<< getGitDiff repo
+            diff `shouldSatisfy` (not . Text.elem '\ESC')
+            diff `shouldSatisfy` (not . Text.elem '\BEL')
+            diff `shouldSatisfy` (not . Text.elem '\r')
+            diff `shouldSatisfy` Text.isInfixOf "␛]52;c;ZXZpbA==␇"
 
 expectDiff :: Either Text GitDiffResult -> IO Text
 expectDiff = \case

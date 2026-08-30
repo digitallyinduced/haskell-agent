@@ -127,19 +127,15 @@ import Control.Monad.Trans.Except
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.Bits (xor)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import Data.Word (Word64)
 import qualified Data.Vector as Vector
 import Numeric (showHex)
 import System.Directory.OsPath
@@ -301,7 +297,7 @@ forkSession
     -> Maybe Text
     -> IO (Either Text SessionHandle)
 forkSession root source turns requestedTitle
-    | not (any substantiveTurn turns) =
+    | not (any substantiveTurn (activeTranscriptTurns turns)) =
         pure (Left "a session must contain at least one turn before it can be forked")
     | otherwise = mask \restore -> do
         allocated <- tryIO (restore (allocateSessionTemp root))
@@ -336,12 +332,10 @@ forkSession root source turns requestedTitle
                                     storedMeta
                                 cleanupFiles
                         prepared <- tryIO $
-                            restore
-                                (prepareForkDirectory source.sessionDir dir)
-                                `onException` cleanupFiles
+                            restore (prepareForkDirectory source.sessionDir dir)
                         case prepared of
                             Left err -> do
-                                cleanupFiles
+                                cleanupForkFiles root sessionId Nothing
                                 pure
                                     (Left
                                         ("could not copy fork session artifacts: "
@@ -377,6 +371,12 @@ substantiveTurn turn =
             || not (null turn.turnItems)
            )
 
+activeTranscriptTurns :: [SessionTurn] -> [SessionTurn]
+activeTranscriptTurns =
+    reverse
+        . takeWhile ((/= TranscriptReset) . (.turnEffect))
+        . reverse
+
 forkedMetadata
     :: UTCTime
     -> Text
@@ -407,15 +407,19 @@ forkedMetadata now sessionId requestedTitle source =
 prepareForkDirectory :: OsPath -> OsPath -> IO ()
 prepareForkDirectory sourceDir destinationDir = do
     createDirectory destinationDir
-    setFileMode (unsafeToFilePath destinationDir) 0o700
-    copyOptionalArtifact
-        ArtifactRegularFile
-        (sourceDir </> unsafeEncodeUtf "plan.md")
-        (destinationDir </> unsafeEncodeUtf "plan.md")
-    copyOptionalArtifact
-        ArtifactDirectory
-        (sourceDir </> unsafeEncodeUtf "agents")
-        (destinationDir </> unsafeEncodeUtf "agents")
+    (do
+        setFileMode (unsafeToFilePath destinationDir) 0o700
+        copyOptionalArtifact
+            ArtifactRegularFile
+            (sourceDir </> unsafeEncodeUtf "plan.md")
+            (destinationDir </> unsafeEncodeUtf "plan.md")
+        copyOptionalArtifact
+            ArtifactDirectory
+            (sourceDir </> unsafeEncodeUtf "agents")
+            (destinationDir </> unsafeEncodeUtf "agents"))
+        `onException` do
+            _ <- tryIO (removePathForcibly destinationDir)
+            pure ()
 
 data ArtifactKind
     = ArtifactRegularFile
@@ -1152,7 +1156,9 @@ allocateSessionTemp root = do
                     root </> unsafeEncodeUtf (Text.unpack sessionId)
                 tempDir =
                     tempRoot </> unsafeEncodeUtf (Text.unpack sessionId)
-            durableExists <- doesDirectoryExist durableDir
+            durableExists <-
+                maybe False (const True)
+                    <$> symbolicLinkStatusMaybe durableDir
             if durableExists
                 then go tempRoot now (attempt + 1)
                 else tryIO (createDirectory tempDir) >>= \case

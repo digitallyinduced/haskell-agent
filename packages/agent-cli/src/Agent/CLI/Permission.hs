@@ -12,6 +12,7 @@ module Agent.CLI.Permission
     , ApprovalPolicyState(..)
     , initialApprovalPolicyState
     , applyApprovalPolicyKey
+    , approvalPolicyOptions
     , renderApprovalPolicyFrame
     ) where
 
@@ -64,6 +65,22 @@ approvalPolicyChoices =
     , ChooseApproveAll
     ]
 
+approvalPolicyOptions :: [(ApprovalPolicy, Text, Text)]
+approvalPolicyOptions =
+    [ ( PromptMutating
+      , "Ask before changes"
+      , "Prompt before mutating tools"
+      )
+    , ( DenyMutating
+      , "Read-only for this session"
+      , "Block all mutating tools"
+      )
+    , ( ApproveAll
+      , "Full access for this project"
+      , "Automatically approve mutating tools"
+      )
+    ]
+
 choicePolicy :: ApprovalPolicyChoice -> ApprovalPolicy
 choicePolicy = \case
     ChoosePromptMutating -> PromptMutating
@@ -90,7 +107,8 @@ applyApprovalPolicyKey key state = case key of
     PickerKeyConfirm ->
         Left
             (ApprovalPolicySelected
-                (choicePolicy (approvalPolicyChoices !! approvalPolicyIndex state)))
+                (choicePolicy
+                    (approvalPolicyChoices !! state.approvalPolicyIndex)))
     PickerKeyUp -> Right (move (-1) state)
     PickerKeyDown -> Right (move 1 state)
     PickerKeyChar c -> case Text.toLower (Text.singleton c) of
@@ -103,20 +121,19 @@ applyApprovalPolicyKey key state = case key of
     move delta current =
         current
             { approvalPolicyIndex =
-                (approvalPolicyIndex current + delta)
+                (current.approvalPolicyIndex + delta)
                     `mod` length approvalPolicyChoices
             }
 
 renderApprovalPolicyFrame :: Bool -> ApprovalPolicyState -> Text
 renderApprovalPolicyFrame color state =
     let labels =
-            [ ("Ask before changes", "Prompt before mutating tools")
-            , ("Read-only for this session", "Block all mutating tools")
-            , ("Full access for this project", "Automatically approve tools")
+            [ (label, detail)
+            | (_, label, detail) <- approvalPolicyOptions
             ]
         rows = zipWith
             (\i (label, detail) ->
-                renderRow color (i == approvalPolicyIndex state)
+                renderRow color (i == state.approvalPolicyIndex)
                     (label <> " — " <> roleMuted color detail))
             [0 ..] labels
     in Text.intercalate "\n"

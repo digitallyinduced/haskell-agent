@@ -817,6 +817,47 @@ spec = describe "Agent.CLI.Session" do
                         expectationFailure
                             ("unexpected fork: " <> show forked.sessionMeta.metaId)
 
+        it "requires a substantive turn after the latest reset before forking" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                source0 <- createSession (testCreate pool root)
+                let sourceTurn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "old conversation"
+                        , turnAssistantText = Just "old answer"
+                        , turnError = Nothing
+                        , turnResponseId = Just "old-response"
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        , turnEffect = TranscriptAppend
+                        }
+                source <- appendTurn source0 sourceTurn
+                let reset = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "/clear"
+                        , turnAssistantText = Just "Conversation cleared."
+                        , turnError = Nothing
+                        , turnResponseId = Nothing
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        , turnEffect = TranscriptReset
+                        }
+                resetSource <- appendTurnKeepTitle source reset
+
+                forkSession
+                    root resetSource
+                    [ sourceTurn
+                    , reset
+                    ]
+                    Nothing >>= \case
+                        Left err ->
+                            err `shouldBe`
+                                "a session must contain at least one turn before it can be forked"
+                        Right forked ->
+                            expectationFailure
+                                ("unexpected fork: "
+                                    <> show forked.sessionMeta.metaId)
+
         it "round-trips and clears ephemeral session activity" $
             withTempStore \store root -> do
                 let pool = trustedPool store

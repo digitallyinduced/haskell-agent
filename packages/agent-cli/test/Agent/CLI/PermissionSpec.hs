@@ -65,9 +65,9 @@ spec = do
 
     describe "approval policy picker" do
         it "selects the current policy" do
-            approvalPolicyIndex (initialApprovalPolicyState ApproveAll)
+            (initialApprovalPolicyState ApproveAll).approvalPolicyIndex
                 `shouldBe` 2
-            approvalPolicyIndex (initialApprovalPolicyState DenyMutating)
+            (initialApprovalPolicyState DenyMutating).approvalPolicyIndex
                 `shouldBe` 1
 
         it "maps shortcuts and confirmation" do

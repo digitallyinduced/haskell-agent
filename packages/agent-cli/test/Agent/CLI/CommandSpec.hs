@@ -1,7 +1,6 @@
 module Agent.CLI.CommandSpec (spec) where
 
 import Agent.CLI.Command
-import Agent.CLI.Command.Instructions (initInstruction)
 import Agent.CLI.Afk
 import Agent.Dialect (DialectId(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
@@ -496,7 +495,8 @@ spec = do
                     map
                         (("/" <>) . (.slashName))
                         defaultSlashCatalog.slashCatalogCommands
-            displays "/mo" 3 `shouldBe` ["/model", "/codemod"]
+            displays "/mo" 3
+                `shouldBe` ["/model", "/codemod", "/permissions"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 

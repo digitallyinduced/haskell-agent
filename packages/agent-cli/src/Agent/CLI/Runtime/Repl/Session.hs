@@ -18,7 +18,7 @@ import Agent.CLI.Command
       currentModel,
       ReplAction(ReplRenameAuto, ReplResume, ReplSearch, ReplClear,
                  ReplNew, ReplShowSession, ReplShowSessionInfo, ReplAfk,
-                 ReplWorktree, ReplRename),
+                 ReplWorktree, ReplRename, ReplFork),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
       SlashCatalog(slashCatalogToolNames) )
 import Agent.CLI.Compaction ()
@@ -69,6 +69,8 @@ import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReset),
       appendTurnKeepTitleIndexed,
       createSession,
+      deleteSession,
+      forkSession,
       loadSession,
       removeSessionTemp,
       resetSessionTitleToAuto,
@@ -85,14 +87,17 @@ import Agent.CLI.Session
       SessionMeta(metaTitle, metaLastResponseId, metaUpdatedAt,
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
-                  metaId, metaCwd),
+                  metaId, metaCwd, metaTitleUserTurns),
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
                   turnItems) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
-import Agent.CLI.Session.History ()
+import Agent.CLI.Session.History
+    ( durableTranscriptCheckpoint
+    , retargetLiveTranscript
+    )
 import Agent.CLI.Session.Interaction ()
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types ()
@@ -164,7 +169,8 @@ import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ()
 import Control.Exception ()
-import Control.Exception.Safe ( finally )
+import Control.Exception.Safe
+    ( displayException, finally, mask_, tryAny )
 import Control.Monad ( forM_ )
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ()
@@ -191,7 +197,7 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ( toAscList )
-import qualified Data.Text as Text ( intercalate, null, unlines )
+import qualified Data.Text as Text ( intercalate, pack, unlines )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -380,6 +386,69 @@ handleSessionAction
                         (roleMuted color
                             (glyphOk <> message))
                 continue
+    ReplFork requestedTitle -> do
+        color <- resolveColor stderr
+        case persist of
+            PersistenceDisabled -> do
+                let message =
+                        "session forking requires a persisted session"
+                displayError message $
+                    Text.hPutStrLn stderr
+                        (roleError color message)
+                continue
+            PersistenceEnabled slotRef ->
+                readIORef slotRef >>= \case
+                    PersistencePending{} -> do
+                        let message =
+                                "a session must contain at least one turn before it can be forked"
+                        displayError message $
+                            Text.hPutStrLn stderr
+                                (roleError color message)
+                        continue
+                    PersistenceActive source -> do
+                        let root = takeDirectory source.sessionDir
+                        result <-
+                            withReplActivity \report -> do
+                                report "Forking session…"
+                                loadSession
+                                    databasePool
+                                    root
+                                    source.sessionMeta.metaId >>= \case
+                                        Left err ->
+                                            pure (Left err)
+                                        Right (meta, turns) ->
+                                            forkSession
+                                                root
+                                                source { sessionMeta = meta }
+                                                turns
+                                                requestedTitle
+                        case result of
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                                continue
+                            Right forked -> do
+                                installed <-
+                                    installFork
+                                        slotRef
+                                        source
+                                        forked
+                                case installed of
+                                    Left err -> do
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                        continue
+                                    Right () -> do
+                                        let message =
+                                                "forked session: "
+                                                    <> forked.sessionMeta.metaId
+                                        displayInfo message $
+                                            Text.hPutStrLn stderr
+                                                (roleMuted color
+                                                    (glyphOk <> message))
+                                        continue
     ReplShowSession -> do
         color <- resolveColor stdout
         case persist of
@@ -640,6 +709,69 @@ handleSessionAction
         continue
     _ -> error "handleSessionAction: unsupported action"
   where
+    installFork slotRef source forked = mask_ do
+        prepared <- tryAny do
+            env.sessionSetTempDir forked.sessionTempDir
+            forM_ fullscreen \runtime ->
+                reloadFullscreenHistoryForHandle runtime forked
+            retargetLiveTranscript
+                env.sessionConversation
+                (durableTranscriptCheckpoint
+                    databasePool
+                    (takeDirectory forked.sessionDir)
+                    forked.sessionMeta.metaId)
+        case prepared of
+            Left err -> rollbackBeforeClaim err
+            Right () ->
+                tryAny (env.sessionOnPersisted forked) >>= \case
+                    Left err -> rollbackBeforeClaim err
+                    Right () -> do
+                        -- With the new lock held, all remaining state changes
+                        -- are non-blocking IORef swaps. Keep the live
+                        -- conversation and response parent unchanged.
+                        writeIORef slotRef (PersistenceActive forked)
+                        writeIORef planMode.planSessionDir
+                            (Just forked.sessionDir)
+                        writeIORef storeRoot (Just forked.sessionDir)
+                        writeIORef
+                            env.sessionTitleTurnCount
+                            forked.sessionMeta.metaTitleUserTurns
+                        _ <- tryAny $
+                            setWindowTitle
+                                (cliWindowTitle
+                                    forked.sessionMeta.metaCwd
+                                    (Just forked.sessionMeta.metaTitle))
+                        pure (Right ())
+      where
+        rollbackBeforeClaim err = do
+            _ <- tryAny
+                (env.sessionSetTempDir source.sessionTempDir)
+            _ <- tryAny $
+                forM_ fullscreen \runtime ->
+                    reloadFullscreenHistoryForHandle runtime source
+            _ <- tryAny $
+                retargetLiveTranscript
+                    env.sessionConversation
+                    (durableTranscriptCheckpoint
+                        databasePool
+                        (takeDirectory source.sessionDir)
+                        source.sessionMeta.metaId)
+            cleanup <-
+                deleteSession
+                    databasePool
+                    (takeDirectory forked.sessionDir)
+                    forked.sessionMeta.metaId
+            let base =
+                    "could not activate forked session: "
+                        <> Text.pack (displayException err)
+            pure $
+                Left $
+                    case cleanup of
+                        Right () -> base
+                        Left cleanupErr ->
+                            base
+                                <> "; cleanup also failed: "
+                                <> cleanupErr
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event

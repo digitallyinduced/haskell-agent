@@ -863,8 +863,9 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
             , loopMaxTurns = runtime.subagentOptions.optMaxTurns
             , loopOnEvent = onEvent
             , loopApprove =
-                \call ->
-                    childApprove runtime.subagentPolicy toolRegistry call
+                \call -> do
+                    policy <- readIORef runtime.subagentPolicy
+                    childApprove policy toolRegistry call
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
             , loopCancel = env.subCancel

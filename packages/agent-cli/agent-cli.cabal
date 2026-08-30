@@ -173,6 +173,7 @@ library
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
                     , Agent.CLI.GatewayClient
+                    , Agent.CLI.GitDiff
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
                     , Agent.CLI.Input.Display
@@ -206,6 +207,7 @@ library
                     , Agent.CLI.Prompt
                     , Agent.CLI.Recap
                     , Agent.CLI.Request
+                    , Agent.CLI.Review
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
                     , Agent.CLI.ProviderTransition
@@ -231,6 +233,7 @@ library
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Transcript
+                    , Agent.CLI.TranscriptExport
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
@@ -424,6 +427,7 @@ test-suite agent-cli-test
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.GatewayClientSpec
+                    , Agent.CLI.GitDiffSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
@@ -455,6 +459,7 @@ test-suite agent-cli-test
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
+                    , Agent.CLI.ReviewSpec
                     , Agent.CLI.SecretSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
@@ -462,6 +467,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TranscriptSpec
                     , Agent.CLI.TurnSpec
+                    , Agent.CLI.TranscriptExportSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionHistorySpec
                     , Agent.CLI.SessionStateSpec
