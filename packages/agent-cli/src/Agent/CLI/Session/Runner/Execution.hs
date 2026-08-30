@@ -330,6 +330,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 resetBackendState
                 conversationRef
                 planMode
+            clearImageGenerationHistory
             writeIORef usageRef emptyTokenUsage
             modifyIORef' renderStateRef clearRenderTokenRate
             writeIORef lastAssistantRef Nothing
@@ -665,7 +666,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             toolRegistry
                             call
                         emitLoop (ToolFinished result)
-                        pure (Right result.output)
+                        pure (Right result)
     btwRequests <- newChan
     recapRequests <- newChan
     let
@@ -738,6 +739,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionConnection = connectionId
             , sessionModelCatalog = catalog
             , sessionDialect = dialect
+            , sessionRecordImageGenerationInputs =
+                recordImageGenerationInputs
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
             , sessionConversation = conversationRef

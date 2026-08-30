@@ -77,6 +77,8 @@ module Agent.CLI.TUI.App
     , syntaxLanguagesForBlocks
     , uiEventRestartsMotionSchedule
     , applyTextPromptEdit
+    , applyMetaConsoleEdit
+    , isMetaConsoleToggle
     , maskedSecretText
     , normalizeTextOverlayInsertion
     , textOverlayDisplayText

@@ -16,6 +16,7 @@ module Agent.CLI.TUI.Types
     , HistoryCommit(..)
     , FullscreenRuntime(..)
     , FullscreenSessionActions(..)
+    , MetaConsoleOverlay(..)
     , Name(..)
     , PendingAppEvent(..)
     , PendingUiEvent(..)
@@ -107,6 +108,7 @@ data Name
     | PermissionRow !Int
     | SlashRow !Int
     | OverlayCursor
+    | MetaConsoleCursor
     | AgentPane
     | AgentRow !AgentTarget
     | AgentPopover !AgentTarget
@@ -300,6 +302,7 @@ data AppState = AppState
     , appResumeSearch :: !(Maybe (Text -> IO (Either Text [ResumeEntry])))
     , appTextPrompt :: !(Maybe TextOverlay)
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
+    , appMetaConsole :: !(Maybe MetaConsoleOverlay)
     , appSlashDismissed :: !Bool
     , appPasted :: !Bool
     , appHistory :: ![Text]
@@ -415,6 +418,11 @@ data TextOverlay = TextOverlay
     , textDraft :: !Text
     , textCursor :: !Int
     , textInputMode :: !TextInputMode
+    }
+
+data MetaConsoleOverlay = MetaConsoleOverlay
+    { metaConsoleDraft :: !Text
+    , metaConsoleCursor :: !Int
     }
 
 data TextInputMode

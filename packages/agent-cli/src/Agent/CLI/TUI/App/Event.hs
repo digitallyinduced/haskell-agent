@@ -215,6 +215,7 @@ handleEvent event = do
             isNothing state.appTextPrompt
                 && isNothing state.appChoice
                 && isNothing state.appResume
+                && isNothing state.appMetaConsole
                 && isNothing state.appUi.uiPermission
                 && isNothing state.appAgentHover
     liftIO do
@@ -770,8 +771,9 @@ handleEventInner event = case event of
                 case ( state.appTextPrompt
                      , state.appChoice
                      , state.appUi.uiPermission
+                     , state.appMetaConsole
                      ) of
-                    (Just _, _, _) ->
+                    (Just _, _, _, _) ->
                         case button of
                             V.BScrollUp ->
                                 vScrollBy
@@ -782,7 +784,9 @@ handleEventInner event = case event of
                                     (viewportScroll OverlayViewport)
                                     mouseScrollLines
                             _ -> pure ()
-                    (Nothing, Nothing, Nothing) ->
+                    (Nothing, Nothing, Nothing, Just _) ->
+                        pure ()
+                    (Nothing, Nothing, Nothing, Nothing) ->
                         case (name, button) of
                             (ComposerModel, V.BLeft) ->
                                 Composer.handleControlMouseDown ComposerModel
@@ -827,7 +831,7 @@ handleEventInner event = case event of
                             (link@MarkdownLink{}, V.BLeft) ->
                                 Composer.handleControlMouseDown link
                             _ -> handleMouseDown name button
-                    (Nothing, Just _, _) ->
+                    (Nothing, Just _, _, _) ->
                         case (name, button) of
                             (ChoiceRow index, V.BLeft) ->
                                 Composer.handleControlMouseDown (ChoiceRow index)
@@ -844,7 +848,7 @@ handleEventInner event = case event of
                                     (viewportScroll OverlayViewport)
                                     mouseScrollLines
                             _ -> pure ()
-                    (Nothing, Nothing, Just _) ->
+                    (Nothing, Nothing, Just _, _) ->
                         case (name, button) of
                             (PermissionRow index, V.BLeft) ->
                                 resolvePermission (permissionChoiceAt index)
@@ -902,15 +906,39 @@ handleEventInner event = case event of
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
-        case state.appResume of
-            Just _ -> handleResumeKey vtyEvent
-            Nothing ->
-                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-                    (Just _, _, _) -> handleTextPromptKey vtyEvent
-                    (Nothing, Just _, _) -> handleChoiceKey vtyEvent
-                    (Nothing, Nothing, Just _) -> handlePermissionKey vtyEvent
-                    (Nothing, Nothing, Nothing) -> handleNormalKey vtyEvent
+        if isMetaConsoleToggle vtyEvent && metaConsoleToggleAvailable state
+            then
+                case state.appMetaConsole of
+                    Just _ -> closeMetaConsole
+                    Nothing -> openMetaConsole
+            else
+                case state.appResume of
+                    Just _ -> handleResumeKey vtyEvent
+                    Nothing ->
+                        case
+                            ( state.appTextPrompt
+                            , state.appChoice
+                            , state.appUi.uiPermission
+                            , state.appMetaConsole
+                            )
+                        of
+                            (Just _, _, _, _) -> handleTextPromptKey vtyEvent
+                            (Nothing, Just _, _, _) -> handleChoiceKey vtyEvent
+                            (Nothing, Nothing, Just _, _) ->
+                                handlePermissionKey vtyEvent
+                            (Nothing, Nothing, Nothing, Just _) ->
+                                handleMetaConsoleKey vtyEvent
+                            (Nothing, Nothing, Nothing, Nothing) ->
+                                handleNormalKey vtyEvent
     _ -> pure ()
+
+metaConsoleToggleAvailable :: AppState -> Bool
+metaConsoleToggleAvailable state =
+    isNothing state.appResume
+        && isNothing state.appTextPrompt
+        && isNothing state.appChoice
+        && isNothing state.appUi.uiPermission
+        && isNothing state.appDictation
 
 handlePermissionKey :: V.Event -> EventM Name AppState ()
 handlePermissionKey = \case
