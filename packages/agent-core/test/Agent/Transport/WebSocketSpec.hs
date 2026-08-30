@@ -109,6 +109,12 @@ spec = describe "Agent.Transport.WebSocket" do
         let exception = transientHandshakeException 403
         wsHandshakeAuthFailureStatus exception `shouldBe` Nothing
         wsHandshakeAuthFailure exception `shouldBe` Nothing
+        webSocketHandshakeFailureStatus
+            (HttpError 403 "WebSocket handshake returned HTTP 403")
+            `shouldBe` Just 403
+        webSocketHandshakeFailureStatus
+            (HttpError 403 "request forbidden after connection")
+            `shouldBe` Nothing
 
         result <- retryTransientWsConnectWithPolicy
             (constantDelay 0 <> limitRetries 3)
