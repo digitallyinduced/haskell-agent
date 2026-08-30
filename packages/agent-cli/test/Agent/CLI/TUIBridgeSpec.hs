@@ -202,7 +202,9 @@ spec = describe "fullscreen TUI bridge" do
         setFullscreenSessionActions
             runtime
             (modifyIORef' calls (<> ["new cancel"]))
-            (const (modifyIORef' calls (<> ["new steer"])))
+            (const
+                (modifyIORef' calls (<> ["new steer"])
+                    >> pure (Right ())))
             (const (modifyIORef' calls (<> ["new btw"])))
             (modifyIORef' calls (<> ["new recap"]))
             (const (modifyIORef' calls (<> ["new effort"])))

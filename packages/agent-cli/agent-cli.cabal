@@ -107,7 +107,6 @@ library
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
                     , Agent.CLI.SessionAdmin
-                    , Agent.CLI.SteeringInputs
                     , Agent.CLI.Startup.Auth
                     , Agent.CLI.StartupContext
                     , Agent.CLI.Startup.Format
@@ -217,6 +216,7 @@ library
                     , Agent.CLI.Secret
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
+                    , Agent.CLI.SteeringInputs
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style
