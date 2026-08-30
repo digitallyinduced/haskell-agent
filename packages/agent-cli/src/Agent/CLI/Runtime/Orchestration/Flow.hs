@@ -90,7 +90,8 @@ import Agent.CLI.Runtime.Types
     ( DevResult(..), PreparedAgent(..), RunResult(..) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
-    ( loadActiveSession,
+    ( deleteSession,
+      loadActiveSession,
       loadRecentSessionTurns,
       sessionDirForId,
       sessionsRoot,
@@ -122,7 +123,7 @@ import Agent.CLI.Startup.Auth
     ( recordStartupTiming, setStartupNotice )
 import Agent.CLI.StartupContext ()
 import Agent.CLI.Style
-    ( glyphSession, roleMuted, setCliWindowTitle )
+    ( glyphOk, glyphSession, roleError, roleMuted, setCliWindowTitle )
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer,
@@ -283,6 +284,46 @@ runAgentWithRuntime processRuntime runMode options = do
                             , optResume = Just sessionId
                             }
                         Nothing
+            RunDeleteSession sessionId cwd -> do
+                home <- getHomeDirectory
+                config <- managedPostgresConfigForHome home
+                deletion <-
+                    openStore config >>= \case
+                        Left err ->
+                            pure (Left (renderStoreError err))
+                        Right store ->
+                            deleteSession
+                                (trustedPool store)
+                                (sessionsRoot home)
+                                sessionId
+                                `finally` closeStore store
+                color <- resolveColor runMode.runStderr
+                case deletion of
+                    Left err -> do
+                        putTextLn runMode.runStderr
+                            (roleError color
+                                ("could not delete session "
+                                    <> sessionId
+                                    <> ": "
+                                    <> err))
+                        pure DevQuit
+                    Right () -> do
+                        putTextLn runMode.runStderr
+                            (roleMuted color
+                                (glyphOk
+                                    <> "deleted session "
+                                    <> sessionId))
+                        newSessionState >>= \nextState ->
+                            go fullscreenInputs nextState
+                                current
+                                    { optCwd = Just cwd
+                                    , optWorktree = False
+                                    , optPrompt = Nothing
+                                    , optPromptFile = Nothing
+                                    , optManagedTurnFile = Nothing
+                                    , optResume = Nothing
+                                    }
+                                Nothing
             RunSwitchWorktree path provider model effort ->
                 newSessionState >>= \nextState ->
                     go fullscreenInputs nextState

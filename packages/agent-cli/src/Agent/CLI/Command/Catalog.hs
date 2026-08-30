@@ -41,12 +41,13 @@ slashCommands =
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
+    , cmd "delete" [] "/delete" "Delete the current session and start fresh" False
     , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts" False
     , cmd "reload-auth" [] "/reload-auth" "Re-read provider credentials" False
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal" True
     , cmd "attachments" [] "/attachments" "List queued clipboard images" False
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images" False
-    , cmd "copy" ["copy-last"] "/copy" "Copy the last assistant response" False
+    , cmd "copy" ["copy-last"] "/copy [N] [PATH]" "Copy an assistant response to the clipboard or a file" True
     , cmd "copy-code" [] "/copy-code [N]" "Copy fenced code block N from the last response" True
     , cmd "copy-diff" [] "/copy-diff" "Copy the last diff block" False
     , cmd "copy-path" [] "/copy-path" "Copy the active worktree path" False

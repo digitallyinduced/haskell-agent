@@ -16,7 +16,8 @@ import Agent.CLI.Artifact ( fencedCodeBlock, lastDiffBlock )
 import Agent.CLI.Auth ()
 import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
-    ( formatSlashHelpWithCatalog,
+    ( CopyRequest(..),
+      formatSlashHelpWithCatalog,
       parseReplLineWithCatalog,
       ReplAction(ReplCommandError, ReplQuit, ReplReload, ReplPrompt,
                  ReplExpandedPrompt, ReplInvokeSkill, ReplSkills, ReplShowShell,
@@ -24,7 +25,7 @@ import Agent.CLI.Command
                  ReplRemoveAttachment,
                  ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp, ReplMcpPrompt,
                  ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
-                 ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopyLast,
+                 ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopy,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplDesktop,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
@@ -32,7 +33,7 @@ import Agent.CLI.Command
                  ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplViewPlan, ReplQueue, ReplTranscript, ReplEditPrompt,
                  ReplContext, ReplHistory, ReplFind,
-                 ReplBtw, ReplMetaConsole, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
+                 ReplBtw, ReplMetaConsole, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew, ReplDelete,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplInit, ReplReview, ReplDiff,
                  ReplFork, ReplExport, ReplPermissions,
@@ -52,7 +53,8 @@ import Agent.CLI.Config
     )
 import Agent.CLI.Context ( formatContextReport )
 import Agent.CLI.Transcript
-    ( foldTranscriptTurns
+    ( assistantResponseBodies
+    , foldTranscriptTurns
     )
 import qualified Agent.CLI.Transcript as Transcript
 import Agent.CLI.Connectivity ()
@@ -222,6 +224,7 @@ import Agent.CLI.Terminal
 import Agent.CLI.TranscriptExport
     ( defaultExportFileName
     , resolveExportPath
+    , saveCopyText
     , saveTranscriptNoClobber
     )
 import qualified Agent.CLI.TranscriptExport as TranscriptExport
@@ -732,12 +735,40 @@ handleReplLine
                     action@ReplGoalSet{} -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplWorkflowRuns -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplWorkflowManage{} -> handleWorkflowAction env submitExpandedTurn color continue action
-                    ReplCopyLast -> do
-                        answer <- readIORef lastAssistantRef
-                        copyCommand
-                            "last response"
-                            "no assistant response to copy"
-                            answer
+                    ReplCopy request -> do
+                        loadAssistantResponses >>= \case
+                            Left err ->
+                                displayError err do
+                                    color <- resolveColor stderr
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                            Right responses ->
+                                case listAt
+                                    (request.copyResponseIndex - 1)
+                                    responses of
+                                    Nothing -> do
+                                        let available = length responses
+                                            responseNoun
+                                                | available == 1 =
+                                                    "response is"
+                                                | otherwise =
+                                                    "responses are"
+                                            message
+                                                | available == 0 =
+                                                    "no assistant response to copy"
+                                                | otherwise =
+                                                    "only "
+                                                        <> Text.pack
+                                                            (show available)
+                                                        <> " assistant "
+                                                        <> responseNoun
+                                                        <> " available to copy"
+                                        displayError message do
+                                            color <- resolveColor stderr
+                                            Text.hPutStrLn stderr
+                                                (roleError color message)
+                                    Just answer ->
+                                        copyAssistantResponse request answer
                         continue
                     ReplCopyCode index -> do
                         answer <- readIORef lastAssistantRef
@@ -1084,6 +1115,7 @@ handleReplLine
                     action@ReplSearch{} -> handleSessionAction env slashCatalog continue action
                     action@ReplClear -> handleSessionAction env slashCatalog continue action
                     action@ReplNew -> handleSessionAction env slashCatalog continue action
+                    action@ReplDelete -> handleSessionAction env slashCatalog continue action
                     action@ReplFork{} -> handleSessionAction env slashCatalog continue action
                     action@ReplShowSession -> handleSessionAction env slashCatalog continue action
                     action@ReplShowSessionInfo -> handleSessionAction env slashCatalog continue action
@@ -1751,6 +1783,58 @@ handleReplLine
             case fullscreen of
                 Nothing -> clearThinking render
                 Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
+    loadAssistantResponses =
+        loadPersistedTranscript >>= \case
+            Left err -> pure (Left err)
+            Right persisted -> do
+                latest <- readIORef lastAssistantRef
+                let responses =
+                        maybe
+                            []
+                            (assistantResponseBodies . snd)
+                            persisted
+                pure $
+                    Right $
+                        if null responses
+                            then maybe [] pure latest
+                            else responses
+    copyAssistantResponse request answer = do
+        let index = request.copyResponseIndex
+            label
+                | index == 1 = "last response"
+                | otherwise =
+                    "response " <> Text.pack (show index)
+        case request.copyDestination of
+            Nothing ->
+                copyCommand
+                    label
+                    "no assistant response to copy"
+                    (Just answer)
+            Just rawPath ->
+                resolveExportPath cwd rawPath >>= \case
+                    Left err ->
+                        displayError err do
+                            color <- resolveColor stderr
+                            Text.hPutStrLn stderr
+                                (roleError color err)
+                    Right path ->
+                        saveCopyText path answer >>= \case
+                            Left err ->
+                                displayError err do
+                                    color <- resolveColor stderr
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                            Right () -> do
+                                let message =
+                                        "copied "
+                                            <> label
+                                            <> " to "
+                                            <> toText path
+                                displayInfo message do
+                                    color <- resolveColor stderr
+                                    Text.hPutStrLn stderr
+                                        (roleSuccess color
+                                            (glyphOk <> message))
     copyCommand label missing payload = case payload of
         Nothing ->
             displayError missing do

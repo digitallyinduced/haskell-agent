@@ -6,6 +6,7 @@ module Agent.CLI.TranscriptExport
     ( defaultExportFileName
     , renderTranscriptMarkdown
     , resolveExportPath
+    , saveCopyText
     , saveTranscriptNoClobber
     , visibleSessionTurns
     ) where
@@ -16,6 +17,7 @@ import Agent.CLI.Session
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.TUI.History (HistoryTurn(historyTurnBlocks))
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.TUI.Model
     ( BlockKind(..)
@@ -27,13 +29,15 @@ import Control.Exception.Safe
     , tryAny
     )
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Foldable (toList)
 import Data.List (findIndex)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import System.Directory.OsPath
-    ( doesDirectoryExist
+    ( createDirectoryIfMissing
+    , doesDirectoryExist
     , getHomeDirectory
     , makeAbsolute
     , removeFile
@@ -146,3 +150,20 @@ saveTranscriptNoClobber target markdown = do
             pure $ case result of
                 Left err -> Left (Text.pack (displayException err))
                 Right () -> Right ()
+
+-- | Replace a copy target atomically, creating parents and keeping the
+-- response owner-readable only. Unlike transcript export, Grok's @/copy@
+-- file form deliberately overwrites its destination.
+saveCopyText :: OsPath -> Text -> IO (Either Text ())
+saveCopyText target value =
+    tryAny
+        (do
+            createDirectoryIfMissing True (takeDirectory target)
+            writeLazyFileAtomically
+                target
+                0o600
+                (LazyByteString.fromStrict
+                    (TextEncoding.encodeUtf8 value)))
+        >>= pure . \case
+            Left err -> Left (Text.pack (displayException err))
+            Right () -> Right ()
