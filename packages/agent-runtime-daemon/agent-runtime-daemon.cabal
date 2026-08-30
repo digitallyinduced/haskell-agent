@@ -44,10 +44,12 @@ library
     build-depends:    aeson >= 2.0
                     , async
                     , base >= 4.17 && < 5
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , directory
                     , filepath
+                    , filelock
                     , network
                     , safe-exceptions
                     , stm
@@ -80,6 +82,7 @@ test-suite agent-runtime-daemon-test
                     , hspec >= 2.11 && < 2.12
                     , network
                     , safe-exceptions
+                    , stm
                     , temporary
                     , text
                     , time

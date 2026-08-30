@@ -1,18 +1,32 @@
 module Main (main) where
 
-import Control.Concurrent.Async (concurrently, withAsync)
-import Control.Exception.Safe (bracket)
-import Data.Aeson (Value (..), object, (.=))
+import Control.Concurrent.Async (cancel, concurrently, waitCatch, withAsync)
+import Control.Concurrent.STM (readTVarIO)
+import Control.Exception.Safe (bracket, isAsyncException)
+import Data.Aeson (Value (..), encode, object, (.=))
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time (getCurrentTime)
 import Network.Socket
 import qualified Network.Socket.ByteString as Socket
+import System.Directory
+    ( createDirectory
+    , doesFileExist
+    , removeFile
+    , renamePath
+    )
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory, withTempDirectory)
-import System.Posix.Files (fileMode, getFileStatus)
+import System.Posix.Files
+    ( createSymbolicLink
+    , fileMode
+    , getFileStatus
+    )
+import System.Timeout (timeout)
 import Test.Hspec
 
 import Agent.Runtime.Daemon.Framing
@@ -108,6 +122,8 @@ main = hspec $ do
                 saved <- snapshot journal
                 (.logTail) (saved.tasks Map.! TaskId "task")
                     `shouldBe` ["[REDACTED]", "safe"]
+                (.description) (saved.tasks Map.! TaskId "task")
+                    `shouldBe` "test"
 
         it "marks active tasks interrupted on startup without retrying them" $
             withSystemTempDirectory "daemon-recovery" $ \directory -> do
@@ -133,6 +149,114 @@ main = hspec $ do
                 unchanged.lastSequence `shouldBe` recoveredSequence
                 (.status) (unchanged.tasks Map.! TaskId "active")
                     `shouldBe` TaskInterrupted
+
+        it "fails closed on corrupt snapshots and event gaps" $
+            withSystemTempDirectory "daemon-corrupt" $ \directory -> do
+                BS.writeFile (directory </> "snapshot.json") "{broken"
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalCorrupt _ _ -> True
+                        _ -> False
+                removeFile (directory </> "snapshot.json")
+                let event sequenceNumber =
+                        EventEnvelope {sequenceNumber, eventType = "test", payload = Null}
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    (LBS.toStrict (encode (event 1)) <> "\n" <> LBS.toStrict (encode (event 3)) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalEventGap 2 3 -> True
+                        _ -> False
+
+        it "enforces contiguous startup retention and rejects an oversized newest event" $
+            withSystemTempDirectory "daemon-startup-retention" $ \directory -> do
+                original <- openJournal ((defaultJournalConfig directory) {maximumEvents = 10})
+                now <- getCurrentTime
+                _ <-
+                    persistTask original $
+                        DurableTask
+                            { taskId = TaskId "snapshot-anchor"
+                            , status = TaskCompleted
+                            , description = "anchor"
+                            , updatedAt = now
+                            , logTail = []
+                            }
+                second <- appendEvent original "two" Null
+                third <- appendEvent original "three" Null
+                reopened <- openJournal ((defaultJournalConfig directory) {maximumEvents = 2})
+                replayAfter reopened 1 `shouldReturn` ReplayEvents [second, third]
+                let tinyConfig =
+                        (defaultJournalConfig (directory </> "oversized"))
+                            { maximumJournalBytes = 4
+                            }
+                bounded <- openJournal tinyConfig
+                appendEvent bounded "large" (String "payload")
+                    `shouldThrow` \case
+                        JournalEventTooLarge _ 4 -> True
+                        _ -> False
+                saved <- snapshot bounded
+                saved.lastSequence `shouldBe` 0
+
+        it "poisons the journal after persistence I/O failure instead of reusing a sequence" $
+            withSystemTempDirectory "daemon-poison" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                _ <- appendEvent journal "first" Null
+                renamePath (directory </> "events.jsonl") (directory </> "events.saved")
+                createDirectory (directory </> "events.jsonl")
+                appendEvent journal "second" Null `shouldThrow` anyException
+                appendEvent journal "third" Null
+                    `shouldThrow` \case
+                        JournalPoisoned _ -> True
+                        _ -> False
+
+        it "redacts descriptions, bounds task count, and bounds subscriber queues" $
+            withSystemTempDirectory "daemon-bounds" $ \directory -> do
+                now <- getCurrentTime
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumTasks = 1
+                            , subscriberQueueSize = 1
+                            }
+                    task name description =
+                        DurableTask
+                            { taskId = TaskId name
+                            , status = TaskCompleted
+                            , description
+                            , updatedAt = now
+                            , logTail = []
+                            }
+                journal <- openJournal config
+                _ <- persistTask journal (task "one" "password=private")
+                saved <- snapshot journal
+                (.description) (saved.tasks Map.! TaskId "one") `shouldBe` "[REDACTED]"
+                persistTask journal (task "two" "safe")
+                    `shouldThrow` \case
+                        JournalTaskCapacityExceeded 1 -> True
+                        _ -> False
+                (_, _, _, overflowed, unsubscribe) <- subscribeReplay journal saved.lastSequence
+                _ <- appendEvent journal "a" Null
+                _ <- appendEvent journal "b" Null
+                readTVarIO overflowed `shouldReturn` True
+                unsubscribe
+
+        it "rejects symlinked journal directories and files" $
+            withSystemTempDirectory "daemon-symlink" $ \directory -> do
+                let target = directory </> "target"
+                    linked = directory </> "linked"
+                createDirectory target
+                createSymbolicLink target linked
+                openJournal (defaultJournalConfig linked)
+                    `shouldThrow` \case
+                        JournalInsecurePath _ -> True
+                        _ -> False
+                let journalDir = directory </> "journal"
+                createDirectory journalDir
+                BS.writeFile (directory </> "outside") "{}"
+                createSymbolicLink (directory </> "outside") (journalDir </> "snapshot.json")
+                openJournal (defaultJournalConfig journalDir)
+                    `shouldThrow` \case
+                        JournalInsecurePath _ -> True
+                        _ -> False
 
     describe "secure Unix socket" $ do
         it "uses private modes and authenticates the same-user peer" $
@@ -163,6 +287,15 @@ main = hspec $ do
                     withUnixListener config (const (pure ()))
                         `shouldThrow` anyException
 
+        it "only removes the socket inode created by this listener" $
+            withTempDirectory "/tmp" "daemon-identity" $ \directory -> do
+                let path = directory </> "daemon.sock"
+                    config = SocketConfig {path, backlog = 1}
+                withUnixListener config $ \_ -> do
+                    renamePath path (path <> ".replaced")
+                    BS.writeFile path "replacement"
+                doesFileExist path `shouldReturn` True
+
     describe "server integration" $ do
         it "handshakes, sends a snapshot, streams events, and uses the supervisor seam" $
             withSystemTempDirectory "daemon-server" $ \directory -> do
@@ -191,7 +324,7 @@ main = hspec $ do
                             _ -> False
                         initial <- receiveJSONFrame config.maximumFrameBytes clientPeer
                         initial `shouldSatisfy` \case
-                            ServerSnapshot 0 _ -> True
+                            ServerSnapshotChunk 0 0 1 _ -> True
                             _ -> False
                         event <- appendEvent journal "changed" (object ["value" .= (1 :: Int)])
                         receiveJSONFrame config.maximumFrameBytes clientPeer
@@ -201,6 +334,78 @@ main = hspec $ do
                         receiveJSONFrame config.maximumFrameBytes clientPeer
                             `shouldReturn` ServerCommandResult (CommandId "command") (Right (String "echo"))
                         sendJSONFrame config.maximumFrameBytes clientPeer (ClientAck event.sequenceNumber)
+
+        it "times out idle clients and preserves async cancellation" $
+            withSystemTempDirectory "daemon-timeout" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                let config = defaultServerConfig {ioTimeoutSeconds = 1}
+                withSocketPair $ \(serverPeer, _) -> do
+                    withAsync (serveConnection config journal unavailableSupervisor serverPeer) $ \server -> do
+                        result <- timeout 2_500_000 (waitCatch server)
+                        result `shouldSatisfy` \case
+                            Just (Left exception) -> not (isAsyncException exception)
+                            _ -> False
+                withTempDirectory "/tmp" "daemon-cancel" $ \socketDirectory -> do
+                    let socketConfig =
+                            SocketConfig
+                                { path = socketDirectory </> "daemon.sock"
+                                , backlog = 1
+                                }
+                    withUnixListener socketConfig $ \listener ->
+                        withAsync (runServerOnListener listener config journal unavailableSupervisor) $ \server -> do
+                            client <- socket AF_UNIX Stream defaultProtocol
+                            bracket (pure client) close $ \peer -> do
+                                connect peer (SockAddrUnix socketConfig.path)
+                                cancel server
+                                outcome <- timeout 2_000_000 (waitCatch server)
+                                outcome `shouldSatisfy` \case
+                                    Just (Left exception) -> isAsyncException exception
+                                    _ -> False
+
+        it "chunks large snapshots below the configured frame bound" $
+            withSystemTempDirectory "daemon-snapshot-chunks" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                now <- getCurrentTime
+                _ <-
+                    persistTask journal $
+                        DurableTask
+                            { taskId = TaskId "large"
+                            , status = TaskCompleted
+                            , description = "large snapshot"
+                            , updatedAt = now
+                            , logTail = [Text.replicate 2_000 "x"]
+                            }
+                let config =
+                        defaultServerConfig
+                            { maximumFrameBytes = 512
+                            , heartbeatSeconds = 60
+                            }
+                withSocketPair $ \(serverPeer, clientPeer) ->
+                    withAsync (serveConnection config journal unavailableSupervisor serverPeer) $ \_ -> do
+                        sendJSONFrame config.maximumFrameBytes clientPeer $
+                            ClientHello
+                                Hello
+                                    { clientId = ClientId "snapshot-client"
+                                    , versions = [currentProtocolVersion]
+                                    , resumeAfter = Nothing
+                                    }
+                        _ <- receiveJSONFrame config.maximumFrameBytes clientPeer :: IO ServerMessage
+                        first <- receiveJSONFrame config.maximumFrameBytes clientPeer
+                        chunkCount <-
+                            case first of
+                                ServerSnapshotChunk 1 0 count _ -> do
+                                    count `shouldSatisfy` (> 1)
+                                    pure count
+                                _ -> expectationFailure ("unexpected snapshot message: " <> show first) >> pure 0
+                        sequenceNumbers <-
+                            traverse
+                                ( \_ ->
+                                    receiveJSONFrame config.maximumFrameBytes clientPeer >>= \case
+                                        ServerSnapshotChunk 1 index count _ | count == chunkCount -> pure index
+                                        other -> expectationFailure ("unexpected snapshot chunk: " <> show other) >> pure (-1)
+                                )
+                                [1 .. chunkCount - 1]
+                        sequenceNumbers `shouldBe` [1 .. chunkCount - 1]
 
 withSocketPair :: ((Socket, Socket) -> IO value) -> IO value
 withSocketPair =

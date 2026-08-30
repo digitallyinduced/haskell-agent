@@ -23,7 +23,7 @@ newtype ProtocolVersion = ProtocolVersion { unProtocolVersion :: Word16 }
     deriving newtype (FromJSON, ToJSON)
 
 currentProtocolVersion :: ProtocolVersion
-currentProtocolVersion = ProtocolVersion 1
+currentProtocolVersion = ProtocolVersion 2
 
 supportedProtocolVersions :: [ProtocolVersion]
 supportedProtocolVersions = [currentProtocolVersion]
@@ -97,7 +97,7 @@ instance FromJSON ClientMessage where
 data ServerMessage
     = ServerWelcome Welcome
     | ServerVersionRejected [ProtocolVersion]
-    | ServerSnapshot Sequence Value
+    | ServerSnapshotChunk Sequence Int Int Text
     | ServerEvent EventEnvelope
     | ServerCommandResult CommandId (Either Text Value)
     | ServerHeartbeat Sequence
@@ -108,8 +108,14 @@ instance ToJSON ServerMessage where
         ServerWelcome welcome -> object ["type" .= String "welcome", "welcome" .= welcome]
         ServerVersionRejected versions ->
             object ["type" .= String "version_rejected", "supported" .= versions]
-        ServerSnapshot sequenceNumber snapshot ->
-            object ["type" .= String "snapshot", "sequence" .= sequenceNumber, "snapshot" .= snapshot]
+        ServerSnapshotChunk sequenceNumber chunkIndex chunkCount snapshotData ->
+            object
+                [ "type" .= String "snapshot_chunk"
+                , "sequence" .= sequenceNumber
+                , "chunk_index" .= chunkIndex
+                , "chunk_count" .= chunkCount
+                , "snapshot_data" .= snapshotData
+                ]
         ServerEvent event -> object ["type" .= String "event", "event" .= event]
         ServerCommandResult commandId result ->
             object
@@ -127,7 +133,12 @@ instance FromJSON ServerMessage where
         objectValue .: "type" >>= \case
             ("welcome" :: Text) -> ServerWelcome <$> objectValue .: "welcome"
             "version_rejected" -> ServerVersionRejected <$> objectValue .: "supported"
-            "snapshot" -> ServerSnapshot <$> objectValue .: "sequence" <*> objectValue .: "snapshot"
+            "snapshot_chunk" ->
+                ServerSnapshotChunk
+                    <$> objectValue .: "sequence"
+                    <*> objectValue .: "chunk_index"
+                    <*> objectValue .: "chunk_count"
+                    <*> objectValue .: "snapshot_data"
             "event" -> ServerEvent <$> objectValue .: "event"
             "command_result" -> do
                 commandId <- objectValue .: "id"
