@@ -7,7 +7,7 @@ module Agent.Runtime.Daemon.Socket
     , verifyPeerOwner
     ) where
 
-import Control.Exception.Safe (IOException, bracket, catch, onException, throwString, tryIO)
+import Control.Exception.Safe (IOException, bracket, catch, finally, onException, throwString, tryIO)
 import Control.Monad (unless, when)
 import Network.Socket
 import System.Directory hiding (isSymbolicLink)
@@ -17,7 +17,7 @@ import qualified System.FileLock as FileLock
 import System.Posix.Files
 import System.Posix.IO
     ( OpenFileFlags (..)
-    , OpenMode (ReadWrite)
+    , OpenMode (ReadOnly, ReadWrite)
     , closeFd
     , defaultFileFlags
     , openFd
@@ -81,20 +81,32 @@ prepareSocketDirectory :: SocketConfig -> IO ()
 prepareSocketDirectory config = do
     let directory = takeDirectory config.path
     createDirectoryIfMissing True directory
-    verifyPrivateDirectory directory
-    setFileMode directory 0o700
+    descriptor <-
+        openFd
+            directory
+            ReadOnly
+            defaultFileFlags {nofollow = True, cloexec = True, directory = True}
+    (do
+            status <- getFdStatus descriptor
+            effectiveUser <- getEffectiveUserID
+            unless (isDirectory status && fileOwner status == effectiveUser) $
+                throwString ("runtime socket directory is not a user-owned directory: " <> directory)
+            setFdMode descriptor 0o700
+        )
+        `finally` closeFd descriptor
 
 prepareLockFile :: FilePath -> IO ()
-prepareLockFile path =
-    bracket
-        (openFd path ReadWrite defaultFileFlags {creat = Just 0o600, nofollow = True, cloexec = True})
-        closeFd
-        $ \_ -> do
-            status <- getSymbolicLinkStatus path
+prepareLockFile path = do
+    descriptor <-
+        openFd path ReadWrite defaultFileFlags {creat = Just 0o600, nofollow = True, cloexec = True}
+    (do
+            status <- getFdStatus descriptor
             effectiveUser <- getEffectiveUserID
             unless (isRegularFile status && fileOwner status == effectiveUser) $
                 throwString ("runtime lock is not a user-owned regular file: " <> path)
-            setFileMode path 0o600
+            setFdMode descriptor 0o600
+        )
+        `finally` closeFd descriptor
 
 openListener :: SocketConfig -> IO Listener
 openListener config = do
@@ -141,13 +153,6 @@ socketAcceptsConnections path =
     bracket (socket AF_UNIX Stream defaultProtocol) close $ \probe ->
         either (const False) (const True)
             <$> tryIO (connect probe (SockAddrUnix path))
-
-verifyPrivateDirectory :: FilePath -> IO ()
-verifyPrivateDirectory directory = do
-    status <- getSymbolicLinkStatus directory
-    effectiveUser <- getEffectiveUserID
-    unless (isDirectory status && not (isSymbolicLink status) && fileOwner status == effectiveUser) $
-        throwString ("runtime socket directory is not a user-owned directory: " <> directory)
 
 identityOf :: FileStatus -> FileIdentity
 identityOf status =

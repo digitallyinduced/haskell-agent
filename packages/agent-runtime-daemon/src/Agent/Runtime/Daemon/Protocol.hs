@@ -23,7 +23,7 @@ newtype ProtocolVersion = ProtocolVersion { unProtocolVersion :: Word16 }
     deriving newtype (FromJSON, ToJSON)
 
 currentProtocolVersion :: ProtocolVersion
-currentProtocolVersion = ProtocolVersion 2
+currentProtocolVersion = ProtocolVersion 3
 
 supportedProtocolVersions :: [ProtocolVersion]
 supportedProtocolVersions = [currentProtocolVersion]
@@ -99,6 +99,7 @@ data ServerMessage
     | ServerVersionRejected [ProtocolVersion]
     | ServerSnapshotChunk Sequence Int Int Text
     | ServerEvent EventEnvelope
+    | ServerEventChunk Sequence Int Int Text
     | ServerCommandResult CommandId (Either Text Value)
     | ServerHeartbeat Sequence
     deriving stock (Eq, Show)
@@ -117,6 +118,14 @@ instance ToJSON ServerMessage where
                 , "snapshot_data" .= snapshotData
                 ]
         ServerEvent event -> object ["type" .= String "event", "event" .= event]
+        ServerEventChunk sequenceNumber chunkIndex chunkCount eventData ->
+            object
+                [ "type" .= String "event_chunk"
+                , "sequence" .= sequenceNumber
+                , "chunk_index" .= chunkIndex
+                , "chunk_count" .= chunkCount
+                , "event_data" .= eventData
+                ]
         ServerCommandResult commandId result ->
             object
                 [ "type" .= String "command_result"
@@ -140,6 +149,12 @@ instance FromJSON ServerMessage where
                     <*> objectValue .: "chunk_count"
                     <*> objectValue .: "snapshot_data"
             "event" -> ServerEvent <$> objectValue .: "event"
+            "event_chunk" ->
+                ServerEventChunk
+                    <$> objectValue .: "sequence"
+                    <*> objectValue .: "chunk_index"
+                    <*> objectValue .: "chunk_count"
+                    <*> objectValue .: "event_data"
             "command_result" -> do
                 commandId <- objectValue .: "id"
                 succeeded <- objectValue .: "ok"

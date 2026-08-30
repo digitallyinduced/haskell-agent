@@ -21,6 +21,7 @@ import Control.Exception.Safe
     ( Exception
     , IOException
     , catch
+    , finally
     , onException
     , throwIO
     , tryIO
@@ -42,18 +43,20 @@ import Data.Sequence (Seq)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (getCurrentTime)
+import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Directory hiding (isSymbolicLink)
 import System.FilePath ((</>))
-import System.IO.Error (isDoesNotExistError)
+import System.IO.Error (isDoesNotExistError, isEOFError)
 import System.Posix.Files
     ( fileOwner
+    , fileSize
     , getFdStatus
     , getSymbolicLinkStatus
     , isDirectory
     , isRegularFile
     , isSymbolicLink
-    , setFileMode
+    , setFdMode
     )
 import System.Posix.User (getEffectiveUserID)
 import System.Posix.IO
@@ -63,7 +66,7 @@ import System.Posix.IO
     , defaultFileFlags
     , openFd
     )
-import System.Posix.IO.ByteString (fdWrite)
+import System.Posix.IO.ByteString (fdRead, fdWrite)
 import System.Posix.Types (Fd)
 import System.Posix.Unistd (fileSynchronise)
 
@@ -107,6 +110,7 @@ data JournalError
     | JournalFileTooLarge FilePath Integer Integer
     | JournalPoisoned String
     | JournalInsecurePath FilePath
+    | JournalSequenceExhausted Sequence
     deriving stock (Eq, Show)
 
 instance Exception JournalError
@@ -147,14 +151,11 @@ openJournal :: JournalConfig -> IO Journal
 openJournal config = do
     createDirectoryIfMissing True config.directory
     verifyPrivateDirectory config.directory
-    setFileMode config.directory 0o700
-    mapM_ verifyPrivateFileIfPresent [snapshotPath config, eventsPath config]
-    snapshotExists <- doesFileExist (snapshotPath config)
-    savedSnapshot <- readSnapshot config
+    (snapshotExists, savedSnapshot) <- readSnapshot config
     savedEvents <- readEvents config
     validateEventSequence savedEvents
-    validateRecoveryOrigin snapshotExists savedEvents
-    recoveredSnapshot <- foldM recoverTask savedSnapshot (toList savedEvents)
+    validateRecoveryOrigin snapshotExists savedSnapshot.lastSequence savedEvents
+    recoveredSnapshot <- foldM (recoverTask config) savedSnapshot (toList savedEvents)
     recoveredTasks <- enforceTaskCapacity config recoveredSnapshot.tasks
     let boundedSnapshot = recoveredSnapshot {tasks = recoveredTasks}
         lastEventSequence =
@@ -176,22 +177,28 @@ openJournal config = do
     interruptTasksFromPreviousProcess journal
     pure journal
 
-recoverTask :: JournalSnapshot -> EventEnvelope -> IO JournalSnapshot
-recoverTask saved event
+recoverTask :: JournalConfig -> JournalSnapshot -> EventEnvelope -> IO JournalSnapshot
+recoverTask config saved event
     | event.sequenceNumber <= saved.lastSequence = pure saved
     | event.eventType /= "task_changed" = pure saved
     | otherwise =
         case fromJSON event.payload of
             Error message -> throwIO (JournalCorrupt "events.jsonl" message)
-            Success task ->
+            Success task -> do
+                let boundedTask = boundTaskLog config task
+                boundedTasks <-
+                    enforceTaskCapacity config $
+                        Map.insert boundedTask.taskId boundedTask saved.tasks
                 pure saved
                     { lastSequence = event.sequenceNumber
-                    , tasks = Map.insert task.taskId task saved.tasks
+                    , tasks = boundedTasks
                     }
 
 synchronisePath :: FilePath -> IO ()
 synchronisePath path =
-    bracketFd (openFd path ReadOnly defaultFileFlags) fileSynchronise
+    bracketFd
+        (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True, directory = True})
+        fileSynchronise
   where
     bracketFd acquire use = do
         descriptor <- acquire
@@ -202,7 +209,8 @@ appendEvent :: Journal -> Text -> Value -> IO EventEnvelope
 appendEvent journal eventType payload =
     modifyMVar journal.state $ \journalState -> do
         ensureHealthy journal
-        let nextSequence = journalState.durableSnapshot.lastSequence + 1
+        nextSequence <- nextSequenceAfter journalState.durableSnapshot.lastSequence
+        let
             event =
                 EventEnvelope
                     { sequenceNumber = nextSequence
@@ -230,8 +238,8 @@ persistTask journal task =
         boundedTasks <-
             enforceTaskCapacity journal.config $
                 Map.insert boundedTask.taskId boundedTask journalState.durableSnapshot.tasks
+        nextSequence <- nextSequenceAfter journalState.durableSnapshot.lastSequence
         let
-            nextSequence = journalState.durableSnapshot.lastSequence + 1
             event =
                 EventEnvelope
                     { sequenceNumber = nextSequence
@@ -272,11 +280,18 @@ replayAfter journal cursor =
 replayFromState :: Sequence -> JournalState -> Replay
 replayFromState cursor journalState =
     let events = toList journalState.retainedEvents
-        earliest = maybe (journalState.durableSnapshot.lastSequence + 1) (.sequenceNumber) (safeHead events)
+        earliest = fmap (.sequenceNumber) (safeHead events)
+        replayGap =
+            case earliest of
+                Nothing -> cursor < journalState.durableSnapshot.lastSequence
+                Just sequenceNumber -> hasGapAfter cursor sequenceNumber
      in
-        if cursor > journalState.durableSnapshot.lastSequence || cursor + 1 < earliest
+        if cursor > journalState.durableSnapshot.lastSequence || replayGap
             then ReplaySnapshot journalState.durableSnapshot
             else ReplayEvents (filter ((> cursor) . (.sequenceNumber)) events)
+  where
+    hasGapAfter (Sequence cursorValue) (Sequence earliestValue) =
+        earliestValue > cursorValue && earliestValue - cursorValue > 1
 
 -- | Atomically with respect to appends, capture handshake state, replay, and
 -- a subscription to subsequent events.
@@ -347,38 +362,49 @@ validateEventSequence events =
             | otherwise -> go first.sequenceNumber rest
   where
     go _ [] = pure ()
-    go previous (event : remaining)
-        | event.sequenceNumber == previous + 1 =
-            go event.sequenceNumber remaining
-        | otherwise =
-            throwIO (JournalEventGap (previous + 1) event.sequenceNumber)
+    go previous (event : remaining) = do
+        expected <- nextSequenceAfter previous
+        if event.sequenceNumber == expected
+            then go event.sequenceNumber remaining
+            else throwIO (JournalEventGap expected event.sequenceNumber)
 
-validateRecoveryOrigin :: Bool -> Seq EventEnvelope -> IO ()
-validateRecoveryOrigin snapshotExists events =
-    case Seq.lookup 0 events of
-        Just first
+validateRecoveryOrigin :: Bool -> Sequence -> Seq EventEnvelope -> IO ()
+validateRecoveryOrigin snapshotExists snapshotSequence events =
+    case (Seq.lookup 0 events, Seq.lookup (Seq.length events - 1) events) of
+        (Just first, Just lastEvent)
             | not snapshotExists && first.sequenceNumber /= 1 ->
                 throwIO (JournalEventGap 1 first.sequenceNumber)
+            | snapshotExists
+            , first.sequenceNumber > snapshotSequence -> do
+                expected <- nextSequenceAfter snapshotSequence
+                unless (first.sequenceNumber == expected) $
+                    throwIO (JournalEventGap expected first.sequenceNumber)
+            | snapshotExists
+            , lastEvent.sequenceNumber < snapshotSequence ->
+                throwIO $
+                    JournalCorrupt
+                        "events.jsonl"
+                        "retained event suffix ends before the snapshot sequence"
         _ -> pure ()
 
-verifyPrivateDirectory :: FilePath -> IO ()
-verifyPrivateDirectory path = do
-    status <- getSymbolicLinkStatus path
-    effectiveUser <- getEffectiveUserID
-    unless (isDirectory status && not (isSymbolicLink status) && fileOwner status == effectiveUser) $
-        throwIO (JournalInsecurePath path)
+nextSequenceAfter :: Sequence -> IO Sequence
+nextSequenceAfter sequenceNumber@(Sequence value)
+    | value == (maxBound :: Word64) = throwIO (JournalSequenceExhausted sequenceNumber)
+    | otherwise = pure (Sequence (value + 1))
 
-verifyPrivateFileIfPresent :: FilePath -> IO ()
-verifyPrivateFileIfPresent path = do
-    tryIO (getSymbolicLinkStatus path) >>= \case
-        Left exception
-            | isDoesNotExistError exception -> pure ()
-            | otherwise -> throwIO exception
-        Right status -> do
-            effectiveUser <- getEffectiveUserID
-            unless (isRegularFile status && not (isSymbolicLink status) && fileOwner status == effectiveUser) $
-                throwIO (JournalInsecurePath path)
-            setFileMode path 0o600
+verifyPrivateDirectory :: FilePath -> IO ()
+verifyPrivateDirectory path =
+    tryIO (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True, directory = True}) >>= \case
+        Left (_ :: IOException) -> throwIO (JournalInsecurePath path)
+        Right descriptor ->
+            ( do
+                status <- getFdStatus descriptor
+                effectiveUser <- getEffectiveUserID
+                unless (isDirectory status && fileOwner status == effectiveUser) $
+                    throwIO (JournalInsecurePath path)
+                setFdMode descriptor 0o700
+            )
+                `finally` closeFd descriptor
 
 redactValue :: Value -> Value
 redactValue = \case
@@ -425,11 +451,15 @@ enforceRetention config journalState = do
     if tooMany || tooLarge
         then do
             let countBounded =
-                    Seq.drop
-                        (max 0 (Seq.length journalState.retainedEvents - max 1 config.maximumEvents))
-                        journalState.retainedEvents
+                    if config.maximumEvents <= 0
+                        then Seq.empty
+                        else
+                            Seq.drop
+                                (max 0 (Seq.length journalState.retainedEvents - config.maximumEvents))
+                                journalState.retainedEvents
                 byteBounded = retainWithinBytes config.maximumJournalBytes countBounded
                 compacted = journalState {retainedEvents = byteBounded}
+            writeSnapshot config compacted.durableSnapshot
             rewriteEvents config byteBounded
             pure compacted
         else pure journalState
@@ -445,29 +475,23 @@ retainWithinBytes maximumBytes events =
       where
         size = BS.length (encodeLine event)
 
-readSnapshot :: JournalConfig -> IO JournalSnapshot
+readSnapshot :: JournalConfig -> IO (Bool, JournalSnapshot)
 readSnapshot config = do
-    exists <- doesFileExist (snapshotPath config)
-    if exists
-        then do
-            ensureFileSize (snapshotPath config) (fromIntegral config.maximumSnapshotBytes)
-            bytes <- BS.readFile (snapshotPath config)
+    readPrivateFile (snapshotPath config) (fromIntegral config.maximumSnapshotBytes) >>= \case
+        Just bytes ->
             case eitherDecodeStrict' bytes of
                 Left message -> throwIO (JournalCorrupt (snapshotPath config) message)
-                Right saved -> pure saved
-        else pure emptySnapshot
+                Right saved -> pure (True, saved)
+        Nothing -> pure (False, emptySnapshot)
   where
     emptySnapshot = JournalSnapshot {lastSequence = 0, tasks = Map.empty}
 
 readEvents :: JournalConfig -> IO (Seq EventEnvelope)
 readEvents config = do
-    exists <- doesFileExist (eventsPath config)
-    if exists
-        then do
-            ensureFileSize (eventsPath config) (fromIntegral config.maximumRecoveryJournalBytes)
-            bytes <- BS.readFile (eventsPath config)
+    readPrivateFile (eventsPath config) (fromIntegral config.maximumRecoveryJournalBytes) >>= \case
+        Just bytes ->
             traverse decodeLine (zip [1 :: Int ..] (BS8.lines bytes)) >>= pure . Seq.fromList
-        else pure Seq.empty
+        Nothing -> pure Seq.empty
 
 decodeLine :: FromJSON value => (Int, BS.ByteString) -> IO value
 decodeLine (lineNumber, bytes) =
@@ -475,11 +499,36 @@ decodeLine (lineNumber, bytes) =
         Left message -> throwIO (JournalCorrupt "events.jsonl" ("line " <> show lineNumber <> ": " <> message))
         Right value -> pure value
 
-ensureFileSize :: FilePath -> Integer -> IO ()
-ensureFileSize path maximumBytes = do
-    actual <- getFileSize path
+readPrivateFile :: FilePath -> Integer -> IO (Maybe BS.ByteString)
+readPrivateFile path maximumBytes =
+    tryIO (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True}) >>= \case
+        Left exception
+            | isDoesNotExistError exception -> pure Nothing
+            | otherwise -> throwIO (JournalInsecurePath path)
+        Right descriptor ->
+            Just
+                <$> ( (verifyPrivateDescriptor path descriptor >> setFdMode descriptor 0o600 >> readDescriptorBounded path maximumBytes descriptor)
+                        `finally` closeFd descriptor
+                    )
+
+readDescriptorBounded :: FilePath -> Integer -> Fd -> IO BS.ByteString
+readDescriptorBounded path maximumBytes descriptor = do
+    status <- getFdStatus descriptor
+    let actual = fromIntegral (fileSize status)
     when (maximumBytes < 0 || actual > maximumBytes) $
         throwIO (JournalFileTooLarge path actual maximumBytes)
+    go 0 []
+  where
+    go used chunks = do
+        chunk <- fdRead descriptor 65_536 `catch` \exception ->
+            if isEOFError exception then pure BS.empty else throwIO (exception :: IOException)
+        if BS.null chunk
+            then pure (BS.concat (reverse chunks))
+            else do
+                let total = used + fromIntegral (BS.length chunk)
+                when (maximumBytes < 0 || total > maximumBytes) $
+                    throwIO (JournalFileTooLarge path total maximumBytes)
+                go total (chunk : chunks)
 
 appendEventFile :: JournalConfig -> EventEnvelope -> IO ()
 appendEventFile config event = do
@@ -494,10 +543,10 @@ appendEventFile config event = do
                 , cloexec = True
                 }
     verifyPrivateDescriptor (eventsPath config) descriptor `onException` closeFd descriptor
+    setFdMode descriptor 0o600 `onException` closeFd descriptor
     writeDescriptor descriptor (encodeLine event) `onException` closeFd descriptor
     fileSynchronise descriptor `onException` closeFd descriptor
     closeFd descriptor
-    setFileMode (eventsPath config) 0o600
 
 verifyPrivateDescriptor :: FilePath -> Fd -> IO ()
 verifyPrivateDescriptor path descriptor = do
@@ -538,6 +587,7 @@ atomicWrite config destination bytes = do
                         , nofollow = True
                         , cloexec = True
                         }
+            setFdMode descriptor 0o600 `onException` closeFd descriptor
             writeDescriptor descriptor bytes `onException` closeFd descriptor
             fileSynchronise descriptor `onException` closeFd descriptor
             closeFd descriptor
@@ -545,7 +595,7 @@ atomicWrite config destination bytes = do
             synchronisePath config.directory
         )
         `onException` cleanup
-    setFileMode config.directory 0o700
+    verifyPrivateDirectory config.directory
 
 writeDescriptor :: Fd -> BS.ByteString -> IO ()
 writeDescriptor _ bytes | BS.null bytes = pure ()
