@@ -57,7 +57,7 @@ import Agent.CLI.TUI.App
 import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
-    , AppState(appConversationReflowQueued)
+    , AppState(..)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
     , FullscreenRuntime(..)
@@ -72,13 +72,20 @@ import Agent.CLI.TUI.History
     , HistoryDirection(..)
     , HistoryGeneration(..)
     , HistoryPage(..)
+    , HistoryRequest(..)
     , HistoryTurn(..)
+    , applyHistoryPage
+    , emptyHistoryWindow
+    )
+import Agent.CLI.TUI.ImagePreview
+    ( NativePreviewPlacement(..)
+    , TuiImagePreview(..)
     )
 import Agent.CLI.Terminal
     ( kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     )
-import Agent.Loop (LoopEvent(..), emptyTurnOutput)
+import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Brick
     ( App(..)
     , BrickEvent(..)
@@ -828,6 +835,27 @@ spec = do
                 (replacementLeavesDurableTailVisible ReplaceWhileHiddenNoFocus)
                 `shouldReturn` Just True
 
+        it "keeps focused tail-following through content shrink" do
+            timeout 2_000_000 (replacementPreservesFollow True)
+                `shouldReturn` Just True
+
+        it "keeps paused scrollback paused through content shrink" do
+            timeout 2_000_000 (replacementPreservesFollow False)
+                `shouldReturn` Just True
+
+    describe "submitted image history retention" do
+        it "remaps a live preview onto its committed durable block" do
+            timeout 2_000_000 committedPreviewKeys
+                `shouldReturn` Just [BlockId (-1)]
+
+        it "clears previews when history is reset" do
+            timeout 2_000_000 resetPreviewState
+                `shouldReturn` Just ([], [], 1)
+
+        it "prunes previews when their history turn is evicted" do
+            timeout 2_000_000 evictedPreviewKeys
+                `shouldReturn` Just []
+
     describe "unfocused terminal recovery" do
         it "treats paste input as proof that focus returned" do
             timeout 2_000_000 unfocusedPasteRendersDraft
@@ -1263,6 +1291,183 @@ replacementAfterHistoryReplacement scenario = do
         ( encoded durableTail `ByteString.isInfixOf` rendered
         , finalState.appConversationReflowQueued
         )
+
+replacementPreservesFollow :: Bool -> IO Bool
+replacementPreservesFollow follow = do
+    let liveTranscript =
+            Text.unlines (replicate 200 "scrollback transcript line")
+    runtime <- newScriptRuntime
+        (initialUiState { uiFollow = follow })
+    let durableTurn = HistoryTurn
+            { historyTurnCursor = HistoryCursor 0
+            , historyTurnBlocks =
+                Seq.singleton
+                    (markerBlock
+                        (BlockId 1000)
+                        (Text.unlines
+                            (replicate 12 "short durable transcript line")))
+            }
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptApp AppHistoryLiveStarted
+            , FullscreenScriptApp
+                (AppUi (UiAssistantHistory liveTranscript))
+            , FullscreenScriptApp
+                (AppHistoryCommitted
+                    (HistoryGeneration 0)
+                    durableTurn
+                    HistoryCommitAppend)
+            , FullscreenScriptHalt
+            ]
+    (_, finalState) <- runFullscreenScriptWithState initialState script
+    pure (finalState.appUi.uiFollow == follow)
+
+committedPreviewKeys :: IO [BlockId]
+committedPreviewKeys = do
+    runtime <- newScriptRuntime initialUiState
+    let liveUi = reduceUi (UiUserSubmitted "question") initialUiState
+        initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appUi = liveUi
+                , appHistoryLiveStart = Just 0
+                , appSubmittedImagePreviews =
+                    Map.singleton (BlockId 0) [historyPreview 1]
+                }
+        durableTurn = HistoryTurn
+            { historyTurnCursor = HistoryCursor 0
+            , historyTurnBlocks =
+                Seq.singleton (markerBlock (BlockId 0) "question")
+            }
+    (_, finalState) <- runFullscreenScriptWithState
+        initialState
+        [ FullscreenScriptApp
+            (AppHistoryCommitted
+                (HistoryGeneration 0)
+                durableTurn
+                HistoryCommitAppend)
+        , FullscreenScriptHalt
+        ]
+    pure (Map.keys finalState.appSubmittedImagePreviews)
+
+resetPreviewState :: IO ([BlockId], [NativePreviewPlacement], Int)
+resetPreviewState = do
+    runtime <- newScriptRuntime initialUiState
+    writeIORef runtime.runtimeSubmittedImagePlacements
+        [historyPlacement (historyPreview 1)]
+    let initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appSubmittedImagePreviews =
+                    Map.singleton (BlockId 0) [historyPreview 1]
+                }
+        generation = HistoryGeneration 1
+        page = HistoryPage
+            { historyPageGeneration = generation
+            , historyPageDirection = HistoryNewer
+            , historyPageTurns = Seq.empty
+            , historyPageGenerationStart = HistoryCursor 0
+            , historyPageTotalTurns = 0
+            , historyPageHasOlder = False
+            , historyPageHasNewer = False
+            }
+    (_, finalState) <- runFullscreenScriptWithState
+        initialState
+        [ FullscreenScriptApp (AppHistoryReset page)
+        , FullscreenScriptHalt
+        ]
+    placements <- readIORef runtime.runtimeSubmittedImagePlacements
+    revision <- readIORef runtime.runtimeImagePreviewRevision
+    pure
+        ( Map.keys finalState.appSubmittedImagePreviews
+        , placements
+        , revision
+        )
+
+evictedPreviewKeys :: IO [BlockId]
+evictedPreviewKeys = do
+    runtime <- newScriptRuntime initialUiState
+    let generation = HistoryGeneration 1
+        initialWindow = emptyHistoryWindow generation 2 20 1_000_000
+        existingPage = historyTestPage
+            generation
+            HistoryNewer
+            [ historyTestTurn 2 (BlockId (-1))
+            , historyTestTurn 3 (BlockId (-2))
+            ]
+        existingWindow =
+            either (error . show) id
+                (applyHistoryPage existingPage initialWindow)
+        initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appHistoryWindow = existingWindow
+                , appNextHistoryBlockId = -3
+                , appSubmittedImagePreviews =
+                    Map.singleton (BlockId (-2)) [historyPreview 1]
+                }
+        request = HistoryRequest
+            { historyRequestGeneration = generation
+            , historyRequestDirection = HistoryOlder
+            , historyRequestCursor = Just (HistoryCursor 2)
+            }
+        olderPage =
+            historyTestPage
+                generation
+                HistoryOlder
+                [historyTestTurn 1 (BlockId 100)]
+    (_, finalState) <- runFullscreenScriptWithState
+        initialState
+        [ FullscreenScriptApp
+            (AppHistoryLoaded request (Right olderPage))
+        , FullscreenScriptHalt
+        ]
+    pure (Map.keys finalState.appSubmittedImagePreviews)
+
+historyTestPage
+    :: HistoryGeneration
+    -> HistoryDirection
+    -> [HistoryTurn]
+    -> HistoryPage
+historyTestPage generation direction turns =
+    HistoryPage
+        { historyPageGeneration = generation
+        , historyPageDirection = direction
+        , historyPageTurns = Seq.fromList turns
+        , historyPageGenerationStart = HistoryCursor 0
+        , historyPageTotalTurns = fromIntegral (length turns)
+        , historyPageHasOlder = direction == HistoryNewer
+        , historyPageHasNewer = direction == HistoryOlder
+        }
+
+historyTestTurn :: Int -> BlockId -> HistoryTurn
+historyTestTurn cursor blockId =
+    HistoryTurn
+        { historyTurnCursor = HistoryCursor (fromIntegral cursor)
+        , historyTurnBlocks =
+            Seq.singleton
+                (markerBlock blockId ("turn " <> Text.pack (show cursor)))
+        }
+
+historyPreview :: Int -> TuiImagePreview
+historyPreview bytes =
+    TuiImagePreview
+        { previewMime = "image/png"
+        , previewBytes = bytes
+        , previewSourceWidth = 1
+        , previewSourceHeight = 1
+        , previewSample = error "history test forced ANSI preview"
+        , previewKittyAttachment = ImageAttachment "image/png" ""
+        }
+
+historyPlacement :: TuiImagePreview -> NativePreviewPlacement
+historyPlacement preview =
+    NativePreviewPlacement
+        { nativePreviewImageId = 1
+        , nativePreviewRow = 0
+        , nativePreviewColumn = 0
+        , nativePreviewColumns = 1
+        , nativePreviewRows = 1
+        , nativePreviewAttachment = preview.previewKittyAttachment
+        }
 
 unfocusedPasteRendersDraft :: IO Bool
 unfocusedPasteRendersDraft = do

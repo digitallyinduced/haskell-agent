@@ -44,6 +44,10 @@ module Agent.CLI.TUI.App
     , readFullscreenLineOrWithCatalog
     , readFullscreenLineOrWithModels
     , repositoryHeaderText
+    , submittedImagePreviewByteBudget
+    , submittedImagePreviewCountBudget
+    , retainSubmittedImagePreviewsForBlocks
+    , previewLogicalEncodedBytes
     , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
     , requestFullscreenPermission
