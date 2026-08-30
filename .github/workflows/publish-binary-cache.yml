@@ -10,7 +10,9 @@ permissions:
 
 concurrency:
   group: haskell-agent-binary-cache-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep the current publication alive when another commit lands on master.
+  # GitHub still coalesces later pending runs within this concurrency group.
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -23,10 +25,12 @@ jobs:
             runner: '["self-hosted", "haskell-agent", "office-builder", "x86_64-linux"]'
             install-nix: false
             trusted-rebuild: false
+            build-cores: 1
           - system: aarch64-darwin
             runner: '"macos-15"'
             install-nix: true
             trusted-rebuild: true
+            build-cores: 1
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 90
     env:
@@ -51,6 +55,7 @@ jobs:
         shell: bash
         env:
           TRUSTED_REBUILD: ${{ matrix.trusted-rebuild }}
+          BUILD_CORES: ${{ matrix.build-cores }}
         run: |
           set -euo pipefail
 
@@ -65,17 +70,21 @@ jobs:
 
           build_args=(
             build .#default
-            --accept-flake-config
             --no-link
             --print-out-paths
+            --max-jobs 1
+            --cores "$BUILD_CORES"
           )
           if [[ "$TRUSTED_REBUILD" == true ]]; then
             # Never restore the Darwin output from the cache previously populated
             # by the affected Mac. Dependencies still come from cache.nixos.org.
             build_args+=(
+              --option accept-flake-config false
               --option substituters https://cache.nixos.org/
               --option extra-substituters ""
             )
+          else
+            build_args+=(--accept-flake-config)
           fi
 
           out_path=$("$nix_bin" "${build_args[@]}")
