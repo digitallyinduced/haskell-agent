@@ -29,6 +29,7 @@ import Agent.Responses.Types
     , ComputerAction(..)
     , ComputerCall(..)
     , ComputerCallOutput(..)
+    , FunctionCall(..)
     , FunctionCallOutput(..)
     , InternalChatMetadata(..)
     , ItemStatus(..)
@@ -42,11 +43,14 @@ import Agent.Responses.Types
     , ResponseInput(..)
     , ResponseCreateParams(..)
     , TaggedObject(..)
+    , computerFunctionName
+    , computerFunctionNamespace
     , defaultResponseCreateParams
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson.Key as Key
+import Data.Foldable (toList)
 import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
@@ -56,6 +60,59 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tokenProviderStatelessResponsesBackend" do
+    it "routes the reserved computer function namespace to the computer harness" do
+        let call = FunctionCall
+                { itemId = Nothing
+                , callId = "call-function"
+                , name = computerFunctionName
+                , namespace = Just computerFunctionNamespace
+                , arguments =
+                    "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}"
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
+                , extraFields = KeyMap.empty
+                }
+        case responseItemToToolCall (FunctionCallItem call) of
+            Just projected -> do
+                projected.name `shouldBe` "computer"
+                projected.callKind `shouldBe` ComputerFunctionCallKind
+                projected.argumentsEncrypted `shouldBe` True
+            Nothing -> expectationFailure
+                "reserved computer function was not projected"
+
+    it "returns reserved computer screenshots as multimodal function output" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/png;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.empty
+                    }
+            result = ToolCallResult
+                { callId = "call-function"
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+
+        case toolResultToItem result of
+            FunctionCallOutputItem output ->
+                case output.output of
+                    Aeson.Array values -> case toList values of
+                        [image] -> do
+                            jsonField "type" image
+                                `shouldBe` Just (Aeson.String "input_image")
+                            jsonField "image_url" image `shouldBe`
+                                Just (Aeson.String "data:image/png;base64,AA==")
+                            jsonField "detail" image
+                                `shouldBe` Just (Aeson.String "original")
+                        other -> expectationFailure
+                            ("expected one screenshot part, got " <> show other)
+                    other -> expectationFailure
+                        ("expected multimodal function output, got " <> show other)
+            other -> expectationFailure ("unexpected output: " <> show other)
+
     it "round-trips native computer calls through structured screenshot output" do
         let call = ComputerCall
                 { computerCallItemId = Just "item-1"

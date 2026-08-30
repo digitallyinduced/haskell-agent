@@ -23,7 +23,12 @@ import Agent.Responses.Types
     , SafetyCheck(..)
     , TaggedObject(..)
     )
-import Agent.ToolDispatch (ToolCall(..), noArgsTool, typedTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallKind(..)
+    , noArgsTool
+    , typedToolWithCall
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -66,12 +71,49 @@ computerUseTool = AppTool
     }
   where
     handler
-        | os == "darwin" = typedTool "computer" executeComputerCall
+        | os == "darwin" =
+            typedToolWithCall "computer" \call input ->
+                executeComputerCallWith
+                    (case call.callKind of
+                        ComputerFunctionCallKind -> ScreenshotJpeg
+                        _ -> ScreenshotPng)
+                    (computerCallFromInput call input)
         | otherwise = noArgsTool "computer"
             (pure (Left "Local computer use is currently supported only on macOS."))
 
+data ComputerToolInput = ComputerToolInput
+    { toolComputerActions :: ![ComputerAction]
+    , toolPendingSafetyChecks :: ![SafetyCheck]
+    }
+
+instance Aeson.FromJSON ComputerToolInput where
+    parseJSON = Aeson.withObject "ComputerToolInput" \object ->
+        ComputerToolInput
+            <$> object Aeson..:? "actions" Aeson..!= []
+            <*> object Aeson..:? "pending_safety_checks" Aeson..!= []
+
+computerCallFromInput :: ToolCall -> ComputerToolInput -> ComputerCall
+computerCallFromInput call input = ComputerCall
+    { computerCallItemId = Nothing
+    , computerCallId = call.callId
+    , computerActions = input.toolComputerActions
+    , pendingSafetyChecks = input.toolPendingSafetyChecks
+    , computerCallStatus = Nothing
+    , computerCallExtra = KeyMap.empty
+    }
+
 executeComputerCall :: ComputerCall -> IO (Either Text Text)
-executeComputerCall call
+executeComputerCall = executeComputerCallWith ScreenshotPng
+
+data ScreenshotEncoding
+    = ScreenshotPng
+    | ScreenshotJpeg
+
+executeComputerCallWith
+    :: ScreenshotEncoding
+    -> ComputerCall
+    -> IO (Either Text Text)
+executeComputerCallWith screenshotEncoding call
     | Left err <- validateComputerCall call = pure (Left err)
     | otherwise = do
         unlocked <- ensureUnlockedSession
@@ -99,7 +141,9 @@ executeComputerCall call
                                                 pure (Left
                                                     "The main display changed during computer use; take a fresh screenshot before continuing.")
                                             | otherwise ->
-                                                screenshotMainDisplay display
+                                                screenshotMainDisplayWith
+                                                    screenshotEncoding
+                                                    display
                                                     >>= \case
                                                         Left err ->
                                                             pure (Left err)
@@ -478,17 +522,32 @@ screenshotUnlockedMacOS = do
         Right display -> screenshotMainDisplay display
 
 screenshotMainDisplay :: (Int, Int) -> IO (Either Text ImageAttachment)
-screenshotMainDisplay (width, height) = do
+screenshotMainDisplay = screenshotMainDisplayWith ScreenshotPng
+
+screenshotMainDisplayWith
+    :: ScreenshotEncoding
+    -> (Int, Int)
+    -> IO (Either Text ImageAttachment)
+screenshotMainDisplayWith encoding (width, height) = do
     temporaryDirectory <- getTemporaryDirectory
     attempted <- tryAny do
+        let (suffix, format, mime, formatOptions) = case encoding of
+                ScreenshotPng ->
+                    (".png", "png", "image/png", [])
+                -- Responses Lite accounts inline image bytes against its
+                -- context. Preserve logical display dimensions while making
+                -- iterative screenshots substantially smaller.
+                ScreenshotJpeg ->
+                    (".jpg", "jpg", "image/jpeg",
+                        ["-s", "formatOptions", "80"])
         (path, handle) <- openBinaryTempFile temporaryDirectory
-            "agent-computer-use-.png"
+            ("agent-computer-use-" <> suffix)
         hClose handle
         let cleanup = removeFile path
         flip finally cleanup do
             capture <- readProcessWithExitCode
                 "/usr/sbin/screencapture"
-                ["-x", "-m", "-C", "-t", "png", path]
+                ["-x", "-m", "-C", "-t", format, path]
                 ""
             case capture of
                 (ExitFailure _, _, stderr) ->
@@ -496,7 +555,9 @@ screenshotMainDisplay (width, height) = do
                 (ExitSuccess, _, _) -> do
                     resized <- readProcessWithExitCode
                         "/usr/bin/sips"
-                        [ "-z", show height, show width, path ]
+                        ([ "-z", show height, show width ]
+                            <> formatOptions
+                            <> [path])
                         ""
                     case resized of
                         (ExitFailure _, _, stderr) ->
@@ -506,7 +567,7 @@ screenshotMainDisplay (width, height) = do
                             pure $ if BS.null bytes
                                 then Left
                                     "Screen capture returned an empty image. Grant Screen Recording permission to the terminal or agent app."
-                                else Right (ImageAttachment "image/png" bytes)
+                                else Right (ImageAttachment mime bytes)
     pure $ either (Left . Text.pack . show) id attempted
 
 mainDisplayLogicalSize :: IO (Either Text (Int, Int))
@@ -650,8 +711,9 @@ summarizeComputerToolCall call
         case Aeson.eitherDecodeStrict'
             (TextEncoding.encodeUtf8 call.arguments) of
             Left _ -> Just "Computer action"
-            Right computerCall ->
-                let detail = summarizeComputerCall computerCall
+            Right input ->
+                let computerCall = computerCallFromInput call input
+                    detail = summarizeComputerCall computerCall
                 in Just $
                     if Text.null detail
                         then "Computer action"

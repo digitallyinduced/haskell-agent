@@ -3,6 +3,7 @@
 module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
+    , isComputerToolCallKind
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolHandler
@@ -44,7 +45,17 @@ data ToolCallKind
     -- action list, and its result is encoded by the provider adapter as a
     -- structured screenshot output rather than a function output string.
     | ComputerCallKind
+    -- | The reserved Responses Lite computer function. It uses the same local
+    -- executor and approval rules as a native computer call, but its result
+    -- must be returned as multimodal @function_call_output@ content.
+    | ComputerFunctionCallKind
     deriving (Eq, Show)
+
+isComputerToolCallKind :: ToolCallKind -> Bool
+isComputerToolCallKind = \case
+    ComputerCallKind -> True
+    ComputerFunctionCallKind -> True
+    _ -> False
 
 -- | Provider-neutral function or custom tool call emitted by a model transport.
 data ToolCall = ToolCall

@@ -143,7 +143,7 @@ import Agent.Store.Postgres
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
-    , ToolCallKind(..)
+    , isComputerToolCallKind
     )
 import Agent.Tools.Types (AppTool)
 import Control.Concurrent (forkFinally, forkIO)
@@ -2036,7 +2036,7 @@ requestApproval
 requestApproval callback context control call = do
     alreadyAllowed <- Set.member call.name
         <$> readTVarIO control.turnControlAllowedTools
-    if alreadyAllowed && call.callKind /= ComputerCallKind
+    if alreadyAllowed && not (isComputerToolCallKind call.callKind)
       then pure (Just PermissionAllowOnce)
       else requestApprovalFromClient callback context control call
 
@@ -2084,7 +2084,7 @@ requestApprovalFromClient callback context control call = do
             (Map.delete approvalId)
     case choice of
         PermissionAllowTool
-            | call.callKind /= ComputerCallKind ->
+            | not (isComputerToolCallKind call.callKind) ->
             atomically $
                 modifyTVar'
                     control.turnControlAllowedTools
