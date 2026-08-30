@@ -1,0 +1,89 @@
+cabal-version:      3.0
+name:               agent-runtime-daemon
+version:            0.1.0.0
+synopsis:           Durable local runtime daemon foundation
+description:        Versioned local IPC, event replay, durable task state, and
+                    secure per-user Unix socket primitives for the agent runtime.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           System
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions: DeriveGeneric
+                      , DerivingStrategies
+                      , DuplicateRecordFields
+                      , GeneralizedNewtypeDeriving
+                      , LambdaCase
+                      , NamedFieldPuns
+                      , NumericUnderscores
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , RecordWildCards
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Werror=incomplete-patterns
+                      -Werror=missing-fields
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.Runtime.Daemon
+                    , Agent.Runtime.Daemon.Framing
+                    , Agent.Runtime.Daemon.Journal
+                    , Agent.Runtime.Daemon.Protocol
+                    , Agent.Runtime.Daemon.Server
+                    , Agent.Runtime.Daemon.Socket
+                    , Agent.Runtime.Daemon.Supervisor
+                    , Agent.Runtime.Daemon.Task
+    build-depends:    aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , filelock
+                    , network
+                    , safe-exceptions
+                    , stm
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , unix
+
+executable agent-runtime-daemon
+    import:           common-options
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N2 -M1G"
+    build-depends:    agent-runtime-daemon
+                    , base >= 4.17 && < 5
+
+test-suite agent-runtime-daemon-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    ghc-options:      -threaded
+    build-depends:    agent-runtime-daemon
+                    , aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , network
+                    , safe-exceptions
+                    , stm
+                    , temporary
+                    , text
+                    , time
+                    , unix
