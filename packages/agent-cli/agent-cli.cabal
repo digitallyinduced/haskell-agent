@@ -46,6 +46,7 @@ library
     other-modules:    Agent.CLI.AccountPicker
                     , Agent.CLI.AgentSessions.Render
                     , Agent.CLI.AgentViewport.Status
+                    , Agent.CLI.Approval.Decision
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
@@ -141,6 +142,7 @@ library
                     , Agent.CLI.AccountSelection
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
+                    , Agent.CLI.AgentViewport.Runtime
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
@@ -171,6 +173,7 @@ library
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
                     , Agent.CLI.Input.Display
+                    , Agent.CLI.Input.Editor
                     , Agent.CLI.Input.Paste
                     , Agent.CLI.Input.History
                     , Agent.CLI.Input.KeyDecoder
@@ -395,6 +398,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
+                    , Agent.CLI.AgentViewportRuntimeSpec
                     , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec

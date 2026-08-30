@@ -55,6 +55,7 @@ data EditorState = EditorState
     , editorSlashDismissed :: !Bool
     , editorSlashCatalog :: !SlashCatalog
     }
+    deriving (Eq, Show)
 
 data DisplayCell = DisplayCell
     { displayCellText :: !Text

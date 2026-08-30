@@ -8,6 +8,8 @@ module Agent.CLI.TUI.Types
     , DictationSession(..)
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
+    , choiceVisibleRows
+    , selectedChoiceIndex
     , FullscreenInput(..)
     , FullscreenInputBuffer(..)
     , FullscreenHistorySource(..)
@@ -59,6 +61,7 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime)
 import Data.Word (Word64)
 import qualified Graphics.Vty as V
@@ -118,6 +121,11 @@ data AppEvent
     | AppAskChoice
         !ChoicePresentation
         !Text
+        !Text
+        !Int
+        ![(Text, Text)]
+        !(TMVar (Maybe Int))
+    | AppAskFilterChoice
         !Text
         !Int
         ![(Text, Text)]
@@ -363,8 +371,42 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceBody :: !Text
     , choiceIndex :: !Int
     , choiceRows :: ![(Text, Text)]
+    , choiceSearch :: !Bool
+    , choiceQuery :: !Text
     , choiceCloseOnTurnEnd :: !Bool
     }
+
+-- | Rows currently visible in a choice overlay.  Searchable overlays retain
+-- each row's source index so callers can return the original choice even
+-- after filtering; ordinary overlays expose the identity mapping.
+choiceVisibleRows :: ChoiceOverlay -> [(Int, (Text, Text))]
+choiceVisibleRows choice
+    | not choice.choiceSearch = zip [0 ..] choice.choiceRows
+    | otherwise =
+        filter (matches choice.choiceQuery . snd)
+            (zip [0 ..] choice.choiceRows)
+  where
+    matches query (label, detail)
+        | Text.null needle = True
+        | otherwise =
+            needle `Text.isInfixOf` Text.toCaseFold label
+                || needle `Text.isInfixOf` Text.toCaseFold detail
+      where
+        needle = Text.toCaseFold query
+
+-- | Resolve the selected row to its source index.  Empty searchable results
+-- have no selection; static choices retain their historical index behavior.
+selectedChoiceIndex :: ChoiceOverlay -> Maybe Int
+selectedChoiceIndex choice
+    | not choice.choiceSearch = Just choice.choiceIndex
+    | otherwise =
+        fst <$> listAt choice.choiceIndex (choiceVisibleRows choice)
+  where
+    listAt index values
+        | index < 0 = Nothing
+        | otherwise = case drop index values of
+            value : _ -> Just value
+            [] -> Nothing
 
 data ResumeOverlay = ResumeOverlay
     { resumeOverlayBrowser :: !ResumeBrowser

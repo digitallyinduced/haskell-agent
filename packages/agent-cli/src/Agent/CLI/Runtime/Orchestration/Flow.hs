@@ -145,7 +145,8 @@ import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createWorktree, worktreeRoot )
+import Agent.CLI.Worktree
+    ( createManagedWorktreeWithProgress, worktreeProgressMessage )
 import Agent.Cancel ( requestCancel )
 import Agent.Claude ()
 import Agent.Dialect ()
@@ -700,11 +701,22 @@ prepareAgentIterationTracked
                     Nothing
                         | options.optWorktree -> do
                             readMVar firstFrameReady
-                            case fullscreen of
-                                Just _ -> pure ()
-                                Nothing ->
-                                    putTextLn stderrHandle "Creating worktree…"
-                            createWorktree source (worktreeRoot home)
+                            let reportWorktreeProgress progress = do
+                                    let message =
+                                            worktreeProgressMessage progress
+                                    case fullscreen of
+                                        Nothing ->
+                                            putTextLn stderrHandle message
+                                        Just runtime ->
+                                            emitUiEvent runtime
+                                                (UiSetNotice
+                                                    (Just
+                                                        (progressNotice
+                                                            message)))
+                            createManagedWorktreeWithProgress
+                                reportWorktreeProgress
+                                home
+                                source
                                 >>= either
                                     (\err -> do
                                         mapM_ releaseSessionLock resumeLock

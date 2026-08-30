@@ -1,5 +1,6 @@
 module Agent.CLI.InputSpec (spec) where
 
+import Agent.CLI.Command (defaultSlashCatalog)
 import Agent.CLI.Input
     ( ChoiceKey(..)
     , approvalKeyText
@@ -18,10 +19,21 @@ import Agent.CLI.Input
     , truncateDisplayText
     , visibleEditorText
     )
+import Agent.CLI.Input.Editor
+    ( EditorEffect(..)
+    , EditorStep(..)
+    , initialEditorState
+    , reduceEditorKey
+    )
 import Agent.CLI.Input.KeyDecoder (decodeKittyEditorKey)
-import Agent.CLI.Input.Types (EditorKey(..))
+import Agent.CLI.Input.Types
+    ( EditorKey(..)
+    , EditorState(..)
+    , ReplLine(..)
+    )
 import Data.Char (isControl)
 import Data.Either (isLeft)
+import Data.List (mapAccumL)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as V
 import System.FilePath ((</>))
@@ -40,6 +52,9 @@ import Test.QuickCheck
     )
 
 data EditorViewportCase = EditorViewportCase !Int !Text.Text !Int
+    deriving (Show)
+
+newtype EditorKeySequence = EditorKeySequence [EditorKey]
     deriving (Show)
 
 spec :: Spec
@@ -225,6 +240,131 @@ spec = do
             isShiftEnterCsiBody "13;2u" `shouldBe` True
             isShiftEnterCsiBody "13u" `shouldBe` False
 
+    describe "inline editor reducer" do
+        it "reduces common editing keys without performing IO" do
+            let initial = editorState "a界b" 2
+                cases =
+                    [ ( EditorLeft
+                      , "a界b"
+                      , 1
+                      )
+                    , ( EditorRight
+                      , "a界b"
+                      , 3
+                      )
+                    , ( EditorBackspace
+                      , "ab"
+                      , 1
+                      )
+                    , ( EditorDelete
+                      , "a界"
+                      , 2
+                      )
+                    , ( EditorChar '!'
+                      , "a界!b"
+                      , 3
+                      )
+                    ]
+            mapM_
+                (\(key, expectedText, expectedCursor) -> do
+                    let step = reduceEditorKey [] initial key
+                    step.editorStepEffect `shouldBe` RedrawEditor
+                    step.editorStepState.editorText `shouldBe` expectedText
+                    step.editorStepState.editorCursor
+                        `shouldBe` expectedCursor)
+                cases
+
+        it "moves through history and restores the in-progress draft" do
+            let initial = editorState "draft" 5
+                newest = reduceEditorKey ["new", "old"] initial EditorUp
+                older =
+                    reduceEditorKey
+                        ["new", "old"]
+                        newest.editorStepState
+                        EditorUp
+                restored =
+                    reduceEditorKey
+                        ["new", "old"]
+                        newest.editorStepState
+                        EditorDown
+            newest.editorStepState.editorText `shouldBe` "new"
+            newest.editorStepState.editorHistoryIndex `shouldBe` Just 0
+            older.editorStepState.editorText `shouldBe` "old"
+            older.editorStepState.editorHistoryIndex `shouldBe` Just 1
+            restored.editorStepState.editorText `shouldBe` "draft"
+            restored.editorStepState.editorHistoryIndex `shouldBe` Nothing
+
+        it "turns effectful keys into explicit requests" do
+            let initial = editorState "draft" 5
+                eofStep =
+                    reduceEditorKey [] (editorState "" 0) EditorEof
+                effects =
+                    [ (EditorEnter, SubmitEditor)
+                    , (EditorCycleMode, ReturnEditor (ReplCycleMode "draft"))
+                    , ( EditorClipboardPaste Nothing
+                      , ReturnEditor (ReplClipboardPaste "draft" Nothing)
+                      )
+                    , (EditorInterrupt, CheckEditorInterrupt)
+                    , (EditorClearScreen, ClearEditorScreen)
+                    , (EditorDictate, DictateIntoEditor)
+                    , (EditorInputError "bad key", ReportEditorError "bad key")
+                    , (EditorIgnore, IgnoreEditorInput)
+                    ]
+            mapM_
+                (\(key, expected) ->
+                    (reduceEditorKey [] initial key).editorStepEffect
+                        `shouldBe` expected)
+                effects
+            eofStep.editorStepEffect
+                `shouldBe` ReturnEditor ReplEof
+
+        it "preserves kill and yank behavior at text boundaries" do
+            let initial = editorState "one  two" 8
+                killed = reduceEditorKey [] initial EditorKillWord
+                yanked =
+                    reduceEditorKey [] killed.editorStepState EditorYank
+                start = editorState "draft" 0
+                end = editorState "draft" 5
+            killed.editorStepState.editorText `shouldBe` "one  "
+            killed.editorStepState.editorCursor `shouldBe` 5
+            killed.editorStepState.editorKillBuffer `shouldBe` "two"
+            yanked.editorStepState.editorText `shouldBe` "one  two"
+            yanked.editorStepState.editorCursor `shouldBe` 8
+            (reduceEditorKey [] start EditorBackspace).editorStepState
+                `shouldBe` start
+            (reduceEditorKey [] end EditorDelete).editorStepState
+                `shouldBe` end
+
+        it "returns paste classification without mutating the live draft" do
+            let initial = editorState "ac" 1
+                step = reduceEditorKey [] initial (EditorPaste "b")
+            step.editorStepState `shouldBe` initial
+            step.editorStepEffect
+                `shouldBe`
+                    ReturnEditor (ReplClipboardPasteOrText "ac" "b" "abc")
+
+        it "keeps slash completion decisions in the pure layer" do
+            let helpDraft =
+                    initialEditorState defaultSlashCatalog True "/he"
+                accepted =
+                    reduceEditorKey [] helpDraft EditorEnter
+                quitDraft =
+                    initialEditorState defaultSlashCatalog True "/qu"
+                submitted =
+                    reduceEditorKey [] quitDraft EditorEnter
+                dismissed =
+                    reduceEditorKey [] helpDraft EditorEscape
+            accepted.editorStepEffect `shouldBe` RedrawEditor
+            accepted.editorStepState.editorText `shouldBe` "/help "
+            submitted.editorStepEffect `shouldBe` SubmitEditor
+            submitted.editorStepState.editorText `shouldBe` "/quit"
+            dismissed.editorStepEffect `shouldBe` RedrawEditor
+            dismissed.editorStepState.editorSlashDismissed `shouldBe` True
+
+        modifyMaxSuccess (const 1000) $
+            prop "keeps the cursor in bounds across generated transitions" $
+                editorReducerCursorProperty
+
 editorViewportProperty :: EditorViewportCase -> Property
 editorViewportProperty (EditorViewportCase available raw requestedCursor) =
     conjoin
@@ -264,4 +404,54 @@ genEditorAtom =
         , Text.pack ['\x1f1fa', '\x1f1f8']
         , Text.pack ['\x1f44d', '\x1f3fd']
         , Text.pack ['1', '\xfe0f', '\x20e3']
+        ]
+
+editorState :: Text.Text -> Int -> EditorState
+editorState text cursor =
+    (initialEditorState defaultSlashCatalog False text)
+        { editorCursor = cursor
+        }
+
+editorReducerCursorProperty :: EditorKeySequence -> Property
+editorReducerCursorProperty (EditorKeySequence keys) =
+    conjoin $
+        zipWith cursorProperty [0 :: Int ..] states
+  where
+    initial = editorState "界e\x0301🙂" 4
+    (_, states) = mapAccumL reduce initial keys
+    reduce state key =
+        let next = (reduceEditorKey [] state key).editorStepState
+        in (next, next)
+    cursorProperty index state =
+        counterexample
+            ("transition " <> show index <> " produced " <> show state)
+            ( (state.editorCursor >= 0
+                && state.editorCursor <= Text.length state.editorText)
+                === True
+            )
+
+instance Arbitrary EditorKeySequence where
+    arbitrary = do
+        count <- chooseInt (0, 200)
+        EditorKeySequence <$> vectorOf count genPureEditorKey
+
+genPureEditorKey :: Gen EditorKey
+genPureEditorKey =
+    elements
+        [ EditorChar 'a'
+        , EditorChar '界'
+        , EditorChar '\x0301'
+        , EditorChar '🙂'
+        , EditorBackspace
+        , EditorDelete
+        , EditorLeft
+        , EditorRight
+        , EditorHome
+        , EditorEnd
+        , EditorKillStart
+        , EditorKillEnd
+        , EditorKillWord
+        , EditorYank
+        , EditorEof
+        , EditorIgnore
         ]

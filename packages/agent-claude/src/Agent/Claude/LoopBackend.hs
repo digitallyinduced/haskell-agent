@@ -7,17 +7,18 @@ module Agent.Claude.LoopBackend
     ) where
 
 import Agent.Claude.Options
-    ( ClaudeCodeOptions
+    ( ClaudeCodeOptions(..)
     , ClaudeCodeToolMode(..)
     , toClaudeAgentOptions
     )
+import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Agent.Claude.Internal.Messages
     ( ClaudeEventState
     , CompletedClaudeTurn(..)
     , assistantMessageItem
     , claudeEventStateHasActivity
     , emptyClaudeEventState
-    , interpretClaudeTurn
+    , interpretClaudeTurnWithCredentialValidation
     , remainingClaudeEvents
     , streamClaudeProgress
     )
@@ -130,7 +131,13 @@ withClaudeCodeBackend options initialPrevious getParams transcript callback =
             { resume = initialPrevious >>= canonicalClaudeSessionId }
         \session -> do
         checkpoint <- newIORef Nothing
-        callback (backendForSession session checkpoint getParams transcript)
+        callback
+            (backendForSession
+                options.transport
+                session
+                checkpoint
+                getParams
+                transcript)
 
 -- | A backend for isolated side requests. Every submission owns and cleans up
 -- its own structured Claude process, while still using subscription auth.
@@ -146,6 +153,7 @@ claudeCodeOneShotBackend options getParams transcript =
             toClaudeAgentOptions ClaudeCodeNoTools options
         result <- withClaudeSDKClient sdkOptions \session ->
             submitClaudeCodeTurn
+                options.transport
                 session
                 checkpoint
                 previous
@@ -156,14 +164,16 @@ claudeCodeOneShotBackend options getParams transcript =
         attachBackendState transcript result
 
 backendForSession
-    :: ClaudeSDKClient
+    :: ClaudeCodeTransport
+    -> ClaudeSDKClient
     -> IORef (Maybe HostTranscriptCheckpoint)
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-backendForSession session checkpoint getParams transcript =
+backendForSession transport session checkpoint getParams transcript =
     Backend \_state previous inputs onEvent -> do
         result <- submitClaudeCodeTurn
+            transport
             session
             checkpoint
             previous
@@ -187,7 +197,8 @@ attachBackendState transcript (Right output) = do
         }
 
 submitClaudeCodeTurn
-    :: ClaudeSDKClient
+    :: ClaudeCodeTransport
+    -> ClaudeSDKClient
     -> IORef (Maybe HostTranscriptCheckpoint)
     -> Maybe Text
     -> IO ResponseCreateParams
@@ -196,6 +207,7 @@ submitClaudeCodeTurn
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError TurnOutput)
 submitClaudeCodeTurn
+    transport
     session
     checkpoint
     previous
@@ -238,7 +250,7 @@ submitClaudeCodeTurn
                                 content
                                 (\message -> do
                                     validated <-
-                                        validateSubscriptionMessage message
+                                        validateTransportMessage transport message
                                     pure validated)
                                 (\progress -> do
                                     state <- readIORef eventState
@@ -260,7 +272,12 @@ submitClaudeCodeTurn
                                     pure (Left sdkError)
                             Right result -> do
                                 turnMessages <- reverse <$> readIORef messages
-                                case interpretClaudeTurn turnMessages result of
+                                case
+                                    interpretClaudeTurnWithCredentialValidation
+                                        (transport == ClaudeCodeLocalSubscription)
+                                        turnMessages
+                                        result
+                                  of
                                     Left message ->
                                         do
                                             state <- readIORef eventState
@@ -345,13 +362,12 @@ collectTurnInputs inputs = do
             [userText]
         UserMultimodalFiles{userText} ->
             [userText]
-        CompletedTool
-            (ToolDispatch.ToolCallResult resultCallId resultOutput _) ->
+        CompletedTool result ->
             pure $
                 "Host tool result for "
-                    <> resultCallId
+                    <> result.callId
                     <> ":\n"
-                    <> resultOutput
+                    <> result.output
     inputImages = \case
         UserMultimodal{userImages} -> userImages
         UserMultimodalFiles{userImages} -> userImages
@@ -703,6 +719,15 @@ sdkUsageToTokenUsage usage =
         , outputTokens = usage.outputTokens
         , cachedTokens = usage.cachedTokens
         }
+
+validateTransportMessage
+    :: ClaudeCodeTransport
+    -> Message
+    -> IO (Either ClaudeSDKError ())
+validateTransportMessage ClaudeCodeGateway{} _ =
+    pure (Right ())
+validateTransportMessage ClaudeCodeLocalSubscription message =
+    validateSubscriptionMessage message
 
 validateSubscriptionMessage
     :: Message

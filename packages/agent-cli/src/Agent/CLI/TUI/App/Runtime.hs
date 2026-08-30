@@ -857,6 +857,21 @@ requestFullscreenChoiceWithBody runtime title body initial rows = do
         (AppAskChoice ChoiceDialog title body initial rows reply)
     atomically (readTMVar reply)
 
+-- | Open a choice overlay whose rows can be narrowed by typing. The returned
+-- index always refers to the original row list, even while the visible rows
+-- are filtered.
+requestFullscreenFilterChoice
+    :: FullscreenRuntime
+    -> Text
+    -> Int
+    -> [(Text, Text)]
+    -> IO (Maybe Int)
+requestFullscreenFilterChoice runtime title initial rows = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskFilterChoice title initial rows reply)
+    atomically (readTMVar reply)
+
 requestFullscreenOnboarding
     :: FullscreenRuntime
     -> Text

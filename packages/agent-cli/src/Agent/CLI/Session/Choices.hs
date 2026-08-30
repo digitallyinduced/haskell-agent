@@ -8,13 +8,17 @@ module Agent.CLI.Session.Choices
     ) where
 
 import Agent.CLI.Error (formatApiErrorInlineAt)
-import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.ModelPicker (pickModel)
+import Agent.CLI.ModelConfig
+    ( ModelCatalog
+    , builtinConnectionId
+    )
+import Agent.CLI.ModelPicker (pickModelWithOptions)
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , PickerState(..)
-    , initialPickerStateResolved
+    , initialPickerStateResolvedWith
+    , rawModelOption
     )
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.ReasoningEffort
@@ -29,6 +33,7 @@ import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , requestFullscreenChoice
+    , requestFullscreenFilterChoice
     )
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
@@ -36,6 +41,7 @@ import Agent.CLI.Usage
     )
 import Agent.Claude
     ( ClaudeCodeAuth(..)
+    , ClaudeCodeTransport(..)
     , loadClaudeCodeAuth
     )
 import Agent.Dialect
@@ -44,6 +50,7 @@ import Agent.Dialect
     )
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.Usage (fetchUsage)
+import qualified Agent.OpenRouter.Models as OpenRouterModels
 import Agent.Provider
     ( Credential(..)
     , Provider(..)
@@ -53,6 +60,7 @@ import Agent.Provider
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime)
 import System.IO (stdout)
@@ -68,36 +76,89 @@ modelChoice
     -> IO (Maybe ModelOption)
 modelChoice
         catalog fullscreen color connectionId provider current currentDialect =
-    case fullscreen of
-    Nothing ->
-        pickModel
-            catalog color connectionId provider current currentDialect
-    Just runtime -> do
-        picker <-
-            initialPickerStateResolved
-                catalog connectionId provider current currentDialect
-        let options = picker.pickerAll
-            rows =
-                [ ( option.modelTarget.targetConnectionId
-                        <> " · "
-                        <> option.modelTarget.targetModelId
-                        <> " · "
-                        <> dialectSlug option.modelTarget.targetDialect
-                  , fromMaybe "" option.modelLabel
-                  )
-                | option <- options
-                ]
-        requestFullscreenChoice
-            runtime
-            "Model"
-            picker.pickerIndex
-            rows
-            >>= \case
-                Just index
-                    | index >= 0
-                    , index < length options ->
-                        pure (Just (options !! index))
-                _ -> pure Nothing
+    discoverModelOptions connectionId provider >>= \(title, discovered) ->
+        case fullscreen of
+            Nothing ->
+                pickModelWithOptions
+                    catalog discovered color connectionId provider current
+                    currentDialect
+            Just runtime -> do
+                picker <-
+                    initialPickerStateResolvedWith
+                        catalog
+                        discovered
+                        connectionId
+                        provider
+                        current
+                        currentDialect
+                let options = picker.pickerAll
+                    rows =
+                        [ ( option.modelTarget.targetConnectionId
+                                <> " · "
+                                <> option.modelTarget.targetModelId
+                                <> " · "
+                                <> dialectSlug option.modelTarget.targetDialect
+                          , fromMaybe "" option.modelLabel
+                          )
+                        | option <- options
+                        ]
+                requestFullscreenFilterChoice
+                    runtime
+                    title
+                    picker.pickerIndex
+                    rows
+                    >>= \case
+                        Just index
+                            | index >= 0
+                            , index < length options ->
+                                pure (Just (options !! index))
+                        _ -> pure Nothing
+
+discoverModelOptions :: Text -> Provider -> IO (Text, [ModelOption])
+discoverModelOptions connectionId provider
+    | provider == OpenRouterProvider
+    , connectionId == builtinConnectionId OpenRouterProvider =
+        OpenRouterModels.fetchOpenRouterModels >>= \case
+            Left _ -> pure ("Model · configured only", [])
+            Right models ->
+                pure
+                    ( "Model · OpenRouter live"
+                    , map openRouterModelOption models
+                    )
+    | otherwise = pure ("Model", [])
+
+openRouterModelOption :: OpenRouterModels.OpenRouterModel -> ModelOption
+openRouterModelOption model =
+    (rawModelOption OpenRouterProvider model.modelId)
+        { modelLabel = Just $
+            Text.intercalate
+                " · "
+                ( [model.modelDisplayName]
+                    <> maybe
+                        []
+                        (pure . formatContextLength)
+                        model.modelContextLength
+                    <> [ if model.modelSupportsTools
+                            then "tools"
+                            else "no tools"
+                       , "OpenRouter live"
+                       ]
+                )
+        }
+
+formatContextLength :: Int -> Text
+formatContextLength contextLength
+    | contextLength >= 1000000 =
+        let tenths = contextLength `div` 100000
+            whole = tenths `div` 10
+            fraction = tenths `mod` 10
+            amount
+                | fraction == 0 = show whole
+                | otherwise = show whole <> "." <> show fraction
+        in Text.pack amount <> "M context"
+    | contextLength >= 1000 =
+        Text.pack (show (contextLength `div` 1000)) <> "k context"
+    | otherwise = Text.pack (show contextLength) <> " context"
 
 effortChoice
     :: Maybe FullscreenRuntime
@@ -182,12 +243,16 @@ accountUsageText color provider tokenProvider openAiPool = do
                     pure (roleError color ("usage: " <> err))
                 Right auth ->
                     pure $
-                        roleMuted color $
-                            "usage: Claude Code "
-                                <> fromMaybe "subscription" auth.subscriptionType
-                                <> " · "
-                                <> auth.accountLabel
-                                <> " (run `claude /status` for live limits)"
+                        roleMuted color $ case auth.transport of
+                            ClaudeCodeGateway{} ->
+                                "usage: Claude gateway-managed · "
+                                    <> auth.accountLabel
+                            ClaudeCodeLocalSubscription ->
+                                "usage: Claude Code "
+                                    <> fromMaybe "subscription" auth.subscriptionType
+                                    <> " · "
+                                    <> auth.accountLabel
+                                    <> " (run `claude /status` for live limits)"
         _ ->
             pure $
                 roleMuted color

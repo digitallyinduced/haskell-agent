@@ -146,6 +146,25 @@ Start in an isolated Git worktree:
 agent-cli --worktree
 ```
 
+By default, managed worktrees fetch and branch from the selected remote's latest
+default commit. Repositories without remotes instead branch from the current
+local `HEAD`. To disable fetching, add this to `~/.haskell-agent/config.json`:
+
+```json
+{
+  "version": 1,
+  "worktree": {
+    "fetchLatestUpstream": false
+  }
+}
+```
+
+This policy applies to `--worktree`, `/worktree`, and subagent worktrees. The
+remote is selected from the current branch's configured remote, then
+`upstream`, `origin`, or the repository's sole remote. When a remote exists, a
+fetch failure aborts worktree creation rather than falling back to a stale
+commit.
+
 Use `--provider openai`, `--provider xai`, `--provider openrouter`, or
 `--provider claude-code` to override automatic provider detection. Claude Code
 is selected explicitly rather than by auto-detection.

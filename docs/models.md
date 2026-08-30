@@ -1,6 +1,7 @@
 # Model catalog and local models
 
-The model picker merges the shipped OpenAI, xAI, and OpenRouter catalog with:
+The model picker merges the shipped OpenAI, xAI, OpenRouter, and Meta catalog
+with:
 
 ```text
 ~/.haskell-agent/models.json
@@ -10,6 +11,11 @@ User entries with the same `id` replace shipped entries; new entries are
 appended. The `id` is accepted by `/model` and `--model`. Secrets are not
 stored in this file: connections name an environment variable containing the
 API key.
+
+The shipped Meta connection calls Meta Model API directly. Export
+`MODEL_API_KEY`, then select `muse-spark-1.2` with
+`agent-cli --model muse-spark-1.2` or from `/model`. The separate
+`meta/muse-spark-1.2` entry uses OpenRouter.
 
 For example, an unauthenticated local server exposing the streaming OpenAI
 Responses API at `POST /v1/responses` can be configured as:
@@ -53,8 +59,9 @@ Supported dialects are:
 - `generic-responses` for portable Responses-compatible models
 
 Custom connections are selected manually and are not considered for automatic
-billing fallback. Built-in connection names (`openai`, `xai`, and
-`openrouter`) are reserved. Invalid catalogs are reported at startup.
+billing fallback. Shipped connection names (`openai`, `xai`, `openrouter`,
+`meta`, and `claude-code`) are reserved. Invalid catalogs are reported at
+startup.
 
 The built-in `add-model` skill handles requests such as “use the model running
 at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.

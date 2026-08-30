@@ -8,6 +8,7 @@ module Agent.CLI.Config
     , McpInitStrategy(..)
     , McpOAuthConfig(..)
     , McpServerConfig(..)
+    , WorktreeConfig(..)
     , defaultHarnessConfig
     , harnessConfigPath
     , loadHarnessConfig
@@ -171,6 +172,13 @@ data LspConfig = LspConfig
     }
     deriving (Eq, Show)
 
+-- | Managed worktree creation policy. Repositories with remotes fetch by
+-- default, while local-only repositories continue to branch from @HEAD@.
+data WorktreeConfig = WorktreeConfig
+    { worktreeFetchLatestUpstream :: !Bool
+    }
+    deriving (Eq, Show)
+
 -- | Resolve the configured MCP startup policy for the current invocation.
 -- Interactive sessions favor prompt availability, while one-shot commands
 -- preserve deterministic startup unless explicitly overridden.
@@ -273,12 +281,20 @@ instance Aeson.ToJSON LspConfig where
             , "servers" Aeson..= config.lspServers
             ]
 
+instance Aeson.ToJSON WorktreeConfig where
+    toJSON config =
+        Aeson.object
+            [ "fetchLatestUpstream"
+                Aeson..= config.worktreeFetchLatestUpstream
+            ]
+
 data HarnessConfig = HarnessConfig
     { configVersion :: !Int
     , configMcpInitStrategy :: !McpInitStrategy
     , configMcpServers :: !(Map Text McpServerConfig)
     , configWebFetch :: !WebFetchConfig
     , configLsp :: !LspConfig
+    , configWorktree :: !WorktreeConfig
     , configMaxConcurrentAgents :: !(Maybe Int)
     }
     deriving (Eq, Show)
@@ -291,6 +307,7 @@ instance Aeson.ToJSON HarnessConfig where
             , "mcpServers" Aeson..= config.configMcpServers
             , "webFetch" Aeson..= config.configWebFetch
             , "lsp" Aeson..= config.configLsp
+            , "worktree" Aeson..= config.configWorktree
             , "maxConcurrentAgents" Aeson..= config.configMaxConcurrentAgents
             ]
 
@@ -309,6 +326,9 @@ defaultHarnessConfig = HarnessConfig
     , configLsp = LspConfig
         { lspEnabled = False
         , lspServers = Map.empty
+        }
+    , configWorktree = WorktreeConfig
+        { worktreeFetchLatestUpstream = True
         }
     , configMaxConcurrentAgents = Nothing
     }
@@ -409,6 +429,12 @@ lspConfigDecoder =
             <*> defaultKey Map.empty "servers"
                 (Hermes.objectAsMap pure lspServerConfigDecoder)
 
+worktreeConfigDecoder :: Hermes.Decoder WorktreeConfig
+worktreeConfigDecoder =
+    Hermes.object $
+        WorktreeConfig
+            <$> defaultKey True "fetchLatestUpstream" Hermes.bool
+
 harnessConfigDecoder :: Hermes.Decoder HarnessConfig
 harnessConfigDecoder =
     Hermes.object $
@@ -422,6 +448,8 @@ harnessConfigDecoder =
                 "webFetch" webFetchConfigDecoder
             <*> defaultKey defaultHarnessConfig.configLsp
                 "lsp" lspConfigDecoder
+            <*> defaultKey defaultHarnessConfig.configWorktree
+                "worktree" worktreeConfigDecoder
             <*> optionalKey "maxConcurrentAgents" Hermes.int
 
 textMapDecoder :: Hermes.Decoder (Map Text Text)

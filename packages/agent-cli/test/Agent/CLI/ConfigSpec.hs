@@ -192,6 +192,26 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configMaxConcurrentAgents) result
                 `shouldBe` Right (Just 48)
 
+    it "fetches the latest upstream for managed worktrees by default" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"worktree\":{}}"
+            result <- loadHarnessConfig home
+            fmap (.configWorktree) result
+                `shouldBe` Right WorktreeConfig
+                    { worktreeFetchLatestUpstream = True
+                    }
+
+    it "loads the managed worktree fetch opt-out" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"worktree\":{\"fetchLatestUpstream\":false}}"
+            result <- loadHarnessConfig home
+            fmap (.configWorktree) result
+                `shouldBe` Right WorktreeConfig
+                    { worktreeFetchLatestUpstream = False
+                    }
+
     it "decodes LSP maps and retains opaque JSON options" $
         withTempDir "agent-config-" \home -> do
             writeConfig home
@@ -302,6 +322,9 @@ spec = describe "Agent.CLI.Config" do
                     }
                 config = defaultHarnessConfig
                     { configMcpServers = Map.singleton "seo-mcp" server
+                    , configWorktree = WorktreeConfig
+                        { worktreeFetchLatestUpstream = True
+                        }
                     , configMaxConcurrentAgents = Just 48
                     }
             saveHarnessConfig home config `shouldReturn` Right ()

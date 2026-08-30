@@ -2,10 +2,12 @@
 -- endpoints.
 module Agent.Responses.GenericClient
     ( GenericClientOptions(..)
+    , ProviderClientConfig(..)
     , buildRequest
     , createResponseWith
     , createResponseWithEvents
     , createResponseWithEventsPolicy
+    , createResponseWithProviderPolicy
     , retryTransientResultWithPolicy
     , classifyFailure
     , classifyStreamError
@@ -59,6 +61,25 @@ data GenericClientOptions = GenericClientOptions
       -- ^ Full streaming-response timeout.
     } deriving (Eq, Show)
 
+-- | Provider-specific hooks around the shared stateless Responses client.
+--
+-- Named providers retain their own option and credential types, request
+-- dialects, headers, error classification, and retry policy. This record only
+-- centralizes the transport/retry wiring common to those clients.
+data ProviderClientConfig = ProviderClientConfig
+    { providerExceptionPrefix :: !Text
+    , providerBaseUrl :: !String
+    , providerRequestTimeoutSeconds :: !Int
+    , providerBuildRequest
+        :: !(ResponseCreateParams -> ResponseCreateParams)
+    , providerConfigureRequest :: !(Request -> Request)
+    , providerClassifyFailure
+        :: !(Int -> Maybe Int -> Text -> ApiError)
+    , providerBuildResponse
+        :: !([ResponseStreamEvent] -> Either ApiError Response)
+    , providerRetryableFailure :: !(ApiError -> Bool)
+    }
+
 -- | Project canonical request parameters onto a stateless Responses endpoint.
 --
 -- Stateless endpoints receive the complete local transcript on every request,
@@ -91,29 +112,42 @@ createResponseWithEventsPolicy
     -> HttpSSE.StreamEventCallback
     -> IO (Either ApiError Response)
 createResponseWithEventsPolicy policy options request onEvent =
-    retryTransientResultWithPolicy policy performOnce onEvent
+    createResponseWithProviderPolicy
+        policy
+        (genericProviderConfig options)
+        request
+        (Just onEvent)
+
+-- | Execute a stateless Responses request through provider-specific hooks.
+--
+-- A missing callback means streamed events are intentionally discarded and
+-- therefore remain safe to replay. A present callback prevents retries after
+-- the first caller-visible event.
+createResponseWithProviderPolicy
+    :: RetryPolicyM IO
+    -> ProviderClientConfig
+    -> ResponseCreateParams
+    -> Maybe HttpSSE.StreamEventCallback
+    -> IO (Either ApiError Response)
+createResponseWithProviderPolicy policy config request onEvent =
+    retryStreamingResultWithPolicy
+        policy
+        config.providerRetryableFailure
+        performOnce
+        onEvent
   where
     performOnce =
         performResponsesRequest
             ResponsesClientConfig
-                { clientExceptionPrefix = "Responses request failed"
-                , clientBaseUrl = options.baseUrl
-                , clientTimeoutSeconds = options.requestTimeoutSeconds
-                , clientClassifyFailure = classifyFailure
-                , clientBuildResponse = buildResponse
+                { clientExceptionPrefix = config.providerExceptionPrefix
+                , clientBaseUrl = config.providerBaseUrl
+                , clientTimeoutSeconds =
+                    config.providerRequestTimeoutSeconds
+                , clientClassifyFailure = config.providerClassifyFailure
+                , clientBuildResponse = config.providerBuildResponse
                 }
-            (buildRequest options request)
-            configureRequest
-
-    configureRequest =
-        maybe
-            id
-            (\token ->
-                setRequestHeader
-                    "Authorization"
-                    ["Bearer " <> Text.encodeUtf8 token])
-            (nonEmptyText options.bearerToken)
-            . setRequestHeader "User-Agent" ["haskell-agent"]
+            (config.providerBuildRequest request)
+            config.providerConfigureRequest
 
 retryTransientResultWithPolicy
     :: RetryPolicyM IO
@@ -153,6 +187,26 @@ buildResponse = buildStreamResponse StreamAssemblyConfig
 
 transientResultPolicy :: RetryPolicyM IO
 transientResultPolicy = exponentialBackoff 1_000_000 <> limitRetries 3
+
+genericProviderConfig :: GenericClientOptions -> ProviderClientConfig
+genericProviderConfig options = ProviderClientConfig
+    { providerExceptionPrefix = "Responses request failed"
+    , providerBaseUrl = options.baseUrl
+    , providerRequestTimeoutSeconds = options.requestTimeoutSeconds
+    , providerBuildRequest = buildRequest options
+    , providerConfigureRequest =
+        maybe
+            id
+            (\token ->
+                setRequestHeader
+                    "Authorization"
+                    ["Bearer " <> Text.encodeUtf8 token])
+            (nonEmptyText options.bearerToken)
+            . setRequestHeader "User-Agent" ["haskell-agent"]
+    , providerClassifyFailure = classifyFailure
+    , providerBuildResponse = buildResponse
+    , providerRetryableFailure = isInlineRetryableProviderError
+    }
 
 nonEmptyText :: Maybe Text -> Maybe Text
 nonEmptyText (Just value)
