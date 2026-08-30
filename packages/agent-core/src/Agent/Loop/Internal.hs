@@ -806,6 +806,22 @@ enqueueLoopEventCommand pump command =
             pure (Right ()))
         ) >>= either throwLoopEventFailure pure
 
+-- Tool output callbacks carry cumulative snapshots. Keep the queue's
+-- coalesced value bounded even when a provider sends a single giant snapshot;
+-- the complete tool result remains available through the normal tool result
+-- path or artifact reference.
+boundLoopToolOutput :: Text -> Text
+boundLoopToolOutput output
+    | Text.length output <= loopEventTailPayloadBudgetCodeUnits =
+        Text.copy output
+    | otherwise =
+        Text.copy (Text.take loopEventTailPayloadCodeUnits output)
+            <> "\n[tool output truncated]"
+
+loopEventTailPayloadCodeUnits :: Int
+loopEventTailPayloadCodeUnits =
+    max 0 (loopEventTailPayloadBudgetCodeUnits - 24)
+
 enqueueTextDelta :: LoopEventPump -> Bool -> Text -> IO ()
 enqueueTextDelta pump reasoning = go
   where
@@ -840,7 +856,7 @@ enqueueTextDelta pump reasoning = go
                             pure (Right ())
                     _ -> do
                         buffer <- newTVar
-                            (appendTextBuffer text emptyTextBuffer)
+                            (appendTextBuffer (Text.copy text) emptyTextBuffer)
                         let pending =
                                 if reasoning
                                     then CoalescedReasoningDelta buffer
@@ -868,6 +884,8 @@ enqueueTextDelta pump reasoning = go
 
 enqueueToolOutput :: LoopEventPump -> Text -> Text -> IO ()
 enqueueToolOutput pump callId output =
+    let boundedOutput = boundLoopToolOutput output
+    in
     atomically
         ( (Left <$> readTMVar pump.eventPumpFailure)
             `orElse`
@@ -876,20 +894,20 @@ enqueueToolOutput pump callId output =
             case current of
                 Just (CoalescedToolOutput currentId snapshot)
                     | currentId == callId -> do
-                        writeTVar snapshot output
+                        writeTVar snapshot boundedOutput
                         reserveTailPayloadBytes
                             pump
                             True
-                            (logicalTextBytes output)
+                            (logicalTextBytes boundedOutput)
                         pure (Right ())
                 _ -> do
-                    snapshot <- newTVar output
+                    snapshot <- newTVar boundedOutput
                     let pending = CoalescedToolOutput callId snapshot
                     writeTVar pump.eventPumpTail (Just pending)
                     reserveTailPayloadBytes
                         pump
                         True
-                        (logicalTextBytes output)
+                        (logicalTextBytes boundedOutput)
                     writeTBQueue pump.eventPumpQueue
                         (DeliverCoalescedLoopEvent pending)
                     pure (Right ()))
