@@ -287,8 +287,10 @@ enqueueMailboxEvent (AppEventMailbox stateRef) event = do
         -- admitting exactly one lets the consumer make progress while still
         -- preventing any additional payload from accumulating behind it.
         firstOversizedSingleton =
-            Seq.null state.mailboxPendingEvents
-                && count == 1
+            -- A keyed update may replace the queue's sole existing event.
+            -- Permit that replacement too; otherwise repeated oversized
+            -- snapshots can block forever before the consumer sees one.
+            count == 1
     check
         ( count <= countLimit
             && (payloadBytes <= byteLimit || firstOversizedSingleton)
