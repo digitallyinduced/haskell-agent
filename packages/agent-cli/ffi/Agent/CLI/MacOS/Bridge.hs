@@ -2,6 +2,7 @@
 
 module Agent.CLI.MacOS.Bridge
     ( repositoryCancelAllAdmissionSmoke
+    , repositoryCancelClassificationSmoke
     , repositoryCancelAllReentrancySmoke
     , repositoryCheckDestroyReentrancySmoke
     ) where
@@ -146,6 +147,7 @@ import Control.Concurrent.MVar
     , newMVar
     , putMVar
     , readMVar
+    , tryReadMVar
     )
 import Control.Concurrent.STM
     ( TMVar
@@ -172,7 +174,9 @@ import Control.Exception.Safe
     , bracket
     , catchAsync
     , finally
+    , isAsyncException
     , mask
+    , throwIO
     , tryAny
     , uninterruptibleMask_
     )
@@ -202,7 +206,7 @@ import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -687,7 +691,7 @@ ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
             Right path -> do
                 started <- startRepositoryWorker
                     (emitRepositoryCancelled resultCallback context) $
-                    tryAny
+                    tryRepositorySynchronous
                         (RepositoryReview.repositorySnapshot (Text.unpack path))
                         >>= \case
                             Left exception ->
@@ -698,7 +702,7 @@ ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
                             Right (Left err) ->
                                 emitRepositoryError resultCallback context err
                             Right (Right snapshot) -> do
-                                streamed <- tryAny do
+                                streamed <- tryRepositorySynchronous do
                                     withRepositorySnapshot snapshot $
                                         invokeRepositorySnapshotCallback
                                             snapshotCallback
@@ -759,7 +763,7 @@ ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
                         Just kind -> do
                             started <- startRepositoryWorker
                                 (emitRepositoryCancelled resultCallback context) $
-                                tryAny
+                                tryRepositorySynchronous
                                     (RepositoryReview.repositoryDiff
                                         (Text.unpack path)
                                         expected
@@ -775,7 +779,7 @@ ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
                                             emitRepositoryError
                                                 resultCallback context err
                                         Right (Right diff) -> do
-                                            streamed <- tryAny do
+                                            streamed <- tryRepositorySynchronous do
                                                 forM_
                                                     (byteStringChunks
                                                         (64 * 1024)
@@ -898,7 +902,7 @@ ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
                 Right [path, expected, message] -> do
                     started <- startRepositoryWorker
                         (emitRepositoryCancelled callback context) $
-                        tryAny
+                        tryRepositorySynchronous
                             (RepositoryReview.commitRepository
                                 (Text.unpack path)
                                 expected
@@ -924,7 +928,8 @@ startRepositoryMutation
     -> IO Bool
 startRepositoryMutation callback context path expected mutation =
     startRepositoryWorker (emitRepositoryCancelled callback context) $
-        tryAny (RepositoryReview.mutateRepository path expected mutation)
+        tryRepositorySynchronous
+            (RepositoryReview.mutateRepository path expected mutation)
             >>= \case
                 Left exception ->
                     emitRepositoryFailure callback context
@@ -936,7 +941,7 @@ startRepositoryMutation callback context path expected mutation =
 
 startRepositoryWorker :: IO () -> IO () -> IO Bool
 startRepositoryWorker onCancelled action =
-    tryAny
+    tryRepositorySynchronous
         (mask \_ -> do
             gate <- newEmptyMVar
             admitted <- modifyMVar repositoryWorkers \state ->
@@ -1062,6 +1067,25 @@ repositoryCancelAllReentrancySmoke = do
         then readMVar completed >> pure True
         else pure False
 
+repositoryCancelClassificationSmoke :: IO Bool
+repositoryCancelClassificationSmoke = do
+    entered <- newEmptyMVar
+    cancelled <- newEmptyMVar
+    synthesizedFailure <- newEmptyMVar
+    accepted <- startRepositoryWorker (putMVar cancelled ()) do
+        putMVar entered ()
+        tryRepositorySynchronous (threadDelay 30_000_000) >>= \case
+            Left _ -> putMVar synthesizedFailure ()
+            Right () -> pure ()
+    if not accepted
+        then pure False
+        else do
+            readMVar entered
+            ha_repository_cancel_all
+            cancellation <- tryReadMVar cancelled
+            failure <- tryReadMVar synthesizedFailure
+            pure (isJust cancellation && isNothing failure)
+
 {-# NOINLINE repositoryWorkers #-}
 repositoryWorkers :: MVar RepositoryWorkerState
 repositoryWorkers = unsafePerformIO
@@ -1094,6 +1118,16 @@ isRepositoryCallbackThread :: IO Bool
 isRepositoryCallbackThread = do
     thread <- myThreadId
     Set.member thread <$> readMVar repositoryCallbackThreads
+
+tryRepositorySynchronous
+    :: IO value
+    -> IO (Either SomeException value)
+tryRepositorySynchronous action =
+    tryAny action >>= \case
+        Left exception
+            | isAsyncException exception -> throwIO exception
+            | otherwise -> pure (Left exception)
+        Right value -> pure (Right value)
 
 data RepositoryCheckHandle = RepositoryCheckHandle
     { repositoryCheckValue :: !(IORef (Maybe RepositoryReview.RepositoryCheck))
@@ -1133,7 +1167,7 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                             gate <- newEmptyMVar
                             owner <- asyncWithUnmask \unmask ->
                                 readMVar gate >> unmask do
-                                    started <- tryAny
+                                    started <- tryRepositorySynchronous
                                         (RepositoryReview.startRepositoryCheck
                                             (Text.unpack path)
                                             expected

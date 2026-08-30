@@ -34,9 +34,12 @@ import Control.Concurrent.MVar
     , withMVar
     )
 import Control.Exception.Safe
-    ( bracket
+    ( SomeException
+    , bracket
     , finally
+    , isAsyncException
     , onException
+    , throwIO
     , tryAny
     )
 import Control.Monad (foldM, unless)
@@ -315,7 +318,7 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                             (InvalidRepositoryRequest
                                 "check argument contains a NUL byte"))
                 | otherwise -> do
-                    created <- tryAny do
+                    created <- trySynchronous do
                         (maybeOutput, maybeError, process) <-
                             createCheckProcess root executable arguments
                         processGroup <- getPid process
@@ -379,7 +382,7 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
                         nextEnabled <-
                             if callbackEnabled
                                 then
-                                    tryAny (onOutput stream bytes) >>= \case
+                                    trySynchronous (onOutput stream bytes) >>= \case
                                         Left _ -> pure False
                                         Right () -> pure True
                                 else pure False
@@ -742,7 +745,7 @@ appendUntrackedHashes root statusBytes diffBytes =
         result <- runGit root
             ["--literal-pathspecs", "hash-object", "--", path]
             BS.empty
-        modeResult <- tryAny
+        modeResult <- trySynchronous
             (fileMode <$> getSymbolicLinkStatus (root </> path))
         pure do
             contentHash <- result
@@ -877,7 +880,7 @@ repositoryRoot requested
         runGit requested ["rev-parse", "--show-toplevel"] BS.empty >>= \case
             Left err -> pure (Left (NotARepository (repositoryErrorText err)))
             Right rootBytes ->
-                tryAny
+                trySynchronous
                     (canonicalizePath
                         (Text.unpack (decodeTrimmed rootBytes))) >>= \case
                             Left exception ->
@@ -901,7 +904,7 @@ runGit
     -> BS.ByteString
     -> IO (Either RepositoryError BS.ByteString)
 runGit root arguments input = do
-    result <- tryAny (runProcessBytes root "git" arguments input)
+    result <- trySynchronous (runProcessBytes root "git" arguments input)
     pure case result of
         Left exception ->
             Left
@@ -924,7 +927,7 @@ runGitDiff
     -> [String]
     -> IO (Either RepositoryError BS.ByteString)
 runGitDiff root arguments = do
-    result <- tryAny (runProcessBytes root "git" arguments BS.empty)
+    result <- trySynchronous (runProcessBytes root "git" arguments BS.empty)
     pure case result of
         Left exception ->
             Left
@@ -1020,3 +1023,11 @@ repositoryErrorText = \case
 
 voidResult :: Either error value -> Either error ()
 voidResult = fmap (const ())
+
+trySynchronous :: IO value -> IO (Either SomeException value)
+trySynchronous action =
+    tryAny action >>= \case
+        Left exception
+            | isAsyncException exception -> throwIO exception
+            | otherwise -> pure (Left exception)
+        Right value -> pure (Right value)
