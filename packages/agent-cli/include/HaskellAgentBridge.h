@@ -584,6 +584,7 @@ int32_t ha_repository_check_start(
 void ha_repository_check_cancel(void *check);
 void ha_repository_check_destroy(void *check);
 
+/*
  * Typed session operations copy all inputs before returning and invoke exactly
  * one terminal callback after returning 0. A return of 2 rejects a null/empty
  * required input, invalid UTF-8 session id, invalid index/radius, null
