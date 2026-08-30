@@ -152,15 +152,18 @@ listDirResolved env path displayName = doesDirectoryExist path >>= \case
     True ->
         collectDir env.toolCwd path >>= \case
             Left err -> pure (Left err)
-            Right entries -> do
-                let (shown, truncated) = capNodes maxListItems entries
-                    tree = renderTree 0 shown
-                    notice
-                        | truncated =
-                            "\nLarge directory summarized; some nested entries were omitted."
-                        | otherwise = ""
-                pure $ Right $
-                    "Directory listing for " <> displayName <> ":\n" <> tree <> notice
+            Right entries -> pure (Right (formatListing displayName entries))
+
+formatListing :: Text -> [DirNode] -> Text
+formatListing displayName entries =
+    "Directory listing for " <> displayName <> ":\n" <> tree <> notice
+  where
+    (shown, truncated) = capNodes maxListItems entries
+    tree = renderTree 0 shown
+    notice
+        | truncated =
+            "\nLarge directory summarized; some nested entries were omitted."
+        | otherwise = ""
 
 data DirNode
     = FileNode OsPath
@@ -174,12 +177,13 @@ collectDir cwd path = do
     case listed of
         Left err -> pure (Left err)
         Right raw -> do
-            let visible = sortOn fst
-                    [ (name, isDir)
-                    | (name, isDir) <- raw
-                    , not ("." `Text.isPrefixOf` toText name)
-                    ]
+            let visible = visibleEntries raw
             Right <$> (fmap concat $ mapM (toNode cwd path) visible)
+
+visibleEntries :: [(OsPath, Bool)] -> [(OsPath, Bool)]
+visibleEntries =
+    sortOn fst
+        . filter (\(name, _) -> not ("." `Text.isPrefixOf` toText name))
 
 -- | Collect a listing, fingerprints for every directory visited, and every
 -- git-ignore decision that affected the output. A root fingerprint alone is
@@ -201,11 +205,7 @@ collectDirSnapshot cwd path = do
             case listed of
                 Left err -> pure (Left err)
                 Right raw -> do
-                    let visible = sortOn fst
-                            [ (name, isDir)
-                            | (name, isDir) <- raw
-                            , not ("." `Text.isPrefixOf` toText name)
-                            ]
+                    let visible = visibleEntries raw
                     children <- mapM (toNodeSnapshot cwd path) visible
                     after <- directoryFingerprint path
                     case sequence children of
@@ -638,15 +638,7 @@ prefetchListing env target =
                 Left _ -> pure Nothing
                 Right (entries, snapshot) -> do
                     display <- displayPathInWorkspace env path
-                    let (shown, truncated) = capNodes maxListItems entries
-                        tree = renderTree 0 shown
-                        notice
-                            | truncated =
-                                "\nLarge directory summarized; some nested entries were omitted."
-                            | otherwise = ""
-                        output =
-                            "Directory listing for " <> display <> ":\n"
-                                <> tree <> notice
+                    let output = formatListing display entries
                     void (evaluate (Text.length output))
                     pure $ Just PrefetchedListing
                         { listingPath = path

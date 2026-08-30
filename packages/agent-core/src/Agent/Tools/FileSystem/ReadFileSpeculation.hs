@@ -9,7 +9,7 @@ module Agent.Tools.FileSystem.ReadFileSpeculation
     , readReadFileSpeculationMetrics
     ) where
 
-import Agent.OsPath (fromText, unsafeToFilePath)
+import Agent.OsPath (fromText)
 import Agent.ToolDispatch
     ( StreamedTool(..)
     , StreamedToolFactory
@@ -21,8 +21,16 @@ import Agent.Tools.FileSystem
     , resolveForReadWithoutAccessRequest
     )
 import Agent.Tools.FileSystem.PathPrefix
-    ( PathProgress(..)
+    ( FileFingerprint(..)
+    , PathProgress(..)
+    , cancelAndJoin
+    , fileFingerprint
     , jsonStringFieldProgress
+    , maxSpeculativeReadBytes
+    , maximumConcurrentSpeculativeTasks
+    , minimumPredictionPrefix
+    , uniqueWorkspaceCandidate
+    , workspaceFileIndex
     )
 import qualified Agent.Json.Decode as Json
 import Agent.Tools.FileSystem.ReadFile.Internal
@@ -38,7 +46,6 @@ import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
-    , cancel
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -49,10 +56,7 @@ import Control.Concurrent.MVar
     , readMVar
     )
 import Control.Exception (evaluate)
-import Control.Exception.Safe
-    ( mask
-    , tryAny
-    )
+import Control.Exception.Safe (mask)
 import Control.Monad (forM_, guard, void, when)
 import Data.Acquire (mkAcquire)
 import Data.IORef
@@ -66,18 +70,7 @@ import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Exit (ExitCode(..))
-import System.OsPath (OsPath, equalFilePath, isAbsolute)
-import System.Posix.Files
-    ( deviceID
-    , fileID
-    , fileSize
-    , getFileStatus
-    , isRegularFile
-    , modificationTimeHiRes
-    , statusChangeTimeHiRes
-    )
-import System.Process (readProcessWithExitCode)
+import System.OsPath (OsPath, equalFilePath)
 
 -- | Session-scoped resources shared by every @read_file@ argument
 -- interpreter. Per-call argument and candidate state lives inside the
@@ -116,15 +109,6 @@ data PrefetchedRead = PrefetchedRead
     , prefetchedFingerprint :: !FileFingerprint
     , prefetchedWindow :: !FileWindow
     }
-
-data FileFingerprint = FileFingerprint
-    { fingerprintDevice :: !Integer
-    , fingerprintFile :: !Integer
-    , fingerprintSize :: !Integer
-    , fingerprintModified :: !Rational
-    , fingerprintChanged :: !Rational
-    }
-    deriving (Eq, Show)
 
 data PredictionKind
     = PrefixPrediction
@@ -443,22 +427,6 @@ candidateStillMatches progress candidateTarget =
         Just (PathComplete target) -> target == candidateTarget
         Nothing -> False
 
-uniqueWorkspaceCandidate :: Text -> Set.Set Text -> Maybe Text
-uniqueWorkspaceCandidate prefix paths
-    | isAbsolute (fromText prefix) = Nothing
-    | otherwise = do
-        candidate <- Set.lookupGE normalizedPrefix paths
-        guard (normalizedPrefix `Text.isPrefixOf` candidate)
-        case Set.lookupGT candidate paths of
-            Just next
-                | normalizedPrefix `Text.isPrefixOf` next -> Nothing
-            _ -> Just (decorate candidate)
-  where
-    (normalizedPrefix, decorate)
-        | Just rest <- Text.stripPrefix "./" prefix =
-            (rest, ("./" <>))
-        | otherwise = (prefix, id)
-
 startReadCandidate
     :: ReadFileSpeculation
     -> ReadFileArgs
@@ -469,7 +437,7 @@ startReadCandidate speculation arguments kind = mask \_ -> do
         modifyMVar speculation.state \current ->
             if current.closed
                 || Map.size current.activeTasks
-                    >= maximumConcurrentSpeculativeReads
+                    >= maximumConcurrentSpeculativeTasks
                 then pure (current, Nothing)
                 else do
                     let taskKey = ReadTaskKey current.nextTaskKey
@@ -548,25 +516,6 @@ installWorkspaceIndex speculation paths =
                 , workspaceIndexTask = Nothing
                 }
 
-workspaceFileIndex :: ToolEnv -> IO (Set.Set Text)
-workspaceFileIndex environment = do
-    result <- tryAny $
-        readProcessWithExitCode
-            "git"
-            [ "-C"
-            , unsafeToFilePath environment.toolCwd
-            , "ls-files"
-            , "--cached"
-            , "--others"
-            , "--exclude-standard"
-            , "-z"
-            ]
-            ""
-    pure $ Set.fromList $ case result of
-        Right (ExitSuccess, output, _) ->
-            filter (not . Text.null) (Text.splitOn "\0" (Text.pack output))
-        _ -> []
-
 prefetchRead :: ToolEnv -> ReadFileArgs -> IO (Maybe PrefetchedRead)
 prefetchRead environment arguments
     | ".pdf" `Text.isSuffixOf` Text.toLower arguments.targetFile =
@@ -609,21 +558,6 @@ readReadFileSpeculationMetrics
     -> IO ReadFileSpeculationMetrics
 readReadFileSpeculationMetrics = readIORef . (.metrics)
 
-fileFingerprint :: OsPath -> IO (Maybe FileFingerprint)
-fileFingerprint path = do
-    result <- tryAny (getFileStatus (unsafeToFilePath path))
-    pure $ case result of
-        Right status
-            | isRegularFile status -> Just FileFingerprint
-                { fingerprintDevice = fromIntegral (deviceID status)
-                , fingerprintFile = fromIntegral (fileID status)
-                , fingerprintSize = fromIntegral (fileSize status)
-                , fingerprintModified = toRational (modificationTimeHiRes status)
-                , fingerprintChanged = toRational (statusChangeTimeHiRes status)
-                }
-        _ -> Nothing
-
-
 recordStart
     :: PredictionKind
     -> ReadFileSpeculationMetrics
@@ -655,20 +589,6 @@ modifyMetrics speculation update =
 
 cancelAndJoinAll :: [Async a] -> IO ()
 cancelAndJoinAll = mapM_ cancelAndJoin
-
-cancelAndJoin :: Async a -> IO ()
-cancelAndJoin worker = do
-    cancel worker
-    void (waitCatch worker)
-
-minimumPredictionPrefix :: Int
-minimumPredictionPrefix = 4
-
-maximumConcurrentSpeculativeReads :: Int
-maximumConcurrentSpeculativeReads = 4
-
-maxSpeculativeReadBytes :: Integer
-maxSpeculativeReadBytes = 16 * 1024 * 1024
 
 decodeReadFileArgs :: Text -> Maybe ReadFileArgs
 decodeReadFileArgs text =

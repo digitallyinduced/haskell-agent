@@ -253,21 +253,14 @@ runWorkload workload tailMillis registry runtime callId = do
     let arguments = readArguments benchmarkTarget
         call = functionToolCall callId "read_file" arguments
         delay = when (tailMillis > 0) (threadDelay (tailMillis * 1000))
+        streamedArguments = case workload of
+            Baseline -> arguments
+            SpeculativeComplete -> arguments
+            SpeculativePrefix -> "{\"target_file\":\"bench/spec"
     observeToolArgumentEvent runtime $
         outputItemAdded (Just callId) (Just 0) callId ""
-    case workload of
-        Baseline ->
-            observeToolArgumentEvent runtime $
-                argumentsDelta (Just callId) (Just 0) arguments
-        SpeculativeComplete ->
-            observeToolArgumentEvent runtime $
-                argumentsDelta (Just callId) (Just 0) arguments
-        SpeculativePrefix ->
-            observeToolArgumentEvent runtime $
-                argumentsDelta
-                    (Just callId)
-                    (Just 0)
-                    "{\"target_file\":\"bench/spec"
+    observeToolArgumentEvent runtime $
+        argumentsDelta (Just callId) (Just 0) streamedArguments
     delay
     finishStream runtime (Just callId) call
     output <-
