@@ -19,6 +19,7 @@ import Agent.GrokBuild.Dialect.Tools
     , grokTools
     , newGrokSession
     )
+import Agent.GrokBuild.Dialect.Shell (resetGrokSessionTemp)
 import Agent.GrokBuild.Dialect.Workflow
     ( WorkflowRuntime
     , newWorkflowRuntime
@@ -39,6 +40,7 @@ import Agent.Tools.Types (AppTool, ToolEnv(..))
 import Control.Exception.Safe (onException)
 import Control.Monad (forM)
 import Data.Maybe (isNothing)
+import System.OsPath (OsPath)
 
 data GrokCodingTools = GrokCodingTools
     { grokAppTools :: ![AppTool]
@@ -56,6 +58,7 @@ data GrokRuntimeControl = GrokRuntimeControl
     { grokGoalRuntime :: !GoalRuntime
     , grokSchedulerRuntime :: !(Maybe SchedulerRuntime)
     , grokWorkflowRuntime :: !(Maybe WorkflowRuntime)
+    , grokResetSessionTemp :: !(OsPath -> IO ())
     }
 
 newGrokCodingTools
@@ -88,6 +91,7 @@ newGrokCodingTools env hooks multi typesRef = do
                 { grokGoalRuntime = goals
                 , grokSchedulerRuntime = scheduler
                 , grokWorkflowRuntime = workflows
+                , grokResetSessionTemp = resetGrokSessionTemp session
                 }
         pure GrokCodingTools
             { grokAppTools =

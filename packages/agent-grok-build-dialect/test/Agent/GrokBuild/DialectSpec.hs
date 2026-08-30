@@ -5,6 +5,8 @@ import Agent.GrokBuild.Dialect.Shell
     , PersistentShell(..)
     , closeGrokSession
     , newGrokSession
+    , resetGrokSessionTemp
+    , runForegroundStreaming
     )
 import Agent.GrokBuild.Dialect.ProjectInstructions (formatGrokAgentsMd)
 import Agent.GrokBuild.Dialect.Prompt
@@ -20,6 +22,7 @@ import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolDispatch (ToolCall, functionToolCall)
 import Agent.Tools.Scheduling (schedulingPlansConflict)
+import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolRegistry
@@ -36,7 +39,11 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import System.Directory (createDirectory, doesFileExist)
+import System.Directory
+    ( createDirectory
+    , doesFileExist
+    , removeDirectoryRecursive
+    )
 import System.FilePath ((</>), takeDirectory)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
@@ -235,6 +242,47 @@ spec = describe "Grok Build dialect" do
                 shell <- readMVar session.grokShell
                 takeDirectory (unsafeToFilePath shell.shellEnvFile)
                     `shouldBe` scratch
+
+    it "recreates shell state after the session temp directory changes" do
+        withTempDir \dir -> do
+            let firstScratch = dir </> "first-session"
+                nextScratch = dir </> "next-session"
+            createDirectory firstScratch
+            createDirectory nextScratch
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSessionTmp env (Just (unsafeEncodeUtf firstScratch))
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                moved <- runForegroundStreaming
+                    session
+                    "cd \"$TMPDIR\""
+                    10000
+                    (\_ _ -> pure ())
+                moved.commandExitCode `shouldBe` Just 0
+                firstShell <- readMVar session.grokShell
+                let firstEnvFile =
+                        unsafeToFilePath firstShell.shellEnvFile
+                unsafeToFilePath firstShell.shellCwd
+                    `shouldBe` firstScratch
+                removeDirectoryRecursive firstScratch
+
+                resetGrokSessionTemp session (unsafeEncodeUtf nextScratch)
+                setToolSessionTmp env (Just (unsafeEncodeUtf nextScratch))
+
+                nextShell <- readMVar session.grokShell
+                let nextEnvFile =
+                        unsafeToFilePath nextShell.shellEnvFile
+                nextEnvFile `shouldNotBe` firstEnvFile
+                takeDirectory nextEnvFile `shouldBe` nextScratch
+                unsafeToFilePath nextShell.shellCwd `shouldBe` dir
+                doesFileExist nextEnvFile `shouldReturn` True
+
+                result <- runForegroundStreaming
+                    session
+                    "printf reset-ok"
+                    10000
+                    (\_ _ -> pure ())
+                result.commandExitCode `shouldBe` Just 0
+                result.commandStdout `shouldBe` "reset-ok"
 
     it "formats and neutralizes project instruction reminders" do
         let loaded = LoadedAgentsMd

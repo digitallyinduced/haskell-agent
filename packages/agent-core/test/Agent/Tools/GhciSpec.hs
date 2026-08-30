@@ -188,19 +188,33 @@ spec = describe "Agent.Tools.Ghci" do
                 result.ghciOutput `shouldSatisfy`
                     Text.isInfixOf (Text.pack (toFilePath env.toolCwd))
 
-    it "inherits the private session temp environment" do
+    it "refreshes the private temp environment after suspension" do
         withTempEnv \env -> do
-            let scratch = toFilePath env.toolCwd </> "session-scratch"
-            createDirectory scratch
-            setToolSessionTmp env (Just (fromFilePath scratch))
+            let firstScratch = toFilePath env.toolCwd </> "first-session"
+                nextScratch = toFilePath env.toolCwd </> "next-session"
+            createDirectory firstScratch
+            createDirectory nextScratch
+            setToolSessionTmp env (Just (fromFilePath firstScratch))
             bracket (newGhciSession env) closeGhciSession \ghci -> do
-                result <- evalGhci ghci
+                first <- evalGhci ghci
                     "cmd \"sh\" [\"-c\", \"printf '%s|%s|%s' \\\"$TMPDIR\\\" \\\"$HASKELL_AGENT_TMPDIR\\\" \\\"${HASKELL_AGENT_HOST_TMPDIR-unset}\\\"\"]"
                     10000
-                result.ghciOk `shouldBe` True
-                result.ghciOutput `shouldSatisfy`
+                first.ghciOk `shouldBe` True
+                first.ghciOutput `shouldSatisfy`
                     Text.isInfixOf
-                        (Text.pack (scratch <> "|" <> scratch <> "|unset"))
+                        (Text.pack
+                            (firstScratch <> "|" <> firstScratch <> "|unset"))
+
+                setToolSessionTmp env (Just (fromFilePath nextScratch))
+                suspendGhciSession ghci
+                next <- evalGhci ghci
+                    "cmd \"sh\" [\"-c\", \"printf '%s|%s|%s' \\\"$TMPDIR\\\" \\\"$HASKELL_AGENT_TMPDIR\\\" \\\"${HASKELL_AGENT_HOST_TMPDIR-unset}\\\"\"]"
+                    10000
+                next.ghciOk `shouldBe` True
+                next.ghciOutput `shouldSatisfy`
+                    Text.isInfixOf
+                        (Text.pack
+                            (nextScratch <> "|" <> nextScratch <> "|unset"))
 
     it "restores helpers after loading a module clears interactive bindings" do
         withTempEnv \env -> do

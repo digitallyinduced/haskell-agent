@@ -63,6 +63,7 @@ import Agent.CLI.Turn
 import Agent.Cancel
 import Agent.Loop
 import Agent.Dialect
+import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl(..))
 import Agent.Skills
 import Agent.Subagents
 import Agent.Subagents.TaskPath
@@ -633,6 +634,12 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             refreshShellParams ghciEnabled bashEnabled
             pure ("shell tools: " <> shellModeLabel mode)
         setSessionTempDir tempDir = do
+            -- Persistent tool runtimes capture temp-backed state at startup.
+            -- Reset them before publishing the new root so no process or
+            -- state file remains attached to the previous session.
+            suspendGhci
+            forM_ grokRuntime \runtime ->
+                runtime.grokResetSessionTemp tempDir
             setToolSessionTmp toolEnv (Just tempDir)
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef
