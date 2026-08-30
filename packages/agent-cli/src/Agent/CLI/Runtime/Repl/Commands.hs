@@ -74,7 +74,11 @@ import Agent.CLI.Input
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
-import Agent.CLI.Login ( connectProviderAccount, runLoginManager )
+import Agent.CLI.Login
+    ( connectProviderAccount
+    , runFullscreenLoginManager
+    , runLoginManager
+    )
 import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ( runMcpManager )
@@ -841,8 +845,12 @@ handleReplLine
                     action@ReplRename{} -> handleSessionAction env slashCatalog continue action
                     action@ReplRenameAuto -> handleSessionAction env slashCatalog continue action
                     ReplLogin -> do
-                        color <- resolveColor stderr
-                        legacy (runLoginManager color)
+                        case fullscreen of
+                            Just runtime ->
+                                runFullscreenLoginManager runtime
+                            Nothing -> do
+                                color <- resolveColor stderr
+                                runLoginManager color
                         continue
                     ReplUsage -> do
                         case fullscreen of

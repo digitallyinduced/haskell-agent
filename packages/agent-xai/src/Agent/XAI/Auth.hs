@@ -20,9 +20,11 @@ module Agent.XAI.Auth
     ( OAuthOptions(..)
     , defaultOAuthOptions
     , DeviceAuthorization(..)
+    , DeviceAuthorizationPoll(..)
     , OAuthTokens(..)
     , requestDeviceAuthorization
     , pollDeviceAuthorization
+    , pollDeviceAuthorizationStatus
     , completeDeviceAuthorization
     , refreshAccessToken
     , accountIdFromAccessToken
@@ -41,6 +43,7 @@ import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import Data.Time.Clock (addUTCTime, diffUTCTime, getCurrentTime)
 import Network.HTTP.Simple
 
 data OAuthOptions = OAuthOptions
@@ -133,6 +136,15 @@ instance Show OAuthTokens where
                 Just _ -> "Just <redacted>")
         <> ", expiresInSeconds = " <> show tokens.expiresInSeconds <> " }"
 
+-- | Detailed result for one device-code poll. RFC 8628 requires clients to
+-- increase their polling interval after @slow_down@, so interactive callers
+-- need to distinguish it from ordinary authorization pending.
+data DeviceAuthorizationPoll
+    = DeviceAuthorizationPending
+    | DeviceAuthorizationSlowDown
+    | DeviceAuthorizationComplete !OAuthTokens
+    deriving (Eq, Show)
+
 -- | Start a device authorization. A 404 means the device grant is disabled
 -- server-side for this client — surfaced as a distinguishable error text so
 -- callers can fall back to credential import.
@@ -161,7 +173,21 @@ deviceFlowDisabledMessage =
 -- | Poll once without blocking; 'Nothing' means the user has not approved
 -- the device yet ('authorization_pending' / 'slow_down').
 pollDeviceAuthorization :: OAuthOptions -> DeviceAuthorization -> IO (Either Text (Maybe OAuthTokens))
-pollDeviceAuthorization options deviceCode = safely do
+pollDeviceAuthorization options deviceCode =
+    fmap (fmap toMaybe) (pollDeviceAuthorizationStatus options deviceCode)
+  where
+    toMaybe = \case
+        DeviceAuthorizationPending -> Nothing
+        DeviceAuthorizationSlowDown -> Nothing
+        DeviceAuthorizationComplete tokens -> Just tokens
+
+-- | Poll once without blocking while preserving @slow_down@ so callers can
+-- apply RFC 8628's five-second cumulative backoff.
+pollDeviceAuthorizationStatus
+    :: OAuthOptions
+    -> DeviceAuthorization
+    -> IO (Either Text DeviceAuthorizationPoll)
+pollDeviceAuthorizationStatus options deviceCode = safely do
     -- The principal has to be declared when the token is minted, not only
     -- when it is later refreshed: a team login that omits it here gets a
     -- personally scoped token that the refresh then contradicts.
@@ -172,32 +198,65 @@ pollDeviceAuthorization options deviceCode = safely do
         ] <> principalFields options
     let status = getResponseStatusCode response
     if status >= 200 && status < 300
-        then Just <$> parseTokens response
+        then DeviceAuthorizationComplete <$> parseTokens response
         else case oauthErrorCode response of
-            Just "authorization_pending" -> pure Nothing
-            Just "slow_down" -> pure Nothing
+            Just "authorization_pending" ->
+                pure DeviceAuthorizationPending
+            Just "slow_down" ->
+                pure DeviceAuthorizationSlowDown
             Just "access_denied" -> fail "the user denied the device authorization"
             Just "expired_token" -> fail "the device code expired before it was approved"
             Just other -> fail ("device token request failed: " <> Text.unpack other)
             Nothing -> fail ("device token request failed with HTTP " <> show status
                 <> ": " <> lbsPreview (getResponseBody response))
 
--- | Blocking convenience wrapper around 'pollDeviceAuthorization' for CLI use.
+-- | Blocking convenience wrapper for CLI use.
 completeDeviceAuthorization :: OAuthOptions -> DeviceAuthorization -> IO (Either Text OAuthTokens)
-completeDeviceAuthorization options deviceCode = go 0
+completeDeviceAuthorization options deviceCode = do
+    startedAt <- getCurrentTime
+    go
+        (addUTCTime (fromIntegral timeoutSeconds) startedAt)
+        (max 1 deviceCode.pollIntervalSeconds)
   where
     timeoutSeconds = Maybe.fromMaybe (15 * 60) deviceCode.expiresInSeconds
 
-    go elapsed
-        | elapsed >= timeoutSeconds =
-            pure (Left "device authorization timed out")
-        | otherwise = pollDeviceAuthorization options deviceCode >>= \case
-            Left err -> pure (Left err)
-            Right (Just tokens) -> pure (Right tokens)
-            Right Nothing -> do
-                let seconds = deviceCode.pollIntervalSeconds
-                threadDelay (seconds * 1_000_000)
-                go (elapsed + seconds)
+    go expiresAt interval = do
+        now <- getCurrentTime
+        if now >= expiresAt
+            then timedOut
+            else
+                pollDeviceAuthorizationStatus options deviceCode >>= \case
+                    Left err -> pure (Left err)
+                    Right (DeviceAuthorizationComplete tokens) -> do
+                        polledAt <- getCurrentTime
+                        if polledAt >= expiresAt
+                            then timedOut
+                            else pure (Right tokens)
+                    Right DeviceAuthorizationPending -> do
+                        polledAt <- getCurrentTime
+                        waitThenPoll expiresAt polledAt interval interval
+                    Right DeviceAuthorizationSlowDown -> do
+                        let backedOffInterval = interval + 5
+                        polledAt <- getCurrentTime
+                        waitThenPoll
+                            expiresAt
+                            polledAt
+                            backedOffInterval
+                            backedOffInterval
+
+    waitThenPoll expiresAt polledAt seconds nextInterval
+        | remainingMicroseconds <= 0 =
+            timedOut
+        | otherwise = do
+            threadDelay
+                (min (seconds * 1_000_000) remainingMicroseconds)
+            go expiresAt nextInterval
+      where
+        remainingMicroseconds =
+            floor (diffUTCTime expiresAt polledAt * 1_000_000)
+
+    timedOut =
+        pure (Left "device authorization timed out")
 
 -- | Rotate an access token. Terminal rejections ('invalid_grant',
 -- 'invalid_client') come back as 'AuthenticationError' so brokers mark the
