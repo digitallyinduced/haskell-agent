@@ -187,16 +187,19 @@ spec = do
                 `shouldBe` replicate 4 True
 
         it "resolves relative aliases against the shell working directory" do
-            let cwd = unsafeEncodeUtf "/usr/local"
+            -- /dev exists in the Nix build sandbox, unlike /usr. Using an
+            -- existing prefix makes each parent traversal meaningful under
+            -- real filesystem semantics.
+            let cwd = unsafeEncodeUtf "/dev"
             mapM (commandUsesHardcodedSystemTmpAt cwd)
-                [ "cat ../../tmp/other-session"
-                , "cat ../../private/tmp/other-session"
-                , "cat ../local/../../tmp/other-session"
+                [ "cat ../tmp/other-session"
+                , "cat ./../tmp/other-session"
+                , "cat ../dev/../tmp/other-session"
                 ]
                 `shouldReturn` replicate 3 True
             mapM (commandUsesHardcodedSystemTmpAt cwd)
-                [ "cat ../tmp/project-file"
-                , "cat ../../tmpfile"
+                [ "cat tmp/project-file"
+                , "cat ../tmpfile"
                 , "curl https://example.test/../../tmp/file"
                 ]
                 `shouldReturn` replicate 3 False
@@ -218,9 +221,9 @@ spec = do
                 `shouldBe` False
 
         it "follows simple shell cwd changes before checking relative aliases" do
-            let cwd = unsafeEncodeUtf "/usr/local"
+            let cwd = unsafeEncodeUtf "/dev"
             commandUsesHardcodedSystemTmpAt cwd
-                "cd ../..; cat tmp/other-session"
+                "cd ..; cat tmp/other-session"
                 `shouldReturn` True
             commandUsesHardcodedSystemTmpAt cwd
                 "cd /; cat private/tmp/other-session"
@@ -232,6 +235,12 @@ spec = do
                 (unsafeEncodeUtf "/")
                 "cat /bin/../tmp/other-session"
                 `shouldReturn` aliases
+
+        it "does not normalize through a missing pre-alias component" do
+            commandUsesHardcodedSystemTmpAt
+                (unsafeEncodeUtf "/")
+                "cat /haskell-agent-missing-temp-alias-prefix/../tmp/file"
+                `shouldReturn` False
 
         it "blocks local file URLs targeting shared temp" do
             map commandUsesHardcodedSystemTmp

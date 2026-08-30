@@ -269,7 +269,7 @@ spec = describe "Agent.Tools.IO" do
                 (fromFilePath ("/private/tmp" </> relative))
                 `shouldReturn` expected
             resolveUnderCwd env
-                (fromFilePath ("/usr/../tmp" </> relative))
+                (fromFilePath ("/dev/../tmp" </> relative))
                 `shouldReturn` expected
             readIORef requests `shouldReturn` []
             varPrivateAliases <-
@@ -374,13 +374,26 @@ spec = describe "Agent.Tools.IO" do
                         "escapes the private session temp directory")
                     (const False)
             normalizedPrefixTraversal <- resolveUnderCwd env
-                (fromFilePath "/usr/../tmp/../outside.txt")
+                (fromFilePath "/dev/../tmp/../outside.txt")
             normalizedPrefixTraversal `shouldSatisfy`
                 either
                     (Text.isInfixOf
                         "escapes the private session temp directory")
                     (const False)
             readIORef requests `shouldReturn` []
+
+    it "does not normalize through a missing pre-alias component" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                scratch = dir </> "scratch"
+                missing = "/haskell-agent-missing-temp-alias-prefix"
+                requested =
+                    missing </> ".." </> "tmp" </> "artifact.txt"
+            mapM_ createDirectory [workspace, scratch]
+            env <- defaultToolEnv (fromFilePath workspace)
+            setToolSessionTmp env (Just (fromFilePath scratch))
+            resolveUnderCwd env (fromFilePath requested)
+                >>= (`shouldSatisfy` isLeft)
 
     it "requests and remembers approval for an escaped filesystem root" do
         withTempDir \dir -> do
