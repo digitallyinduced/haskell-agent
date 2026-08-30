@@ -14,7 +14,12 @@ import qualified Data.ByteString as BS
 import Data.List (sort)
 import Data.IORef (newIORef, writeIORef)
 import GHC.Clock (getMonotonicTimeNSec)
-import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
+import GHC.Stats
+    ( GCDetails(..)
+    , RTSStats(..)
+    , getRTSStats
+    , getRTSStatsEnabled
+    )
 import System.CPUTime (getCPUTime)
 import System.Directory (findExecutable, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Exit (die)
@@ -54,7 +59,7 @@ main = do
         forM_ [1, 8, 32 :: Int] \sizeMb -> do
             let path = dir </> show sizeMb <> "mb.txt"
             writeFixture path sizeMb
-            forM_ ["buffered-old", "streaming-bounded"] \mode -> do
+            forM_ (["buffered-old", "streaming-bounded"] :: [String]) \mode -> do
                 measurements <- replicateM sampleCount do
                     performGC
                     before <- getRTSStats
@@ -115,7 +120,8 @@ buffered rg path = do
     let !selectedLength =
             length (concat (take outputLineLimit (lines output)))
     performGC
-    live <- (.gc.gcdetails_live_bytes) <$> getRTSStats
+    live <- getRTSStats >>= \stats ->
+        pure (fromIntegral stats.gc.gcdetails_live_bytes :: Integer)
     writeIORef retained ""
     pure (selectedLength, fromIntegral live)
 
@@ -133,7 +139,8 @@ streaming rg path = do
         _ <- waitForProcess ph
         hClose out `finally` hClose err
         performGC
-        live <- (.gc.gcdetails_live_bytes) <$> getRTSStats
+        live <- getRTSStats >>= \stats ->
+            pure (fromIntegral stats.gc.gcdetails_live_bytes :: Integer)
         pure (result, fromIntegral live)
   where
     readLines :: Handle -> Int -> IO Int
