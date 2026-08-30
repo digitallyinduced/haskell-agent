@@ -5,6 +5,8 @@ import Agent.CLI.RepositoryReview
     ( RepositorySnapshot(..)
     , repositorySnapshot
     )
+import System.Timeout (timeout)
+import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
 import System.Directory
@@ -314,6 +316,21 @@ spec = describe "repository delivery service" do
                 createPullRequest root preview.pullRequestConfirmation
                     `shouldReturnSatisfying` isConfirmationRejection
 
+    it "kills a gh descendant retaining pipes after its leader exits" $
+        withDeliveryRepository \root _ ->
+            withFakeGh root \_ _ -> do
+                let descendantMarker = root <> "/gh-descendant-survived"
+                setEnv "GH_RETAIN_PIPE_MARKER" descendantMarker
+                snapshot <- expectRight =<< repositorySnapshot root
+                result <- timeout 5_000_000
+                    (previewPullRequest
+                        root snapshot.snapshotId "main" "Title" "Body")
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                threadDelay 2_500_000
+                doesFileExist descendantMarker `shouldReturn` False
+
     it "rejects a gh result URL for another repository" $
         withDeliveryRepository \root _ ->
             withFakeGh root \_ _ -> do
@@ -374,6 +391,7 @@ withFakeGh root action = do
     originalCapture <- lookupEnv "GH_BODY_CAPTURE"
     originalFakeUrl <- lookupEnv "GH_FAKE_PR_URL"
     originalFakeRepository <- lookupEnv "GH_FAKE_REPOSITORY"
+    originalRetainPipeMarker <- lookupEnv "GH_RETAIN_PIPE_MARKER"
     withTempDirectory "repository-delivery-gh" \bin -> do
         realGit <- maybe (fail "git not found") pure =<< findExecutable "git"
         localRemote <- Text.unpack . Text.strip
@@ -404,6 +422,10 @@ withFakeGh root action = do
         writeFile executable $ unlines
             [ "#!/bin/sh"
             , "set -eu"
+            , "if [ \"${GH_RETAIN_PIPE_MARKER:-}\" != '' ] && [ \"$1 $2\" = 'auth status' ]; then"
+            , "  (sleep 2; printf survived > \"$GH_RETAIN_PIPE_MARKER\") &"
+            , "  exit 0"
+            , "fi"
             , "case \"$1 $2\" in"
             , "  'auth status') exit 0 ;;"
             , "  'repo view') printf '{\"nameWithOwner\":\"%s\"}\\n' \"${GH_FAKE_REPOSITORY:-owner/repository}\" ;;"
@@ -433,7 +455,10 @@ withFakeGh root action = do
                     Just value -> setEnv "GH_FAKE_PR_URL" value
                 case originalFakeRepository of
                     Nothing -> unsetEnv "GH_FAKE_REPOSITORY"
-                    Just value -> setEnv "GH_FAKE_REPOSITORY" value)
+                    Just value -> setEnv "GH_FAKE_REPOSITORY" value
+                case originalRetainPipeMarker of
+                    Nothing -> unsetEnv "GH_RETAIN_PIPE_MARKER"
+                    Just value -> setEnv "GH_RETAIN_PIPE_MARKER" value)
             (\_ -> action bodyCapture injectionMarker)
 
 git :: FilePath -> [String] -> IO Text.Text

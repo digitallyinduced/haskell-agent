@@ -14,7 +14,7 @@ module Agent.CLI.RepositoryDelivery
     ) where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar
     ( MVar
@@ -27,6 +27,8 @@ import Control.Exception.Safe
     , bracket
     , finally
     , isAsyncException
+    , mask
+    , onException
     , throwIO
     , tryAny
     )
@@ -67,13 +69,13 @@ import System.Posix.Signals
     , sigTERM
     , signalProcessGroup
     )
+import System.Posix.Types (ProcessID)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
     , StdStream(CreatePipe)
     , createProcess
     , getPid
-    , getProcessExitCode
     , proc
     , terminateProcess
     , waitForProcess
@@ -1285,7 +1287,7 @@ runCommand root executable arguments input timeoutMicros = do
         Right Nothing -> Left ProcessTimedOut
         Right (Just result) -> result
   where
-    start = do
+    start = mask \_ -> do
         environment <- nonInteractiveEnvironment executable
         (maybeInput, maybeOutput, maybeError, process) <-
             createProcess
@@ -1299,48 +1301,103 @@ runCommand root executable arguments input timeoutMicros = do
                     , env = Just environment
                     }
         case (maybeInput, maybeOutput, maybeError) of
-            (Just inputHandle, Just outputHandle, Just errorHandle) ->
-                pure (inputHandle, outputHandle, errorHandle, process)
+            (Just inputHandle, Just outputHandle, Just errorHandle) -> do
+                let closePipes = do
+                        closeQuietly inputHandle
+                        closeQuietly outputHandle
+                        closeQuietly errorHandle
+                    cleanupWithoutGroup = do
+                        closePipes
+                        _ <- tryAny (terminateProcess process)
+                        _ <- tryAny (waitForProcess process)
+                        pure ()
+                processGroup <- getPid process
+                    `onException` cleanupWithoutGroup
+                completed <- newIORef False
+                    `onException` do
+                        closePipes
+                        terminateProcessGroup sigKILL processGroup process
+                        _ <- tryAny (waitForProcess process)
+                        pure ()
+                pure
+                    ( inputHandle
+                    , outputHandle
+                    , errorHandle
+                    , process
+                    , processGroup
+                    , completed
+                    )
             _ -> do
                 terminateProcess process
                 _ <- waitForProcess process
                 fail "could not create command pipes"
-    stop (inputHandle, outputHandle, errorHandle, process) = do
+    stop
+        ( inputHandle
+        , outputHandle
+        , errorHandle
+        , process
+        , processGroup
+        , completed
+        ) = do
         closeQuietly inputHandle
         closeQuietly outputHandle
         closeQuietly errorHandle
-        getProcessExitCode process >>= \case
-            Just _ -> pure ()
-            Nothing -> do
-                terminateProcessGroup sigTERM process
-                threadDelay 100_000
-                getProcessExitCode process >>= \case
-                    Just _ -> pure ()
-                    Nothing -> terminateProcessGroup sigKILL process
+        finished <- readIORef completed
+        unless finished do
+            terminateProcessGroup sigTERM processGroup process
+            threadDelay 100_000
+            -- A descendant can retain the group and pipes after its leader
+            -- exits, so always escalate the captured process group.
+            terminateProcessGroup sigKILL processGroup process
         _ <- tryAny (waitForProcess process)
         pure ()
-    run (inputHandle, outputHandle, errorHandle, process) =
+    run
+        ( inputHandle
+        , outputHandle
+        , errorHandle
+        , process
+        , processGroup
+        , completed
+        ) =
         withAsync
             (BS.hPut inputHandle input `finally` closeQuietly inputHandle)
             \inputWriter ->
                 withAsync (readBounded outputHandle) \outputReader ->
                     withAsync (readBounded errorHandle) \errorReader -> do
                         exitCode <- waitForProcess process
+                        -- Do not wait for pipe EOF before terminating residual
+                        -- descendants in the leader's dedicated group.
+                        terminateProcessGroup sigKILL processGroup process
                         _ <- wait inputWriter
-                        (output, outputTruncated) <- wait outputReader
-                        (errors, errorsTruncated) <- wait errorReader
-                        let truncated = outputTruncated || errorsTruncated
-                        pure
-                            (if truncated
-                                then Left ProcessOutputExceeded
-                                else
-                                    Right
-                                        ProcessResult
-                                            { processExitCode = exitCode
-                                            , processStdout = output
-                                            , processStderr = errors
-                                            , processOutputTruncated = False
-                                            })
+                        drained <- timeout processPipeTeardownMicros
+                            ((,) <$> wait outputReader <*> wait errorReader)
+                        case drained of
+                            Nothing -> do
+                                closeQuietly outputHandle
+                                closeQuietly errorHandle
+                                cancel outputReader
+                                cancel errorReader
+                                pure (Left ProcessTimedOut)
+                            Just
+                                ( (output, outputTruncated)
+                                , (errors, errorsTruncated)
+                                ) -> do
+                                    writeIORef completed True
+                                    let truncated =
+                                            outputTruncated || errorsTruncated
+                                    pure
+                                        (if truncated
+                                            then Left ProcessOutputExceeded
+                                            else
+                                                Right
+                                                    ProcessResult
+                                                        { processExitCode =
+                                                            exitCode
+                                                        , processStdout = output
+                                                        , processStderr = errors
+                                                        , processOutputTruncated =
+                                                            False
+                                                        })
 
 readBounded :: Handle -> IO (BS.ByteString, Bool)
 readBounded handle = do
@@ -1366,10 +1423,11 @@ readBounded handle = do
 
 terminateProcessGroup
     :: Signal
+    -> Maybe ProcessID
     -> ProcessHandle
     -> IO ()
-terminateProcessGroup signal process = do
-    pid <- getPid process
+terminateProcessGroup signal processGroup process = do
+    pid <- maybe (getPid process) (pure . Just) processGroup
     case pid of
         Nothing -> do
             _ <- tryAny (terminateProcess process)
@@ -1487,6 +1545,9 @@ localTimeoutMicros = 15 * 1_000_000
 
 networkTimeoutMicros :: Int
 networkTimeoutMicros = 60 * 1_000_000
+
+processPipeTeardownMicros :: Int
+processPipeTeardownMicros = 1_000_000
 
 maxProcessOutputBytes :: Int
 maxProcessOutputBytes = 1024 * 1024
