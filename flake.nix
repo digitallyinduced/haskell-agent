@@ -61,6 +61,27 @@
                     hash = "sha256-rIrhB6DXL+NHa0MK+xYepOZ9ouRG13iu/ESCgWBVmAc=";
                 };
 
+                intercom2xSkillsRev =
+                    "59213af0a2db9321ef10355ff24e9bd619151b6b";
+                intercom2xSkills = pkgs.fetchFromGitHub {
+                    owner = "intercom";
+                    repo = "2x-skills";
+                    rev = intercom2xSkillsRev;
+                    hash = "sha256-zyLCqcygYUKkReLX+UchnhvhFa5Rz3eo+rIaR4wUsSM=";
+                };
+                attachGithubAssetsSkill = pkgs.runCommand
+                    "attach-github-assets-skill-${intercom2xSkillsRev}"
+                    { nativeBuildInputs = [ pkgs.patch ]; }
+                    ''
+                        sourceSkill="${intercom2xSkills}/plugins/pr-tools/skills/attach-github-assets"
+                        targetSkill="$out/attach-github-assets"
+                        mkdir -p "$out"
+                        cp -R "$sourceSkill" "$targetSkill"
+                        chmod -R u+w "$out"
+                        cp "${intercom2xSkills}/LICENSE" "$targetSkill/LICENSE"
+                        patch -l -d "$targetSkill" -p1 < ${./patches/attach-github-assets.patch}
+                    '';
+
                 agentOpenaiSource = nix-filter.lib {
                     root = ./packages/agent-openai;
                     include = [
@@ -459,15 +480,21 @@
                                     src = agentStoreSource;
                                 })
                             [ pkgs.postgresql_18 ]);
-                        agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
-                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
-                                src = agentCliSource;
-                            })
-                            [
-                                pkgs.git
-                                bun_1_4
-                                pkgs.postgresql_18
-                            ]);
+                        agent-cli = localPackage (
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage ./packages/agent-cli/package.nix { })
+                                    { src = agentCliSource; })
+                                [
+                                    pkgs.git
+                                    bun_1_4
+                                    pkgs.postgresql_18
+                                ]).overrideAttrs
+                                (old: {
+                                    preCheck = (old.preCheck or "") + ''
+                                        export HASKELL_AGENT_BUILTIN_SKILLS=${attachGithubAssetsSkill}
+                                    '';
+                                }));
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src = agentTelegramSource;
@@ -511,6 +538,8 @@
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
+                                        --prefix HASKELL_AGENT_BUILTIN_SKILLS : \
+                                            "${attachGithubAssetsSkill}" \
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
                                                 pkgs.ffmpeg
@@ -722,6 +751,9 @@
                     shellHook = ''
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                         export AGENT_POSTGRES_BIN=${pkgs.postgresql_18}/bin
+                        # Expose nix-fetched built-in skills to GHCi without
+                        # copying their upstream files into the checkout.
+                        export HASKELL_AGENT_BUILTIN_SKILLS="${attachGithubAssetsSkill}''${HASKELL_AGENT_BUILTIN_SKILLS:+:$HASKELL_AGENT_BUILTIN_SKILLS}"
                         # Development builds embed the nix-fetched Codex catalog
                         # at compile time; provision it into the checkout.
                         if [ -d packages/agent-openai ]; then

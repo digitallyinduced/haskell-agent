@@ -1,0 +1,39 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -1,11 +1,10 @@
+ ---
+ name: attach-github-assets
+ description: Upload local files (screenshots, screen recordings, images, videos) to GitHub as user-attachment assets and return markdown-ready URLs for PR descriptions, issue bodies, or PR/issue comments.
++argument-hint: "<file-path> [additional-file-paths...]"
++user-invocable: true
+ metadata:
+-  user-invocable: true
+-  argument-hint: "<file-path> [additional-file-paths...]"
+-  keywords:
+-    - pr-image
++  keywords: pr-image
+ allowed-tools: Bash Read Glob
+ ---
+
+@@ -51,15 +50,18 @@
+ ### Step 2: Run the upload script — once per file
+
+ ```bash
+-${CLAUDE_PLUGIN_ROOT}/skills/attach-github-assets/scripts/upload.sh "<file-path>"
++bash "<skill_directory>/scripts/upload.sh" "<file-path>"
+ ```
+
+-The script auto-detects the repo ID from `git remote` and MIME type from extension. Returns the asset URL on stdout, exits non-zero on failure.
++Use the absolute `skill_directory` returned by `view_skill`; do not use the
++literal placeholder. The script auto-detects the repo ID from `git remote` and
++MIME type from extension. Returns the asset URL on stdout, exits non-zero on
++failure.
+
+ To override repo ID (e.g. uploading from a worktree whose remote isn't the target repo):
+
+ ```bash
+-${CLAUDE_PLUGIN_ROOT}/skills/attach-github-assets/scripts/upload.sh "<file-path>" <repo_id>
++bash "<skill_directory>/scripts/upload.sh" "<file-path>" <repo_id>
+ ```
+
+ Run the script **once per file** — never batch into a single invocation, never substitute `curl` or a different upload mechanism.

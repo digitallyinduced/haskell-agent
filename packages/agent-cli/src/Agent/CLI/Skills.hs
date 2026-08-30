@@ -30,7 +30,7 @@ import Agent.CLI.Terminal (resolveColor)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Skills
 import Agent.Tools.Types (ToolEnv, setToolSkillRoots)
-import Control.Monad (void, when)
+import Control.Monad (filterM, void, when)
 import Data.IORef (IORef, modifyIORef', writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -80,15 +80,25 @@ loadSkillsCatalogQuiet
 loadSkillsCatalogQuiet options home projectRoot cwd
     | not options.optSkills = pure (SkillCatalog [] [])
     | otherwise = do
-        builtinRoot <- packagedSkillsRoot cwd
+        builtinRoots <- packagedSkillsRoots cwd
         discoverSkills SkillDiscoverOptions
             { skillsHome = home
             , skillsProjectRoot = projectRoot
             , skillsCwd = cwd
             , skillsMaxDepth = 6
             , skillsBuiltinRoots =
-                [(AgentSkills, unsafeEncodeUtf builtinRoot)]
+                [ (AgentSkills, unsafeEncodeUtf root)
+                | root <- builtinRoots
+                ]
             }
+
+packagedSkillsRoots :: OsPath -> IO [FilePath]
+packagedSkillsRoots cwd = do
+    packagedRoot <- packagedSkillsRoot cwd
+    externalRoots <-
+        maybe [] FilePath.splitSearchPath
+            <$> Environment.lookupEnv "HASKELL_AGENT_BUILTIN_SKILLS"
+    filterM Directory.doesDirectoryExist (packagedRoot : externalRoots)
 
 packagedSkillsRoot :: OsPath -> IO FilePath
 packagedSkillsRoot cwd = do

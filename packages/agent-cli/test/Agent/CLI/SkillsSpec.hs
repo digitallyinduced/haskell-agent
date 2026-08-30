@@ -76,6 +76,20 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
+    it "loads the Nix-provided GitHub asset attachment skill" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let matching =
+                filter ((== "attach-github-assets") . (.skillName))
+                    catalog.catalogSkills
+        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map (.skillModelInvocable) matching `shouldBe` [True]
+        map (.skillUserInvocable) matching `shouldBe` [True]
+
     it "loads the packaged learn-about-user skill" do
         catalog <- loadSkillsCatalog
             defaultCliOptions
