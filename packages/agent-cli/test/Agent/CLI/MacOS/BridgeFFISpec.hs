@@ -29,6 +29,10 @@ spec = describe "native image attachment staging" do
     it "blocks new repository workers until cancel-all returns" do
         Bridge.repositoryCancelAllAdmissionSmoke `shouldReturn` True
 
+    it "does not self-deadlock on callback lifecycle calls" do
+        Bridge.repositoryCancelAllReentrancySmoke `shouldReturn` True
+        Bridge.repositoryCheckDestroyReentrancySmoke `shouldReturn` True
+
     it "validates the typed repository-review ABI from native code" do
 #ifdef darwin_HOST_OS
         repositoryReviewAbiSmoke `shouldReturn` 0

@@ -32,7 +32,14 @@ import System.Process
     , readCreateProcessWithExitCode
     )
 import System.Timeout (timeout)
-import System.Posix.Files (createSymbolicLink)
+import System.Posix.Files
+    ( createSymbolicLink
+    , ownerExecuteMode
+    , ownerReadMode
+    , ownerWriteMode
+    , setFileMode
+    , unionFileModes
+    )
 import Test.Hspec
 
 spec :: Spec
@@ -57,6 +64,19 @@ spec = describe "repository review service" do
                 linked <- expectRight =<< repositorySnapshot alias
                 linked.snapshotRoot `shouldBe` direct.snapshotRoot
                 linked.snapshotId `shouldBe` direct.snapshotId
+
+    it "includes untracked file mode in the worktree fingerprint" $
+        withRepository \root -> do
+            let path = root <> "/untracked-mode.txt"
+            writeFile path "same content\n"
+            before <- expectRight =<< repositorySnapshot root
+            setFileMode path
+                (ownerReadMode
+                    `unionFileModes` ownerWriteMode
+                    `unionFileModes` ownerExecuteMode)
+            after <- expectRight =<< repositorySnapshot root
+            after.snapshotWorktreeFingerprint
+                `shouldNotBe` before.snapshotWorktreeFingerprint
 
     it "snapshots unusual paths and parses diff hunk coordinates" $
         withRepository \root -> do

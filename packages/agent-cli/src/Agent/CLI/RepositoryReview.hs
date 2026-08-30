@@ -74,6 +74,7 @@ import System.Posix.Signals
     , sigTERM
     , signalProcessGroup
     )
+import System.Posix.Files (fileMode, getSymbolicLinkStatus)
 import System.Posix.Types (ProcessID)
 import System.Process
     ( CreateProcess(..)
@@ -741,7 +742,23 @@ appendUntrackedHashes root statusBytes diffBytes =
         result <- runGit root
             ["--literal-pathspecs", "hash-object", "--", path]
             BS.empty
-        pure ((material <>) <$> result)
+        modeResult <- tryAny
+            (fileMode <$> getSymbolicLinkStatus (root </> path))
+        pure do
+            contentHash <- result
+            mode <- case modeResult of
+                Left exception ->
+                    Left
+                        (InvalidRepositoryRequest
+                            ("could not fingerprint untracked file mode: "
+                                <> Text.pack (show exception)))
+                Right value -> Right value
+            pure
+                ( material
+                    <> contentHash
+                    <> BS8.pack (show mode)
+                    <> "\NUL"
+                )
 
 hashMaterial :: FilePath -> BS.ByteString -> IO (Either RepositoryError Text)
 hashMaterial root bytes =

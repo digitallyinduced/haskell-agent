@@ -2,6 +2,8 @@
 
 module Agent.CLI.MacOS.Bridge
     ( repositoryCancelAllAdmissionSmoke
+    , repositoryCancelAllReentrancySmoke
+    , repositoryCheckDestroyReentrancySmoke
     ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
@@ -121,7 +123,13 @@ import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
     )
-import Control.Concurrent (forkFinally, forkIO, threadDelay)
+import Control.Concurrent
+    ( ThreadId
+    , forkFinally
+    , forkIO
+    , myThreadId
+    , threadDelay
+    )
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -182,6 +190,7 @@ import qualified Data.Aeson.Types as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (ord)
+import Data.Either (isRight)
 import Data.IORef
     ( IORef
     , newIORef
@@ -255,6 +264,11 @@ withText value action = BS.useAsCStringLen (TextEncoding.encodeUtf8 value) \(poi
 
 withOptionalText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
 withOptionalText value action = withText (fromMaybe "" value) action
+
+withNullableText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
+withNullableText value action = case value of
+    Nothing -> action nullPtr 0
+    Just text -> withText text action
 
 type EventCallback = Ptr () -> Ptr Word8 -> CSize -> IO ()
 
@@ -693,7 +707,7 @@ ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
                                         withText
                                             (Text.pack file.repositoryFilePath)
                                             \pathPtr pathSize ->
-                                        withOptionalText
+                                        withNullableText
                                             (Text.pack
                                                 <$> file.repositoryFileOriginalPath)
                                             \originalPtr originalSize ->
@@ -931,9 +945,11 @@ startRepositoryWorker onCancelled action =
                     Nothing -> do
                         let workerId = state.repositoryWorkerNextId
                         worker <- asyncWithUnmask \unmask -> do
-                            ((readMVar gate >> unmask action)
-                                `catchAsync`
-                                    \(_ :: SomeAsyncException) -> onCancelled)
+                            withRepositoryCallbackThread
+                                (((readMVar gate >> unmask action)
+                                    `catchAsync`
+                                        \(_ :: SomeAsyncException) ->
+                                            onCancelled))
                                 `finally`
                                 unregisterRepositoryWorker workerId
                         pure
@@ -966,36 +982,38 @@ unregisterRepositoryWorker workerId =
 
 ha_repository_cancel_all :: IO ()
 ha_repository_cancel_all =
-    mask \restore -> do
-        admission <- modifyMVar repositoryWorkers \state ->
-            case state.repositoryWorkerBarrier of
-                Just barrier ->
-                    pure (state, Left barrier)
-                Nothing -> do
-                    barrier <- newEmptyMVar
-                    pure
-                        ( state
-                            { repositoryWorkerActive = Map.empty
-                            , repositoryWorkerBarrier = Just barrier
-                            }
-                        , Right
-                            ( barrier
-                            , Map.elems state.repositoryWorkerActive
-                            )
-                        )
-        case admission of
-            Left activeBarrier -> restore (readMVar activeBarrier)
-            Right (barrier, workers) ->
-                restore
-                    (mapM_ cancel workers >> mapM_ waitCatch workers)
-                    `finally` do
-                        modifyMVar repositoryWorkers \state ->
-                            pure
-                                ( state
-                                    { repositoryWorkerBarrier = Nothing }
-                                , ()
+    isRepositoryCallbackThread >>= \case
+        True -> pure ()
+        False -> mask \restore -> do
+            admission <- modifyMVar repositoryWorkers \state ->
+                case state.repositoryWorkerBarrier of
+                    Just barrier ->
+                        pure (state, Left barrier)
+                    Nothing -> do
+                        barrier <- newEmptyMVar
+                        pure
+                            ( state
+                                { repositoryWorkerActive = Map.empty
+                                , repositoryWorkerBarrier = Just barrier
+                                }
+                            , Right
+                                ( barrier
+                                , Map.elems state.repositoryWorkerActive
                                 )
-                        putMVar barrier ()
+                            )
+            case admission of
+                Left activeBarrier -> restore (readMVar activeBarrier)
+                Right (barrier, workers) ->
+                    restore
+                        (mapM_ cancel workers >> mapM_ waitCatch workers)
+                        `finally` do
+                            modifyMVar repositoryWorkers \state ->
+                                pure
+                                    ( state
+                                        { repositoryWorkerBarrier = Nothing }
+                                    , ()
+                                    )
+                            putMVar barrier ()
 
 -- Deterministic regression hook for the admission-barrier lifecycle. This is
 -- a Haskell test hook, not part of the C ABI.
@@ -1034,6 +1052,16 @@ repositoryCancelAllAdmissionSmoke = do
                 False -> pure True
                 True -> threadDelay 1000 >> awaitRejection (attempts - 1)
 
+repositoryCancelAllReentrancySmoke :: IO Bool
+repositoryCancelAllReentrancySmoke = do
+    completed <- newEmptyMVar
+    accepted <- startRepositoryWorker (pure ()) do
+        ha_repository_cancel_all
+        putMVar completed ()
+    if accepted
+        then readMVar completed >> pure True
+        else pure False
+
 {-# NOINLINE repositoryWorkers #-}
 repositoryWorkers :: MVar RepositoryWorkerState
 repositoryWorkers = unsafePerformIO
@@ -1048,6 +1076,24 @@ data RepositoryWorkerState = RepositoryWorkerState
     , repositoryWorkerActive :: !(Map Int (Async ()))
     , repositoryWorkerBarrier :: !(Maybe (MVar ()))
     }
+
+{-# NOINLINE repositoryCallbackThreads #-}
+repositoryCallbackThreads :: MVar (Set.Set ThreadId)
+repositoryCallbackThreads = unsafePerformIO (newMVar Set.empty)
+
+withRepositoryCallbackThread :: IO value -> IO value
+withRepositoryCallbackThread action = do
+    thread <- myThreadId
+    modifyMVar repositoryCallbackThreads \threads ->
+        pure (Set.insert thread threads, ())
+    action `finally`
+        modifyMVar repositoryCallbackThreads \threads ->
+            pure (Set.delete thread threads, ())
+
+isRepositoryCallbackThread :: IO Bool
+isRepositoryCallbackThread = do
+    thread <- myThreadId
+    Set.member thread <$> readMVar repositoryCallbackThreads
 
 data RepositoryCheckHandle = RepositoryCheckHandle
     { repositoryCheckValue :: !(IORef (Maybe RepositoryReview.RepositoryCheck))
@@ -1096,40 +1142,46 @@ ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
                                             (\stream bytes ->
                                                 BS.useAsCStringLen bytes
                                                     \(pointer, length) ->
-                                                        invokeRepositoryCheckOutputCallback
-                                                            outputCallback
-                                                            context
-                                                            (case stream of
-                                                                RepositoryReview.RepositoryCheckStdout -> 1
-                                                                RepositoryReview.RepositoryCheckStderr -> 2)
-                                                            (castPtr pointer)
-                                                            (fromIntegral length))
+                                                        withRepositoryCallbackThread
+                                                            (invokeRepositoryCheckOutputCallback
+                                                                outputCallback
+                                                                context
+                                                                (case stream of
+                                                                    RepositoryReview.RepositoryCheckStdout -> 1
+                                                                    RepositoryReview.RepositoryCheckStderr -> 2)
+                                                                (castPtr pointer)
+                                                                (fromIntegral length)))
                                             (\cancelled exitCode ->
-                                                invokeRepositoryCheckExitCallback
-                                                    exitCallback
-                                                    context
-                                                    (if cancelled then 1 else 0)
-                                                    (case exitCode of
-                                                        System.Exit.ExitSuccess -> 0
-                                                        System.Exit.ExitFailure code ->
-                                                            fromIntegral code)
-                                                    nullPtr 0))
+                                                withRepositoryCallbackThread
+                                                    (invokeRepositoryCheckExitCallback
+                                                        exitCallback
+                                                        context
+                                                        (if cancelled then 1 else 0)
+                                                        (case exitCode of
+                                                            System.Exit.ExitSuccess -> 0
+                                                            System.Exit.ExitFailure code ->
+                                                                fromIntegral code)
+                                                        nullPtr 0)))
                                     case started of
                                         Left exception ->
                                             withText
                                                 (Text.pack (show exception))
                                                 \errorPtr errorLength ->
-                                                    invokeRepositoryCheckExitCallback
-                                                        exitCallback context 0 (-1)
-                                                        errorPtr errorLength
+                                                    withRepositoryCallbackThread
+                                                        (invokeRepositoryCheckExitCallback
+                                                            exitCallback
+                                                            context 0 (-1)
+                                                            errorPtr errorLength)
                                         Right (Left err) ->
                                             withText
                                                 (RepositoryReview.repositoryErrorText
                                                     err)
                                                 \errorPtr errorLength ->
-                                                    invokeRepositoryCheckExitCallback
-                                                        exitCallback context 0 (-1)
-                                                        errorPtr errorLength
+                                                    withRepositoryCallbackThread
+                                                        (invokeRepositoryCheckExitCallback
+                                                            exitCallback
+                                                            context 0 (-1)
+                                                            errorPtr errorLength)
                                         Right (Right check) -> do
                                             writeIORef checkRef (Just check)
                                             cancelRequested <- readIORef cancelRef
@@ -1153,24 +1205,49 @@ ha_repository_check_cancel :: Ptr () -> IO ()
 ha_repository_check_cancel pointer
     | pointer == nullPtr = pure ()
     | otherwise = do
-        let stable =
-                castPtrToStablePtr pointer
-                    :: StablePtr RepositoryCheckHandle
-        handle <- deRefStablePtr stable
-        writeIORef handle.repositoryCheckCancelRequested True
-        readIORef handle.repositoryCheckValue >>= mapM_
-            RepositoryReview.cancelRepositoryCheck
+        isRepositoryCallbackThread >>= \case
+            True -> pure ()
+            False -> do
+                let stable =
+                        castPtrToStablePtr pointer
+                            :: StablePtr RepositoryCheckHandle
+                handle <- deRefStablePtr stable
+                writeIORef handle.repositoryCheckCancelRequested True
+                readIORef handle.repositoryCheckValue >>= mapM_
+                    RepositoryReview.cancelRepositoryCheck
 
 ha_repository_check_destroy :: Ptr () -> IO ()
 ha_repository_check_destroy pointer
     | pointer == nullPtr = pure ()
     | otherwise = do
-        let stable =
-                castPtrToStablePtr pointer
-                    :: StablePtr RepositoryCheckHandle
-        handle <- deRefStablePtr stable
-        _ <- waitCatch handle.repositoryCheckOwner
-        freeStablePtr stable
+        isRepositoryCallbackThread >>= \case
+            True -> pure ()
+            False -> do
+                let stable =
+                        castPtrToStablePtr pointer
+                            :: StablePtr RepositoryCheckHandle
+                handle <- deRefStablePtr stable
+                _ <- waitCatch handle.repositoryCheckOwner
+                freeStablePtr stable
+
+repositoryCheckDestroyReentrancySmoke :: IO Bool
+repositoryCheckDestroyReentrancySmoke = do
+    gate <- newEmptyMVar
+    owner <- asyncWithUnmask \unmask -> unmask (readMVar gate)
+    value <- newIORef Nothing
+    cancelled <- newIORef False
+    stable <- newStablePtr RepositoryCheckHandle
+        { repositoryCheckValue = value
+        , repositoryCheckCancelRequested = cancelled
+        , repositoryCheckOwner = owner
+        }
+    let pointer = castStablePtrToPtr stable
+    result <- tryAny
+        (withRepositoryCallbackThread
+            (ha_repository_check_destroy pointer))
+    putMVar gate ()
+    ha_repository_check_destroy pointer
+    pure (isRight result)
 
 copyRepositoryCheckArguments
     :: Ptr () -> CSize -> IO (Either () [Text])

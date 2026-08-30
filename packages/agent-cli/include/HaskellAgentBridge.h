@@ -198,8 +198,9 @@ typedef struct ha_utf8_string {
  *
  * A successful snapshot first invokes snapshot_callback once, then
  * file_callback once per changed file, and finally result_callback. HEAD is
- * empty for an unborn branch. original_path is empty unless Git reports a
- * rename/copy. File status values are unsigned Git porcelain status bytes.
+ * empty for an unborn branch. original_path is NULL with length zero unless
+ * Git reports a rename/copy. File status values are unsigned Git porcelain
+ * status bytes.
  *
  * A successful diff invokes diff_callback with ordered patch chunks of at
  * most 64 KiB, then hunk_callback for each parsed hunk, then result_callback.
@@ -373,8 +374,8 @@ void ha_engine_destroy(void *engine);
  * failure terminal attempt; terminal callbacks are never retried.
  *
  * Repository callbacks must return promptly and must not call
- * ha_repository_cancel_all reentrantly; doing so would wait for the callback's
- * own worker. Call cancellation from another thread after the callback returns.
+ * ha_repository_cancel_all reentrantly. A reentrant call is detected and is a
+ * no-op; call cancellation from another thread after the callback returns.
  */
 int32_t ha_repository_snapshot(
     const uint8_t *path,
@@ -459,8 +460,9 @@ void ha_repository_cancel_all(void);
  * returns. Cancel uses a short termination-escalation grace period; destroy
  * also assumes callbacks return promptly. A check callback must not call
  * ha_repository_check_destroy for its own handle; schedule destruction on a
- * different thread after the callback returns. A callback must likewise not
- * call check_cancel for its own handle. Status values match the other
+ * different thread after the callback returns. Reentrant destroy is detected
+ * and is a no-op, so the owner must still destroy the handle later. A callback
+ * reentrant check_cancel is also a no-op. Status values match the other
  * repository functions.
  */
 int32_t ha_repository_check_start(
