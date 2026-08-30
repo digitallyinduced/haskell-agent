@@ -162,6 +162,7 @@ library
                     , Agent.CLI.Database
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
+                    , Agent.CLI.Desktop
                     , Agent.CLI.Duration
                     , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
@@ -416,6 +417,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
+                    , Agent.CLI.DesktopSpec
                     , Agent.CLI.ErrorSpec
                     , Agent.CLI.ExternalProgramSpec
                     , Agent.CLI.FileUriSpec
