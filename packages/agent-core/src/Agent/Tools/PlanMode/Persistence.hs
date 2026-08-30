@@ -7,6 +7,7 @@ module Agent.Tools.PlanMode.Persistence
     , validatePlanTracker
     , readPlanTrackerState
     , writePlanTrackerState
+    , compareAndWritePlanTrackerState
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
@@ -19,6 +20,7 @@ import Control.Exception.Safe
     , bracket
     , bracketOnError
     , displayException
+    , tryAny
     , tryIO
     )
 import Control.Monad (unless, when)
@@ -33,6 +35,7 @@ import System.Directory.OsPath (createDirectoryIfMissing)
 import System.IO (Handle, hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
+import qualified System.FileLock as FileLock
 import System.Posix.Files
     ( getSymbolicLinkStatus
     , FileStatus
@@ -50,6 +53,9 @@ import System.Posix.IO
 
 planTrackerStateFileName :: OsPath
 planTrackerStateFileName = unsafeEncodeUtf ".plan-mode.json"
+
+planTrackerLockFileName :: OsPath
+planTrackerLockFileName = unsafeEncodeUtf ".plan-mode.lock"
 
 planTrackerStateFilePath :: OsPath -> OsPath
 planTrackerStateFilePath directory =
@@ -94,7 +100,10 @@ validatePlanTracker tracker = do
         (_, Nothing) -> pure ()
     case tracker.trackerApprovedContinuation of
         Nothing -> pure ()
-        Just continuation ->
+        Just continuation -> do
+            unless (tracker.trackerPhase == TrackerInactive) $
+                Left
+                    "approved plan continuation is present outside inactive state"
             validateDigest continuation.approvedPlanDigest
 
 readPlanTrackerState
@@ -143,6 +152,47 @@ writePlanTrackerState directory tracker =
                                 pure (Left (stateIoError path err))
                         _ ->
                             writeAndVerify path bytes tracker
+
+-- | Serialize cross-process tracker transitions and reject a write when the
+-- durable predecessor no longer matches the caller's in-memory predecessor.
+-- Atomic replacement prevents torn JSON but does not prevent two processes
+-- from both deriving revision N+1 from revision N.
+compareAndWritePlanTrackerState
+    :: OsPath
+    -> PlanTracker
+    -> PlanTracker
+    -> IO (Either Text ())
+compareAndWritePlanTrackerState directory expected candidate = do
+    let lockPath = directory </> planTrackerLockFileName
+    tryIO (createDirectoryIfMissing True directory) >>= \case
+        Left err -> pure (Left (stateIoError lockPath err))
+        Right () ->
+            tryAny
+                (FileLock.withFileLock
+                    (unsafeToFilePath lockPath)
+                    FileLock.Exclusive
+                    \_ ->
+                        readPlanTrackerState directory >>= \case
+                            Left err -> pure (Left err)
+                            Right persisted
+                                | predecessorMatches persisted ->
+                                    writePlanTrackerState directory candidate
+                                | otherwise ->
+                                    pure
+                                        (Left
+                                            "plan-mode state changed in another process; reload the session before retrying"))
+                >>= \case
+                    Left err ->
+                        pure
+                            (Left
+                                ("could not lock plan-mode state: "
+                                    <> Text.pack
+                                        (displayException err)))
+                    Right result -> pure result
+  where
+    predecessorMatches = \case
+        Nothing -> expected == initialPlanTracker
+        Just persisted -> persisted == expected
 
 writeAndVerify
     :: OsPath

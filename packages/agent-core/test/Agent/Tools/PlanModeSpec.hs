@@ -44,6 +44,7 @@ import System.Posix.Files
     , intersectFileModes
     )
 import System.Posix.Temp (mkdtemp)
+import System.Timeout (timeout)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -55,6 +56,30 @@ spec = describe "Agent.Tools.PlanMode" do
             case (enterPlanModeTool env).appToolApproval of
                 AlwaysReadOnly -> pure ()
                 _ -> expectationFailure "enter_plan_mode should be read-only"
+
+    it "correlates enter confirmation with the provider tool call id" do
+        requests <- newIORef []
+        let hooks =
+                (testLifecycleHooks
+                    (\_ -> pure PlanReviewDefer)
+                    (pure (Right ()))
+                    (pure ()))
+                    { planConfirmEnterRequest = \request ->
+                        modifyIORef' requests (<> [request]) >> pure False
+                    }
+        withTempPlanHooks hooks \env -> do
+            _ <- dispatchToolCall testDispatchConfig
+                [(enterPlanModeTool env).appToolHandler]
+                (functionToolCall
+                    "enter-call-42"
+                    "enter_plan_mode"
+                    "{\"explanation\":\"inspect architecture\"}")
+            readIORef requests `shouldReturn`
+                [ PlanEnterRequest
+                    { planEnterRequestKey = "enter-call-42"
+                    , planEnterReason = "inspect architecture"
+                    }
+                ]
 
     it "marks entry and exit as mode-changing batch barriers" do
         withTempPlan \env -> do
@@ -73,6 +98,16 @@ spec = describe "Agent.Tools.PlanMode" do
             deactivatePlanMode env
             isPlanModeActive env `shouldReturn` False
 
+    it "allows only approval resolution to relax exit-pending state" do
+        let active = activatePlanTracker initialPlanTracker
+            digest = PlanDigest "digest"
+            exitPending =
+                either (error . show) id
+                    (beginPlanExit "review-key" digest active)
+        requestPlanActivation exitPending `shouldBe` exitPending
+        activatePlanTracker exitPending `shouldBe` exitPending
+        deactivatePlanTracker True exitPending `shouldBe` exitPending
+
     it "exposes non-breaking session attachment accessors" do
         withTempPlan \env -> do
             readPlanSessionDir env `shouldReturn` Nothing
@@ -80,8 +115,6 @@ spec = describe "Agent.Tools.PlanMode" do
                 `shouldReturn` Right ()
             readPlanSessionDir env `shouldReturn`
                 Just env.planFallbackDir
-            setPlanSessionDir env Nothing
-            readPlanSessionDir env `shouldReturn` Nothing
 
     it "writes and reads an authoritative plan snapshot" do
         withTempPlan \env -> do
@@ -169,6 +202,7 @@ spec = describe "Agent.Tools.PlanMode" do
                     , PlanChanges
                     , PlanVerification
                     ]
+
             document.planDocumentVerification `shouldBe`
                 [ "cabal repl agent-core:agent-core-test"
                 , "tmux capture-pane -p"
@@ -245,6 +279,44 @@ spec = describe "Agent.Tools.PlanMode" do
                 `shouldSatisfy`
                     ((== Nothing) . (.trackerApprovedContinuation))
 
+        it "does not re-enter while an approved continuation is pending" do
+            let continuation = ApprovedPlanContinuation
+                    { approvedPlanDigest = validDigest
+                    , approvedPlanVerification = ["cabal repl"]
+                    , approvedPlanContinuation = "Implement now."
+                    }
+                approved =
+                    either (error . show) id $
+                        beginPlanExit
+                            "request-1"
+                            validDigest
+                            (activatePlanTracker initialPlanTracker)
+                            >>= resolvePlanApproval
+                                (PlanGeneration 1)
+                                validDigest
+                                (ApprovePlan continuation)
+            requestPlanActivation approved `shouldBe` approved
+            activatePlanTracker approved `shouldBe` approved
+
+        it "rejects a continuation for a different plan digest" do
+            let pending =
+                    expectBeginExit
+                        "request-1"
+                        validDigest
+                        (activatePlanTracker initialPlanTracker)
+                mismatched = ApprovedPlanContinuation
+                    { approvedPlanDigest =
+                        PlanDigest (Text.replicate 64 "b")
+                    , approvedPlanVerification = []
+                    , approvedPlanContinuation = "Implement now."
+                    }
+            resolvePlanApproval
+                (PlanGeneration 1)
+                validDigest
+                (ApprovePlan mismatched)
+                pending
+                `shouldBe` Left PlanTrackerStaleResolution
+
         it "restores only when no newer revision has won" do
             let snapshot = initialPlanTracker
                 active = activatePlanTracker snapshot
@@ -280,6 +352,26 @@ spec = describe "Agent.Tools.PlanMode" do
             encoded <- expectRight (encodePlanTracker tracker)
             decodePlanTracker (LBS.toStrict encoded)
                 `shouldBe` Right tracker
+
+        it "rejects a stale cross-process tracker predecessor" do
+            withTempPlan \env -> do
+                let directory = env.planFallbackDir
+                    active = activatePlanTracker initialPlanTracker
+                    staleCandidate =
+                        requestPlanActivation initialPlanTracker
+                writePlanTrackerState directory active
+                    `shouldReturn` Right ()
+                staleWrite <- compareAndWritePlanTrackerState
+                    directory
+                    initialPlanTracker
+                    staleCandidate
+                staleWrite `shouldSatisfy` \case
+                        Left message ->
+                            "changed in another process"
+                                `Text.isInfixOf` message
+                        Right () -> False
+                readPlanTrackerState directory
+                    `shouldReturn` Right (Just active)
 
         it "treats a missing legacy sidecar as inactive" do
             withTempPlan \env -> do
@@ -321,6 +413,7 @@ spec = describe "Agent.Tools.PlanMode" do
                 resumed <- newPlanModeEnv directory Nothing
                 attachPlanSessionDir resumed directory `shouldReturn` Right ()
                 readPlanTracker resumed `shouldReturn` expected
+                readPlanModeState resumed `shouldReturn` PlanExitPending
                 isPlanModeActive resumed `shouldReturn` True
 
         it "normalizes transient restart fields and advances the revision" do
@@ -401,6 +494,41 @@ spec = describe "Agent.Tools.PlanMode" do
                 isPlanModeActive env `shouldReturn` True
 
     describe "correlated plan review lifecycle" do
+        it "keeps lifecycle callbacks re-entrant for reads and fails mutations closed" do
+            envRef <- newIORef Nothing
+            quiesceObservation <- newIORef Nothing
+            resumePhase <- newIORef Nothing
+            let inspectQuiesce = do
+                    Just env <- readIORef envRef
+                    phase <- (.trackerPhase) <$> readPlanTracker env
+                    mutation <- updatePlanTracker env Right
+                    writeIORef quiesceObservation
+                        (Just (phase, mutation))
+                    pure (Right ())
+                inspectResume = do
+                    Just env <- readIORef envRef
+                    phase <- (.trackerPhase) <$> readPlanTracker env
+                    writeIORef resumePhase (Just phase)
+                hooks = testLifecycleHooks
+                    (\_ -> pure PlanReviewDefer)
+                    inspectQuiesce
+                    inspectResume
+            withTempPlanHooks hooks \env -> do
+                writeIORef envRef (Just env)
+                timeout 2000000 (activatePlanMode env)
+                    `shouldReturn` Just ()
+                readIORef quiesceObservation >>= \case
+                    Just (TrackerInactive, Left message) ->
+                        message `shouldSatisfy`
+                            Text.isInfixOf "transition is already in progress"
+                    other ->
+                        expectationFailure
+                            ("unexpected quiesce observation: " <> show other)
+                timeout 2000000 (deactivatePlanMode env)
+                    `shouldReturn` Just ()
+                readIORef resumePhase
+                    `shouldReturn` Just TrackerInactive
+
         it "presents a typed canonical snapshot and stores its continuation" do
             requests <- newIORef []
             events <- newIORef ([] :: [Text])
@@ -424,6 +552,10 @@ spec = describe "Agent.Tools.PlanMode" do
                         >> fail "unreachable"
                 continuation.approvedPlanVerification
                     `shouldBe` ["cabal repl agent-core:test:agent-core-test"]
+                continuation.approvedPlanContinuation
+                    `shouldSatisfy`
+                        Text.isInfixOf
+                            "cabal repl agent-core:test:agent-core-test"
                 request <- expectSingle =<< readIORef requests
                 canonical <- planFilePath env
                 request.planReviewPath `shouldBe` canonical
@@ -465,6 +597,26 @@ spec = describe "Agent.Tools.PlanMode" do
                     _ -> False
                 (readPlanTracker env <&> (.trackerPhase))
                     `shouldReturn` TrackerExitPending
+                nextPlanModeReminder
+                    env
+                    PlanReminderToolNames
+                        { planReminderWriteToolName = "write_plan"
+                        , planReminderQuestionToolName =
+                            "ask_user_question"
+                        , planReminderCompletionToolName =
+                            "exit_plan_mode"
+                        }
+                    `shouldReturn` Right Nothing
+                frozenWrite <- dispatchToolCall testDispatchConfig
+                    [(writePlanTool env).appToolHandler]
+                    (functionToolCall
+                        "write-frozen"
+                        "write_plan"
+                        "{\"content\":\"# Replaced\"}")
+                frozenWrite.output
+                    `shouldSatisfy`
+                        Text.isInfixOf
+                            "awaiting review and is frozen"
                 resumed <- newPlanModeEnv directory (Just hooks)
                 attachPlanSessionDir resumed directory
                     `shouldReturn` Right ()
@@ -537,7 +689,7 @@ spec = describe "Agent.Tools.PlanMode" do
                 secondRequest.planReviewRequestKey
                     `shouldBe` firstRequest.planReviewRequestKey
 
-        it "fails activation before restriction when quiescence fails" do
+        it "rolls quiescence back when activation cannot acquire it" do
             resumed <- newIORef False
             let hooks = testLifecycleHooks
                     (\_ -> pure PlanReviewDefer)
@@ -547,7 +699,31 @@ spec = describe "Agent.Tools.PlanMode" do
                 activation <- tryAny (activatePlanMode env)
                 activation `shouldSatisfy` isLeft
                 readPlanModeState env `shouldReturn` PlanInactive
-                readIORef resumed `shouldReturn` False
+                readIORef resumed `shouldReturn` True
+
+        it "releases every acquired lifecycle layer after a later failure" do
+            events <- newIORef ([] :: [Text])
+            let record value = modifyIORef' events (<> [value])
+                inner = testLifecycleHooks
+                    (\_ -> pure PlanReviewDefer)
+                    (record "inner-acquire" >> pure (Right ()))
+                    (record "inner-release")
+                hooks =
+                    withPlanModeLifecycle
+                        (record "outer-acquire"
+                            >> pure (Left "outer failed"))
+                        (record "outer-release")
+                        inner
+            withTempPlanHooks hooks \env -> do
+                activation <- tryAny (activatePlanMode env)
+                activation `shouldSatisfy` isLeft
+                readPlanModeState env `shouldReturn` PlanInactive
+                readIORef events `shouldReturn`
+                    [ "inner-acquire"
+                    , "outer-acquire"
+                    , "outer-release"
+                    , "inner-release"
+                    ]
 
         it "allows safe reattach only without restrictions or continuation" do
             let hooks = testLifecycleHooks
@@ -688,6 +864,46 @@ spec = describe "Agent.Tools.PlanMode" do
                       )
                     ]
 
+        it "passes the complete batch once with its tool call id" do
+            requests <- newIORef []
+            let hooks =
+                    (testLifecycleHooks
+                        (\_ -> pure PlanReviewDefer)
+                        (pure (Right ()))
+                        (pure ()))
+                        { planAskQuestionnaire = \request -> do
+                            modifyIORef' requests (<> [request])
+                            pure
+                                (PlanQuestionnaireSubmitted
+                                    [ PlanQuestionnaireAnswer
+                                        { planAnswerQuestionIndex = 0
+                                        , planAnswerQuestion = "Database?"
+                                        , planAnswerLabels = ["Postgres"]
+                                        , planAnswerOther = Nothing
+                                        }
+                                    , PlanQuestionnaireAnswer
+                                        { planAnswerQuestionIndex = 1
+                                        , planAnswerQuestion = "Features?"
+                                        , planAnswerLabels = ["Auth", "Logging"]
+                                        , planAnswerOther = Nothing
+                                        }
+                                    ])
+                        }
+            withTempPlanHooks hooks \env -> do
+                _ <- runAskTool env $
+                    "{\"questions\":["
+                        <> "{\"question\":\"Database?\",\"options\":["
+                        <> "{\"label\":\"Postgres\",\"description\":\"SQL\"}]},"
+                        <> "{\"question\":\"Features?\",\"options\":["
+                        <> "{\"label\":\"Auth\",\"description\":\"Auth\"},"
+                        <> "{\"label\":\"Logging\",\"description\":\"Logs\"}],"
+                        <> "\"multi_select\":true}]}"
+                observed <- readIORef requests
+                map (.planQuestionnaireRequestKey) observed
+                    `shouldBe` ["ask-1"]
+                map (length . (.planQuestionnaireQuestions)) observed
+                    `shouldBe` [2]
+
         it "maps a displayed structured choice back to its label" do
             let displayed =
                     "Postgres — Reliable relational database — "
@@ -736,7 +952,10 @@ testLifecycleHooks
     -> PlanModeHooks
 testLifecycleHooks review quiesce resume = PlanModeLifecycleHooks
     { planConfirmEnter = \_ -> pure True
+    , planConfirmEnterRequest = \_ -> pure True
     , planAskQuestion = \_ _ -> pure Nothing
+    , planAskQuestionnaire =
+        legacyPlanQuestionnaireHook (\_ _ -> pure Nothing)
     , planReviewPlan = review
     , planQuiesceBeforeActivation = quiesce
     , planResumeAfterExit = resume

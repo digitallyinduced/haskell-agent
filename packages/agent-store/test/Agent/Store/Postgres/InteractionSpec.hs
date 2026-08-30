@@ -31,6 +31,7 @@ import Agent.Store.Postgres.Session
     , StoredTurn(..)
     , TranscriptEffect(..)
     , appendSessionTurnIndexedAndDeliver
+    , appendSessionTurnIndexedAndDeliverMany
     , createSession
     , loadSession
     )
@@ -60,6 +61,7 @@ spec = describe "PostgreSQL pending interaction storage" do
         ddl `shouldNotContainBytes` "jsonb"
         grants `shouldContainBytes`
             "GRANT SELECT ON harness.session_interactions"
+        grants `shouldContainBytes` "turn_fingerprint"
         grants `shouldNotContainBytes` "UPDATE"
         grants `shouldNotContainBytes` "DELETE"
 
@@ -139,6 +141,7 @@ exerciseInteractions pool = do
             interaction.sessionInteractionId
         , interactionDeliveryRequestKind = "tool_output"
         , interactionDeliveryRequestTurnIndex = 0
+        , interactionDeliveryRequestTurnFingerprint = Nothing
         , interactionDeliveryRequestDeliveredAt = later
         }
         `shouldReturn` Right InteractionDeliveryUnresolved
@@ -146,6 +149,7 @@ exerciseInteractions pool = do
             { interactionDeliveryIntentInteractionId =
                 interaction.sessionInteractionId
             , interactionDeliveryIntentKind = "tool_output"
+            , interactionDeliveryIntentTurnFingerprint = Nothing
             , interactionDeliveryIntentDeliveredAt = later
             }
     appendSessionTurnIndexedAndDeliver
@@ -215,6 +219,7 @@ exerciseInteractions pool = do
                 interaction.sessionInteractionId
             , interactionDeliveryRequestKind = "tool_output"
             , interactionDeliveryRequestTurnIndex = 0
+            , interactionDeliveryRequestTurnFingerprint = Nothing
             , interactionDeliveryRequestDeliveredAt = later
             }
     markSessionInteractionDelivered pool deliveryRequest
@@ -249,13 +254,87 @@ exerciseInteractions pool = do
                 ("unexpected atomic replay result: " <> show other)
             fail "expected delivery-only replay"
     repeatedDelivery `shouldBe` delivery
+
+    -- A replay batch is atomic only when every observed delivery matches the
+    -- same candidate turn. One exact replay plus one stale delivery must not
+    -- be reported as a shorter successful batch.
+    secondPublished <- publishSessionInteraction pool
+        request
+            { interactionRequestKey = "plan:revision:8"
+            , interactionRequestOrigin =
+                Just InteractionOrigin
+                    { interactionOriginToolName = "exit_plan_mode"
+                    , interactionOriginCallId = "call-8"
+                    }
+            }
+    second <- expectPublished True secondPublished
+    resolveSessionInteraction pool
+        InteractionResolutionRequest
+            { interactionResolutionRequestSessionKey =
+                "interaction-session"
+            , interactionResolutionRequestInteractionId =
+                second.sessionInteractionId
+            , interactionResolutionRequestPayloadVersion = 1
+            , interactionResolutionRequestPayload =
+                "{\"outcome\":\"approve\"}"
+            , interactionResolutionRequestResponder = "client-8"
+            , interactionResolutionRequestResolvedAt = later
+            }
+        >>= expectResolution
+        >> pure ()
+    markSessionInteractionDelivered pool
+        InteractionDeliveryRequest
+            { interactionDeliveryRequestSessionKey =
+                "interaction-session"
+            , interactionDeliveryRequestInteractionId =
+                second.sessionInteractionId
+            , interactionDeliveryRequestKind = "tool_output"
+            , interactionDeliveryRequestTurnIndex = 0
+            , interactionDeliveryRequestTurnFingerprint =
+                Just "different-candidate"
+            , interactionDeliveryRequestDeliveredAt = later
+            }
+        >>= expectDelivered True
+        >> pure ()
+    let secondIntent =
+            intent
+                { interactionDeliveryIntentInteractionId =
+                    second.sessionInteractionId
+                }
+    appendSessionTurnIndexedAndDeliverMany
+        pool
+        (testTurn later)
+        metadata
+        [intent, secondIntent]
+        `shouldReturn`
+            Left
+                (StoreDataError
+                    "interaction delivery batch contains an unresolved or partially replayed response")
+
+    -- A stale in-memory intent must not suppress a later unrelated turn.
+    let nextTurn =
+            (testTurn later)
+                { sessionTurnUserText = "different turn"
+                }
+    appendSessionTurnIndexedAndDeliver
+        pool
+        nextTurn
+        metadata
+        intent >>= \case
+            Right (Just 1, result) ->
+                expectDelivered False (Right result)
+                    `shouldReturn` delivery
+            other ->
+                expectationFailure
+                    ("unexpected stale-intent append result: "
+                        <> show other)
     loadSession pool "interaction-session" >>= \case
         Right (Just stored) ->
             map
                 (\storedTurn ->
                     storedTurn.storedTurn.sessionTurnUserText)
                 (toList stored.storedTurns)
-                `shouldBe` ["approved plan"]
+                `shouldBe` ["approved plan", "different turn"]
         other ->
             expectationFailure
                 ("unexpected session after atomic replay: " <> show other)

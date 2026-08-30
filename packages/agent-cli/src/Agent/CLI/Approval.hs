@@ -32,10 +32,11 @@ import Agent.ToolDispatch
 import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
+    , PlanModeState(..)
     , isPlanFileEditTarget
-    , isPlanModeActive
     , planFilePath
     , planModeBlockedEditMessage
+    , readPlanModeState
     )
 import Agent.Tools.Types
     ( AppTool(..)
@@ -53,7 +54,6 @@ import Data.IORef
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
 import System.IO (stderr)
 
 data ApprovalNotice
@@ -132,7 +132,10 @@ approveToolDecisionWithReporterAndPersistence
     -> IO (Either Text Bool)
 approveToolDecisionWithReporterAndPersistence requestPermission report persistAlwaysApprove policyRef allowedToolsRef tools planMode call = do
     policy <- readIORef policyRef
-    planActive <- isPlanModeActive planMode
+    planState <- readPlanModeState planMode
+    let planRestricted =
+            planState `elem` [PlanActive, PlanExitPending]
+        planEditable = planState == PlanActive
     planPath <- planFilePath planMode
     let toolName = canonicalToolName call.name
     -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
@@ -151,7 +154,9 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
             -- target is the exact canonical session plan.
             blocked <-
                 planModeBlockReason
-                    planActive
+                    planRestricted
+                    planEditable
+                    readOnly
                     planPath
                     registered
                     call
@@ -162,7 +167,7 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
                 Nothing -> do
                     fileWrite <-
                         isAuthorizedPlanFileWrite
-                            planActive
+                            planEditable
                             planPath
                             registered
                             call
@@ -209,34 +214,42 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
 
 planModeBlockReason
     :: Bool
+    -> Bool
+    -> Bool
     -> OsPath
     -> Maybe AppTool
     -> ToolCall
     -> IO (Maybe Text)
-planModeBlockReason active planPath registered call
-    | not active = pure Nothing
+planModeBlockReason restricted editable readOnly planPath registered call
+    | not restricted = pure Nothing
     | otherwise = case (.appToolPlanModeCapability) <$> registered of
         Nothing -> pure (Just unknownMessage)
         Just PlanModeUnknown -> pure (Just unknownMessage)
         Just PlanModeBlocked -> pure (Just blockedMessage)
         Just PlanModeReadOnly -> pure Nothing
         Just PlanModeInteraction -> pure Nothing
-        Just PlanModeSafeSubagent -> pure Nothing
+        Just PlanModeSafeSubagent
+            | readOnly -> pure Nothing
+            | otherwise -> pure (Just blockedMessage)
         Just PlanModeScopedState -> pure Nothing
         Just (PlanModePlanFileWrite resolveTarget) ->
-            resolveTarget call >>= \case
-                Left err ->
-                    pure . Just $
-                        planModeBlockedEditMessage planPath
-                            <> " The plan-file target could not be validated: "
-                            <> err
-                Right target
-                    | isPlanFileEditTarget planPath target -> pure Nothing
-                    | otherwise -> pure (Just blockedMessage)
+            if not editable
+                then
+                    pure
+                        (Just
+                            "Rejected: the submitted plan snapshot is frozen while its review is pending.")
+                else
+                    resolveTarget call >>= \case
+                        Left err ->
+                            pure . Just $
+                                planModeBlockedEditMessage planPath
+                                    <> " The plan-file target could not be validated: "
+                                    <> err
+                        Right target
+                            | isPlanFileEditTarget planPath target -> pure Nothing
+                            | otherwise -> pure (Just blockedMessage)
   where
-    unknownMessage =
-        "Rejected: unknown tool `" <> call.name
-            <> "` has no plan-mode capability."
+    unknownMessage = blockedMessage
     blockedMessage = planModeBlockedEditMessage planPath
 
 isAuthorizedPlanFileWrite

@@ -179,10 +179,50 @@ coreMigrations =
               \ ADD COLUMN IF NOT EXISTS image_bytes bytea"
             ]
         }
+    -- Keep feature migrations in a separate band from the sequential core
+    -- versions used by other active harness releases. The migration runner
+    -- deliberately permits gaps, so stores carrying an unrelated v11/v12 can
+    -- apply these idempotent additions without a name collision.
     , Migration
-        { migrationVersion = 11
+        { migrationVersion = 100
         , migrationName = "durable pending session interactions"
         , migrationStatements = interactionMigrationStatements
+        }
+    , Migration
+        { migrationVersion = 101
+        , migrationName = "bind interaction delivery to exact turns"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS\
+              \ harness.session_interaction_deliveries\
+              \ ADD COLUMN IF NOT EXISTS turn_fingerprint text"
+            , "DO $ha$\
+              \ BEGIN\
+              \   IF to_regclass(\
+              \       'harness.session_interaction_deliveries'\
+              \     ) IS NOT NULL THEN\
+              \     IF NOT EXISTS (\
+              \       SELECT 1 FROM pg_catalog.pg_constraint\
+              \       WHERE conrelid =\
+              \         'harness.session_interaction_deliveries'::regclass\
+              \         AND conname =\
+              \           'session_interaction_deliveries_fingerprint_check'\
+              \     ) THEN\
+              \       ALTER TABLE harness.session_interaction_deliveries\
+              \         ADD CONSTRAINT\
+              \           session_interaction_deliveries_fingerprint_check\
+              \         CHECK (\
+              \           turn_fingerprint IS NULL\
+              \           OR (length(turn_fingerprint) > 0\
+              \             AND length(turn_fingerprint) <= 128)\
+              \         );\
+              \     END IF;\
+              \     GRANT INSERT (turn_fingerprint)\
+              \       ON harness.session_interaction_deliveries\
+              \       TO ha_runtime;\
+              \   END IF;\
+              \ END\
+              \ $ha$"
+            ]
         }
     ]
 

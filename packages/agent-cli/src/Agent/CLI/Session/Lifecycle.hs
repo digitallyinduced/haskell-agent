@@ -125,7 +125,7 @@ runPendingTurnWithCooldownRetry
 
 runPendingAttempt :: SessionEnv -> PendingTurn -> IO TurnResult
 runPendingAttempt env pending
-    | pending.pendingCheckpointed = retryCheckpointedTurn env
+    | pending.pendingCheckpointed = retryCheckpointedTurn env pending
     | otherwise =
         runOneTurn env pending.pendingPromptText pending.pendingInputs
 

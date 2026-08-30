@@ -29,6 +29,7 @@ module Agent.CLI.Session
     , appendTurnIndexed
     , appendTurnWithMetaUpdate
     , appendTurnWithMetaUpdateIndexed
+    , appendTurnWithMetaUpdateIndexedAndDeliver
     , appendTurnKeepTitle
     , appendTurnKeepTitleIndexed
     , addSessionUsage
@@ -103,9 +104,14 @@ import Agent.CLI.Session.Codec
     )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Loop (TokenUsage(..))
-import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.OsPath (unsafeToFilePath)
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.Interaction
+    ( InteractionDelivery(..)
+    , InteractionDeliveryIntent
+    , InteractionDeliveryResult(..)
+    )
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (StoreError, renderStoreError)
 import Control.Applicative ((<|>))
@@ -120,19 +126,15 @@ import Control.Monad.Trans.Except
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.Bits (xor)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import Data.Word (Word64)
 import qualified Data.Vector as Vector
 import Numeric (showHex)
 import System.Directory.OsPath
@@ -369,6 +371,61 @@ appendTurnWithMetaUpdate
 appendTurnWithMetaUpdate handle turn updateMeta =
     appendTurnWithMetaTransition handle turn
         (updateMeta . applyTurnMetadata turn)
+
+appendTurnWithMetaUpdateIndexedAndDeliver
+    :: SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> [InteractionDeliveryIntent]
+    -> IO (SessionHandle, Int64)
+appendTurnWithMetaUpdateIndexedAndDeliver
+        handle turn updateMeta intents
+    | null intents =
+        appendTurnWithMetaUpdateIndexed handle turn updateMeta
+    | otherwise = do
+        let pool = handle.sessionPool
+        now <- normalizePostgresTimestamp <$> getCurrentTime
+        let meta0 = handle.sessionMeta
+            meta = meta0
+                { metaUpdatedAt = now
+                , metaLastResponseId =
+                    turn.turnResponseId <|> meta0.metaLastResponseId
+                }
+            finalMeta = updateMeta (applyTurnMetadata turn meta)
+        Store.appendSessionTurnIndexedAndDeliverMany
+            pool
+            (toStoredTurn turn)
+            (toStoredMetadata finalMeta)
+            intents >>= \case
+                Left err ->
+                    fail
+                        ("could not append PostgreSQL session turn with interaction delivery: "
+                            <> Text.unpack (renderStoreError err))
+                Right (Just turnIndex, _) ->
+                    pure
+                        ( handle { sessionMeta = finalMeta }
+                        , turnIndex
+                        )
+                Right (Nothing, results)
+                    | Just turnIndex <- deliveredTurnIndex results ->
+                        pure
+                            ( handle { sessionMeta = finalMeta }
+                            , turnIndex
+                            )
+                Right _ ->
+                    fail
+                        "interaction delivery blocked the session turn append"
+  where
+    deliveredTurnIndex results =
+        case
+            [ delivery.interactionDeliveryTurnIndex
+            | InteractionDeliveryObserved
+                { interactionDeliveryValue = delivery } <- results
+            ]
+        of
+            index : rest
+                | all (== index) rest -> Just index
+            _ -> Nothing
 
 appendTurnWithMetaUpdateIndexed
     :: SessionHandle

@@ -99,7 +99,8 @@ import Agent.CLI.Session.Runtime.Types
                      connectionId, options, provider, dialect, policy, allTools,
                      suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
                      mcpInstructions, mcpFleet,
-                     ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
+                     ghciEnabledRef, bashEnabledRef, toolEnv, planMode,
+                     interactionDeliveriesRef, startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
                      conversationRef, needsInitialContext, persist,
@@ -271,6 +272,7 @@ runAgentSession
     pendingTurn
     persist
     planHooks
+    interactionDeliveriesRef
     planMode
     policy
     preferredOpenAiAccountRef
@@ -511,8 +513,8 @@ runAgentSession
                 slot <- readIORef slotRef
                 case slot of
                     PersistenceActive handle -> do
-                        claimCurrentSession handle
                         noteSessionDir handle.sessionDir
+                        claimCurrentSession handle
                     PersistencePending _ _ _ -> pure ()
             PersistenceDisabled -> pure ()
         progName <- getProgName
@@ -554,6 +556,7 @@ runAgentSession
                                 , bashEnabledRef
                                 , toolEnv
                                 , planMode
+                                , interactionDeliveriesRef
                                 , startup
                                 , learnAboutUserRequested
                                 , databaseScopes
@@ -594,7 +597,9 @@ runAgentSession
                                 , selectionRef = activeSelectionRef
                                 , accountLabel = resolveActiveAccountLabel
                                 , selectAccount = sessionSelectAccount
-                                , onPersisted = claimCurrentSession
+                                , onPersisted = \handle -> do
+                                    noteSessionDir handle.sessionDir
+                                    claimCurrentSession handle
                                 , compactRunner = sessionCompactRunner
                                 , codeModeNestedSlot =
                                     (.codeModeNestedSlot) <$> codeModeRuntime

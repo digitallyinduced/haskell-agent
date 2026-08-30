@@ -57,6 +57,7 @@ spec =
                                 , True
                                 , True
                                 , True
+                                , True
                                 )
                     forbiddenResult <- withSession
                         (trustedPool store)
@@ -99,6 +100,36 @@ spec =
                                 expectationFailure
                                     ("could not upgrade managed store: " <> show err)
                             Right () -> pure ()
+                    ) `finally` cleanup
+
+        it "upgrades legacy interaction deliveries alongside unrelated migrations" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open migration pool: " <> show err)
+                        Right ownerPool ->
+                            finally
+                                (do
+                                    runMigrations ownerPool
+                                        legacyInteractionMigrations
+                                        `shouldReturn` Right ()
+                                    runMigrations ownerPool coreMigrations
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.statement ()
+                                            migratedInteractionFingerprintStatement)
+                                        `shouldReturn` Right (True, True)
+                                )
+                                (closeStorePool ownerPool)
                     ) `finally` cleanup
 
         it "migrates legacy tool outputs to typed text fields" $
@@ -235,6 +266,56 @@ legacyMigrations =
             ]
         }
     ]
+
+legacyInteractionMigrations :: [Migration]
+legacyInteractionMigrations =
+    [ Migration
+        { migrationVersion = 11
+        , migrationName = "provider turn telemetry"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 12
+        , migrationName = "account usage cache"
+        , migrationStatements = []
+        }
+    ]
+    <> [ migration
+            { migrationStatements =
+                case migration.migrationVersion of
+                    2 ->
+                        [ "DO $ha$ BEGIN\
+                          \ IF NOT EXISTS (\
+                          \   SELECT 1 FROM pg_catalog.pg_roles\
+                          \   WHERE rolname = 'ha_runtime'\
+                          \ ) THEN\
+                          \   CREATE ROLE ha_runtime LOGIN;\
+                          \ END IF;\
+                          \ END $ha$"
+                        ]
+                    100 ->
+                        [ "CREATE TABLE\
+                          \ harness.session_interaction_deliveries (\
+                          \ interaction_id uuid PRIMARY KEY,\
+                          \ session_id uuid NOT NULL,\
+                          \ delivery_kind text NOT NULL,\
+                          \ turn_index bigint NOT NULL,\
+                          \ delivered_at timestamptz NOT NULL\
+                          \ )"
+                        , "GRANT SELECT\
+                          \ ON harness.session_interaction_deliveries\
+                          \ TO ha_runtime"
+                        , "GRANT INSERT\
+                          \ (interaction_id, session_id, delivery_kind,\
+                          \ turn_index, delivered_at)\
+                          \ ON harness.session_interaction_deliveries\
+                          \ TO ha_runtime"
+                        ]
+                    _ -> []
+            }
+        | migration <- coreMigrations
+        , migration.migrationVersion <= 100
+        ]
 
 legacyTranscriptEffectMigrations :: [Migration]
 legacyTranscriptEffectMigrations =
@@ -458,20 +539,46 @@ legacySessionSchemaStatements =
       \ )"
     ]
 
-serverStatement :: Statement () (Text, Text, Bool, Bool, Bool)
+serverStatement :: Statement () (Text, Text, Bool, Bool, Bool, Bool)
 serverStatement = Statement.preparable
     "SELECT current_database()::text, current_user::text,\
     \ inet_server_addr() IS NULL,\
     \ to_regclass('harness.sessions') IS NOT NULL,\
     \ current_setting('server_version_num')::integer >= 180000\
-    \   AND substring(pg_catalog.uuidv7()::text, 15, 1) = '7'"
+    \   AND substring(pg_catalog.uuidv7()::text, 15, 1) = '7',\
+    \ has_column_privilege(\
+    \   current_user,\
+    \   'harness.session_interaction_deliveries',\
+    \   'turn_fingerprint',\
+    \   'INSERT')"
     Encoders.noParams
     (Decoders.singleRow $
-        (,,,,)
+        (,,,,,)
             <$> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool))
+
+migratedInteractionFingerprintStatement :: Statement () (Bool, Bool)
+migratedInteractionFingerprintStatement = Statement.preparable
+    "SELECT\
+    \ EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'session_interaction_deliveries'\
+    \     AND column_name = 'turn_fingerprint'\
+    \ ),\
+    \ has_column_privilege(\
+    \   'ha_runtime',\
+    \   'harness.session_interaction_deliveries',\
+    \   'turn_fingerprint',\
+    \   'INSERT')"
+    Encoders.noParams
+    (Decoders.singleRow $
+        (,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))
 
 migratedOpaqueFieldsStatement :: Statement () (Bool, Bool, Bool)

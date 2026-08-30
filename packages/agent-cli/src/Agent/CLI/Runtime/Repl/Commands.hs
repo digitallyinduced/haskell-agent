@@ -71,15 +71,12 @@ import Agent.CLI.Prompt ()
 import Agent.CLI.PromptHooks ()
 import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch
-    ( reloadAuth,
-      reportProviderUnavailable,
-      requestAutomaticProviderFallback )
+    ( reloadAuth )
 import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition
     ( PendingTurn
-    , ProviderTransition
-    , TurnResult(TurnProviderUnavailable)
+    , TurnResult
     )
 import Agent.CLI.Recap ( RecapKind(..), RecapRequest(..) )
 import Agent.CLI.Render
@@ -87,7 +84,6 @@ import Agent.CLI.Render
       clearThinking,
       putTextLn,
       renderEvent,
-      renderPrintedText,
       resetRenderPrintedText )
 import Agent.CLI.ReplMode ( replModeLabel )
 import Agent.CLI.Request ()
@@ -136,7 +132,7 @@ import Agent.CLI.Startup.Format ()
 import Agent.CLI.StartupContext ()
 import Agent.CLI.Status ( applyReplMode, cycleReplInteraction )
 import Agent.CLI.Style
-    ( glyphOk, glyphSession, roleError, roleMuted, roleSuccess )
+    ( glyphOk, glyphSession, glyphWarn, roleError, roleMuted, roleSuccess )
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenRuntime,
@@ -190,11 +186,20 @@ import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(planStateRef, planSessionDir),
+    ( PlanModeEnv,
+      PlanReviewOutcome(..),
       activatePlanMode,
       readPlanMarkdown,
+      readPlanModeState,
+      readPlanTracker,
       planFilePath,
-      PlanModeState(PlanPending) )
+      submitPlanForReview,
+      writePlanModeState,
+      PlanModeState(PlanExitPending, PlanPending) )
+import Agent.Tools.PlanMode.Tracker
+    ( ApprovedPlanContinuation(..)
+    , PlanTracker(..)
+    )
 import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
 import Agent.XAI.LoopBackend ()
@@ -348,51 +353,63 @@ handleReplLine
                         Text.putStrLn (roleMuted color chip)
                 case parseReplLineWithCatalog slashCatalog promptLine of
                     ReplQuit -> pure RunQuit
-                    ReplReload -> requestReload fullscreen persist
+                    ReplReload ->
+                        requestReload
+                            fullscreen
+                            persist
+                            env.sessionOnPersisted
                     ReplPrompt text -> do
-                        -- Native Cmd+V of a Finder image often pastes a path
-                        -- rather than bitmap bytes. Treat a prompt that is
-                        -- only image path(s) as an attach + in-terminal preview,
-                        -- matching Grok Build's paste chip.
-                        pastedImages <- loadImagesFromPastedText text
-                        case pastedImages of
-                            Just images@(_:_) -> do
-                                message <- queueAttachedImages
-                                    conversationRef
-                                    previewIdRef
-                                    color
-                                    (isNothing fullscreen)
-                                    images
-                                syncFullscreenImagePreviews
+                        if planState == PlanExitPending
+                            then do
+                                let message =
+                                        "plan review is awaiting a decision; use /plan to resume it before sending another prompt"
                                 displayInfo message $
-                                    Text.putStrLn
+                                    Text.hPutStrLn stderr
                                         (roleMuted color
-                                            (glyphOk <> message))
-                                continue
-                            _ -> do
-                                pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
-                                forM_ fullscreen \runtime ->
-                                    commitFullscreenImagePreviews runtime pendingImages
-                                resetRenderPrintedText render
-                                let turnInputs =
-                                        if null pendingImages
-                                            then [UserMessage text]
-                                            else
-                                                [ UserMultimodal
-                                                    { userText = text
-                                                    , userImages = pendingImages
-                                                    }
-                                                ]
-                                preparePromptSkillInputs env text turnInputs >>= \case
-                                    Left err -> do
-                                        displayError err $
-                                            Text.hPutStrLn stderr
-                                                (roleError color err)
+                                            (glyphWarn <> message))
+                                continueWith text
+                            else do
+                                -- Native Cmd+V of a Finder image often pastes
+                                -- a path rather than bitmap bytes.
+                                pastedImages <- loadImagesFromPastedText text
+                                case pastedImages of
+                                    Just images@(_:_) -> do
+                                        message <- queueAttachedImages
+                                            conversationRef
+                                            previewIdRef
+                                            color
+                                            (isNothing fullscreen)
+                                            images
+                                        syncFullscreenImagePreviews
+                                        displayInfo message $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphOk <> message))
                                         continue
-                                    Right skillInputs -> do
-                                        fullscreenEvent (UiUserSubmitted text)
-                                        result <- runOneTurn env text skillInputs
-                                        finishTurn False result
+                                    _ -> do
+                                        pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
+                                        forM_ fullscreen \runtime ->
+                                            commitFullscreenImagePreviews runtime pendingImages
+                                        resetRenderPrintedText render
+                                        let turnInputs =
+                                                if null pendingImages
+                                                    then [UserMessage text]
+                                                    else
+                                                        [ UserMultimodal
+                                                            { userText = text
+                                                            , userImages = pendingImages
+                                                            }
+                                                        ]
+                                        preparePromptSkillInputs env text turnInputs >>= \case
+                                            Left err -> do
+                                                displayError err $
+                                                    Text.hPutStrLn stderr
+                                                        (roleError color err)
+                                                continue
+                                            Right skillInputs -> do
+                                                fullscreenEvent (UiUserSubmitted text)
+                                                result <- runOneTurn env text skillInputs
+                                                finishTurn False result
                     ReplExpandedPrompt original expanded ->
                         submitExpandedTurn
                             continue color original expanded
@@ -504,7 +521,9 @@ handleReplLine
                                     env.sessionMcpWarnings
                         if restart
                             then requestMcpRestart
-                                fullscreen persist
+                                fullscreen
+                                persist
+                                env.sessionOnPersisted
                             else continue
                     ReplMcpPrompt server name arguments -> do
                         outcome <- case env.sessionMcpFleet of
@@ -576,7 +595,10 @@ handleReplLine
                     action@ReplShowModel -> handleSelectionAction env continue action
                     action@ReplSetModel{} -> handleSelectionAction env continue action
                     ReplEnableCodeMode ->
-                        requestCodeModeRestart fullscreen persist
+                        requestCodeModeRestart
+                            fullscreen
+                            persist
+                            env.sessionOnPersisted
                     ReplToggleAlwaysApprove
                         | provider == ClaudeCodeProvider -> do
                             let message =
@@ -626,6 +648,7 @@ handleReplLine
                                                 outcome.compactSummary)
                                         now <- getCurrentTime
                                         handle <- ensureSession slotRef
+                                        env.sessionOnPersisted handle
                                         let turn = SessionTurn
                                                 { turnAt = now
                                                 , turnUserText = compactSessionUserText focus
@@ -666,9 +689,11 @@ handleReplLine
                                 putTextLn stderr (roleMuted color message)
                             continue
                     ReplPlan maybeDescription ->
-                        enterPlanFromSlash env maybeDescription >>= \case
-                            Just providerSwitch ->
-                                pure (RunSwitchProvider providerSwitch)
+                        enterPlanFromSlash
+                            env
+                            finishTurn
+                            maybeDescription >>= \case
+                            Just result -> pure result
                             Nothing -> continue
                     ReplViewPlan -> do
                         content <- readPlanMarkdown planMode
@@ -830,8 +855,9 @@ handleReplLine
 requestReload
     :: Maybe FullscreenRuntime
     -> Persistence
+    -> (SessionHandle -> IO ())
     -> IO RunResult
-requestReload fullscreen persist = do
+requestReload fullscreen persist onPersisted = do
     color <- resolveColor stderr
     let reportInfo message =
             case fullscreen of
@@ -852,14 +878,16 @@ requestReload fullscreen persist = do
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
+            onPersisted handle
             reportInfo ("reloading; session " <> handle.sessionMeta.metaId)
             pure (RunReload handle.sessionMeta.metaId)
 
 requestMcpRestart
     :: Maybe FullscreenRuntime
     -> Persistence
+    -> (SessionHandle -> IO ())
     -> IO RunResult
-requestMcpRestart fullscreen persist = do
+requestMcpRestart fullscreen persist onPersisted = do
     color <- resolveColor stderr
     let report message =
             case fullscreen of
@@ -875,14 +903,16 @@ requestMcpRestart fullscreen persist = do
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
+            onPersisted handle
             report "restarting MCP servers…"
             pure (RunRestart handle.sessionMeta.metaId)
 
 requestCodeModeRestart
     :: Maybe FullscreenRuntime
     -> Persistence
+    -> (SessionHandle -> IO ())
     -> IO RunResult
-requestCodeModeRestart fullscreen persist = do
+requestCodeModeRestart fullscreen persist onPersisted = do
     color <- resolveColor stderr
     let report message =
             case fullscreen of
@@ -897,63 +927,99 @@ requestCodeModeRestart fullscreen persist = do
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
+            onPersisted handle
             report "enabling code mode…"
             pure (RunEnableCodeMode handle.sessionMeta.metaId)
 
-enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
+enterPlanFromSlash
+    :: SessionEnv
+    -> (Bool -> TurnResult -> IO RunResult)
+    -> Maybe Text
+    -> IO (Maybe RunResult)
 enterPlanFromSlash env@SessionEnv
     { sessionPlanMode = planMode
     , sessionPersist = persist
     , sessionRender = render
     , sessionFullscreen = fullscreen
-    } maybeDescription = do
+    } finishTurn maybeDescription = do
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
     let report message minimal = case fullscreen of
             Nothing -> putTextLn stderr (roleMuted color minimal)
             Just runtime -> emitUiEvent runtime (UiSystemMessage message)
-    case persist of
-        PersistenceEnabled slotRef -> do
-            handle <- ensureSession slotRef
-            writeIORef planMode.planSessionDir (Just handle.sessionDir)
-            report
-                ("session: " <> handle.sessionMeta.metaId)
-                (glyphSession <> "session: " <> handle.sessionMeta.metaId)
-        PersistenceDisabled -> pure ()
-    case maybeDescription of
-        Nothing -> do
-            writeIORef planMode.planStateRef PlanPending
-            let message =
-                    "plan mode armed; send a prompt to activate \
-                    \(or /plan <description>)"
-            report message (glyphSession <> message)
-            pure Nothing
-        Just description -> do
-            activatePlanMode planMode
-            path <- planFilePath planMode
-            let message = "plan mode on (" <> toText path <> ")"
-            report message (glyphSession <> message)
+        runPlanTurn planEnv text inputs = do
             resetRenderPrintedText render
-            case fullscreen of
-                Nothing -> pure ()
-                Just runtime ->
-                    emitUiEvent runtime (UiUserSubmitted description)
-            let planEnv = env { sessionStoreRoot = discardStore }
-                inputs = [UserMessage description]
-            result <- runOneTurn planEnv description inputs
-            case result of
-                TurnProviderUnavailable apiError pending ->
-                    requestAutomaticProviderFallback
-                        planEnv apiError pending >>= \case
-                            Nothing -> do
-                                reportProviderUnavailable fullscreen apiError
-                                pure Nothing
-                            Just providerTransition ->
-                                pure (Just providerTransition)
-                _ -> do
-                    when (isNothing fullscreen) $
-                        putTrailingNewline render
+            runOneTurn planEnv text inputs
+                >>= fmap Just . finishTurn False
+        resumeReview =
+            submitPlanForReview planMode Nothing >>= \case
+                Left err -> do
+                    report err (glyphWarn <> err)
                     pure Nothing
+                Right (PlanReviewAccepted continuation) ->
+                    runPlanTurn
+                        env
+                        continuation.approvedPlanContinuation
+                        []
+                Right (PlanReviewRevisionRequired notes) ->
+                    runPlanTurn env notes [UserMessage notes]
+                Right PlanReviewAbandoned -> do
+                    let message = "plan abandoned; plan mode is off"
+                    report message (glyphSession <> message)
+                    pure Nothing
+                Right PlanReviewApprovalOverrideRequired{} -> do
+                    let message =
+                            "plan approval still requires explicit warning acknowledgement"
+                    report message (glyphWarn <> message)
+                    pure Nothing
+                Right PlanReviewDeferred{} -> do
+                    let message =
+                            "plan review is still awaiting a response"
+                    report message (glyphWarn <> message)
+                    pure Nothing
+        enter = do
+            case persist of
+                PersistenceEnabled slotRef -> do
+                    handle <- ensureSession slotRef
+                    env.sessionOnPersisted handle
+                    report
+                        ("session: " <> handle.sessionMeta.metaId)
+                        (glyphSession <> "session: "
+                            <> handle.sessionMeta.metaId)
+                PersistenceDisabled -> pure ()
+            case maybeDescription of
+                Nothing -> do
+                    writePlanModeState planMode PlanPending
+                    let message =
+                            "plan mode armed; send a prompt to activate \
+                            \(or /plan <description>)"
+                    report message (glyphSession <> message)
+                    pure Nothing
+                Just description -> do
+                    activatePlanMode planMode
+                    path <- planFilePath planMode
+                    let message = "plan mode on (" <> toText path <> ")"
+                    report message (glyphSession <> message)
+                    resetRenderPrintedText render
+                    case fullscreen of
+                        Nothing -> pure ()
+                        Just runtime ->
+                            emitUiEvent runtime
+                                (UiUserSubmitted description)
+                    let planEnv = env { sessionStoreRoot = discardStore }
+                        inputs = [UserMessage description]
+                    runPlanTurn planEnv description inputs
+    tracker <- readPlanTracker planMode
+    case tracker.trackerApprovedContinuation of
+        Just continuation ->
+            runPlanTurn
+                env
+                continuation.approvedPlanContinuation
+                []
+        Nothing ->
+            readPlanModeState planMode >>= \case
+                PlanExitPending -> resumeReview
+                _ -> enter
 
 preparePromptSkillInputs
     :: SessionEnv
@@ -969,8 +1035,3 @@ preparePromptSkillInputs env prompt inputs = do
                 | invocation <- selected
                 ]
         pure (activations <> inputs)
-
-putTrailingNewline :: RenderConfig -> IO ()
-putTrailingNewline render = do
-    didPrint <- renderPrintedText render
-    when didPrint (putTextLn render.renderStdout "")

@@ -18,6 +18,7 @@ module Agent.Store.Postgres.Session
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedAndDeliver
+    , appendSessionTurnIndexedAndDeliverMany
     , loadSession
     , loadSessionWithImplementation
     , loadSessions

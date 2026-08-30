@@ -57,7 +57,7 @@ import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
 import Control.Exception.Safe (bracket, throwIO)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
-import Data.IORef (newIORef, readIORef)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import System.Directory
     ( getCurrentDirectory
     , getTemporaryDirectory
@@ -323,6 +323,8 @@ spec = do
         it "treats pending/active plan as plan even under yolo" do
             replModeFromState PlanPending ApproveAll `shouldBe` ReplModePlan
             replModeFromState PlanActive PromptMutating `shouldBe` ReplModePlan
+            replModeFromState PlanExitPending ApproveAll
+                `shouldBe` ReplModePlan
             replModeFromState PlanInactive ApproveAll `shouldBe` ReplModeAlwaysApprove
             replModeFromState PlanInactive PromptMutating `shouldBe` ReplModeNormal
             replModeFromState PlanInactive DenyMutating `shouldBe` ReplModeNormal
@@ -332,6 +334,8 @@ spec = do
                 `shouldBe` ReplModePlan
             cycleReplInteraction PlanPending PromptMutating
                 `shouldBe` ReplModeAlwaysApprove
+            cycleReplInteraction PlanExitPending PromptMutating
+                `shouldBe` ReplModePlan
             cycleReplInteraction PlanInactive ApproveAll
                 `shouldBe` ReplModeNormal
 
@@ -355,6 +359,21 @@ spec = do
                 readIORef policyRef `shouldReturn` PromptMutating
                 settings' <- loadProjectSettings rootPath
                 settings'.settingsAutoApprove `shouldBe` False
+
+        it "does not cycle policy while a plan review is pending" $
+            withTempDir "agent-mode-" \root -> do
+                let rootPath = fromFilePath root
+                plan <- newPlanModeEnv rootPath Nothing
+                writeIORef plan.planStateRef PlanExitPending
+                policyRef <- newIORef PromptMutating
+                applyReplMode
+                    plan
+                    policyRef
+                    rootPath
+                    ReplModeAlwaysApprove
+                readIORef plan.planStateRef
+                    `shouldReturn` PlanExitPending
+                readIORef policyRef `shouldReturn` PromptMutating
 
     describe "formatTokenUsage" do
         it "omits empty totals" do

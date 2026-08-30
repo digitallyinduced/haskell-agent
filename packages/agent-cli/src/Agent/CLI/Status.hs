@@ -26,8 +26,11 @@ import Agent.Tools.PlanMode
     ( PlanModeEnv
     , PlanModeState(..)
     , deactivatePlanMode
+    , readPlanModeState
+    , readPlanTracker
     , writePlanModeState
     )
+import Agent.Tools.PlanMode.Tracker (PlanTracker(..))
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Text (Text)
@@ -80,22 +83,32 @@ applyReplMode
     -> OsPath
     -> ReplMode
     -> IO ()
-applyReplMode planMode policyRef projectRoot = \case
-    ReplModePlan ->
-        writePlanModeState planMode PlanPending
-    ReplModeAlwaysApprove -> do
-        deactivatePlanMode planMode
-        writeIORef policyRef ApproveAll
-        saveProjectAutoApprove projectRoot True
-    ReplModeNormal -> do
-        deactivatePlanMode planMode
-        current <- readIORef policyRef
-        when (current == ApproveAll) do
-            writeIORef policyRef PromptMutating
-            saveProjectAutoApprove projectRoot False
+applyReplMode planMode policyRef projectRoot target = do
+    -- A pending plan review is a durable barrier.  Do not let an idle
+    -- Shift+Tab cycle silently change approval policy or destroy the
+    -- review-visible mode while another client may still answer it.
+    currentState <- readPlanModeState planMode
+    tracker <- readPlanTracker planMode
+    if currentState == PlanExitPending
+        || tracker.trackerApprovedContinuation /= Nothing
+        then pure ()
+        else case target of
+            ReplModePlan ->
+                writePlanModeState planMode PlanPending
+            ReplModeAlwaysApprove -> do
+                deactivatePlanMode planMode
+                writeIORef policyRef ApproveAll
+                saveProjectAutoApprove projectRoot True
+            ReplModeNormal -> do
+                deactivatePlanMode planMode
+                current <- readIORef policyRef
+                when (current == ApproveAll) do
+                    writeIORef policyRef PromptMutating
+                    saveProjectAutoApprove projectRoot False
 
 -- | Pure next-mode helper used by tests and the Shift+Tab handler.
 cycleReplInteraction :: PlanModeState -> ApprovalPolicy -> ReplMode
+cycleReplInteraction PlanExitPending _ = ReplModePlan
 cycleReplInteraction planState policy =
     cycleReplMode (replModeFromState planState policy)
 

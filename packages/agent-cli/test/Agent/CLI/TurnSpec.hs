@@ -41,7 +41,11 @@ import Agent.Tools.PlanMode
     , PlanModeState(..)
     , activatePlanMode
     , newPlanModeEnv
+    , readPlanModeState
+    , readPlanTracker
+    , writePlanModeState
     )
+import Agent.Tools.PlanMode.Tracker (PlanTracker(..))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -409,17 +413,29 @@ spec = do
     describe "restorePlanStateAfterIncomplete" do
         it "undoes an agent-initiated plan-mode entry after cancellation" do
             plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/turn-plan") Nothing
+            snapshot <- readPlanTracker plan
             activatePlanMode plan
-            restorePlanStateAfterIncomplete plan PlanInactive
-            readIORef plan.planStateRef `shouldReturn` PlanInactive
+            activated <- readPlanTracker plan
+            writeIORef
+                plan.planAgentActivationRevision
+                (Just activated.trackerRevision)
+            restorePlanStateAfterIncomplete
+                plan
+                snapshot
+                activated.trackerRevision
+            readPlanModeState plan `shouldReturn` PlanInactive
 
-        it "restores pending and already-active modes exactly" do
+        it "restores a turn-start pending activation exactly" do
             plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/turn-plan") Nothing
-            writeIORef plan.planStateRef PlanActive
-            restorePlanStateAfterIncomplete plan PlanPending
-            readIORef plan.planStateRef `shouldReturn` PlanPending
-            restorePlanStateAfterIncomplete plan PlanActive
-            readIORef plan.planStateRef `shouldReturn` PlanActive
+            writePlanModeState plan PlanPending
+            snapshot <- readPlanTracker plan
+            activatePlanMode plan
+            activated <- readPlanTracker plan
+            restorePlanStateAfterIncomplete
+                plan
+                snapshot
+                activated.trackerRevision
+            readPlanModeState plan `shouldReturn` PlanPending
 
     describe "Grok user-message framing" do
         it "wraps a request in user_query tags" do

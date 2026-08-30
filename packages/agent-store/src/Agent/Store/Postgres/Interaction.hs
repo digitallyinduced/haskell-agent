@@ -40,6 +40,7 @@ module Agent.Store.Postgres.Interaction
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.Functor.Contravariant ((>$<))
+import Data.Foldable (traverse_)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -72,6 +73,7 @@ data InteractionOrigin = InteractionOrigin
 data InteractionDeliveryIntent = InteractionDeliveryIntent
     { interactionDeliveryIntentInteractionId :: !Text
     , interactionDeliveryIntentKind :: !Text
+    , interactionDeliveryIntentTurnFingerprint :: !(Maybe Text)
     , interactionDeliveryIntentDeliveredAt :: !UTCTime
     }
     deriving (Eq, Show)
@@ -131,6 +133,7 @@ data InteractionDelivery = InteractionDelivery
     { interactionDeliveryInteractionId :: !Text
     , interactionDeliveryKind :: !Text
     , interactionDeliveryTurnIndex :: !Int64
+    , interactionDeliveryTurnFingerprint :: !(Maybe Text)
     , interactionDeliveryDeliveredAt :: !UTCTime
     }
     deriving (Eq, Show)
@@ -140,6 +143,7 @@ data InteractionDeliveryRequest = InteractionDeliveryRequest
     , interactionDeliveryRequestInteractionId :: !Text
     , interactionDeliveryRequestKind :: !Text
     , interactionDeliveryRequestTurnIndex :: !Int64
+    , interactionDeliveryRequestTurnFingerprint :: !(Maybe Text)
     , interactionDeliveryRequestDeliveredAt :: !UTCTime
     }
     deriving (Eq, Show)
@@ -170,7 +174,8 @@ data InteractionDeliveryResult
         }
     deriving (Eq, Show)
 
--- | Fresh-schema DDL.  Migration 11 applies the same idempotent statements to
+-- | Fresh-schema DDL. The durable-interaction migration applies the same
+-- idempotent statements to
 -- existing stores.
 interactionSchemaStatements :: [ByteString]
 interactionSchemaStatements =
@@ -232,6 +237,10 @@ interactionSchemaStatements =
       \ delivery_kind text NOT NULL\
       \   CHECK (delivery_kind ~ '^[a-z][a-z0-9_.-]{0,79}$'),\
       \ turn_index bigint NOT NULL CHECK (turn_index >= 0),\
+      \ turn_fingerprint text\
+      \   CHECK (turn_fingerprint IS NULL\
+      \     OR (length(turn_fingerprint) > 0\
+      \       AND length(turn_fingerprint) <= 128)),\
       \ delivered_at timestamptz NOT NULL,\
       \ FOREIGN KEY (interaction_id, session_id)\
       \   REFERENCES\
@@ -244,6 +253,8 @@ interactionSchemaStatements =
     , "CREATE INDEX IF NOT EXISTS session_interaction_deliveries_session_idx\
       \ ON harness.session_interaction_deliveries\
       \ (session_id, delivered_at, interaction_id)"
+    , "ALTER TABLE harness.session_interaction_deliveries\
+      \ ADD COLUMN IF NOT EXISTS turn_fingerprint text"
     , "CREATE OR REPLACE FUNCTION\
       \ harness.reject_session_interaction_fact_mutation()\
       \ RETURNS trigger\
@@ -287,7 +298,8 @@ interactionRuntimeGrantStatements =
       \ ON harness.session_interaction_resolutions TO ha_runtime"
     , "GRANT SELECT ON harness.session_interaction_deliveries TO ha_runtime"
     , "GRANT INSERT\
-      \ (interaction_id, session_id, delivery_kind, turn_index, delivered_at)\
+      \ (interaction_id, session_id, delivery_kind, turn_index,\
+      \ turn_fingerprint, delivered_at)\
       \ ON harness.session_interaction_deliveries TO ha_runtime"
     ]
 
@@ -645,6 +657,8 @@ commitSessionInteractionDeliveryTransaction sessionKey turnIndex intent = do
             , interactionDeliveryRequestKind =
                 intent.interactionDeliveryIntentKind
             , interactionDeliveryRequestTurnIndex = turnIndex
+            , interactionDeliveryRequestTurnFingerprint =
+                intent.interactionDeliveryIntentTurnFingerprint
             , interactionDeliveryRequestDeliveredAt =
                 intent.interactionDeliveryIntentDeliveredAt
             }
@@ -706,6 +720,7 @@ data InteractionRow = InteractionRow
     , rowResolvedAt :: !(Maybe UTCTime)
     , rowDeliveryKind :: !(Maybe Text)
     , rowDeliveryTurnIndex :: !(Maybe Int64)
+    , rowDeliveryTurnFingerprint :: !(Maybe Text)
     , rowDeliveredAt :: !(Maybe UTCTime)
     }
 
@@ -721,6 +736,7 @@ data DeliveryRow = DeliveryRow
     { deliveryRowInteractionId :: !Text
     , deliveryRowKind :: !Text
     , deliveryRowTurnIndex :: !Int64
+    , deliveryRowTurnFingerprint :: !(Maybe Text)
     , deliveryRowDeliveredAt :: !UTCTime
     }
 
@@ -741,6 +757,7 @@ interactionSelectColumns =
     \ resolution.resolved_at,\
     \ delivery.delivery_kind,\
     \ delivery.turn_index,\
+    \ delivery.turn_fingerprint,\
     \ delivery.delivered_at\
     \ FROM harness.session_interactions interaction\
     \ JOIN harness.sessions session_row\
@@ -860,8 +877,10 @@ insertDeliveryStatement
     :: Statement InteractionDeliveryRequest (Maybe InteractionDelivery)
 insertDeliveryStatement = mkStatement
     "INSERT INTO harness.session_interaction_deliveries\
-    \ (interaction_id, session_id, delivery_kind, turn_index, delivered_at)\
-    \ SELECT resolution.interaction_id, resolution.session_id, $3, $4, $5\
+    \ (interaction_id, session_id, delivery_kind, turn_index,\
+    \ turn_fingerprint, delivered_at)\
+    \ SELECT resolution.interaction_id, resolution.session_id,\
+    \   $3, $4, $5, $6\
     \ FROM harness.session_interaction_resolutions resolution\
     \ JOIN harness.session_interactions interaction\
     \   ON interaction.interaction_id = resolution.interaction_id\
@@ -871,7 +890,7 @@ insertDeliveryStatement = mkStatement
     \   AND interaction.interaction_id = $2::uuid\
     \ ON CONFLICT (interaction_id) DO NOTHING\
     \ RETURNING interaction_id::text, delivery_kind,\
-    \   turn_index, delivered_at"
+    \   turn_index, turn_fingerprint, delivered_at"
     interactionDeliveryRequestParams
     (fmap (fmap deliveryFromRow)
         (Decoders.rowMaybe deliveryRowDecoder))
@@ -905,6 +924,7 @@ interactionRowDecoder =
         <*> optionalTime
         <*> optionalText
         <*> optionalInt64
+        <*> optionalText
         <*> optionalTime
 
 resolutionRowDecoder :: Decoders.Row ResolutionRow
@@ -922,6 +942,7 @@ deliveryRowDecoder =
         <$> requiredText
         <*> requiredText
         <*> requiredInt64
+        <*> optionalText
         <*> requiredTime
 
 requiredText = Decoders.column (Decoders.nonNullable Decoders.text)
@@ -976,6 +997,8 @@ interactionDeliveryRequestParams =
         <> ((.interactionDeliveryRequestKind) >$< textParam)
         <> ((.interactionDeliveryRequestTurnIndex)
             >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((.interactionDeliveryRequestTurnFingerprint)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
         <> ((.interactionDeliveryRequestDeliveredAt)
             >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
 
@@ -995,6 +1018,8 @@ deliveryIntentFromRequest request = InteractionDeliveryIntent
         request.interactionDeliveryRequestInteractionId
     , interactionDeliveryIntentKind =
         request.interactionDeliveryRequestKind
+    , interactionDeliveryIntentTurnFingerprint =
+        request.interactionDeliveryRequestTurnFingerprint
     , interactionDeliveryIntentDeliveredAt =
         request.interactionDeliveryRequestDeliveredAt
     }
@@ -1062,16 +1087,18 @@ decodeDelivery row =
     case
         ( row.rowDeliveryKind
         , row.rowDeliveryTurnIndex
+        , row.rowDeliveryTurnFingerprint
         , row.rowDeliveredAt
         ) of
-        (Nothing, Nothing, Nothing) -> Right Nothing
-        (Just kind, Just turnIndex, Just deliveredAt) ->
+        (Nothing, Nothing, Nothing, Nothing) -> Right Nothing
+        (Just kind, Just turnIndex, fingerprint, Just deliveredAt) ->
             Right
                 (Just InteractionDelivery
                     { interactionDeliveryInteractionId =
                         row.rowInteractionId
                     , interactionDeliveryKind = kind
                     , interactionDeliveryTurnIndex = turnIndex
+                    , interactionDeliveryTurnFingerprint = fingerprint
                     , interactionDeliveryDeliveredAt = deliveredAt
                     })
         _ -> Left "interaction delivery columns are partially populated"
@@ -1090,6 +1117,8 @@ deliveryFromRow row = InteractionDelivery
     { interactionDeliveryInteractionId = row.deliveryRowInteractionId
     , interactionDeliveryKind = row.deliveryRowKind
     , interactionDeliveryTurnIndex = row.deliveryRowTurnIndex
+    , interactionDeliveryTurnFingerprint =
+        row.deliveryRowTurnFingerprint
     , interactionDeliveryDeliveredAt = row.deliveryRowDeliveredAt
     }
 
@@ -1200,6 +1229,9 @@ validateDeliveryRequest request = do
     validateKind
         "interaction delivery kind"
         request.interactionDeliveryRequestKind
+    traverse_
+        (validateBoundedText "interaction delivery turn fingerprint" 128)
+        request.interactionDeliveryRequestTurnFingerprint
     if request.interactionDeliveryRequestTurnIndex < 0
         then Left "interaction delivery turn index must be non-negative"
         else Right ()
@@ -1215,6 +1247,9 @@ validateDeliveryIntent sessionKey intent = do
     validateKind
         "interaction delivery kind"
         intent.interactionDeliveryIntentKind
+    traverse_
+        (validateBoundedText "interaction delivery turn fingerprint" 128)
+        intent.interactionDeliveryIntentTurnFingerprint
 
 validateLookup :: Text -> Text -> Either Text ()
 validateLookup sessionKey interactionId = do

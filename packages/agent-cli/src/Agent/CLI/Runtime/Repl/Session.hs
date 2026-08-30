@@ -153,9 +153,13 @@ import Agent.TUI.Model
 import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
-import Agent.Tools.PlanMode ( PlanModeEnv(planSessionDir) )
 import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
+import Agent.Tools.PlanMode (readPlanTracker)
+import Agent.Tools.PlanMode.Tracker
+    ( PlanTracker(..)
+    , PlanTrackerPhase(..)
+    )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ()
 import Control.Concurrent.Async ()
@@ -212,8 +216,6 @@ handleSessionAction
             , sessionProvider = provider
             , sessionConnection = connectionId
             , sessionDialect = dialect
-            , sessionPlanMode = planMode
-            , sessionStoreRoot = storeRoot
             , sessionSetWindowTitle = setWindowTitle
             , sessionUsage = usageRef
             , sessionCwd = cwd
@@ -286,99 +288,109 @@ handleSessionAction
                 (roleMuted color (glyphOk <> message))
         continue
     ReplNew -> do
-        sessionReset
-        fullscreenEvent UiConversationCleared
-        color <- resolveColor stderr
-        case persist of
-            PersistenceDisabled -> do
-                displayInfo "started a fresh conversation" $
-                    Text.hPutStrLn stderr
-                        (roleMuted color
-                            (glyphOk
-                                <> "started a fresh conversation"))
+        tracker <- readPlanTracker env.sessionPlanMode
+        if tracker.trackerPhase /= TrackerInactive
+            || tracker.trackerPendingApproval /= Nothing
+            || tracker.trackerApprovedContinuation /= Nothing
+            || tracker.trackerBufferedActivation
+            then do
+                displayInfo
+                    "cannot start a new session while plan mode has an unresolved transition; finish or cancel the plan first"
+                    (pure ())
                 continue
-            PersistenceEnabled slotRef -> do
-                params <- readIORef paramsRef
-                slot <- readIORef slotRef
-                let model = currentModel params
-                    effort = reasoningEffortText (currentEffort params)
-                    create = case slot of
-                        PersistencePending pending _ _ ->
-                            pending
-                                { createTarget =
-                                    pending.createTarget
-                                        { targetModelId = model }
-                                , createEffort = effort
-                                , createTitleHint = Nothing
-                                , createTitleIsManual = False
+            else do
+                color <- resolveColor stderr
+                case persist of
+                    PersistenceDisabled -> do
+                        sessionReset
+                        fullscreenEvent UiConversationCleared
+                        displayInfo "started a fresh conversation" $
+                            Text.hPutStrLn stderr
+                                (roleMuted color
+                                    (glyphOk
+                                        <> "started a fresh conversation"))
+                        continue
+                    PersistenceEnabled slotRef -> do
+                        params <- readIORef paramsRef
+                        slot <- readIORef slotRef
+                        let model = currentModel params
+                            effort = reasoningEffortText (currentEffort params)
+                            create = case slot of
+                                PersistencePending pending _ _ ->
+                                    pending
+                                        { createTarget =
+                                            pending.createTarget
+                                                { targetModelId = model }
+                                        , createEffort = effort
+                                        , createTitleHint = Nothing
+                                        , createTitleIsManual = False
+                                        }
+                                PersistenceActive handle ->
+                                    SessionCreate
+                                        { createPool = handle.sessionPool
+                                        , createRoot =
+                                            takeDirectory handle.sessionDir
+                                        , createTarget = ModelTarget
+                                            { targetProvider = provider
+                                            , targetConnectionId =
+                                                connectionId
+                                            , targetModelId = model
+                                            , targetWireModelId =
+                                                fromMaybe
+                                                    model
+                                                    handle.sessionMeta.metaTransportModel
+                                            , targetDialect =
+                                                dialectId dialect
+                                            }
+                                        , createCwd =
+                                            handle.sessionMeta.metaCwd
+                                        , createEffort = effort
+                                        , createTitleHint = Nothing
+                                        , createTitleIsManual = False
+                                        }
+                        handle <- createSession create
+                        case slot of
+                            PersistencePending pending sessionId _ -> do
+                                _ <- removeSessionTemp
+                                    pending.createRoot
+                                    sessionId
+                                pure ()
+                            PersistenceActive _ -> pure ()
+                        now <- getCurrentTime
+                        let turn = SessionTurn
+                                { turnAt = now
+                                , turnUserText = newSessionUserText
+                                , turnAssistantText =
+                                    Just "Started a new session."
+                                , turnError = Nothing
+                                , turnResponseId = Nothing
+                                , turnEffect = TranscriptReset
+                                , turnItems = []
+                                , turnUsage = Nothing
                                 }
-                        PersistenceActive handle ->
-                            SessionCreate
-                                { createPool = handle.sessionPool
-                                , createRoot =
-                                    takeDirectory handle.sessionDir
-                                , createTarget = ModelTarget
-                                    { targetProvider = provider
-                                    , targetConnectionId =
-                                        connectionId
-                                    , targetModelId = model
-                                    , targetWireModelId =
-                                        fromMaybe
-                                            model
-                                            handle.sessionMeta.metaTransportModel
-                                    , targetDialect =
-                                        dialectId dialect
-                                    }
-                                , createCwd =
-                                    handle.sessionMeta.metaCwd
-                                , createEffort = effort
-                                , createTitleHint = Nothing
-                                , createTitleIsManual = False
-                                }
-                handle <- createSession create
-                case slot of
-                    PersistencePending pending sessionId _ -> do
-                        _ <- removeSessionTemp
-                            pending.createRoot
-                            sessionId
-                        pure ()
-                    PersistenceActive _ -> pure ()
-                now <- getCurrentTime
-                let turn = SessionTurn
-                        { turnAt = now
-                        , turnUserText = newSessionUserText
-                        , turnAssistantText =
-                            Just "Started a new session."
-                        , turnError = Nothing
-                        , turnResponseId = Nothing
-                        , turnEffect = TranscriptReset
-                        , turnItems = []
-                        , turnUsage = Nothing
-                        }
-                (handle', _) <-
-                    appendTurnKeepTitleIndexed handle turn
-                let meta = handle'.sessionMeta
-                env.sessionOnPersisted handle'
-                env.sessionSetTempDir handle'.sessionTempDir
-                writeIORef slotRef
-                    (PersistenceActive handle')
-                writeIORef env.sessionTitleTurnCount 0
-                writeIORef planMode.planSessionDir
-                    (Just handle'.sessionDir)
-                writeIORef storeRoot (Just handle'.sessionDir)
-                forM_ fullscreen \runtime ->
-                    reloadFullscreenHistoryForHandle
-                        runtime
-                        handle'
-                setWindowTitle
-                    (cliWindowTitle meta.metaCwd
-                        (Just meta.metaTitle))
-                let message = "new session: " <> meta.metaId
-                displayInfo message $
-                    Text.hPutStrLn stderr
-                        (roleMuted color
-                            (glyphOk <> message))
-                continue
+                        (handle', _) <-
+                            appendTurnKeepTitleIndexed handle turn
+                        let meta = handle'.sessionMeta
+                        env.sessionOnPersisted handle'
+                        sessionReset
+                        fullscreenEvent UiConversationCleared
+                        env.sessionSetTempDir handle'.sessionTempDir
+                        writeIORef slotRef
+                            (PersistenceActive handle')
+                        writeIORef env.sessionTitleTurnCount 0
+                        forM_ fullscreen \runtime ->
+                            reloadFullscreenHistoryForHandle
+                                runtime
+                                handle'
+                        setWindowTitle
+                            (cliWindowTitle meta.metaCwd
+                                (Just meta.metaTitle))
+                        let message = "new session: " <> meta.metaId
+                        displayInfo message $
+                            Text.hPutStrLn stderr
+                                (roleMuted color
+                                    (glyphOk <> message))
+                        continue
     ReplShowSession -> do
         color <- resolveColor stdout
         case persist of

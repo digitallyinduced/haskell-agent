@@ -73,6 +73,15 @@ import Agent.CLI.Options
                  optGhci, optBash, optComputerUse, optNoYolo) )
 import Agent.CLI.PendingInputs
     ( enqueuePendingInput, newPendingInputs )
+import Agent.CLI.PendingInteraction
+    ( DurableInteractionDelivery(..)
+    , deterministicPlanModeInteractionContext
+    , postgresPendingInteractionCoordinatorDynamic
+    , recordDurableInteractionDelivery
+    , renderPendingInteractionError
+    , withPendingInteractionResolution
+    , wrapDurablePlanModeHooks
+    )
 import Agent.CLI.Plan
     ( cliPlanHooks
     )
@@ -203,10 +212,14 @@ import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(planSessionDir),
+    ( PlanModeEnv,
+      attachPlanSessionDir,
       isPlanModeActive,
-      PlanModeHooks(planAskQuestion, PlanModeHooks, planConfirmEnter,
-                    planDecideExit),
+      PlanModeHooks(planAskQuestion, PlanModeHooks, PlanModeLifecycleHooks,
+                    planAskQuestionnaire, planConfirmEnter,
+                    planConfirmEnterRequest, planDecideExit,
+                    planQuiesceBeforeActivation, planResumeAfterExit,
+                    planReviewPlan),
       PlanDecision(PlanCancel) )
 import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
@@ -215,6 +228,7 @@ import Agent.Tools.ShowImage
 import Agent.Tools.Types ( setToolSessionTmp )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
+import Control.Concurrent ( threadDelay )
 import Control.Concurrent.Async ( concurrently_ )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
@@ -323,17 +337,7 @@ runAgentTools
         loadHarnessConfig home >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right config -> pure config
-    let basePlanHooks
-            | startup.startupBackground =
-                PlanModeHooks
-                    { planConfirmEnter = \_ -> pure False
-                    , planDecideExit = \_ -> pure PlanCancel
-                    , planAskQuestion = \_ _ -> pure Nothing
-                    }
-            | otherwise =
-                cliPlanHooks interrupt escPaused (resolveColor stderrHandle)
-        planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
-        baseSecretHooks = SecretPromptHooks \request ->
+    let baseSecretHooks = SecretPromptHooks \request ->
             Right <$> promptSecretLine
                 escPaused
                 request.secretPromptMessage
@@ -578,8 +582,64 @@ runAgentTools
                 inferredTarget { targetDialect = dialectId }
                 (isNothing transition) cwd effortText promptText resumed
     writeIORef persistSlotRef persist
+    planSessionId <- reservedSessionId persist
+    interactionDeliveriesRef <-
+        newIORef ([] :: [DurableInteractionDelivery])
+    let waitForExternalResponse :: IO a
+        waitForExternalResponse = do
+            threadDelay 60000000
+            waitForExternalResponse
+        localPlanHooks
+            | startup.startupBackground
+            , isJust planSessionId =
+                PlanModeLifecycleHooks
+                    { planConfirmEnter = \_ -> waitForExternalResponse
+                    , planConfirmEnterRequest = \_ ->
+                        waitForExternalResponse
+                    , planAskQuestion = \_ _ -> waitForExternalResponse
+                    , planAskQuestionnaire = \_ ->
+                        waitForExternalResponse
+                    , planReviewPlan = \_ -> waitForExternalResponse
+                    , planQuiesceBeforeActivation = pure (Right ())
+                    , planResumeAfterExit = pure ()
+                    }
+            | startup.startupBackground =
+                PlanModeHooks
+                    { planConfirmEnter = \_ -> pure False
+                    , planDecideExit = \_ -> pure PlanCancel
+                    , planAskQuestion = \_ _ -> pure Nothing
+                    }
+            | otherwise =
+                fullscreenAwarePlanHooks
+                    uiRuntimeRef
+                    (cliPlanHooks
+                        interrupt
+                        escPaused
+                        (resolveColor stderrHandle))
+        planHooks = case planSessionId of
+            Nothing -> localPlanHooks
+            Just sessionId ->
+                wrapDurablePlanModeHooks
+                    (withPendingInteractionResolution
+                        (recordDurableInteractionDelivery
+                            interactionDeliveriesRef)
+                        (postgresPendingInteractionCoordinatorDynamic
+                            (trustedPool startup.startupDatabaseStore)
+                            (readIORef persistSlotRef
+                                >>= reservedSessionId
+                                >>= \case
+                                Just current -> pure current
+                                Nothing ->
+                                    throwIO
+                                        (userError
+                                            "plan interaction requires a persisted session"))
+                            ("cli:" <> sessionId)))
+                    (pure . deterministicPlanModeInteractionContext)
+                    (reportStartupWarning startup
+                        . renderPendingInteractionError)
+                    localPlanHooks
     forM_ fullscreen \runtime ->
-        reservedSessionId persist >>= \case
+        case planSessionId of
             Nothing ->
                 clearFullscreenHistorySource runtime
             Just sessionId ->
@@ -871,7 +931,9 @@ runAgentTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
-            writeIORef planMode.planSessionDir (Just dir)
+            attachPlanSessionDir planMode dir >>= \case
+                Left err -> throwIO (userError (Text.unpack err))
+                Right () -> pure ()
             writeIORef subagentStoreRoot (Just dir)
         closeAgents =
             case multiCtx of
@@ -943,6 +1005,7 @@ runAgentTools
         pendingTurn
         persist
         planHooks
+        interactionDeliveriesRef
         planMode
         policy
         preferredOpenAiAccountRef

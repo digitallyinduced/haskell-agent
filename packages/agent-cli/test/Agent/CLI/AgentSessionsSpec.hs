@@ -28,6 +28,15 @@ import Agent.Store.Postgres
     , trustedPool
     )
 import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.Interaction
+    ( InteractionOrigin(..)
+    , InteractionPublishResult(..)
+    , InteractionRequest(..)
+    , InteractionResolution(..)
+    , SessionInteraction(..)
+    , loadSessionInteraction
+    , publishSessionInteraction
+    )
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
@@ -57,7 +66,7 @@ toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.AgentSessions" do
-    it "registers create/read/message tools with mutating flags" $
+    it "registers session and interaction tools with mutating flags" $
         withTempEnv \env _ -> do
             map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval))
                 (agentSessionTools env)
@@ -65,6 +74,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                     [ ("create_agent_session", False)
                     , ("read_agent_session", True)
                     , ("send_agent_session_message", False)
+                    , ("respond_agent_session_interaction", False)
                     ]
 
     it "creates a persisted session and launches its first turn" $
@@ -120,6 +130,65 @@ spec = describe "Agent.CLI.AgentSessions" do
             result `shouldSatisfy` Text.isInfixOf "User:\n  question"
             result `shouldSatisfy` Text.isInfixOf "Assistant:\n  answer"
             result `shouldNotSatisfy` Text.isInfixOf "items"
+
+    it "validates and resolves a pending session interaction" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            published <-
+                publishSessionInteraction
+                    env.toolsPool
+                    InteractionRequest
+                        { interactionRequestSessionKey =
+                            handle.sessionMeta.metaId
+                        , interactionRequestKey = "enter-plan:test"
+                        , interactionRequestKind =
+                            "plan_mode.confirm_enter"
+                        , interactionRequestPayloadVersion = 1
+                        , interactionRequestPayload =
+                            "{\"type\":\"plan_mode.confirm_enter\",\
+                            \\"request_id\":\"enter-test\",\
+                            \\"reason\":\"inspect first\"}"
+                        , interactionRequestOrigin =
+                            Just InteractionOrigin
+                                { interactionOriginToolName =
+                                    "enter_plan_mode"
+                                , interactionOriginCallId = "enter-test"
+                                }
+                        , interactionRequestCreatedAt = fixedTime
+                        }
+            interaction <- case published of
+                Right InteractionPublishObserved
+                    { interactionPublishValue } ->
+                        pure interactionPublishValue
+                other ->
+                    expectationFailure
+                        ("could not publish interaction: " <> show other)
+                        >> fail "unreachable"
+            result <-
+                runTool env "respond_agent_session_interaction" $
+                    "{\"session_id\":\""
+                        <> handle.sessionMeta.metaId
+                        <> "\",\"interaction_id\":\""
+                        <> interaction.sessionInteractionId
+                        <> "\",\"response\":\"approve\"}"
+            result `shouldSatisfy` Text.isInfixOf "Response accepted."
+            loaded <-
+                loadSessionInteraction
+                    env.toolsPool
+                    handle.sessionMeta.metaId
+                    interaction.sessionInteractionId
+            case loaded of
+                Right
+                    (Just SessionInteraction
+                        { sessionInteractionResolution =
+                            Just resolution
+                        }) ->
+                            resolution.interactionResolutionPayload
+                                `shouldBe`
+                                    "{\"confirmed\":true,\"type\":\"plan_mode.confirm_enter\"}"
+                other ->
+                    expectationFailure
+                        ("interaction was not resolved: " <> show other)
 
     it "includes ephemeral retry activity while a session is running" $
         withTempEnv \env _ -> do

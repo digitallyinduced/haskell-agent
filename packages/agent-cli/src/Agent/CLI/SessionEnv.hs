@@ -16,6 +16,7 @@ import Agent.CLI.Compaction
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
+import Agent.CLI.PendingInteraction (DurableInteractionDelivery)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
@@ -63,6 +64,8 @@ data SessionEnv = SessionEnv
     , sessionTitleManager :: !SessionTitleManager
     , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv
+    , sessionInteractionDeliveries
+        :: !(IORef [DurableInteractionDelivery])
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
     , sessionHome :: !OsPath

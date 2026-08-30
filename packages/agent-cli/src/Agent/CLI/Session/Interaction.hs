@@ -59,8 +59,7 @@ import Agent.ReasoningEffort
     )
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Tools.PlanMode
-    ( PlanModeEnv
-    , PlanModeState
+    ( PlanModeState
     , readPlanModeState
     )
 import Agent.TUI.Model

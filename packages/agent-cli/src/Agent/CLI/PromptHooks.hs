@@ -9,6 +9,8 @@ module Agent.CLI.PromptHooks
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
+    , dismissFullscreenPlanReview
+    , dismissFullscreenQuestionnaire
     , requestFullscreenChoiceWithBody
     , requestFullscreenPlanReview
     , requestFullscreenQuestionnaire
@@ -35,7 +37,9 @@ import Agent.TUI.Questionnaire
     , QuestionnaireSubmission(..)
     )
 import Agent.Tools.PlanMode
-    ( PlanModeHooks(..) )
+    ( PlanEnterRequest(..)
+    , PlanModeHooks(..)
+    )
 import qualified Agent.Tools.PlanMode as Plan
 import Agent.Tools.PlanMode.Document (PlanValidationWarning(..))
 import Agent.Tools.Secret
@@ -47,6 +51,7 @@ import Agent.Tools.ShowImage
     , ImageDisplayRequest(..)
     )
 import Control.Applicative ((<|>))
+import Control.Exception.Safe (finally)
 import Data.IORef (IORef, readIORef)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -110,26 +115,72 @@ fullscreenAwarePlanHooks
 fullscreenAwarePlanHooks runtimeRef hooks =
     PlanModeLifecycleHooks
         { planConfirmEnter = wrapped.planConfirmEnter
+        , planConfirmEnterRequest = \request ->
+            withCurrentFullscreen runtimeRef
+                (enterFallback request)
+                \runtime ->
+                    requestFullscreenChoiceWithBody
+                        runtime
+                        "Enter plan mode?"
+                        request.planEnterReason
+                        0
+                        [ ("Enter plan mode", "Explore and design before implementing")
+                        , ("Stay in normal mode", "Continue without entering plan mode")
+                        ]
+                        >>= pure . (== Just 0)
         , planAskQuestion = wrapped.planAskQuestion
+        , planAskQuestionnaire = \request ->
+            withCurrentFullscreen runtimeRef
+                (questionnaireFallback request)
+                \runtime -> do
+                    let tuiRequest =
+                            planningQuestionnaireBatch request
+                    outcome <-
+                        requestFullscreenQuestionnaire runtime tuiRequest
+                            `finally`
+                                dismissFullscreenQuestionnaire
+                                    runtime
+                                    tuiRequest.requestId
+                    pure
+                        (questionnaireDecision
+                            tuiRequest.requestId
+                            outcome)
         , planReviewPlan = \request ->
             withCurrentFullscreen runtimeRef
                 (reviewFallback request)
-                \runtime ->
+                \runtime -> do
+                    let tuiRequest = planReviewRequest request
                     planReviewDecision
-                        <$> requestFullscreenPlanReview
-                            runtime
-                            (planReviewRequest request)
+                        <$> (requestFullscreenPlanReview runtime tuiRequest
+                            `finally`
+                                dismissFullscreenPlanReview
+                                    runtime
+                                    tuiRequest.requestId)
         , planQuiesceBeforeActivation = existingQuiesce
         , planResumeAfterExit = existingResume
         }
   where
     wrapped = fullscreenCompatibilityHooks runtimeRef hooks
+    enterFallback request =
+        case hooks of
+            PlanModeHooks{planConfirmEnter} ->
+                planConfirmEnter request.planEnterReason
+            PlanModeLifecycleHooks{planConfirmEnterRequest} ->
+                planConfirmEnterRequest request
     reviewFallback request =
         case hooks of
             PlanModeHooks{planDecideExit} ->
                 Plan.legacyPlanReviewHook planDecideExit request
             PlanModeLifecycleHooks{planReviewPlan} ->
                 planReviewPlan request
+    questionnaireFallback request =
+        case hooks of
+            PlanModeHooks{planAskQuestion} ->
+                Plan.legacyPlanQuestionnaireHook
+                    planAskQuestion
+                    request
+            PlanModeLifecycleHooks{planAskQuestionnaire} ->
+                planAskQuestionnaire request
     existingQuiesce =
         case hooks of
             PlanModeHooks{} -> pure (Right ())
@@ -295,6 +346,62 @@ planningQuestionnaire question choices =
         }
   where
     payload = Text.intercalate "\NUL" (question : choices)
+
+planningQuestionnaireBatch
+    :: Plan.PlanQuestionnaireRequest
+    -> QuestionnaireRequest
+planningQuestionnaireBatch request =
+    QuestionnaireRequest
+        { requestId =
+            QuestionnaireId request.planQuestionnaireRequestKey
+        , requestQuestions =
+            map toQuestion request.planQuestionnaireQuestions
+        }
+  where
+    toQuestion question =
+        QuestionnaireQuestion
+            { questionText = question.question
+            , questionOptions = map toOption question.options
+            , questionMultiSelect =
+                question.multiSelect == Just True
+            }
+    toOption option =
+        QuestionnaireOption
+            { optionLabel = option.label
+            , optionDescription = option.description
+            , optionPreview = option.preview
+            }
+
+questionnaireDecision
+    :: QuestionnaireId
+    -> QuestionnaireOutcome
+    -> Plan.PlanQuestionnaireDecision
+questionnaireDecision expected = \case
+    QuestionnaireSubmitted submission
+        | submission.submissionRequestId == expected ->
+            Plan.PlanQuestionnaireSubmitted
+                [ Plan.PlanQuestionnaireAnswer
+                    { Plan.planAnswerQuestionIndex =
+                        answer.answerQuestionIndex
+                    , Plan.planAnswerQuestion = answer.answerQuestion
+                    , Plan.planAnswerLabels = answer.answerLabels
+                    , Plan.planAnswerOther = answer.answerOther
+                    }
+                | answer <- submission.submissionAnswers
+                ]
+    QuestionnaireClarificationRequested ident clarification
+        | ident == expected ->
+            Plan.PlanQuestionnaireClarification clarification
+    QuestionnaireFinished ident
+        | ident == expected ->
+            Plan.PlanQuestionnaireFinished
+    QuestionnaireCancelled ident
+        | ident == expected ->
+            Plan.PlanQuestionnaireCancelled
+    QuestionnaireTimeout _ -> Plan.PlanQuestionnaireDeferred
+    QuestionnaireExternallyResolved _ ->
+        Plan.PlanQuestionnaireDeferred
+    _ -> Plan.PlanQuestionnaireDeferred
 
 questionnaireResult :: QuestionnaireOutcome -> Maybe Text
 questionnaireResult = \case

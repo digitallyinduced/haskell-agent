@@ -16,14 +16,19 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
+    , PlanModeCapability(..)
     , ToolRegistry
     , jsonAppTool
     , mkToolRegistry
+    , withPlanModeCapability
     )
 import Agent.Tools.PlanMode
     ( activatePlanMode
     , newPlanModeEnv
+    , updatePlanTracker
     )
+import Agent.Tools.PlanMode.File (PlanDigest(..))
+import Agent.Tools.PlanMode.Tracker (beginPlanExit)
 import Data.IORef
     ( modifyIORef'
     , newIORef
@@ -175,6 +180,38 @@ spec = do
                 policy allowed (registry [writePlanSafeTool]) plan call
                 `shouldReturn` Right True
             readIORef permissionRequests `shouldReturn` 0
+
+        it "freezes the plan-file writer while review is pending" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test")
+                Nothing
+            activatePlanMode plan
+            _ <- updatePlanTracker plan \tracker ->
+                case
+                    beginPlanExit
+                        "review"
+                        (PlanDigest (Text.replicate 64 "a"))
+                        tracker
+                of
+                    Left err -> Left (Text.pack (show err))
+                    Right updated -> Right updated
+            let call = functionToolCall
+                    "call-write-plan"
+                    "write_plan"
+                    "{\"content\":\"# Replaced\"}"
+            approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy
+                allowed
+                (registry [writePlanSafeTool])
+                plan
+                call
+                `shouldReturn`
+                    Left
+                        "Rejected: the submitted plan snapshot is frozen while its review is pending."
 
         it "rejects every other mutating tool in plan mode even under yolo" do
             policy <- newIORef ApproveAll
@@ -411,9 +448,24 @@ writePlanSafeTool = tool "write_plan" AlwaysReadOnly
 
 tool :: Text -> ApprovalRule -> AppTool
 tool name approval =
-    jsonAppTool
-        name "" [] approval
-        (noArgsTool name (pure (Right "ok")))
+    withPlanModeCapability capability $
+        jsonAppTool
+            name "" [] approval
+            (noArgsTool name (pure (Right "ok")))
+  where
+    capability
+        | name == "write_plan" =
+            PlanModePlanFileWrite
+                (\_ ->
+                    pure
+                        (Right
+                            (unsafeEncodeUtf
+                                "/tmp/approval-test/plan.md")))
+        | name `elem` ["spawn_agent", "task"] =
+            PlanModeSafeSubagent
+        | name `elem` ["read", "list_agents"] =
+            PlanModeReadOnly
+        | otherwise = PlanModeBlocked
 
 registry :: [AppTool] -> ToolRegistry
 registry = either (error . Text.unpack) id . mkToolRegistry

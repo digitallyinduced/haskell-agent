@@ -15,6 +15,7 @@ import Agent.Error (ApiError)
 import Agent.Loop (TurnInput)
 import Agent.Provider (BillingMode, Provider)
 import Agent.Tools.PlanMode (PlanModeState)
+import Agent.Tools.PlanMode.Tracker (ApprovedPlanContinuation)
 import Control.Applicative ((<|>))
 import Data.Set (Set)
 import Data.Text (Text)
@@ -25,6 +26,10 @@ data PendingTurn = PendingTurn
     -- | The exact continuation input is already durable in the transcript;
     -- retry without regenerating plan/startup/provider framing.
     , pendingCheckpointed :: !Bool
+    -- | Exact approved-plan continuation represented by this attempt.  A
+    -- checkpoint retry does not regenerate turn context, so it must carry
+    -- this identity explicitly in order to consume it after a durable retry.
+    , pendingPlanContinuation :: !(Maybe ApprovedPlanContinuation)
     , pendingExitAfter :: !Bool
     , pendingPlanState :: !PlanModeState
     }

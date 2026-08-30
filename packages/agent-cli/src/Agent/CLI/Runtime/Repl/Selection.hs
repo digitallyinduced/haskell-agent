@@ -287,7 +287,10 @@ handleSelection
                 connectionId provider (dialectId dialect) choice
             then
                 requestModelTargetSwitch
-                    fullscreen choice persist >>= \case
+                    fullscreen
+                    choice
+                    persist
+                    env.sessionOnPersisted >>= \case
                     Left err -> do
                         displayError err $
                             Text.hPutStrLn stderr
@@ -389,7 +392,11 @@ handleSelection
                                 (glyphOk <> message))
                     next
                   else
-                    requestModelTargetSwitch fullscreen choice persist >>= \case
+                    requestModelTargetSwitch
+                        fullscreen
+                        choice
+                        persist
+                        env.sessionOnPersisted >>= \case
                         Left err -> do
                             displayError err $
                                 Text.hPutStrLn stderr
@@ -539,7 +546,9 @@ handleSelection
                                     catalog fullscreen provider connectionId
                                     (currentModel params) (dialectId dialect)
                                     selectedProvider selectedSelectionId
-                                    selectedAccountId persist >>= \case
+                                    selectedAccountId
+                                    persist
+                                    env.sessionOnPersisted >>= \case
                                         Left err -> do
                                             displayError err (pure ())
                                             next

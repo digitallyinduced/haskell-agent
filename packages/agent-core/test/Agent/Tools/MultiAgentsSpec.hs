@@ -22,6 +22,8 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , PlanModeCapability(..)
+    , ToolBatchPhase(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , appToolHandlers
@@ -621,6 +623,9 @@ fakeTool name = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolBatchPhase = ToolBatchNormal
+    , appToolCallNormalizer = Nothing
+    , appToolPlanModeCapability = PlanModeUnknown
     }
 
 rootContext

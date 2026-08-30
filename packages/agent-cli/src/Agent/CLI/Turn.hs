@@ -1,6 +1,7 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
     ( applyPendingSessionTitles
+    , consumeInteractionDeliveries
     , grokFirstTurnPrefix
     , grokFrameLastUserInput
     , grokUserQuery
@@ -19,6 +20,13 @@ import Agent.CLI.Plan
     , renderProposedPlanParseError
     )
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
+import Agent.CLI.PendingInteraction
+    ( DurableInteractionDelivery(..)
+    , recoverUndeliveredInteractions
+    , renderPendingInteractionError
+    , renderRestoredInteractions
+    , resolvedPlanEnterDecision
+    )
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , TurnResult(..)
@@ -58,7 +66,7 @@ import Agent.CLI.Session
     , TranscriptEffect(..)
     , Persistence(..)
     , PersistenceState(..)
-    , appendTurnWithMetaUpdateIndexed
+    , appendTurnWithMetaUpdateIndexedAndDeliver
     , ensureSession
     , loadRecentSessionTurns
     , sessionConversationText
@@ -87,7 +95,9 @@ import Agent.CLI.Status (formatUsageWithRate)
 import Agent.CLI.Style
     ( cliWindowTitle
     , glyphSession
+    , glyphWarn
     , roleMuted
+    , roleWarn
     )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
@@ -128,30 +138,47 @@ import Agent.Loop
     )
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types (ResponseItem)
+import Agent.Store.Postgres.Interaction
+    ( InteractionDeliveryIntent(..) )
 import Agent.Tools.PlanMode
-    ( PlanCompletion(..)
-    , PlanModeEnv(..)
+    ( PlanModeEnv(..)
     , PlanModeState(..)
+    , PlanReminder(..)
+    , PlanReminderToolNames(..)
     , PlanReviewOutcome(..)
     , activatePlanMode
+    , ensurePlanMarkdown
     , isPlanModeActive
-    , planFilePath
-    , planModeReminder
+    , readPlanAgentActivationRevision
+    , readPlanModeState
+    , readPlanTracker
+    , nextPlanModeReminder
     , submitPlanForReview
+    , updatePlanTracker
     , writePlanMarkdown
     )
-import Agent.Tools.PlanMode.Tracker (ApprovedPlanContinuation(..))
+import Agent.Tools.PlanMode.File (renderPlanFileError)
+import Agent.Tools.PlanMode.Tracker
+    ( ApprovedPlanContinuation(..)
+    , PlanTracker(..)
+    , PlanTrackerPhase(..)
+    , markPlanContinuationDelivered
+    , restorePlanTrackerIfRevision
+    )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Monad (forM_, when)
-import Control.Exception.Safe (bracket_, finally, onException, tryAny)
+import Control.Monad (forM_, unless, when)
+import Control.Exception.Safe
+    ( bracket_, finally, mask, onException, throwString, tryAny )
 import Data.IORef
-    ( atomicModifyIORef'
+    ( IORef
+    , atomicModifyIORef'
     , readIORef
     , writeIORef
     )
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word64)
 import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
@@ -170,44 +197,122 @@ import System.Timeout (timeout)
 import System.Mem (performMajorGC)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
-runOneTurn = runOneTurnWithContext True
+runOneTurn = runOneTurnWithContext True Nothing
 
 -- | Retry after a failed turn whose exact prepared inputs are already
 -- checkpointed in the live transcript. Per-turn plan/startup context must not
--- be generated again.
-retryCheckpointedTurn :: SessionEnv -> IO TurnResult
-retryCheckpointedTurn env = runOneTurnWithContext False env "" []
+-- be generated again. New durable-interaction responses may still be appended
+-- to that checkpoint, and the pending turn carries the exact approved-plan
+-- continuation identity already represented by it.
+retryCheckpointedTurn :: SessionEnv -> PendingTurn -> IO TurnResult
+retryCheckpointedTurn env pending =
+    runOneTurnWithContext
+        False
+        pending.pendingPlanContinuation
+        env
+        ""
+        pending.pendingInputs
 
 runOneTurnWithContext
     :: Bool
+    -> Maybe ApprovedPlanContinuation
     -> SessionEnv
     -> Text
     -> [TurnInput]
     -> IO TurnResult
-runOneTurnWithContext includeTurnContext env promptText inputs = do
-    -- A newly submitted turn supersedes any older retry candidate. If this
-    -- attempt fails, finishTurn installs its own PendingTurn afterwards.
-    writeIORef env.sessionLastFailedTurn Nothing
-    -- Automatic compaction is scoped to one enclosing user turn. A committed
-    -- boundary from an earlier attempt is already represented by the live and
-    -- durable transcripts and must not affect this turn's suffix calculation.
-    writeIORef env.sessionAutomaticCompaction Nothing
-    bracket_
-        env.sessionBeginWindowTitleBusy
-        env.sessionEndWindowTitleBusy
-        (withLiveTranscript env.sessionConversation \beforeItems ->
-            runOneTurnBusy
-                includeTurnContext env beforeItems promptText inputs)
-        `finally` writeIORef env.sessionAutomaticCompaction Nothing
+runOneTurnWithContext
+        includeTurnContext checkpointedContinuation env promptText inputs =
+    readPlanModeState env.sessionPlanMode >>= \case
+        -- A deferred correlated review is a hard turn barrier. Its immutable
+        -- snapshot must be resolved (or revised) before any unrelated model
+        -- work can run against the session.
+        PlanExitPending -> do
+            let message =
+                    "plan review is awaiting a decision; use /plan to resume it before starting another turn"
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+                Nothing -> do
+                    color <- resolveColor env.sessionRender.renderStderr
+                    putTextLn
+                        env.sessionRender.renderStderr
+                        (roleWarn color (glyphWarn <> message))
+            pure TurnCancelled
+        _ -> do
+            recoveredInputs <- recoverTurnInteractionInputs env
+            -- A newly submitted turn supersedes any older retry candidate. If
+            -- this attempt fails, finishTurn installs its PendingTurn.
+            writeIORef env.sessionLastFailedTurn Nothing
+            -- Automatic compaction is scoped to one enclosing user turn. A
+            -- committed boundary from an earlier attempt is already
+            -- represented by the live and durable transcripts.
+            writeIORef env.sessionAutomaticCompaction Nothing
+            bracket_
+                env.sessionBeginWindowTitleBusy
+                env.sessionEndWindowTitleBusy
+                (withLiveTranscript env.sessionConversation \beforeItems ->
+                    runOneTurnBusy
+                        includeTurnContext
+                        checkpointedContinuation
+                        env
+                        beforeItems
+                        promptText
+                        (recoveredInputs <> inputs))
+                `finally` writeIORef env.sessionAutomaticCompaction Nothing
+
+recoverTurnInteractionInputs :: SessionEnv -> IO [TurnInput]
+recoverTurnInteractionInputs env =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure []
+        PersistenceEnabled slotRef ->
+            readIORef slotRef >>= \case
+                PersistencePending{} -> pure []
+                PersistenceActive handle ->
+                    recoverUndeliveredInteractions
+                        handle.sessionPool
+                        handle.sessionMeta.metaId
+                        env.sessionInteractionDeliveries >>= \case
+                            Left err ->
+                                throwString
+                                    (Text.unpack
+                                        (renderPendingInteractionError err))
+                            Right [] -> pure []
+                            Right interactions -> do
+                                forM_ interactions \interaction ->
+                                    case
+                                        resolvedPlanEnterDecision interaction
+                                    of
+                                        Right (Just True) -> do
+                                            ensurePlanMarkdown
+                                                env.sessionPlanMode >>= \case
+                                                    Left planError ->
+                                                        throwString
+                                                            (Text.unpack
+                                                                (renderPlanFileError
+                                                                    planError))
+                                                    Right _ -> do
+                                                        active <-
+                                                            isPlanModeActive
+                                                                env.sessionPlanMode
+                                                        unless active
+                                                            (activatePlanMode
+                                                                env.sessionPlanMode)
+                                        _ -> pure ()
+                                pure
+                                    [ UserMessage
+                                        (renderRestoredInteractions
+                                            interactions)
+                                    ]
 
 runOneTurnBusy
     :: Bool
+    -> Maybe ApprovedPlanContinuation
     -> SessionEnv
     -> [ResponseItem]
     -> Text
     -> [TurnInput]
     -> IO TurnResult
-runOneTurnBusy includeTurnContext env@SessionEnv
+runOneTurnBusy includeTurnContext checkpointedContinuation env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
     , sessionConversation = conversationRef
@@ -217,7 +322,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     , sessionBackground = background
     , sessionEscPaused = escPaused
     , sessionInterrupt = interrupt
-    , sessionStoreRoot = storeRoot
+    , sessionInteractionDeliveries = interactionDeliveriesRef
     , sessionUsage = usageRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
@@ -239,17 +344,13 @@ runOneTurnBusy includeTurnContext env@SessionEnv
         then id
         else withEscCancel config.loopCancel escPaused) do
     applyPendingSessionTitles env
-    initialPlanState <- readIORef planMode.planStateRef
-    when (initialPlanState == PlanPending) (activatePlanMode planMode)
     -- Create the session directory before tools run so first-turn subagents
-    -- can persist under agents/<id>/ as they complete.
+    -- and plan-mode state can persist under it as they change.
     case persist of
         PersistenceEnabled slotRef -> do
             created <- isPendingPersistence <$> readIORef slotRef
             handle <- ensureSession slotRef
             onPersisted handle
-            writeIORef planMode.planSessionDir (Just handle.sessionDir)
-            writeIORef storeRoot (Just handle.sessionDir)
             when
                 ( handle.sessionMeta.metaTitle == "untitled"
                     && not (Text.null (Text.strip promptText))
@@ -270,6 +371,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                 (glyphSession <> "session: "
                                     <> handle.sessionMeta.metaId))
         PersistenceDisabled -> pure ()
+    initialPlanTracker <- readPlanTracker planMode
+    initialPlanState <- readPlanModeState planMode
+    when (initialPlanState == PlanPending) (activatePlanMode planMode)
     prev <- readLivePreviousResponseId conversationRef
     pendingStartup <-
         if includeTurnContext
@@ -278,22 +382,56 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             else pure Nothing
     planReminder <-
         if includeTurnContext
-            then do
-                planActive <- isPlanModeActive planMode
-                planPath <- planFilePath planMode
-                pure $
-                    if planActive
-                        then Just $
-                            planModeReminder
-                                (case env.sessionProvider of
-                                    OpenAIProvider -> CompleteWithProposedPlan
-                                    _ -> CompleteWithExitTool)
-                                planPath
-                        else Nothing
+            then
+                nextPlanModeReminder
+                    planMode
+                    PlanReminderToolNames
+                        { planReminderWriteToolName = "write_plan"
+                        , planReminderQuestionToolName =
+                            "ask_user_question"
+                        , planReminderCompletionToolName =
+                            case env.sessionProvider of
+                                OpenAIProvider -> "<proposed_plan>"
+                                _ -> "exit_plan_mode"
+                        }
+                    >>= either (throwString . Text.unpack)
+                        (pure . fmap (.planReminderText))
             else pure Nothing
+    trackerAtTurnStart <- readPlanTracker planMode
+    let pendingContinuation
+            | includeTurnContext =
+                trackerAtTurnStart.trackerApprovedContinuation
+            | otherwise = checkpointedContinuation
+        continuationInputs =
+            case pendingContinuation of
+                Just continuation
+                    | includeTurnContext
+                    , not
+                        (hasExactUserMessage
+                            continuation.approvedPlanContinuation
+                            inputs) ->
+                                [ UserMessage
+                                    continuation.approvedPlanContinuation
+                                ]
+                _ -> []
     let
         turnInputs0 =
-            turnInputsWithContext planReminder pendingStartup inputs
+            turnInputsWithContext
+                planReminder
+                pendingStartup
+                (continuationInputs <> inputs)
+        continuationInjected =
+            includeTurnContext && not (null continuationInputs)
+        continuationCarried =
+            isJust checkpointedContinuation
+                || continuationInjected
+                || maybe
+                    False
+                    (\continuation ->
+                        hasExactUserMessage
+                            continuation.approvedPlanContinuation
+                            inputs)
+                    pendingContinuation
     stampedInputs <- stampTurnInputs turnInputs0
     turnInputs <-
         if dialectId env.sessionDialect == GrokBuildDialect
@@ -340,12 +478,18 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 (finishConversation
                     (rebasePreparedTurn boundary prepared)
                     ConversationInterrupted)
-                >> restorePlanStateAfterIncomplete planMode initialPlanState
+                >> restorePlanStateAfterIncomplete
+                    planMode
+                    initialPlanTracker
+                    trackerAtTurnStart.trackerRevision
                 >> abortSubagentTurn rootTurnId
             )
     automaticCompaction <- readIORef env.sessionAutomaticCompaction
     let committedPrepared =
             rebasePreparedTurn automaticCompaction prepared
+    when (isJust automaticCompaction && continuationCarried) $
+        forM_ pendingContinuation
+            (markPlanContinuationDeliveredIfCurrent planMode)
     let result = execution.executionResult
     clearThinking render
     finishedAt <- getCurrentTime
@@ -366,8 +510,6 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
                 handle <- ensureSession slotRef
-                writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                writeIORef storeRoot (Just handle.sessionDir)
                 let turn = SessionTurn
                         { turnAt = now
                         , turnUserText = promptText
@@ -382,8 +524,16 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         , turnUsage = (.tokenUsage) <$> maybeTurn
                         }
                 (handle', turnIndex) <-
-                    appendTurnWithMetaUpdateIndexed handle turn \meta ->
-                    meta { metaLastResponseId = Nothing }
+                    consumeInteractionDeliveries
+                        interactionDeliveriesRef
+                        handle.sessionMeta.metaId
+                        \intents ->
+                            appendTurnWithMetaUpdateIndexedAndDeliver
+                                handle
+                                turn
+                                (\meta ->
+                                    meta { metaLastResponseId = Nothing })
+                                intents
                 writeIORef slotRef (PersistenceActive handle')
                 forM_ fullscreen \runtime ->
                     commitFullscreenHistoryTurn
@@ -391,12 +541,16 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         (sessionHistoryTurn turnIndex turn)
                         HistoryCommitAppend
                 evictDurableConversation env handle'
+                when continuationCarried $
+                    forM_ pendingContinuation
+                        (markPlanContinuationDeliveredIfCurrent
+                            planMode)
     case (restartEffort, result) of
         (Just level, _) -> do
             abortSubagentTurn rootTurnId
             commitConversationPatch
                 (finishConversation committedPrepared ConversationRestarted)
-            planState <- readIORef planMode.planStateRef
+            planState <- readPlanModeState planMode
             case fullscreen of
                 Just runtime ->
                     emitUiEvent runtime UiTurnRestarted
@@ -405,11 +559,18 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 { pendingPromptText = promptText
                 , pendingInputs = maybe inputs (const []) automaticCompaction
                 , pendingCheckpointed = isJust automaticCompaction
+                , pendingPlanContinuation =
+                    if continuationCarried
+                        then pendingContinuation
+                        else Nothing
                 , pendingExitAfter = False
                 , pendingPlanState = planState
                 }
         (Nothing, Left cancelled@(LoopCancelled _)) -> do
-            restorePlanStateAfterIncomplete planMode initialPlanState
+            restorePlanStateAfterIncomplete
+                planMode
+                initialPlanTracker
+                trackerAtTurnStart.trackerRevision
             finishTerminal (isNothing fullscreen)
                 stdoutHandle terminal wallStarted finishedAt 130 Nothing
             abortSubagentTurn rootTurnId
@@ -461,16 +622,23 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         finishTerminal (isNothing fullscreen)
                             stdoutHandle terminal wallStarted finishedAt 1
                             (Just "Agent provider unavailable")
-                        planState <- readIORef planMode.planStateRef
+                        planState <- readPlanModeState planMode
                         pure $ TurnProviderUnavailable apiError PendingTurn
                             { pendingPromptText = promptText
                             , pendingInputs = maybe inputs (const []) automaticCompaction
                             , pendingCheckpointed = isJust automaticCompaction
+                            , pendingPlanContinuation =
+                                if continuationCarried
+                                    then pendingContinuation
+                                    else Nothing
                             , pendingExitAfter = False
                             , pendingPlanState = planState
                             }
                 _ -> do
-                    restorePlanStateAfterIncomplete planMode initialPlanState
+                    restorePlanStateAfterIncomplete
+                        planMode
+                        initialPlanTracker
+                        trackerAtTurnStart.trackerRevision
                     finishTerminal (isNothing fullscreen)
                         stdoutHandle terminal wallStarted finishedAt 1
                         (Just "Agent turn failed")
@@ -515,7 +683,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         (formatLoopErrorPersistedAt finishedAt err)
                         maybeIncompleteTurn
                         (uncommittedAssistantText execution)
-                    planState <- readIORef planMode.planStateRef
+                    planState <- readPlanModeState planMode
                     pure $ TurnFailed PendingTurn
                         { pendingPromptText = promptText
                         -- ConversationFailed checkpoints the exact stamped
@@ -524,6 +692,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         -- large copy here.
                         , pendingInputs = []
                         , pendingCheckpointed = True
+                        , pendingPlanContinuation =
+                            if continuationCarried
+                                then pendingContinuation
+                                else Nothing
                         , pendingExitAfter = False
                         , pendingPlanState = planState
                         }
@@ -581,6 +753,28 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         execution.executionState
                         then TranscriptReplace
                         else TranscriptAppend
+            pendingDeliveries <- readIORef interactionDeliveriesRef
+            let deliveredReview =
+                    any
+                        (\delivery ->
+                            delivery.durableDeliveryInteractionKind
+                                == "plan_mode.review")
+                        pendingDeliveries
+            continuationDeliveredByTurn <-
+                if continuationCarried
+                    then pure pendingContinuation
+                    else
+                        if deliveredReview
+                            then
+                                (.trackerApprovedContinuation)
+                                    <$> readPlanTracker planMode
+                            else pure Nothing
+            case persist of
+                PersistenceDisabled ->
+                    forM_ continuationDeliveredByTurn
+                        (markPlanContinuationDeliveredIfCurrent
+                            planMode)
+                PersistenceEnabled{} -> pure ()
             followUp <-
                 reviewAfterDurableAppend
                     (case persist of
@@ -588,9 +782,6 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         PersistenceEnabled slotRef -> do
                             now <- getCurrentTime
                             handle <- ensureSession slotRef
-                            writeIORef planMode.planSessionDir
-                                (Just handle.sessionDir)
-                            writeIORef storeRoot (Just handle.sessionDir)
                             let turn = SessionTurn
                                     { turnAt = now
                                     , turnUserText = promptText
@@ -605,14 +796,19 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                             titleTurns <-
                                 (+ 1) <$> readIORef env.sessionTitleTurnCount
                             (countedHandle, turnIndex) <-
-                                appendTurnWithMetaUpdateIndexed
-                                    handle
-                                    turn
-                                    \meta ->
-                                        meta
-                                            { metaTitleUserTurns =
-                                                titleTurns
-                                            }
+                                consumeInteractionDeliveries
+                                    interactionDeliveriesRef
+                                    handle.sessionMeta.metaId
+                                    \intents ->
+                                        appendTurnWithMetaUpdateIndexedAndDeliver
+                                            handle
+                                            turn
+                                            (\meta ->
+                                                meta
+                                                    { metaTitleUserTurns =
+                                                        titleTurns
+                                                    })
+                                            intents
                             writeIORef env.sessionTitleTurnCount titleTurns
                             let countedMeta = countedHandle.sessionMeta
                             writeIORef slotRef
@@ -652,13 +848,73 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                             countedMeta.metaCwd
                                             (Just countedMeta.metaTitle))
                             applyPendingSessionTitles env
+                            forM_ continuationDeliveredByTurn
+                                (markPlanContinuationDeliveredIfCurrent
+                                    planMode)
                             pure True)
                     (handleProposedPlan planMode loopResult.finalText)
             case followUp of
                 Nothing -> pure TurnSucceeded
                 Just notes -> do
                     resetRenderPrintedText render
-                    runOneTurn env notes [UserMessage notes]
+                    current <- readPlanTracker planMode
+                    let followInputs =
+                            case current.trackerApprovedContinuation of
+                                Just continuation
+                                    | continuation.approvedPlanContinuation
+                                        == notes ->
+                                            []
+                                _ -> [UserMessage notes]
+                    runOneTurn env notes followInputs
+
+hasExactUserMessage :: Text -> [TurnInput] -> Bool
+hasExactUserMessage expected =
+    any \case
+        UserMessage value -> value == expected
+        UserMultimodal{userText} -> userText == expected
+        UserMultimodalFiles{userText} -> userText == expected
+        _ -> False
+
+markPlanContinuationDeliveredIfCurrent
+    :: PlanModeEnv
+    -> ApprovedPlanContinuation
+    -> IO ()
+markPlanContinuationDeliveredIfCurrent planMode delivered =
+    updatePlanTracker planMode transition >>= \case
+        Left err -> throwString (Text.unpack err)
+        Right _ -> pure ()
+  where
+    transition tracker
+        | tracker.trackerApprovedContinuation == Just delivered =
+            Right (markPlanContinuationDelivered tracker)
+        | otherwise = Right tracker
+
+consumeInteractionDeliveries
+    :: IORef [DurableInteractionDelivery]
+    -> Text
+    -> ([InteractionDeliveryIntent] -> IO value)
+    -> IO value
+consumeInteractionDeliveries ref sessionKey action =
+    mask \restore -> do
+        pending <- readIORef ref
+        let selected =
+                [ delivery.durableDeliveryIntent
+                | delivery <- pending
+                , delivery.durableDeliverySessionKey == sessionKey
+                ]
+        result <- restore (action selected)
+        let consumedIds =
+                map (.interactionDeliveryIntentInteractionId) selected
+        atomicModifyIORef' ref \current ->
+            ( filter
+                (\delivery ->
+                    delivery.durableDeliverySessionKey /= sessionKey
+                        || delivery.durableDeliveryIntent.interactionDeliveryIntentInteractionId
+                            `notElem` consumedIds)
+                current
+            , ()
+            )
+        pure result
 
 -- | Do not open a review surface or start its continuation until the
 -- assistant turn that proposed the plan is durable. A disabled or failed
@@ -875,10 +1131,39 @@ applyPendingSessionTitles env =
 -- user prompt in Plan Mode after the turn is interrupted.
 restorePlanStateAfterIncomplete
     :: PlanModeEnv
-    -> PlanModeState
+    -> PlanTracker
+    -> Word64
     -> IO ()
-restorePlanStateAfterIncomplete planMode =
-    writeIORef planMode.planStateRef
+restorePlanStateAfterIncomplete planMode snapshot preparedRevision = do
+    current <- readPlanTracker planMode
+    agentActivationRevision <- readPlanAgentActivationRevision planMode
+    let expectedRevision
+            | snapshot.trackerPhase == TrackerPending =
+                Just preparedRevision
+            | snapshot.trackerPhase == TrackerInactive =
+                agentActivationRevision
+            | otherwise = Nothing
+    when
+        ( turnOwnedActivation snapshot current
+            && expectedRevision == Just current.trackerRevision
+        ) do
+        _ <-
+            updatePlanTracker planMode $
+                either
+                    (Left . Text.pack . show)
+                    Right
+                    . restorePlanTrackerIfRevision
+                        current.trackerRevision
+                        snapshot
+        pure ()
+  where
+    -- Only undo the activation this turn could have introduced. Never roll
+    -- back an exit-pending request or a user resolution/continuation.
+    turnOwnedActivation before after =
+        before.trackerPhase `elem` [TrackerInactive, TrackerPending]
+            && after.trackerPhase == TrackerActive
+            && after.trackerPendingApproval == Nothing
+            && after.trackerApprovedContinuation == Nothing
 
 finishTerminal
     :: Bool
@@ -908,9 +1193,9 @@ handleProposedPlan
 handleProposedPlan planMode = \case
     Nothing -> pure Nothing
     Just text -> do
-        active <- isPlanModeActive planMode
-        case (active, parseProposedPlan text) of
-            (True, Right planBody) -> do
+        state <- readPlanModeState planMode
+        case (state, parseProposedPlan text) of
+            (PlanActive, Right planBody) -> do
                 writePlanMarkdown planMode planBody >>= \case
                     Left writeError ->
                         pure $ Just $
@@ -939,8 +1224,8 @@ handleProposedPlan planMode = \case
                                 pure Nothing
                             Right PlanReviewDeferred{} ->
                                 pure Nothing
-            (True, Left ProposedPlanNotFound) -> pure Nothing
-            (True, Left parseError) ->
+            (PlanActive, Left ProposedPlanNotFound) -> pure Nothing
+            (PlanActive, Left parseError) ->
                 pure $ Just $
                     "The proposed plan could not be reviewed because "
                         <> renderProposedPlanParseError parseError

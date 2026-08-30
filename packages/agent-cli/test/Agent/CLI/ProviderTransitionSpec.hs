@@ -37,6 +37,7 @@ spec = do
                     { pendingPromptText = "make a plan"
                     , pendingInputs = []
                     , pendingCheckpointed = False
+                    , pendingPlanContinuation = Nothing
                     , pendingExitAfter = False
                     , pendingPlanState = PlanActive
                     }

@@ -287,10 +287,16 @@ requestModelTargetSwitch
     :: Maybe FullscreenRuntime
     -> ModelOption
     -> Persistence
+    -> (SessionHandle -> IO ())
     -> IO (Either Text RunResult)
-requestModelTargetSwitch fullscreen choice persist =
+requestModelTargetSwitch fullscreen choice persist onPersisted =
     prepareProviderTransition
-        ManualTransition Set.empty Nothing choice persist >>= \case
+        ManualTransition
+        Set.empty
+        Nothing
+        choice
+        persist
+        onPersisted >>= \case
             Left err -> pure (Left err)
             Right transition -> do
                 color <- resolveColor stdout
@@ -319,6 +325,7 @@ requestAccountProviderSwitch
     -> Text
     -> Text
     -> Persistence
+    -> (SessionHandle -> IO ())
     -> IO (Either Text RunResult)
 requestAccountProviderSwitch
     catalog
@@ -330,7 +337,8 @@ requestAccountProviderSwitch
     selectedProvider
     selectionId
     accountId
-    persist = do
+    persist
+    onPersisted = do
         currentTransportModel <-
             persistenceTransportModel currentModelId persist
         let rawChoice =
@@ -352,7 +360,8 @@ requestAccountProviderSwitch
             accountId >>= \case
                 Left err -> pure (Left err)
                 Right () -> do
-                    sessionId <- ensureTransitionSessionId persist
+                    sessionId <-
+                        ensureTransitionSessionId persist onPersisted
                     let transition = ProviderTransition
                             { transitionTarget = choice.modelTarget
                             , transitionAccountSelectionId =
@@ -468,7 +477,10 @@ requestAutomaticProviderFallback
 requestAutomaticProviderFallback env apiError pending = do
     forM_ env.sessionFullscreen \runtime ->
         emitUiEvent runtime UiTurnRestarted
-    sessionId <- ensureTransitionSessionId env.sessionPersist
+    sessionId <-
+        ensureTransitionSessionId
+            env.sessionPersist
+            env.sessionOnPersisted
     unavailable <- readIORef env.sessionUnavailableProviders
     case env.sessionTokenProvider of
         Nothing -> pure Nothing
@@ -662,13 +674,16 @@ prepareProviderTransition
     -> Maybe PendingTurn
     -> ModelOption
     -> Persistence
+    -> (SessionHandle -> IO ())
     -> IO (Either Text ProviderTransition)
-prepareProviderTransition cause unavailable pending rawChoice persist = do
+prepareProviderTransition
+        cause unavailable pending rawChoice persist onPersisted = do
     choice <- resolveModelOptionDialect rawChoice
     validateProviderTarget choice >>= \case
         Left err -> pure (Left err)
         Right () -> do
-            sessionId <- ensureTransitionSessionId persist
+            sessionId <-
+                ensureTransitionSessionId persist onPersisted
             pure $ Right ProviderTransition
                 { transitionTarget = choice.modelTarget
                 , transitionAccountSelectionId = Nothing
@@ -785,10 +800,12 @@ loadValidatedProviderTarget probeAvailability choice =
 
 ensureTransitionSessionId
     :: Persistence
+    -> (SessionHandle -> IO ())
     -> IO (Maybe Text)
-ensureTransitionSessionId PersistenceDisabled = pure Nothing
-ensureTransitionSessionId (PersistenceEnabled slotRef) = do
+ensureTransitionSessionId PersistenceDisabled _ = pure Nothing
+ensureTransitionSessionId (PersistenceEnabled slotRef) onPersisted = do
     handle <- ensureSession slotRef
+    onPersisted handle
     pure (Just handle.sessionMeta.metaId)
 
 commitProviderTransition

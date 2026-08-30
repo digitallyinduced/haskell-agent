@@ -3,7 +3,11 @@ module Agent.CLI.PendingInteractionSpec (spec) where
 import Agent.CLI.PendingInteraction
 import Agent.Store.Postgres.Interaction
 import Agent.Store.Types (StoreError(..))
-import Agent.Tools.PlanMode (PlanDecision(..), PlanModeHooks(..))
+import Agent.Tools.PlanMode
+    ( PlanDecision(..)
+    , PlanEnterRequest(..)
+    , PlanModeHooks(..)
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( newEmptyMVar
@@ -14,6 +18,7 @@ import Control.Concurrent.MVar
 import Control.Exception.Safe (finally)
 import Data.IORef
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..))
 import Test.Hspec
@@ -60,7 +65,10 @@ spec = describe "Agent.CLI.PendingInteraction" do
             coordinatePlanConfirmEnter
                 coordinator
                 context
-                "Need to inspect architecture"
+                PlanEnterRequest
+                    { planEnterRequestKey = "enter-call-1"
+                    , planEnterReason = "Need to inspect architecture"
+                    }
                 local
 
         readIORef events `shouldReturn` ["publish", "ui", "resolve"]
@@ -72,7 +80,7 @@ spec = describe "Agent.CLI.PendingInteraction" do
         fmap (.interactionRequestPayload) request
             `shouldBe`
                 Just
-                    "{\"reason\":\"Need to inspect architecture\",\"type\":\"plan_mode.confirm_enter\"}"
+                    "{\"reason\":\"Need to inspect architecture\",\"request_id\":\"enter-call-1\",\"type\":\"plan_mode.confirm_enter\"}"
         result `shouldSatisfy` \case
             Right PendingInteractionResolved
                 { pendingInteractionAnswer = True
@@ -115,7 +123,10 @@ spec = describe "Agent.CLI.PendingInteraction" do
             coordinatePlanConfirmEnter
                 (testCoordinator store)
                 (testContext "race")
-                "reason"
+                PlanEnterRequest
+                    { planEnterRequestKey = "race-call"
+                    , planEnterReason = "reason"
+                    }
                 local
 
         tryReadMVar localStarted `shouldReturn` Just ()
@@ -272,10 +283,18 @@ spec = describe "Agent.CLI.PendingInteraction" do
                 (\err -> modifyIORef' failures (<> [err]))
                 localHooks
 
-        wrapped.planConfirmEnter "reason" `shouldReturn` False
+        wrapped.planConfirmEnterRequest PlanEnterRequest
+            { planEnterRequestKey = "failed-call"
+            , planEnterReason = "reason"
+            }
+            `shouldReturn` False
         readIORef uiShown `shouldReturn` False
         readIORef requests `shouldReturn`
-            [PlanModeConfirmEnterRequest "reason"]
+            [ PlanModeConfirmEnterRequest PlanEnterRequest
+                { planEnterRequestKey = "failed-call"
+                , planEnterReason = "reason"
+                }
+            ]
         observedFailures <- readIORef failures
         observedFailures `shouldSatisfy` \case
             [PendingInteractionStoreError
@@ -315,7 +334,11 @@ spec = describe "Agent.CLI.PendingInteraction" do
                     , planAskQuestion = \_ _ -> pure Nothing
                     }
 
-        hooks.planConfirmEnter "reason" `shouldReturn` False
+        hooks.planConfirmEnterRequest PlanEnterRequest
+            { planEnterRequestKey = "malformed-call"
+            , planEnterReason = "reason"
+            }
+            `shouldReturn` False
         readIORef localShown `shouldReturn` False
         observedFailures <- readIORef failures
         observedFailures `shouldSatisfy` \case
@@ -349,6 +372,62 @@ spec = describe "Agent.CLI.PendingInteraction" do
                 `shouldSatisfy` \case
                     Left _ -> True
                     Right _ -> False
+
+        it "requires explicit acknowledgement for warned plan reviews" do
+            let interaction =
+                    (testInteraction Nothing)
+                        { sessionInteractionKind = "plan_mode.review"
+                        , sessionInteractionPayload =
+                            "{\"type\":\"plan_mode.review\","
+                                <> "\"request_key\":\"review-1\","
+                                <> "\"path\":\"/tmp/plan.md\","
+                                <> "\"digest\":\"digest\","
+                                <> "\"plan_markdown\":\"# Plan\","
+                                <> "\"warnings\":[{\"code\":\"warning\","
+                                <> "\"message\":\"missing verification\","
+                                <> "\"line\":null}],"
+                                <> "\"verification\":[]}"
+                        }
+            canonicalizeExternalInteractionResponse interaction "approve"
+                `shouldSatisfy` \case
+                    Left message ->
+                        "approve_anyway" `Text.isInfixOf` message
+                    Right _ -> False
+            canonicalizeExternalInteractionResponse
+                interaction
+                "approve_anyway"
+                `shouldBe`
+                    Right
+                        (ExternalInteractionResolve
+                            "{\"decision\":\"approve_anyway\",\"type\":\"plan_mode.review\"}")
+
+        it "recovers a canonical enter-plan decision after a restart" do
+            let interaction =
+                    (testInteraction
+                        (Just
+                            (testResolution
+                                "{\"confirmed\":true,\"type\":\"plan_mode.confirm_enter\"}"
+                                "remote")))
+            resolvedPlanEnterDecision interaction
+                `shouldBe` Right (Just True)
+
+        it "does not invent an enter-plan decision for an open request" do
+            resolvedPlanEnterDecision (testInteraction Nothing)
+                `shouldBe` Right Nothing
+
+    describe "resolvedPlanEnterDecision" do
+        it "recovers a canonical confirmed decision after restart" do
+            let resolution =
+                    testResolution
+                        "{\"confirmed\":true,\"type\":\"plan_mode.confirm_enter\"}"
+                        "remote"
+            resolvedPlanEnterDecision
+                (testInteraction (Just resolution))
+                `shouldBe` Right (Just True)
+
+        it "distinguishes an unresolved confirmation" do
+            resolvedPlanEnterDecision (testInteraction Nothing)
+                `shouldBe` Right Nothing
 
 testCoordinator :: PendingInteractionStore -> PendingInteractionCoordinator
 testCoordinator store =
@@ -404,7 +483,7 @@ testInteraction resolution = SessionInteraction
     , sessionInteractionKind = "plan_mode.confirm_enter"
     , sessionInteractionPayloadVersion = 1
     , sessionInteractionPayload =
-        "{\"reason\":\"reason\",\"type\":\"plan_mode.confirm_enter\"}"
+        "{\"reason\":\"reason\",\"request_id\":\"race-call\",\"type\":\"plan_mode.confirm_enter\"}"
     , sessionInteractionOrigin =
         (testContext "race").pendingInteractionOrigin
     , sessionInteractionCreatedAt = fixedTime

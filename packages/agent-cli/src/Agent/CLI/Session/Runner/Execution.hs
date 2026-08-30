@@ -36,10 +36,21 @@ import Agent.CLI.LearnedSkills
 import Agent.CLI.LearnedSkills.Store
 import Agent.CLI.Options
 import Agent.CLI.PendingInputs
+import Agent.CLI.PendingInteraction
+    ( recordDurableInteractionDelivery
+    , recoverUndeliveredInteractions
+    , renderPendingInteractionError
+    , renderRestoredInteractions
+    , resolvedPlanEnterDecision
+    )
 import Agent.CLI.Runtime.Types
 import Agent.CLI.Session.Runtime.Types
 import Agent.CLI.Interrupt
 import Agent.Store.Postgres
+import Agent.Store.Postgres.Interaction
+    ( SessionInteraction(..)
+    , loadSessionInteractionByRequestKey
+    )
 import Agent.CLI.Project
 import Agent.CLI.Prompt
 import Agent.CLI.ProviderTransition
@@ -69,12 +80,18 @@ import Agent.Cancel
 import Agent.Loop
 import Agent.Dialect
 import Agent.Skills
-import Agent.Responses.Types
 import Agent.Subagents
 import Agent.Subagents.TaskPath
 import Agent.ToolDispatch
 import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode
+import Agent.Tools.PlanMode.Tracker
+    ( ApprovedPlanContinuation(..)
+    , PlanTracker(..)
+    , PlanTrackerPhase(..)
+    , markPlanContinuationDelivered
+    )
+import Agent.Tools.PlanMode.File (renderPlanFileError)
 import Agent.Tools.Types
 import Agent.OsPath
 import Control.Concurrent.Async (withAsync)
@@ -90,6 +107,7 @@ import qualified Data.Text as Text
 import qualified Data.Set as Set
 import Data.Time.Clock (getCurrentTime, utctDay)
 import System.Mem.StableName (makeStableName)
+
 runSession
     :: SessionRunnerContinuation
     -> SessionRequest
@@ -866,10 +884,19 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 , turnUsage = Nothing
                                 }
                         (updated, _) <-
-                            appendTurnWithMetaUpdateIndexed
-                                handle
-                                checkpointTurn
-                                \meta -> meta { metaLastResponseId = Nothing }
+                            consumeInteractionDeliveries
+                                interactionDeliveriesRef
+                                handle.sessionMeta.metaId
+                                \intents ->
+                                    appendTurnWithMetaUpdateIndexedAndDeliver
+                                        handle
+                                        checkpointTurn
+                                        (\meta ->
+                                            meta
+                                                { metaLastResponseId =
+                                                    Nothing
+                                                })
+                                        intents
                         writeIORef slotRef (PersistenceActive updated)
                 let boundary = AutomaticCompactionBoundary
                         { automaticCompactionHistory = durableHistory
@@ -917,6 +944,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionTitleManager = titleManager
             , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
+            , sessionInteractionDeliveries =
+                interactionDeliveriesRef
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
             , sessionHome = home
@@ -1013,55 +1042,251 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     else pure []
             callbacks.runnerFinishStartup startup
             pure learnedSkills
-        sessionAction = do
-            learnedSkills <- initializeSkills
-            case pendingTurn of
-                Just pending ->
-                    callbacks.runnerRunPendingTurn
-                        (if startup.startupFullscreenReused
-                            then ContinuePendingTurn
-                            else SubmitPendingTurn)
-                        env
-                        pending
-                Nothing -> case promptRequest of
-                    Just request -> do
-                        inputs <- managedTurnInputs cwd request
-                        skillInputs <-
-                            callbacks.runnerPreparePromptSkillInputs
-                                env
-                                request.managedTurnText
-                                inputs
-                                >>= either
-                                    (startupDie startup . Text.unpack)
-                                    pure
-                        result <- runOneTurn env request.managedTurnText skillInputs
-                        callbacks.runnerFinishTurn env True result
-                    Nothing ->
-                        case learnAboutUserOnboardingPrompt learnedSkills of
-                            Just onboardingPrompt
-                                | learnAboutUserRequested
-                                , isNothing initialPrevious -> do
-                                    skillInputs <-
-                                        callbacks.runnerPreparePromptSkillInputs
-                                            env
-                                            onboardingPrompt
-                                            [UserMessage onboardingPrompt]
-                                            >>= either
-                                                (startupDie startup . Text.unpack)
-                                                pure
-                                    forM_ fullscreen \runtime ->
-                                        emitUiEvent runtime
-                                            (UiUserSubmitted onboardingPrompt)
-                                    result <-
-                                        runOneTurn
-                                            env
-                                            onboardingPrompt
-                                            skillInputs
-                                    callbacks.runnerFinishTurn env False result
-                            _ ->
+        reconcileApprovedContinuation = do
+            tracker <- readPlanTracker planMode
+            case tracker.trackerApprovedContinuation of
+                Nothing -> pure ()
+                Just continuation ->
+                    case persist of
+                        PersistenceDisabled -> pure ()
+                        PersistenceEnabled slotRef ->
+                            readIORef slotRef >>= \case
+                                PersistencePending{} -> pure ()
+                                PersistenceActive handle -> do
+                                    let requestKey =
+                                            planReviewRequestKey
+                                                tracker.trackerGeneration
+                                                continuation.approvedPlanDigest
+                                    loadSessionInteractionByRequestKey
+                                        handle.sessionPool
+                                        handle.sessionMeta.metaId
+                                        requestKey >>= \case
+                                            Left err ->
+                                                startupDie startup
+                                                    ("could not reconcile the approved plan continuation: "
+                                                        <> show err)
+                                            Right Nothing -> pure ()
+                                            Right (Just interaction)
+                                                | isJust
+                                                    interaction.sessionInteractionDelivery ->
+                                                        updatePlanTracker
+                                                            planMode
+                                                            (\current ->
+                                                                Right
+                                                                    (if
+                                                                        current.trackerApprovedContinuation
+                                                                            == Just continuation
+                                                                    then
+                                                                        markPlanContinuationDelivered
+                                                                            current
+                                                                    else current))
+                                                            >>= either
+                                                                (startupDie startup
+                                                                    . Text.unpack)
+                                                                (const (pure ()))
+                                                | Just resolution <-
+                                                    interaction.sessionInteractionResolution ->
+                                                        recordDurableInteractionDelivery
+                                                            env.sessionInteractionDeliveries
+                                                            interaction
+                                                            resolution
+                                                | otherwise -> pure ()
+        loadUndeliveredInteractions =
+            case persist of
+                PersistenceDisabled -> pure []
+                PersistenceEnabled slotRef ->
+                    readIORef slotRef >>= \case
+                        PersistencePending{} -> pure []
+                        PersistenceActive handle ->
+                            recoverUndeliveredInteractions
+                                handle.sessionPool
+                                handle.sessionMeta.metaId
+                                env.sessionInteractionDeliveries >>= \case
+                                Left err ->
+                                    startupDie startup
+                                        ("could not restore pending interaction responses: "
+                                            <> Text.unpack
+                                                (renderPendingInteractionError
+                                                    err))
+                                Right interactions -> pure interactions
+        restoreUndeliveredInteractionState interaction =
+            case resolvedPlanEnterDecision interaction of
+                Right (Just True) -> do
+                    ensurePlanMarkdown planMode >>= \case
+                        Left err ->
+                            startupDie startup
+                                (Text.unpack
+                                    (renderPlanFileError err))
+                        Right _ -> do
+                            active <- isPlanModeActive planMode
+                            unless active (activatePlanMode planMode)
+                _ -> pure ()
+        replayPendingPlanReview restoredInputs = do
+            tracker <- readPlanTracker planMode
+            if tracker.trackerPhase /= TrackerExitPending
+                then pure Nothing
+                else
+                    submitPlanForReview planMode Nothing >>= \case
+                        Left err ->
+                            startupDie startup
+                                ("could not resume the pending plan review: "
+                                    <> Text.unpack err)
+                        Right (PlanReviewAccepted continuation) -> do
+                            let text =
+                                    continuation.approvedPlanContinuation
+                            result <- runOneTurn env text restoredInputs
+                            Just
+                                <$> callbacks.runnerFinishTurn
+                                    env
+                                    False
+                                    result
+                        Right (PlanReviewRevisionRequired notes) -> do
+                            result <-
+                                runOneTurn
+                                    env
+                                    notes
+                                    (restoredInputs <> [UserMessage notes])
+                            Just
+                                <$> callbacks.runnerFinishTurn
+                                    env
+                                    False
+                                    result
+                        Right PlanReviewAbandoned ->
+                            pure Nothing
+                        Right PlanReviewApprovalOverrideRequired{} -> do
+                            preserveRestoredInteractionContext
+                                restoredInputs
+                            reportSessionError
+                                "Plan approval still requires explicit warning acknowledgement."
+                            draft <-
                                 readIORef
                                     startup.startupSessionState.sessionDraft
-                                    >>= callbacks.runnerReplWithDraft env
+                            Just <$> callbacks.runnerReplWithDraft env draft
+                        Right PlanReviewDeferred{} -> do
+                            preserveRestoredInteractionContext
+                                restoredInputs
+                            reportSessionError
+                                "Plan review is still awaiting a response."
+                            draft <-
+                                readIORef
+                                    startup.startupSessionState.sessionDraft
+                            Just <$> callbacks.runnerReplWithDraft env draft
+        preserveRestoredInteractionContext restoredInputs =
+            case restoredInputs of
+                [UserMessage text] ->
+                    atomicModifyIORef' startupContext \current ->
+                        ( Just $ case current of
+                            Nothing -> text
+                            Just existing -> existing <> "\n\n" <> text
+                        , ()
+                        )
+                _ -> pure ()
+        sessionAction = do
+            learnedSkills <- initializeSkills
+            undeliveredInteractions <- loadUndeliveredInteractions
+            reconcileApprovedContinuation
+            let restoredInteractions = undeliveredInteractions
+            forM_ restoredInteractions restoreUndeliveredInteractionState
+            let restoredInputs =
+                    case restoredInteractions of
+                        [] -> []
+                        _ ->
+                            [ UserMessage
+                                (renderRestoredInteractions
+                                    restoredInteractions)
+                            ]
+            replayPendingPlanReview restoredInputs >>= \case
+                Just replayed -> pure replayed
+                Nothing ->
+                    case pendingTurn of
+                        Just pending ->
+                            callbacks.runnerRunPendingTurn
+                                (if startup.startupFullscreenReused
+                                    then ContinuePendingTurn
+                                    else SubmitPendingTurn)
+                                env
+                                pending
+                                    { pendingInputs =
+                                        pending.pendingInputs
+                                            <> restoredInputs
+                                    }
+                        Nothing -> do
+                            tracker <- readPlanTracker planMode
+                            case tracker.trackerApprovedContinuation of
+                                Just continuation -> do
+                                    let text =
+                                            continuation.approvedPlanContinuation
+                                    result <-
+                                        runOneTurn env text restoredInputs
+                                    callbacks.runnerFinishTurn env False result
+                                Nothing -> case promptRequest of
+                                    Just request -> do
+                                        inputs <- managedTurnInputs cwd request
+                                        skillInputs <-
+                                            callbacks.runnerPreparePromptSkillInputs
+                                                env
+                                                request.managedTurnText
+                                                inputs
+                                                >>= either
+                                                    (startupDie startup
+                                                        . Text.unpack)
+                                                    pure
+                                        result <-
+                                            runOneTurn
+                                                env
+                                                request.managedTurnText
+                                                (restoredInputs
+                                                    <> skillInputs)
+                                        callbacks.runnerFinishTurn
+                                            env
+                                            True
+                                            result
+                                    Nothing
+                                        | [UserMessage text] <-
+                                            restoredInputs -> do
+                                                result <-
+                                                    runOneTurn
+                                                        env
+                                                        text
+                                                        [UserMessage text]
+                                                callbacks.runnerFinishTurn
+                                                    env
+                                                    False
+                                                    result
+                                        | otherwise ->
+                                            case
+                                                learnAboutUserOnboardingPrompt
+                                                    learnedSkills
+                                            of
+                                            Just onboardingPrompt
+                                                | learnAboutUserRequested
+                                                , isNothing initialPrevious -> do
+                                                    skillInputs <-
+                                                        callbacks.runnerPreparePromptSkillInputs
+                                                            env
+                                                            onboardingPrompt
+                                                            [UserMessage onboardingPrompt]
+                                                            >>= either
+                                                                (startupDie startup
+                                                                    . Text.unpack)
+                                                                pure
+                                                    forM_ fullscreen \runtime ->
+                                                        emitUiEvent runtime
+                                                            (UiUserSubmitted
+                                                                onboardingPrompt)
+                                                    result <-
+                                                        runOneTurn
+                                                            env
+                                                            onboardingPrompt
+                                                            skillInputs
+                                                    callbacks.runnerFinishTurn
+                                                        env
+                                                        False
+                                                        result
+                                            _ ->
+                                                readIORef
+                                                    startup.startupSessionState.sessionDraft
+                                                    >>= callbacks.runnerReplWithDraft env
         btwWorker = do
             question <- readChan btwRequests
             runBtwQuestion False env question

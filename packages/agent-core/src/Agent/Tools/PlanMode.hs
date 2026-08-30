@@ -11,6 +11,13 @@ module Agent.Tools.PlanMode
     , PlanReviewRequest(..)
     , PlanReviewDecision(..)
     , PlanReviewOutcome(..)
+    , AskUserQuestionOption(..)
+    , AskUserQuestion(..)
+    , PlanQuestionnaireRequest(..)
+    , PlanQuestionnaireAnswer(..)
+    , PlanQuestionnaireDecision(..)
+    , validatePlanQuestionnaireDecision
+    , PlanEnterRequest(..)
     , PlanReminderKind(..)
     , PlanReminderToolNames(..)
     , PlanReminder(..)
@@ -28,9 +35,9 @@ module Agent.Tools.PlanMode
     , readPlanModeState
     , writePlanModeState
     , readPlanSessionDir
-    , setPlanSessionDir
     , attachPlanSessionDir
     , readPlanTracker
+    , readPlanAgentActivationRevision
     , updatePlanTracker
     , restrictPlanTracker
     , isPlanModeActive
@@ -46,6 +53,7 @@ module Agent.Tools.PlanMode
     , submitPlanForReview
     , planReviewRequestKey
     , legacyPlanReviewHook
+    , legacyPlanQuestionnaireHook
     , planApprovedContinuation
     , planModeBlockedEditMessage
     , isPlanFileEditTarget
@@ -63,7 +71,11 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , typedTool
+    , typedToolWithCall
+    )
 import Agent.Tools.Types
     ( AppTool
     , PlanModeCapability(..)
@@ -89,9 +101,9 @@ import Agent.Tools.PlanMode.Document
     , parsePlanDocument
     )
 import Agent.Tools.PlanMode.Persistence
-    ( readPlanTrackerState
+    ( compareAndWritePlanTrackerState
+    , readPlanTrackerState
     , validatePlanTracker
-    , writePlanTrackerState
     )
 import Agent.Tools.PlanMode.Tracker
     ( ApprovedPlanContinuation(..)
@@ -114,17 +126,27 @@ import Agent.Tools.PlanMode.Tracker
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar
     ( MVar
-    , modifyMVar
+    , modifyMVar_
     , newMVar
+    , putMVar
     , readMVar
+    , tryTakeMVar
     )
-import Control.Exception.Safe (displayException, throwString, tryAny, tryIO)
+import Control.Exception.Safe
+    ( displayException
+    , finally
+    , mask
+    , throwString
+    , tryAny
+    , tryIO
+    )
 import Control.Monad (when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word64)
 import System.Directory.OsPath (canonicalizePath)
 import System.OsPath (OsPath, equalFilePath, unsafeEncodeUtf, (</>))
 
@@ -133,7 +155,96 @@ data PlanModeState
     | PlanPending
     -- ^ User toggled plan mode; becomes Active on the next prompt.
     | PlanActive
+    | PlanExitPending
+    -- ^ The exact on-disk plan snapshot is awaiting a correlated decision.
     deriving (Eq, Show)
+
+-- | Immutable identity supplied to the enter-plan-mode confirmation hook.
+data PlanEnterRequest = PlanEnterRequest
+    { planEnterRequestKey :: !Text
+    , planEnterReason :: !Text
+    }
+    deriving (Eq, Show)
+
+data PlanQuestionnaireAnswer = PlanQuestionnaireAnswer
+    { planAnswerQuestionIndex :: !Int
+    , planAnswerQuestion :: !Text
+    , planAnswerLabels :: ![Text]
+    , planAnswerOther :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+data PlanQuestionnaireRequest = PlanQuestionnaireRequest
+    { planQuestionnaireRequestKey :: !Text
+    , planQuestionnaireQuestions :: ![AskUserQuestion]
+    } deriving (Eq, Show)
+
+data PlanQuestionnaireDecision
+    = PlanQuestionnaireSubmitted ![PlanQuestionnaireAnswer]
+    | PlanQuestionnaireClarification !Text
+    | PlanQuestionnaireFinished
+    | PlanQuestionnaireCancelled
+    | PlanQuestionnaireDeferred
+    deriving (Eq, Show)
+
+validatePlanQuestionnaireDecision
+    :: PlanQuestionnaireRequest
+    -> PlanQuestionnaireDecision
+    -> Either Text PlanQuestionnaireDecision
+validatePlanQuestionnaireDecision request = \case
+    PlanQuestionnaireSubmitted answers -> do
+        let questions = request.planQuestionnaireQuestions
+        if length answers /= length questions
+            then
+                Left
+                    "submitted questionnaire must answer every question exactly once"
+            else
+                PlanQuestionnaireSubmitted
+                    <$> traverse
+                        validateAnswer
+                        (zip3 [0 ..] questions answers)
+    PlanQuestionnaireClarification clarification
+        | Text.null (Text.strip clarification) ->
+            Left "questionnaire clarification must not be blank"
+        | otherwise ->
+            Right
+                (PlanQuestionnaireClarification
+                    (Text.strip clarification))
+    other -> Right other
+  where
+    validateAnswer
+        :: (Int, AskUserQuestion, PlanQuestionnaireAnswer)
+        -> Either Text PlanQuestionnaireAnswer
+    validateAnswer (expectedIndex, question, answer)
+        | answer.planAnswerQuestionIndex /= expectedIndex =
+            Left "questionnaire answers must be ordered by question index"
+        | answer.planAnswerQuestion /= question.question =
+            Left "questionnaire answer text does not match its request"
+        | any (`notElem` offered) answer.planAnswerLabels =
+            Left "questionnaire answer contains an unknown option label"
+        | hasDuplicates answer.planAnswerLabels =
+            Left "questionnaire answer contains duplicate option labels"
+        | not multi
+        , length answer.planAnswerLabels + otherCount /= 1 =
+            Left
+                "single-select questionnaire answer must contain exactly one option or Other"
+        | multi
+        , null answer.planAnswerLabels && normalizedOther == Nothing =
+            Left
+                "multi-select questionnaire answer must select an option or Other"
+        | otherwise =
+            Right answer
+                { planAnswerOther = normalizedOther
+                }
+      where
+        offered = map (.label) question.options
+        multi = question.multiSelect == Just True
+        normalizedOther =
+            answer.planAnswerOther >>= nonBlankText
+        otherCount = maybe 0 (const 1) normalizedOther
+
+    hasDuplicates values =
+        length values
+            /= Map.size (Map.fromList [(value, ()) | value <- values])
 
 data PlanCompletion
     = CompleteWithExitTool
@@ -204,6 +315,8 @@ data PlanModeEnv = PlanModeEnv
     , planFallbackDir :: !OsPath
     , planHooks :: !PlanModeHooks
     , planTrackerRuntime :: !(MVar PlanTrackerRuntime)
+    , planTransitionLock :: !(MVar ())
+    , planAgentActivationRevision :: !(IORef (Maybe Word64))
     }
 
 data PlanTrackerRuntime = PlanTrackerRuntime
@@ -226,7 +339,10 @@ data PlanModeHooks
         }
     | PlanModeLifecycleHooks
         { planConfirmEnter :: !(Text -> IO Bool)
+        , planConfirmEnterRequest :: !(PlanEnterRequest -> IO Bool)
         , planAskQuestion :: !(Text -> [Text] -> IO (Maybe Text))
+        , planAskQuestionnaire
+            :: !(PlanQuestionnaireRequest -> IO PlanQuestionnaireDecision)
         , planReviewPlan :: !(PlanReviewRequest -> IO PlanReviewDecision)
         -- ^ Correlated typed review used by all new provider integrations.
         , planQuiesceBeforeActivation :: !(IO (Either Text ()))
@@ -251,7 +367,11 @@ withPlanModeLifecycle quiesce resume = \case
         } ->
             PlanModeLifecycleHooks
                 { planConfirmEnter
+                , planConfirmEnterRequest =
+                    planConfirmEnter . (.planEnterReason)
                 , planAskQuestion
+                , planAskQuestionnaire =
+                    legacyPlanQuestionnaireHook planAskQuestion
                 , planReviewPlan =
                     legacyPlanReviewHook planDecideExit
                 , planQuiesceBeforeActivation = quiesce
@@ -259,14 +379,18 @@ withPlanModeLifecycle quiesce resume = \case
                 }
     PlanModeLifecycleHooks
         { planConfirmEnter
+        , planConfirmEnterRequest
         , planAskQuestion
+        , planAskQuestionnaire
         , planReviewPlan
         , planQuiesceBeforeActivation
         , planResumeAfterExit
         } ->
             PlanModeLifecycleHooks
                 { planConfirmEnter
+                , planConfirmEnterRequest
                 , planAskQuestion
+                , planAskQuestionnaire
                 , planReviewPlan
                 , planQuiesceBeforeActivation = do
                     planQuiesceBeforeActivation >>= \case
@@ -303,12 +427,16 @@ newPlanModeEnv fallbackDir hooks = do
         , runtimeAttachedDir = Nothing
         , runtimeQuiesced = False
         }
+    transitionLock <- newMVar ()
+    agentActivationRevision <- newIORef Nothing
     pure PlanModeEnv
         { planStateRef = stateRef
         , planSessionDir = sessionRef
         , planFallbackDir = fallbackDir
         , planHooks = fromMaybe defaultHooks hooks
         , planTrackerRuntime = trackerRuntime
+        , planTransitionLock = transitionLock
+        , planAgentActivationRevision = agentActivationRevision
         }
 
 planFilePath :: PlanModeEnv -> IO OsPath
@@ -326,9 +454,17 @@ readPlanModeState = readIORef . (.planStateRef)
 -- the durable tracker. New code should keep state transitions in one owner.
 writePlanModeState :: PlanModeEnv -> PlanModeState -> IO ()
 writePlanModeState env target = do
-    let transition tracker = Right (legacyStateTransition target tracker)
+    let transition tracker = case target of
+            PlanExitPending
+                | tracker.trackerPhase == TrackerExitPending ->
+                    Right tracker
+                | otherwise ->
+                    Left
+                        "PlanExitPending can only mirror an existing pending review"
+            _ -> Right (legacyStateTransition target tracker)
         apply
-            | target == PlanActive = restrictPlanTracker
+            | target `elem` [PlanActive, PlanExitPending] =
+                restrictPlanTracker
             | otherwise = updatePlanTracker
     apply env transition >>= \case
         Left err -> throwString (Text.unpack err)
@@ -353,7 +489,14 @@ attachPlanSessionDir env rawDirectory = do
                     ("could not resolve plan-mode session directory: "
                         <> Text.pack (displayException err)))
         Right directory ->
-            modifyMVar env.planTrackerRuntime \runtime ->
+            withPlanTransition env do
+                runtime <- readMVar env.planTrackerRuntime
+                (next, result) <-
+                    attachRuntime runtime directory
+                replacePlanTrackerRuntime env next
+                pure result
+  where
+    attachRuntime runtime directory =
                 case runtime.runtimeAttachedDir of
                     Just attached
                         | equalFilePath attached directory -> do
@@ -412,7 +555,13 @@ attachDirectory env runtime directory mergeLegacy =
                     when restricted (mirrorTrackerState env selected)
                     persistedResult <-
                         if shouldWrite
-                            then writePlanTrackerState directory selected
+                            then
+                                compareAndWritePlanTrackerState
+                                    directory
+                                    (fromMaybe
+                                        initialPlanTracker
+                                        persisted)
+                                    selected
                             else pure (Right ())
                     case persistedResult of
                         Left err ->
@@ -435,6 +584,14 @@ attachDirectory env runtime directory mergeLegacy =
 readPlanTracker :: PlanModeEnv -> IO PlanTracker
 readPlanTracker env =
     (.runtimeTracker) <$> readMVar env.planTrackerRuntime
+
+-- | Revision of the most recent activation confirmed through the
+-- @enter_plan_mode@ tool in this process. This volatile owner marker lets a
+-- cancelled turn roll back only its own activation rather than a concurrent
+-- user transition.
+readPlanAgentActivationRevision :: PlanModeEnv -> IO (Maybe Word64)
+readPlanAgentActivationRevision =
+    readIORef . (.planAgentActivationRevision)
 
 -- | Persist a candidate before exposing it. Persistence failure leaves the
 -- previous tracker and restrictions intact, which is appropriate for reminder
@@ -464,22 +621,45 @@ changePlanTracker
     -> (PlanTracker -> Either Text PlanTracker)
     -> IO (Either Text PlanTracker)
 changePlanTracker order env transition =
-    modifyMVar env.planTrackerRuntime \runtime ->
-        case transition runtime.runtimeTracker of
-            Left err -> pure (runtime, Left err)
-            Right candidate
-                | Left err <- validatePlanTracker candidate ->
-                    pure (runtime, Left err)
-                | otherwise ->
-                    ensureRuntimeQuiesced env runtime candidate >>= \case
-                        Left err -> pure (runtime, Left err)
-                        Right prepared ->
-                            commitPlanTracker
-                                order
-                                env
-                                runtime
-                                prepared
-                                candidate
+    withPlanTransition env do
+        runtime <- readMVar env.planTrackerRuntime
+        (next, result) <-
+            case transition runtime.runtimeTracker of
+                Left err -> pure (runtime, Left err)
+                Right candidate
+                    | Left err <- validatePlanTracker candidate ->
+                        pure (runtime, Left err)
+                    | otherwise ->
+                        ensureRuntimeQuiesced env runtime candidate >>= \case
+                            Left err -> pure (runtime, Left err)
+                            Right prepared ->
+                                commitPlanTracker
+                                    order
+                                    env
+                                    runtime
+                                    prepared
+                                    candidate
+        replacePlanTrackerRuntime env next
+        pure result
+
+-- Lifecycle callbacks are application code and may inspect plan state. Keep
+-- the runtime MVar available while they run, but fail concurrent or re-entrant
+-- mutations closed instead of waiting forever on a non-reentrant lock.
+withPlanTransition
+    :: PlanModeEnv
+    -> IO (Either Text a)
+    -> IO (Either Text a)
+withPlanTransition env action =
+    mask \restore ->
+        tryTakeMVar env.planTransitionLock >>= \case
+            Nothing ->
+                pure (Left "another plan-mode transition is already in progress")
+            Just () ->
+                restore action `finally` putMVar env.planTransitionLock ()
+
+replacePlanTrackerRuntime :: PlanModeEnv -> PlanTrackerRuntime -> IO ()
+replacePlanTrackerRuntime env runtime =
+    modifyMVar_ env.planTrackerRuntime (const (pure runtime))
 
 commitPlanTracker
     :: TrackerCommitOrder
@@ -496,7 +676,10 @@ commitPlanTracker order env previous prepared candidate =
     of
         (_, Nothing) -> exposeAndFinish
         (PersistBeforeExpose, Just directory) ->
-            writePlanTrackerState directory candidate >>= \case
+            compareAndWritePlanTrackerState
+                directory
+                previous.runtimeTracker
+                candidate >>= \case
                 Left err -> do
                     restored <- rollbackQuiescence env previous prepared
                     pure (restored, Left err)
@@ -504,7 +687,11 @@ commitPlanTracker order env previous prepared candidate =
         (ExposeBeforePersist, Just directory) -> do
             mirrorTrackerState env candidate
             let exposed = prepared { runtimeTracker = candidate }
-            writePlanTrackerState directory candidate >>= \case
+            replacePlanTrackerRuntime env exposed
+            compareAndWritePlanTrackerState
+                directory
+                previous.runtimeTracker
+                candidate >>= \case
                 Left err -> pure (exposed, Left err)
                 Right () ->
                     finishRuntimeTransition env exposed
@@ -537,7 +724,15 @@ ensureRuntimeQuiesced env runtime candidate
         pure (Right runtime)
     | otherwise =
         planQuiesceAction env.planHooks >>= \case
-            Left err -> pure (Left err)
+            Left err -> do
+                rollback <- tryAny (planResumeAction env.planHooks)
+                pure $ Left $ case rollback of
+                    Right () -> err
+                    Left rollbackErr ->
+                        err
+                            <> "; rollback also failed: "
+                            <> Text.pack
+                                (displayException rollbackErr)
             Right () ->
                 pure (Right runtime { runtimeQuiesced = True })
 
@@ -560,9 +755,12 @@ finishRuntimeTransition
 finishRuntimeTransition env runtime result
     | runtime.runtimeQuiesced
     , not (trackerRestricts runtime.runtimeTracker) = do
+        replacePlanTrackerRuntime env runtime
         resumed <- tryAny (planResumeAction env.planHooks)
+        let finished = runtime { runtimeQuiesced = False }
+        replacePlanTrackerRuntime env finished
         pure
-            ( runtime { runtimeQuiesced = False }
+            ( finished
             , case resumed of
                 Left err ->
                     Left
@@ -570,7 +768,9 @@ finishRuntimeTransition env runtime result
                             <> Text.pack (displayException err))
                 Right () -> result
             )
-    | otherwise = pure (runtime, result)
+    | otherwise = do
+        replacePlanTrackerRuntime env runtime
+        pure (runtime, result)
 
 planQuiesceAction :: PlanModeHooks -> IO (Either Text ())
 planQuiesceAction = \case
@@ -597,7 +797,9 @@ trackerCanReattach tracker =
         && tracker.trackerApprovedContinuation == Nothing
 
 isPlanModeActive :: PlanModeEnv -> IO Bool
-isPlanModeActive env = (== PlanActive) <$> readPlanModeState env
+isPlanModeActive env = do
+    state <- readPlanModeState env
+    pure (state `elem` [PlanActive, PlanExitPending])
 
 activatePlanMode :: PlanModeEnv -> IO ()
 activatePlanMode env = writePlanModeState env PlanActive
@@ -620,6 +822,9 @@ legacyStateTransition = \case
     PlanPending ->
         requestPlanActivation . deactivatePlanTracker False
     PlanActive -> activatePlanTracker
+    -- There is no safe way to synthesize an exit-pending state without its
+    -- generation, digest, and request key.
+    PlanExitPending -> id
 
 mergeLegacyState :: PlanModeState -> PlanTracker -> PlanTracker
 mergeLegacyState legacy tracker
@@ -638,7 +843,7 @@ mirrorTrackerState env tracker =
         TrackerInactive -> PlanInactive
         TrackerPending -> PlanPending
         TrackerActive -> PlanActive
-        TrackerExitPending -> PlanActive
+        TrackerExitPending -> PlanExitPending
 
 readPlanMarkdown :: PlanModeEnv -> IO Text
 readPlanMarkdown env =
@@ -822,7 +1027,9 @@ acceptPlanReview env pending request = do
     let continuation = ApprovedPlanContinuation
             { approvedPlanDigest = request.planReviewSnapshotDigest
             , approvedPlanVerification = request.planReviewVerification
-            , approvedPlanContinuation = planApprovedContinuation
+            , approvedPlanContinuation =
+                approvedContinuationWithVerification
+                    request.planReviewVerification
             }
     resolveReview env pending (ApprovePlan continuation) >>= \case
         Left err -> pure (Left err)
@@ -960,7 +1167,6 @@ nextPlanModeReminder env tools = do
         then consumePostExitReminder env tracker
         else case tracker.trackerPhase of
             TrackerActive -> activeReminder env tools tracker
-            TrackerExitPending -> activeReminder env tools tracker
             _ -> pure (Right Nothing)
 
 consumePostExitReminder
@@ -1095,6 +1301,13 @@ planApprovedContinuation =
         <> "Begin implementing the approved plan immediately. "
         <> "Do not wait for another user message."
 
+approvedContinuationWithVerification :: [Text] -> Text
+approvedContinuationWithVerification [] = planApprovedContinuation
+approvedContinuationWithVerification verification =
+    planApprovedContinuation
+        <> "\n\nRun these verification steps before reporting completion:\n"
+        <> Text.unlines ["- " <> step | step <- verification]
+
 planModeBlockedEditMessage :: OsPath -> Text
 planModeBlockedEditMessage path =
     "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file ("
@@ -1139,7 +1352,7 @@ enterPlanModeToolWith completion env =
             -- planConfirmEnter, so it must not also trigger generic tool approval.
             True
             TurnSequential
-            (typedTool "enter_plan_mode" enterPlanArgsDecoder
+            (typedToolWithCall "enter_plan_mode" enterPlanArgsDecoder
                 (runEnterPlanMode completion env))
 
 enterPlanDescription :: PlanCompletion -> Text
@@ -1155,29 +1368,52 @@ enterPlanDescription completion =
 runEnterPlanMode
     :: PlanCompletion
     -> PlanModeEnv
+    -> ToolCall
     -> EnterPlanArgs
     -> IO (Either Text Text)
-runEnterPlanMode completion env args = do
-    active <- isPlanModeActive env
-    if active
-        then pure $ Right "Plan mode is already active."
-        else do
-            let reason = fromMaybe "Enter plan mode to design an approach before coding." args.explanation
-            ok <- env.planHooks.planConfirmEnter reason
-            if not ok
-                then pure $ Left "User declined plan mode. Stay in normal mode and continue."
+runEnterPlanMode completion env call args = do
+    tracker <- readPlanTracker env
+    case tracker.trackerApprovedContinuation of
+        Just _ ->
+            pure
+                (Left
+                    "An approved plan is still waiting to run. Continue that plan before entering plan mode again.")
+        Nothing -> do
+            active <- isPlanModeActive env
+            if active
+                then pure $ Right "Plan mode is already active."
                 else do
-                    path <- planFilePath env
-                    ensurePlanFile path >>= \case
-                        Left err ->
-                            pure (Left (renderPlanFileError err))
-                        Right _ -> do
-                            activatePlanMode env
-                            pure $ Right $
-                                "You have entered plan mode. Explore the codebase and write an implementation plan to "
-                                    <> toText path
-                                    <> ". "
-                                    <> completionInstruction completion
+                    let reason = fromMaybe "Enter plan mode to design an approach before coding." args.explanation
+                    ok <- invokeEnterHook env.planHooks PlanEnterRequest
+                        { planEnterRequestKey = call.callId
+                        , planEnterReason = reason
+                        }
+                    if not ok
+                        then pure $ Left "User declined plan mode. Stay in normal mode and continue."
+                        else do
+                            path <- planFilePath env
+                            ensurePlanFile path >>= \case
+                                Left err ->
+                                    pure (Left (renderPlanFileError err))
+                                Right _ -> do
+                                    activatePlanMode env
+                                    activated <- readPlanTracker env
+                                    writeIORef
+                                        env.planAgentActivationRevision
+                                        (Just activated.trackerRevision)
+                                    pure $ Right $
+                                        "You have entered plan mode. Explore the codebase and write an implementation plan to "
+                                            <> toText path
+                                            <> ". "
+                                            <> completionInstruction completion
+
+invokeEnterHook :: PlanModeHooks -> PlanEnterRequest -> IO Bool
+invokeEnterHook hooks request =
+    case hooks of
+        PlanModeHooks{planConfirmEnter} ->
+            planConfirmEnter request.planEnterReason
+        PlanModeLifecycleHooks{planConfirmEnterRequest} ->
+            planConfirmEnterRequest request
 
 data WritePlanArgs = WritePlanArgs
     { content :: Text
@@ -1206,16 +1442,20 @@ writePlanDescription =
 
 runWritePlan :: PlanModeEnv -> WritePlanArgs -> IO (Either Text Text)
 runWritePlan env args = do
-    active <- isPlanModeActive env
-    if not active
-        then pure (Left "Plan mode is not active.")
-        else writePlanMarkdown env args.content >>= \case
-            Left err -> pure (Left err)
-            Right () -> do
-                path <- planFilePath env
-                pure $ Right $
-                    "Wrote the plan to " <> toText path
-                        <> ". Continue planning or present it for approval when ready."
+    readPlanModeState env >>= \case
+        PlanActive ->
+            writePlanMarkdown env args.content >>= \case
+                Left err -> pure (Left err)
+                Right () -> do
+                    path <- planFilePath env
+                    pure $ Right $
+                        "Wrote the plan to " <> toText path
+                            <> ". Continue planning or present it for approval when ready."
+        PlanExitPending ->
+            pure
+                (Left
+                    "The submitted plan snapshot is awaiting review and is frozen. Resolve or revise that review before writing it again.")
+        _ -> pure (Left "Plan mode is not active.")
 
 data ExitPlanArgs = ExitPlanArgs
     { summary :: Maybe Text
@@ -1282,6 +1522,7 @@ data AskUserQuestionOption = AskUserQuestionOption
     , description :: Text
     , preview :: Maybe Text
     }
+    deriving (Eq, Show)
 
 askUserQuestionOptionDecoder :: Decoder AskUserQuestionOption
 askUserQuestionOptionDecoder = objectArgs \object ->
@@ -1295,6 +1536,7 @@ data AskUserQuestion = AskUserQuestion
     , options :: [AskUserQuestionOption]
     , multiSelect :: Maybe Bool
     }
+    deriving (Eq, Show)
 
 askUserQuestionDecoder :: Decoder AskUserQuestion
 askUserQuestionDecoder = objectArgs \object -> do
@@ -1364,55 +1606,126 @@ askUserQuestionTool env =
     ]
     True
     TurnSequential
-    (typedTool "ask_user_question" askUserQuestionArgsDecoder (runAskUserQuestion env))
+    (typedToolWithCall
+        "ask_user_question"
+        askUserQuestionArgsDecoder
+        (runAskUserQuestion env))
 
 askUserDescription :: Text
 askUserDescription =
     "Ask the user one or more multiple-choice questions. "
         <> "This tool works both inside and outside plan mode."
 
-runAskUserQuestion :: PlanModeEnv -> AskUserQuestionArgs -> IO (Either Text Text)
-runAskUserQuestion env args
+runAskUserQuestion
+    :: PlanModeEnv
+    -> ToolCall
+    -> AskUserQuestionArgs
+    -> IO (Either Text Text)
+runAskUserQuestion env call args
     | null args.questions =
         pure (Right "No questions provided. Continue with the task.")
     | otherwise = do
-        answers <- collectAnswers args.questions
-        pure (formatAnswers <$> answers)
+        let request = PlanQuestionnaireRequest
+                { planQuestionnaireRequestKey = call.callId
+                , planQuestionnaireQuestions = args.questions
+                }
+        decision <- invokeQuestionnaireHook env.planHooks request
+        case validatePlanQuestionnaireDecision request decision of
+            Left err -> pure (Left err)
+            Right outcome -> case outcome of
+                PlanQuestionnaireSubmitted answers ->
+                    pure (Right (formatAnswers answers))
+                PlanQuestionnaireClarification clarification ->
+                    pure $ Right $
+                        "The user requested clarification before answering: "
+                            <> Text.strip clarification
+                PlanQuestionnaireFinished ->
+                    pure
+                        (Right
+                            "The user finished the questionnaire without providing further answers. Continue using the information already available.")
+                PlanQuestionnaireCancelled ->
+                    pure
+                        (Right
+                            "The user declined to answer the questionnaire. Continue without those answers.")
+                PlanQuestionnaireDeferred ->
+                    pure
+                        (Left
+                            "The questionnaire remains unanswered. Wait for the user or retry the same request later.")
+
+invokeQuestionnaireHook
+    :: PlanModeHooks
+    -> PlanQuestionnaireRequest
+    -> IO PlanQuestionnaireDecision
+invokeQuestionnaireHook hooks request =
+    case hooks of
+        PlanModeHooks{planAskQuestion} ->
+            legacyPlanQuestionnaireHook planAskQuestion request
+        PlanModeLifecycleHooks{planAskQuestionnaire} ->
+            planAskQuestionnaire request
+
+legacyPlanQuestionnaireHook
+    :: (Text -> [Text] -> IO (Maybe Text))
+    -> PlanQuestionnaireRequest
+    -> IO PlanQuestionnaireDecision
+legacyPlanQuestionnaireHook askHook request =
+    collectAnswers 0 questions >>= \case
+        Left _ -> pure PlanQuestionnaireDeferred
+        Right answers -> pure (PlanQuestionnaireSubmitted answers)
   where
+    questions = request.planQuestionnaireQuestions
+
     collectAnswers
-        :: [AskUserQuestion]
-        -> IO (Either Text [(Text, Text)])
-    collectAnswers [] = pure (Right [])
-    collectAnswers (question : rest) =
-        ask question >>= \case
+        :: Int
+        -> [AskUserQuestion]
+        -> IO (Either Text [PlanQuestionnaireAnswer])
+    collectAnswers _ [] = pure (Right [])
+    collectAnswers index (question : rest) =
+        ask index question >>= \case
             Left err -> pure (Left err)
             Right answer ->
-                collectAnswers rest >>= \case
+                collectAnswers (index + 1) rest >>= \case
                     Left err -> pure (Left err)
                     Right answers -> pure (Right (answer : answers))
 
-    ask :: AskUserQuestion -> IO (Either Text (Text, Text))
-    ask question
+    ask
+        :: Int
+        -> AskUserQuestion
+        -> IO (Either Text PlanQuestionnaireAnswer)
+    ask index question
         | question.multiSelect == Just True =
             askMultiple question >>= \case
                 Left err -> pure (Left err)
-                Right answer -> pure (Right (question.question, answer))
+                Right (labels, other) ->
+                    pure
+                        (Right PlanQuestionnaireAnswer
+                            { planAnswerQuestionIndex = index
+                            , planAnswerQuestion = question.question
+                            , planAnswerLabels = labels
+                            , planAnswerOther = other
+                            })
         | otherwise = do
             let choices = map formatOption question.options
                 labelsByChoice =
                     Map.fromList (zip choices (map (.label) question.options))
-            answer <- env.planHooks.planAskQuestion question.question choices
+            answer <- askHook question.question choices
             pure $ case answer of
                 Nothing -> Left "No answer from user."
                 Just text | Text.null (Text.strip text) ->
                     Left "No answer from user."
-                Just text ->
-                    Right
-                        ( question.question
-                        , fromMaybe text (Map.lookup text labelsByChoice)
-                        )
+                Just text -> Right PlanQuestionnaireAnswer
+                    { planAnswerQuestionIndex = index
+                    , planAnswerQuestion = question.question
+                    , planAnswerLabels =
+                        maybe [] pure (Map.lookup text labelsByChoice)
+                    , planAnswerOther =
+                        case Map.lookup text labelsByChoice of
+                            Just _ -> Nothing
+                            Nothing -> Just (Text.strip text)
+                    }
 
-    askMultiple :: AskUserQuestion -> IO (Either Text Text)
+    askMultiple
+        :: AskUserQuestion
+        -> IO (Either Text ([Text], Maybe Text))
     askMultiple question =
         choose [] question.options
       where
@@ -1428,7 +1741,7 @@ runAskUserQuestion env args
                         question.question
                             <> "\nSelected: "
                             <> Text.intercalate ", " (reverse selected)
-            answer <- env.planHooks.planAskQuestion prompt choices
+            answer <- askHook prompt choices
             case answer of
                 Nothing -> noAnswer selected
                 Just raw
@@ -1436,8 +1749,7 @@ runAskUserQuestion env args
                     | raw == doneChoice ->
                         if null selected
                             then pure (Left "No answer from user.")
-                            else pure
-                                (Right (Text.intercalate ", " (reverse selected)))
+                            else pure (Right (reverse selected, Nothing))
                     | Just label <-
                         Map.lookup raw labelsByDisplayed ->
                             choose
@@ -1449,12 +1761,27 @@ runAskUserQuestion env args
                     | otherwise ->
                         -- Non-TUI hooks may return a comma-separated answer
                         -- directly rather than one displayed choice at a time.
-                        pure (Right (Text.strip raw))
+                        let
+                            parts = parseOptions raw
+                            known =
+                                [ part
+                                | part <- parts
+                                , part `elem` map (.label) question.options
+                                ]
+                            unknown =
+                                [ part
+                                | part <- parts
+                                , part `notElem` known
+                                ]
+                        in pure
+                            (Right
+                                ( known
+                                , nonBlankText (Text.intercalate ", " unknown)
+                                ))
 
         noAnswer selected
             | null selected = pure (Left "No answer from user.")
-            | otherwise =
-                pure (Right (Text.intercalate ", " (reverse selected)))
+            | otherwise = pure (Right (reverse selected, Nothing))
 
 formatOption :: AskUserQuestionOption -> Text
 formatOption option =
@@ -1468,14 +1795,29 @@ formatOption option =
   where
     nonBlank = not . Text.null . Text.strip
 
-formatAnswers :: [(Text, Text)] -> Text
+formatAnswers :: [PlanQuestionnaireAnswer] -> Text
 formatAnswers answers =
     "User has answered your questions: "
         <> Text.intercalate ", "
-            [ "\"" <> question <> "\"=\"" <> answer <> "\""
-            | (question, answer) <- answers
+            [ "\""
+                <> answer.planAnswerQuestion
+                <> "\"=\""
+                <> renderAnswer answer
+                <> "\""
+            | answer <- answers
             ]
         <> ". You can now continue with the user's answers in mind."
+  where
+    renderAnswer :: PlanQuestionnaireAnswer -> Text
+    renderAnswer answer =
+        Text.intercalate ", " $
+            answer.planAnswerLabels
+                <> maybe [] pure answer.planAnswerOther
+
+nonBlankText :: Text -> Maybe Text
+nonBlankText value
+    | Text.null (Text.strip value) = Nothing
+    | otherwise = Just (Text.strip value)
 
 parseOptions :: Text -> [Text]
 parseOptions raw =

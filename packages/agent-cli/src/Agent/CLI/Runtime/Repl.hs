@@ -151,7 +151,7 @@ import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode
-    ( PlanModeState(PlanPending, PlanActive)
+    ( PlanModeState(PlanPending, PlanActive, PlanExitPending)
     , readPlanModeState
     )
 import Agent.Tools.Secret ()
@@ -264,7 +264,7 @@ replWithDraft env@SessionEnv
                 (catalogModelIds catalog)
     stdoutColor <- resolveColor stdout
     planState <- readPlanModeState planMode
-    let planActive = planState == PlanActive
+    let planActive = planState `elem` [PlanActive, PlanExitPending]
         planPending = planState == PlanPending
     policy <- readIORef policyRef
     pendingAttachments <- readLiveAttachments conversationRef

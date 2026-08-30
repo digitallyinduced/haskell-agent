@@ -33,6 +33,7 @@ import Agent.CLI.Options
     )
 import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.CLI.PendingInputs (PendingInputs)
+import Agent.CLI.PendingInteraction (DurableInteractionDelivery)
 import Agent.CLI.Session
     ( LegacySubagentTarget
     , Persistence
@@ -115,6 +116,8 @@ data SessionRequest = SessionRequest
     , bashEnabledRef :: !(IORef Bool)
     , toolEnv :: !ToolEnv
     , planMode :: !PlanModeEnv
+    , interactionDeliveriesRef
+        :: !(IORef [DurableInteractionDelivery])
     , startup :: !StartupRuntime
     , learnAboutUserRequested :: !Bool
     , databaseScopes :: !DatabaseScopes

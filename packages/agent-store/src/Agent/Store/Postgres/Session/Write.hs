@@ -10,15 +10,19 @@ module Agent.Store.Postgres.Session.Write
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedAndDeliver
+    , appendSessionTurnIndexedAndDeliverMany
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
     ) where
 
 import Control.Monad (forM_, unless)
+import Crypto.Hash (Digest, SHA256, hash)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int64)
 import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime)
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
@@ -33,7 +37,7 @@ import Agent.Store.Postgres.Connection
 import Agent.Store.Postgres.Hasql (mkStatement)
 import Agent.Store.Postgres.Interaction
     ( InteractionDelivery(..)
-    , InteractionDeliveryIntent
+    , InteractionDeliveryIntent(..)
     , InteractionDeliveryPreparation(..)
     , InteractionDeliveryResult(..)
     , commitSessionInteractionDeliveryTransaction
@@ -158,100 +162,273 @@ appendSessionTurnIndexedAndDeliver
             StoreError
             (Maybe Int64, InteractionDeliveryResult))
 appendSessionTurnIndexedAndDeliver pool turn metadata intent =
-    withSession pool
-        (Transactions.transaction
-            Transactions.Serializable
-            Transactions.Write
-            do
-                _ <- Transaction.statement
-                    metadata.sessionMetadataKey
-                    blockingAdvisoryLockStatement
-                prepared <-
-                    prepareSessionInteractionDeliveryTransaction
-                        metadata.sessionMetadataKey
-                        intent
-                case prepared of
-                    Left err -> pure (Left err)
-                    Right (InteractionDeliveryBlocked result) ->
-                        pure (Right (Nothing, result))
-                    Right InteractionDeliveryReady -> do
-                        changed <- Transaction.statement
-                            metadata
-                            appendProjectionStatement
-                        case changed of
-                            Nothing ->
-                                pure
-                                    (Right
-                                        ( Nothing
-                                        , InteractionDeliveryNotFound
-                                        ))
-                            Just (sessionId, sequence, turnIndex) -> do
-                                eventId <- Transaction.statement
-                                    EventInsert
-                                        { eventInsertSessionId = sessionId
-                                        , eventInsertSequence = sequence
-                                        , eventInsertKind = "turn.appended"
-                                        , eventInsertOccurredAt =
-                                            turn.sessionTurnOccurredAt
-                                        }
-                                    insertEventStatement
-                                turnId <- Transaction.statement
-                                    TurnInsert
-                                        { turnInsertSessionId = sessionId
-                                        , turnInsertEventId = eventId
-                                        , turnInsertIndex = turnIndex
-                                        , turnInsertEventSequence = sequence
-                                        , turnInsertTurn = turn
-                                        }
-                                    insertTurnStatement
-                                insertResponseItems
-                                    turnId
-                                    turn.sessionTurnItems
-                                delivered <-
-                                    commitSessionInteractionDeliveryTransaction
-                                        metadata.sessionMetadataKey
-                                        turnIndex
-                                        intent
-                                case delivered of
-                                    Left err ->
-                                        condemnAtomicAppend err
-                                    Right result@InteractionDeliveryObserved
-                                        { interactionDeliveryInserted = True
-                                        , interactionDeliveryValue
-                                        }
-                                            | interactionDeliveryValue.interactionDeliveryTurnIndex
-                                                == turnIndex ->
-                                                    pure
-                                                        (Right
-                                                            ( Just turnIndex
-                                                            , result
-                                                            ))
-                                            | otherwise ->
-                                                condemnAtomicAppend
-                                                    "interaction delivery references a different turn than the atomic append"
-                                    Right _ ->
-                                        condemnAtomicAppend
-                                            "interaction delivery was not inserted with the atomic turn append"
-        )
-        >>= pure . flattenAtomicAppendResult
+    fmap convert $
+        appendSessionTurnIndexedAndDeliverMany
+            pool
+            turn
+            metadata
+            [intent]
+  where
+    convert = \case
+        Left err -> Left err
+        Right (turnIndex, [result]) ->
+            Right (turnIndex, result)
+        Right _ ->
+            Left
+                (StoreDataError
+                    "single interaction delivery returned an unexpected result count")
 
-flattenAtomicAppendResult
+-- | Multi-interaction variant of 'appendSessionTurnIndexedAndDeliver'. Every
+-- delivery is prepared and committed in the same transaction as the turn, so
+-- a batch of user interactions cannot be partially acknowledged.
+appendSessionTurnIndexedAndDeliverMany
+    :: StorePool
+    -> SessionTurn
+    -> SessionMetadata
+    -> [InteractionDeliveryIntent]
+    -> IO
+        (Either
+            StoreError
+            (Maybe Int64, [InteractionDeliveryResult]))
+appendSessionTurnIndexedAndDeliverMany pool turn metadata intents
+    | null intents =
+        fmap (fmap (\index -> (index, []))) $
+            appendSessionTurnIndexed pool turn metadata
+    | otherwise =
+        withSession pool
+            (Transactions.transaction
+                Transactions.Serializable
+                Transactions.Write
+                do
+                    _ <- Transaction.statement
+                        metadata.sessionMetadataKey
+                        blockingAdvisoryLockStatement
+                    let boundIntents =
+                            map
+                                (bindDeliveryIntent turn)
+                                intents
+                    prepared <-
+                        traverse
+                            (prepareSessionInteractionDeliveryTransaction
+                                metadata.sessionMetadataKey)
+                            boundIntents
+                    case sequence prepared of
+                        Left err -> pure (Left err)
+                        Right preparations ->
+                            let pairs = zip boundIntents preparations
+                            in case replayedDeliveries pairs of
+                                Just results ->
+                                    pure (Right (Nothing, results))
+                                Nothing
+                                    | Just results <-
+                                        uniformlyBlockedResults pairs ->
+                                            pure
+                                                (Right
+                                                    (Nothing, results))
+                                    | all deliverable pairs ->
+                                        appendAndDeliver pairs
+                                    | otherwise ->
+                                        condemnAtomicAppendMany
+                                            "interaction delivery batch contains an unresolved or partially replayed response"
+                )
+            >>= pure . flattenAtomicAppendManyResult
+  where
+    appendAndDeliver pairs = do
+        changed <- Transaction.statement metadata appendProjectionStatement
+        case changed of
+            Nothing ->
+                pure
+                    (Right
+                        ( Nothing
+                        , replicate
+                            (length intents)
+                            InteractionDeliveryNotFound
+                        ))
+            Just (sessionId, eventSequence, turnIndex) -> do
+                eventId <- Transaction.statement
+                    EventInsert
+                        { eventInsertSessionId = sessionId
+                        , eventInsertSequence = eventSequence
+                        , eventInsertKind = "turn.appended"
+                        , eventInsertOccurredAt =
+                            turn.sessionTurnOccurredAt
+                        }
+                    insertEventStatement
+                turnId <- Transaction.statement
+                    TurnInsert
+                        { turnInsertSessionId = sessionId
+                        , turnInsertEventId = eventId
+                        , turnInsertIndex = turnIndex
+                        , turnInsertEventSequence = eventSequence
+                        , turnInsertTurn = turn
+                        }
+                    insertTurnStatement
+                insertResponseItems turnId turn.sessionTurnItems
+                let readyIntents =
+                        [ intent
+                        | (intent, InteractionDeliveryReady) <- pairs
+                        ]
+                delivered <-
+                    traverse
+                        (commitSessionInteractionDeliveryTransaction
+                            metadata.sessionMetadataKey
+                            turnIndex)
+                        readyIntents
+                case sequence delivered of
+                    Left err -> condemnAtomicAppendMany err
+                    Right results
+                        | all (insertedFor turnIndex) results ->
+                            case orderDeliveryResults pairs results of
+                                Just ordered ->
+                                    pure
+                                        (Right
+                                            ( Just turnIndex
+                                            , ordered
+                                            ))
+                                Nothing ->
+                                    condemnAtomicAppendMany
+                                        "interaction delivery result count changed while ordering the atomic batch"
+                        | otherwise ->
+                            condemnAtomicAppendMany
+                                "not every interaction delivery was inserted with the atomic turn append"
+
+    replayedDeliveries
+        :: [(InteractionDeliveryIntent, InteractionDeliveryPreparation)]
+        -> Maybe [InteractionDeliveryResult]
+    replayedDeliveries pairs =
+        let
+            matching =
+                [ (result, delivery.interactionDeliveryTurnIndex)
+                | (intent, InteractionDeliveryBlocked result) <- pairs
+                , Just delivery <- [observedDelivery result]
+                , delivery.interactionDeliveryKind
+                    == intent.interactionDeliveryIntentKind
+                , delivery.interactionDeliveryTurnFingerprint
+                    == intent.interactionDeliveryIntentTurnFingerprint
+                ]
+        in if not (null matching)
+                && length matching == length pairs
+                && allEqual (map snd matching)
+            then Just (map fst matching)
+            else Nothing
+
+    uniformlyBlockedResults
+        :: [(InteractionDeliveryIntent, InteractionDeliveryPreparation)]
+        -> Maybe [InteractionDeliveryResult]
+    uniformlyBlockedResults pairs =
+        let results =
+                [ result
+                | (_, InteractionDeliveryBlocked result) <- pairs
+                ]
+        in if length results == length pairs
+                && all
+                    (\result ->
+                        case observedDelivery result of
+                            Nothing -> True
+                            Just _ -> False)
+                    results
+            then Just results
+            else Nothing
+
+    deliverable
+        :: (InteractionDeliveryIntent, InteractionDeliveryPreparation)
+        -> Bool
+    deliverable = \case
+        (_, InteractionDeliveryReady) -> True
+        (intent, InteractionDeliveryBlocked result) ->
+            isStaleObserved intent result
+
+    isStaleObserved
+        :: InteractionDeliveryIntent
+        -> InteractionDeliveryResult
+        -> Bool
+    isStaleObserved intent result =
+        case observedDelivery result of
+            Just delivery ->
+                delivery.interactionDeliveryKind
+                    /= intent.interactionDeliveryIntentKind
+                    || delivery.interactionDeliveryTurnFingerprint
+                        /= intent.interactionDeliveryIntentTurnFingerprint
+            Nothing -> False
+
+    observedDelivery = \case
+        InteractionDeliveryObserved
+            { interactionDeliveryValue = delivery } ->
+                Just delivery
+        _ -> Nothing
+
+    insertedFor turnIndex = \case
+        InteractionDeliveryObserved
+            { interactionDeliveryInserted = True
+            , interactionDeliveryValue = delivery
+            } ->
+                delivery.interactionDeliveryTurnIndex == turnIndex
+        _ -> False
+
+    orderDeliveryResults [] [] = Just []
+    orderDeliveryResults
+            ((_, InteractionDeliveryReady) : pairs)
+            (result : results) =
+        (result :) <$> orderDeliveryResults pairs results
+    orderDeliveryResults
+            ((_, InteractionDeliveryBlocked result) : pairs)
+            results =
+        (result :) <$> orderDeliveryResults pairs results
+    orderDeliveryResults _ _ = Nothing
+
+    allEqual [] = False
+    allEqual (value : values) = all (== value) values
+
+flattenAtomicAppendManyResult
     :: Either
         StoreError
-        (Either Text (Maybe Int64, InteractionDeliveryResult))
-    -> Either StoreError (Maybe Int64, InteractionDeliveryResult)
-flattenAtomicAppendResult = \case
+        (Either Text (Maybe Int64, [InteractionDeliveryResult]))
+    -> Either
+        StoreError
+        (Maybe Int64, [InteractionDeliveryResult])
+flattenAtomicAppendManyResult = \case
     Left err -> Left err
     Right (Left err) -> Left (StoreDataError err)
     Right (Right value) -> Right value
 
-condemnAtomicAppend
+condemnAtomicAppendMany
     :: Text
     -> Transaction.Transaction
-        (Either Text (Maybe Int64, InteractionDeliveryResult))
-condemnAtomicAppend err = do
+        (Either Text (Maybe Int64, [InteractionDeliveryResult]))
+condemnAtomicAppendMany err = do
     Transaction.condemn
     pure (Left err)
+
+-- | Bind an interaction response to the exact candidate turn. Reusing a stale
+-- in-memory intent can no longer make a later, unrelated turn look like a
+-- replay of the earlier atomic append.
+bindDeliveryIntent
+    :: SessionTurn
+    -> InteractionDeliveryIntent
+    -> InteractionDeliveryIntent
+bindDeliveryIntent turn intent =
+    intent
+        { interactionDeliveryIntentTurnFingerprint =
+            Just (turnDeliveryFingerprint turn)
+        }
+
+turnDeliveryFingerprint :: SessionTurn -> Text
+turnDeliveryFingerprint turn =
+    Text.pack
+        (show
+            (hash
+                (TextEncoding.encodeUtf8
+                    (Text.pack
+                        (show
+                            ( turn.sessionTurnUserText
+                            , turn.sessionTurnAssistantText
+                            , turn.sessionTurnError
+                            , turn.sessionTurnResponseId
+                            , turn.sessionTurnEffect
+                            , turn.sessionTurnItems
+                            , turn.sessionTurnUsage
+                            ))))
+                :: Digest SHA256))
 
 deleteSession
     :: StorePool

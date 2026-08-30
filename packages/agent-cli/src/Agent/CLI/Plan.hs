@@ -64,9 +64,11 @@ import Agent.CLI.Style
 import Agent.OsPath (toText)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
+    , PlanEnterRequest(..)
     , PlanModeHooks(..)
     , PlanReviewDecision(..)
     , PlanReviewRequest(..)
+    , legacyPlanQuestionnaireHook
     , planApprovedContinuation
     )
 import Agent.Tools.PlanMode.Document (PlanValidationWarning(..))
@@ -93,8 +95,16 @@ import System.OsPath (OsPath)
 cliPlanHooks :: InterruptState -> IORef Bool -> IO Bool -> PlanModeHooks
 cliPlanHooks interrupt escPaused resolveColor = PlanModeLifecycleHooks
     { planConfirmEnter = withStdinPaused escPaused . confirmEnter resolveColor
+    , planConfirmEnterRequest =
+        withStdinPaused escPaused
+            . confirmEnter resolveColor
+            . (.planEnterReason)
     , planAskQuestion = \q opts ->
         withStdinPaused escPaused (askQuestion interrupt resolveColor q opts)
+    , planAskQuestionnaire =
+        legacyPlanQuestionnaireHook \q opts ->
+            withStdinPaused escPaused
+                (askQuestion interrupt resolveColor q opts)
     , planReviewPlan =
         withStdinPaused escPaused . reviewPlan interrupt resolveColor
     , planQuiesceBeforeActivation = pure (Right ())
@@ -392,21 +402,6 @@ enterChoiceFromIndex :: Int -> PlanEnterChoice
 enterChoiceFromIndex 0 = PlanEnter
 enterChoiceFromIndex _ = PlanStayNormal
 
-decideExit :: InterruptState -> IO Bool -> Text -> IO PlanDecision
-decideExit interrupt resolveColor planBody = do
-    color <- resolveColor
-    isTty <- hIsTerminalDevice stdin
-    putTextLn stderr ""
-    putTextLn stderr (roleMuted color "── plan ──")
-    Text.hPutStrLn stderr (renderPlanMarkdown color planBody)
-    hFlush stderr
-    putTextLn stderr (roleMuted color "──────────")
-    if not isTty
-        then pure PlanCancel
-        else do
-            notifyAttention stderr InputRequested
-            promptDecision interrupt color
-
 reviewPlan
     :: InterruptState
     -> IO Bool
@@ -461,24 +456,6 @@ finishTerminalReview interrupt color = \case
     TerminalPlanDefer -> do
         putTextLn stderr (roleMuted color "plan review closed")
         pure PlanReviewDefer
-
-promptDecision :: InterruptState -> Bool -> IO PlanDecision
-promptDecision interrupt color = do
-    result <-
-        runOverlay
-            (renderPlanExitFrame color)
-            applyPlanExitKey
-            initialPlanExitState
-    case fromMaybe PlanCancel result of
-        PlanApprove -> do
-            putTextLn stderr (roleSuccess color "plan approved")
-            pure PlanApprove
-        PlanCancel -> do
-            putTextLn stderr (roleMuted color "plan abandoned")
-            pure PlanCancel
-        PlanRequestChanges _ -> do
-            notes <- readChangeNotes interrupt color
-            pure (PlanRequestChanges notes)
 
 applyPlanExitKey
     :: PickerKey

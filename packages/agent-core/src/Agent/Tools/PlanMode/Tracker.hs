@@ -110,6 +110,9 @@ planTrackerReminderCount :: PlanTracker -> Word64
 planTrackerReminderCount = (.trackerReminderCount)
 
 requestPlanActivation :: PlanTracker -> PlanTracker
+requestPlanActivation tracker
+    | tracker.trackerPhase == TrackerExitPending
+        || tracker.trackerApprovedContinuation /= Nothing = tracker
 requestPlanActivation tracker =
     bumpRevision $
         case tracker.trackerPhase of
@@ -126,15 +129,12 @@ requestPlanActivation tracker =
                     { trackerReminderCount = 0
                     , trackerReentered = True
                     }
-            TrackerExitPending ->
-                tracker
-                    { trackerPhase = TrackerActive
-                    , trackerPendingApproval = Nothing
-                    , trackerReminderCount = 0
-                    , trackerReentered = True
-                    }
+            TrackerExitPending -> tracker
 
 activatePlanTracker :: PlanTracker -> PlanTracker
+activatePlanTracker tracker
+    | tracker.trackerPhase == TrackerExitPending
+        || tracker.trackerApprovedContinuation /= Nothing = tracker
 activatePlanTracker tracker =
     bumpRevision tracker
         { trackerPhase = TrackerActive
@@ -147,6 +147,8 @@ activatePlanTracker tracker =
         }
 
 deactivatePlanTracker :: Bool -> PlanTracker -> PlanTracker
+deactivatePlanTracker _ tracker
+    | tracker.trackerPhase == TrackerExitPending = tracker
 deactivatePlanTracker emitExitNotice tracker =
     bumpRevision tracker
         { trackerPhase = TrackerInactive
@@ -190,6 +192,9 @@ resolvePlanApproval generation digest resolution tracker =
         Just pending
             | pending.pendingPlanGeneration /= generation
                 || pending.pendingPlanDigest /= digest ->
+                Left PlanTrackerStaleResolution
+            | ApprovePlan continuation <- resolution
+            , continuation.approvedPlanDigest /= digest ->
                 Left PlanTrackerStaleResolution
             | otherwise -> Right $
                 bumpRevision $ case resolution of
