@@ -283,6 +283,9 @@ grepOutputByteLimit = 16 * 1024 * 1024
 grepDiagnosticByteLimit :: Int
 grepDiagnosticByteLimit = 1024 * 1024
 
+grepLineByteLimit :: Int
+grepLineByteLimit = 256 * 1024
+
 readBoundedStdout
     :: ProcessHandle
     -> Handle
@@ -290,36 +293,14 @@ readBoundedStdout
     -> Int
     -> IO GrepCapture
 readBoundedStdout processHandle handle lineLimit byteLimit =
-    go [] 0 0
+    go BS.empty [] 0 0
   where
-    go reversed totalBytes totalLines = do
+    go pending reversed totalBytes totalLines = do
         chunk <- BS.hGetSome handle 32768
         if BS.null chunk
-            then pure (finish reversed GrepComplete)
-            else do
-                let remainingBytes = max 0 (byteLimit - totalBytes)
-                    withinBytes = BS.take remainingBytes chunk
-                    neededLines = max 0 (lineLimit - totalLines)
-                    (kept, hitLineLimit) =
-                        takeThroughNewlines neededLines withinBytes
-                    hitByteLimit =
-                        BS.length chunk > remainingBytes
-                            || (remainingBytes == 0
-                                && not (BS.null chunk))
-                    nextReversed =
-                        if BS.null kept then reversed else kept : reversed
-                    nextBytes = totalBytes + BS.length kept
-                    nextLines = totalLines + BS.count 10 kept
-                    truncation
-                        | hitLineLimit = GrepLineTruncated
-                        | hitByteLimit = GrepByteTruncated
-                        | otherwise = GrepComplete
-                if truncation == GrepComplete
-                    then go nextReversed nextBytes nextLines
-                    else do
-                        void (tryAny (terminateProcess processHandle))
-                        drainHandle handle
-                        pure (finish nextReversed truncation)
+            then finishPending pending reversed totalBytes
+            else consume (if BS.null pending then chunk else pending <> chunk)
+                reversed totalBytes totalLines
 
     finish reversed truncation =
         GrepCapture
@@ -327,16 +308,69 @@ readBoundedStdout processHandle handle lineLimit byteLimit =
             , captureTruncation = truncation
             }
 
-takeThroughNewlines
-    :: Int
-    -> BS.ByteString
-    -> (BS.ByteString, Bool)
-takeThroughNewlines needed bytes
-    | needed <= 0 = (BS.empty, not (BS.null bytes))
-    | otherwise =
-        case drop (needed - 1) (BS.elemIndices 10 bytes) of
-            index : _ -> (BS.take (index + 1) bytes, True)
-            [] -> (bytes, False)
+    consume bytes reversed totalBytes totalLines =
+        case BS.elemIndex 10 bytes of
+            Nothing
+                | BS.length bytes > grepLineByteLimit ->
+                    truncateAndDrain
+                        (BS.take (min grepLineByteLimit
+                            (max 0 (byteLimit - totalBytes))) bytes)
+                        reversed
+                        GrepLineTruncated
+                | otherwise ->
+                    go bytes reversed totalBytes totalLines
+            Just newlineIndex -> do
+                let line = BS.take (newlineIndex + 1) bytes
+                    remainingBytes = max 0 (byteLimit - totalBytes)
+                if BS.length line > grepLineByteLimit
+                    then truncateAndDrain
+                        (BS.take (min grepLineByteLimit remainingBytes) line)
+                        reversed
+                        GrepLineTruncated
+                else if BS.length line > remainingBytes
+                    then truncateAndDrain
+                        (BS.take remainingBytes line)
+                        reversed
+                        GrepByteTruncated
+                    else
+                        let nextReversed =
+                                if BS.null line then reversed else line : reversed
+                            nextBytes = totalBytes + BS.length line
+                        in if totalLines + 1 >= lineLimit
+                            then truncateAndDrain
+                                BS.empty
+                                nextReversed
+                                GrepLineTruncated
+                            else
+                                consume
+                                    (BS.drop (newlineIndex + 1) bytes)
+                                    nextReversed
+                                    nextBytes
+                                    (totalLines + 1)
+
+    finishPending pending reversed totalBytes
+        | BS.null pending = pure (finish reversed GrepComplete)
+        | otherwise =
+            let remainingBytes = max 0 (byteLimit - totalBytes)
+                keep = BS.take
+                    (min grepLineByteLimit remainingBytes)
+                    pending
+                truncation
+                    | BS.length pending > remainingBytes =
+                        GrepByteTruncated
+                    | BS.length pending > grepLineByteLimit =
+                        GrepLineTruncated
+                    | otherwise = GrepComplete
+                nextReversed =
+                    if BS.null keep then reversed else keep : reversed
+            in pure (finish nextReversed truncation)
+
+    truncateAndDrain kept reversed truncation = do
+        void (tryAny (terminateProcess processHandle))
+        drainHandle handle
+        pure (finish
+            (if BS.null kept then reversed else kept : reversed)
+            truncation)
 
 data DiagnosticCapture = DiagnosticCapture
     { diagnosticBytes :: !BS.ByteString
