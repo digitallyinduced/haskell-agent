@@ -172,6 +172,15 @@ spec = do
             commandUsesHardcodedSystemTmp "cat /private//tmp/input.txt"
                 `shouldBe` True
 
+        it "normalizes absolute aliases of the shared temp roots" do
+            map commandUsesHardcodedSystemTmp
+                [ "touch /usr/../tmp/output"
+                , "cat /var/../private/tmp/input"
+                , "touch /var/cache/../../tmp/output"
+                , "cat '/usr/local/../../private//tmp/input'"
+                ]
+                `shouldBe` replicate 4 True
+
         it "allows session temp variables and unrelated tmp path components" do
             commandUsesHardcodedSystemTmp "touch \"$TMPDIR/result.png\""
                 `shouldBe` False
@@ -183,6 +192,13 @@ spec = do
             commandUsesHardcodedSystemTmp "cat build/tmp/result.png"
                 `shouldBe` False
             commandUsesHardcodedSystemTmp "curl https://example.test/tmp/file"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp
+                "curl https://example.test/usr/../tmp/file"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp "cat /usr/../tmpfile"
+                `shouldBe` False
+            commandUsesHardcodedSystemTmp "cat /usr/../private/tmpfile"
                 `shouldBe` False
 
     describe "shellCommandBlocked" do

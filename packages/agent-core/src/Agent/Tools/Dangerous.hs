@@ -50,10 +50,12 @@ forbiddenRmRfReason command =
 -- quoted data, heredocs, URLs, or nested programs. Instead, require the
 -- environment variable that the runtime points at the session-private temp
 -- directory. This is intentionally best-effort rather than a shell parser; it
--- recognizes an absolute path at a token-like boundary while avoiding ordinary
--- URL path components and names such as @/tmpfile@.
+-- recognizes absolute paths at token-like boundaries, lexically normalizes
+-- dot/parent components, and avoids ordinary URL path components and names
+-- such as @/tmpfile@.
 commandUsesHardcodedSystemTmp :: Text -> Bool
-commandUsesHardcodedSystemTmp = go Nothing
+commandUsesHardcodedSystemTmp command =
+    go Nothing command || normalizedAbsolutePathTargetsTemp command
   where
     go previous remaining
         | Text.null remaining = False
@@ -94,6 +96,37 @@ commandUsesHardcodedSystemTmp = go Nothing
         Text.null suffix
             || Text.head suffix == '/'
             || not (isPathNameChar (Text.head suffix))
+
+    normalizedAbsolutePathTargetsTemp = scan Nothing
+      where
+        scan previous remaining
+            | Text.null remaining = False
+            | pathBoundaryBefore previous
+            , Text.head remaining == '/' =
+                let (candidate, _) =
+                        Text.span isAbsolutePathChar remaining
+                in normalizedPathTargetsTemp candidate
+                    || advance remaining
+            | otherwise = advance remaining
+          where
+            advance text =
+                scan (Just (Text.head text)) (Text.tail text)
+
+        isAbsolutePathChar char =
+            char == '/' || isPathNameChar char
+
+        normalizedPathTargetsTemp path =
+            case reverse (foldl normalizeComponent [] (Text.splitOn "/" path)) of
+                "tmp" : _ -> True
+                "private" : "tmp" : _ -> True
+                _ -> False
+
+        -- The accumulator is reversed, so an absolute parent component pops
+        -- the most recent ordinary component and clamps at the root.
+        normalizeComponent components component
+            | Text.null component || component == "." = components
+            | component == ".." = drop 1 components
+            | otherwise = component : components
 
     -- A preceding URL/path character means this slash is a path component,
     -- rather than the beginning of an absolute temp path.
