@@ -73,6 +73,27 @@ spec = describe "grepTool" do
                     (functionToolCall "grep-3" "grep"
                         "{\"pattern\":\"[\"}")
                 result.output `shouldContain` "ERR"
+    it "preserves no-match and context behavior" do
+        findExecutable "rg" >>= \case
+            Nothing -> pendingWith "rg is not installed"
+            Just _ -> withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                    source = workspace </> "context.txt"
+                createDirectory workspace
+                writeFile source "before\nneedle\nafter\n"
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                noMatch <- dispatchToolCall testConfig
+                    [(grepTool env).appToolHandler]
+                    (functionToolCall "grep-4" "grep"
+                        "{\"pattern\":\"absent\"}")
+                noMatch.output `shouldBe` "No matches found."
+                context <- dispatchToolCall testConfig
+                    [(grepTool env).appToolHandler]
+                    (functionToolCall "grep-5" "grep"
+                        "{\"pattern\":\"needle\",\"-C\":1}")
+                context.output `shouldContain` "before"
+                context.output `shouldContain` "needle"
+                context.output `shouldContain` "after"
 
 testConfig :: ToolDispatchConfig
 testConfig = ToolDispatchConfig
