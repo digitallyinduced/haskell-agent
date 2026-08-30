@@ -9,6 +9,11 @@ module Agent.CLI.MacOS.Bridge
     , browserStatusMessage
     , browserToolsWhenEnabled
     , invokeBrowserCommand
+    , repositoryCancelAllAdmissionSmoke
+    , repositoryCancelClassificationSmoke
+    , repositoryCancelAllReentrancySmoke
+    , repositoryCheckDestroyReentrancySmoke
+    , repositoryTerminalThrowSmoke
     , TurnStart(..)
     , nativeTurnArguments
     ) where
@@ -136,6 +141,8 @@ import Agent.CLI.Project
     )
 import Agent.CLI.Render
     ( summarizeToolCall )
+import qualified Agent.CLI.RepositoryDelivery as RepositoryDelivery
+import qualified Agent.CLI.RepositoryReview as RepositoryReview
 import Agent.CLI.Options (parseEffort)
 import Agent.CLI.Session
     ( SessionMeta(..)
@@ -168,11 +175,19 @@ import Agent.ToolDispatch
     , ToolCallKind(..)
     )
 import Agent.Tools.Types (AppTool)
-import Control.Concurrent (forkFinally, forkIO)
+import Control.Concurrent
+    ( ThreadId
+    , forkFinally
+    , forkIO
+    , myThreadId
+    , threadDelay
+    )
 import Control.Concurrent.Async
     ( Async
+    , asyncWithUnmask
     , cancel
     , mapConcurrently
+    , waitCatch
     , waitCatchSTM
     , withAsync
     )
@@ -185,6 +200,7 @@ import Control.Concurrent.MVar
     , putMVar
     , readMVar
     , withMVar
+    , tryReadMVar
     )
 import Control.Concurrent.STM
     ( TMVar
@@ -202,14 +218,23 @@ import Control.Concurrent.STM
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
-    ( SomeException
+    ( SomeAsyncException
+    , SomeException
     , bracket
+    , catchAsync
     , finally
+    , isAsyncException
+    , mask
+    , onException
+    , throwIO
+    , throwString
     , tryAny
+    , uninterruptibleMask_
     )
 import Control.Monad
     ( forM_
     , void
+    , when
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson
@@ -219,16 +244,20 @@ import Data.Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (ord)
+import Data.Either (isRight)
 import Data.IORef
-    ( newIORef
+    ( IORef
+    , newIORef
     , readIORef
     , writeIORef
     )
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -251,6 +280,7 @@ import Foreign
     , peek
     , poke
     , plusPtr
+    , poke
     , peekByteOff
     , sizeOf
     )
@@ -262,6 +292,7 @@ import System.Directory
     , removeFile
     )
 import System.Directory.OsPath (getHomeDirectory)
+import qualified System.Exit
 import System.IO
     ( IOMode(WriteMode)
     , hClose
@@ -292,6 +323,11 @@ withText value action = BS.useAsCStringLen (TextEncoding.encodeUtf8 value) \(poi
 
 withOptionalText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
 withOptionalText value action = withText (fromMaybe "" value) action
+
+withNullableText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
+withNullableText value action = case value of
+    Nothing -> action nullPtr 0
+    Just text -> withText text action
 
 type EventCallback = Ptr () -> Ptr Word8 -> CSize -> IO ()
 
@@ -384,6 +420,67 @@ type McpServerFieldCallback =
 
 type McpResultCallback =
     Ptr () -> CInt -> Word64 -> CString -> CSize -> IO ()
+type RepositorySnapshotCallback =
+    Ptr ()
+    -> CString -> CSize -- snapshot id
+    -> CString -> CSize -- repository root
+    -> CString -> CSize -- HEAD, empty for unborn
+    -> CString -> CSize -- index fingerprint
+    -> CString -> CSize -- worktree fingerprint
+    -> IO ()
+
+type RepositoryFileCallback =
+    Ptr ()
+    -> CString -> CSize -- path
+    -> CString -> CSize -- original path, null when absent
+    -> CInt -- index status byte
+    -> CInt -- worktree status byte
+    -> IO ()
+
+type RepositoryDiffCallback =
+    Ptr () -> Ptr Word8 -> CSize -> CInt -> IO ()
+
+type RepositoryHunkCallback =
+    Ptr () -> CLLong -> CLLong -> CLLong -> CLLong
+    -> CString -> CSize -> IO ()
+
+type RepositoryResultCallback =
+    Ptr () -> CInt
+    -> CString -> CSize -- current snapshot id on success/stale
+    -> CString -> CSize -- error
+    -> IO ()
+
+type RepositoryDeliveryStatusCallback =
+    Ptr () -> CInt
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CLLong -> CLLong -> CString -> CSize -> IO ()
+
+type RepositoryPushPreviewCallback =
+    Ptr () -> CInt -> CString -> CSize -> CLLong
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CLLong -> CLLong -> CString -> CSize -> IO ()
+
+type RepositoryPushResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> IO ()
+
+type RepositoryPullRequestPreviewCallback =
+    Ptr () -> CInt -> CString -> CSize -> CLLong
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> IO ()
+
+type RepositoryPullRequestResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
+
+type RepositoryCheckOutputCallback =
+    Ptr () -> CInt -> Ptr Word8 -> CSize -> IO ()
+
+type RepositoryCheckExitCallback =
+    Ptr () -> CInt -> CInt -> CString -> CSize -> IO ()
 
 foreign import ccall "dynamic"
     invokeEventCallback :: FunPtr EventCallback -> EventCallback
@@ -445,6 +542,59 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeMcpResultCallback
         :: FunPtr McpResultCallback -> McpResultCallback
+
+foreign import ccall "dynamic"
+    invokeRepositorySnapshotCallback
+        :: FunPtr RepositorySnapshotCallback -> RepositorySnapshotCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryFileCallback
+        :: FunPtr RepositoryFileCallback -> RepositoryFileCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryDiffCallback
+        :: FunPtr RepositoryDiffCallback -> RepositoryDiffCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryHunkCallback
+        :: FunPtr RepositoryHunkCallback -> RepositoryHunkCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryResultCallback
+        :: FunPtr RepositoryResultCallback -> RepositoryResultCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryDeliveryStatusCallback
+        :: FunPtr RepositoryDeliveryStatusCallback
+        -> RepositoryDeliveryStatusCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPushPreviewCallback
+        :: FunPtr RepositoryPushPreviewCallback
+        -> RepositoryPushPreviewCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPushResultCallback
+        :: FunPtr RepositoryPushResultCallback
+        -> RepositoryPushResultCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPullRequestPreviewCallback
+        :: FunPtr RepositoryPullRequestPreviewCallback
+        -> RepositoryPullRequestPreviewCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryPullRequestResultCallback
+        :: FunPtr RepositoryPullRequestResultCallback
+        -> RepositoryPullRequestResultCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryCheckOutputCallback
+        :: FunPtr RepositoryCheckOutputCallback -> RepositoryCheckOutputCallback
+
+foreign import ccall "dynamic"
+    invokeRepositoryCheckExitCallback
+        :: FunPtr RepositoryCheckExitCallback -> RepositoryCheckExitCallback
 
 data BridgeRequest = BridgeRequest
     { requestId :: !Text
@@ -1033,6 +1183,1222 @@ mcpAdminTry action =
         Left exception ->
             pure (Left (McpAdminInvalid (Text.pack (show exception))))
         Right result -> pure result
+foreign export ccall ha_repository_snapshot
+    :: Ptr Word8 -> CSize
+    -> FunPtr RepositorySnapshotCallback
+    -> FunPtr RepositoryFileCallback
+    -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_diff
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryDiffCallback
+    -> FunPtr RepositoryHunkCallback
+    -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_apply_path
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
+    -> Ptr Word8 -> CSize -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_apply_hunks
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
+    -> Ptr Word8 -> CSize -> Ptr CSize -> CSize
+    -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_commit
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_delivery_status
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_push_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_push_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_pr_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_pr_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_repository_cancel_all :: IO ()
+
+foreign export ccall ha_repository_check_start
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr () -> CSize
+    -> FunPtr RepositoryCheckOutputCallback
+    -> FunPtr RepositoryCheckExitCallback
+    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
+
+foreign export ccall ha_repository_check_cancel :: Ptr () -> IO ()
+
+foreign export ccall ha_repository_check_destroy :: Ptr () -> IO ()
+
+ha_repository_snapshot
+    :: Ptr Word8 -> CSize
+    -> FunPtr RepositorySnapshotCallback
+    -> FunPtr RepositoryFileCallback
+    -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
+    resultCallback context
+    | snapshotCallback == nullFunPtr
+        || fileCallback == nullFunPtr
+        || resultCallback == nullFunPtr = pure 1
+    | otherwise =
+        copyRequiredText pathBytes pathLength >>= \case
+            Left _ -> pure 2
+            Right path -> do
+                started <- startRepositoryWorker
+                    (emitRepositoryCancelled resultCallback context) do
+                    tryRepositorySynchronous
+                        (RepositoryReview.repositorySnapshot (Text.unpack path))
+                        >>= \case
+                            Left exception ->
+                                pure
+                                    (emitRepositoryFailure
+                                        resultCallback
+                                        context
+                                        (Text.pack (show exception)))
+                            Right (Left err) ->
+                                pure
+                                    (emitRepositoryError
+                                        resultCallback context err)
+                            Right (Right snapshot) -> do
+                                streamed <- tryRepositorySynchronous do
+                                    withRepositorySnapshot snapshot $
+                                        invokeRepositorySnapshotCallback
+                                            snapshotCallback
+                                            context
+                                    forM_ snapshot.snapshotFiles \file ->
+                                        withText
+                                            (Text.pack file.repositoryFilePath)
+                                            \pathPtr pathSize ->
+                                        withNullableText
+                                            (Text.pack
+                                                <$> file.repositoryFileOriginalPath)
+                                            \originalPtr originalSize ->
+                                                invokeRepositoryFileCallback
+                                                    fileCallback
+                                                    context
+                                                    pathPtr pathSize
+                                                    originalPtr originalSize
+                                                    (fromIntegral
+                                                        (ord
+                                                            file.repositoryFileIndexStatus))
+                                                    (fromIntegral
+                                                        (ord
+                                                            file.repositoryFileWorktreeStatus))
+                                case streamed of
+                                    Left exception ->
+                                        pure
+                                            (emitRepositoryFailure
+                                                resultCallback
+                                                context
+                                                (Text.pack (show exception)))
+                                    Right () ->
+                                        pure
+                                            (emitRepositorySuccess
+                                                resultCallback
+                                                context
+                                                snapshot.snapshotId)
+                pure (if started then 0 else 3)
+
+ha_repository_diff
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryDiffCallback
+    -> FunPtr RepositoryHunkCallback
+    -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
+    diffKind fileBytes fileLength diffCallback hunkCallback resultCallback context
+    | diffCallback == nullFunPtr
+        || hunkCallback == nullFunPtr
+        || resultCallback == nullFunPtr = pure 1
+    | otherwise =
+        copyRequiredTexts
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (fileBytes, fileLength)
+            ] >>= \case
+                Left _ -> pure 2
+                Right [path, expected, file] ->
+                    case repositoryDiffKind diffKind of
+                        Nothing -> pure 2
+                        Just kind -> do
+                            started <- startRepositoryWorker
+                                (emitRepositoryCancelled resultCallback context) do
+                                tryRepositorySynchronous
+                                    (RepositoryReview.repositoryDiff
+                                        (Text.unpack path)
+                                        expected
+                                        kind
+                                        (Text.unpack file))
+                                    >>= \case
+                                        Left exception ->
+                                            pure
+                                                (emitRepositoryFailure
+                                                    resultCallback
+                                                    context
+                                                    (Text.pack (show exception)))
+                                        Right (Left err) ->
+                                            pure
+                                                (emitRepositoryError
+                                                    resultCallback context err)
+                                        Right (Right diff) -> do
+                                            streamed <- tryRepositorySynchronous do
+                                                forM_
+                                                    (byteStringChunks
+                                                        (64 * 1024)
+                                                        diff.repositoryDiffPatch)
+                                                    \chunk ->
+                                                        BS.useAsCStringLen chunk
+                                                            \(pointer, length) ->
+                                                                invokeRepositoryDiffCallback
+                                                                    diffCallback
+                                                                    context
+                                                                    (castPtr pointer)
+                                                                    (fromIntegral length)
+                                                                    (if
+                                                                        diff.repositoryDiffBinary
+                                                                        then 1
+                                                                        else 0)
+                                                forM_
+                                                    diff.repositoryDiffHunks
+                                                    \hunk ->
+                                                        withText
+                                                            hunk.hunkHeader
+                                                            \headerPtr
+                                                                headerLength ->
+                                                                    invokeRepositoryHunkCallback
+                                                                        hunkCallback
+                                                                        context
+                                                                        (fromIntegral hunk.hunkOldStart)
+                                                                        (fromIntegral hunk.hunkOldCount)
+                                                                        (fromIntegral hunk.hunkNewStart)
+                                                                        (fromIntegral hunk.hunkNewCount)
+                                                                        headerPtr
+                                                                        headerLength
+                                            case streamed of
+                                                Left exception ->
+                                                    pure
+                                                        (emitRepositoryFailure
+                                                            resultCallback
+                                                            context
+                                                            (Text.pack
+                                                                (show exception)))
+                                                Right () ->
+                                                    pure
+                                                        (emitRepositorySuccess
+                                                            resultCallback
+                                                            context
+                                                            expected)
+                            pure (if started then 0 else 3)
+                Right _ -> pure 3
+
+ha_repository_apply_path
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
+    -> Ptr Word8 -> CSize -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+ha_repository_apply_path pathBytes pathLength snapshotBytes snapshotLength
+    operation fileBytes fileLength callback context
+    | callback == nullFunPtr = pure 1
+    | otherwise =
+        copyRequiredTexts
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (fileBytes, fileLength)
+            ] >>= \case
+                Left _ -> pure 2
+                Right [path, expected, file] ->
+                    case repositoryPathMutation operation (Text.unpack file) of
+                        Nothing -> pure 2
+                        Just mutation -> do
+                            started <- startRepositoryMutation
+                                callback context (Text.unpack path) expected mutation
+                            pure (if started then 0 else 3)
+                Right _ -> pure 3
+
+ha_repository_apply_hunks
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
+    -> Ptr Word8 -> CSize -> Ptr CSize -> CSize
+    -> FunPtr RepositoryResultCallback
+    -> Ptr () -> IO CInt
+ha_repository_apply_hunks pathBytes pathLength snapshotBytes snapshotLength
+    operation fileBytes fileLength hunkIndices hunkCount callback context
+    | callback == nullFunPtr = pure 1
+    | hunkIndices == nullPtr || hunkCount == 0 = pure 2
+    | hunkCount > 4096 = pure 2
+    | fromIntegral hunkCount
+        > (maxBound :: Int) `div` sizeOf (undefined :: CSize) = pure 2
+    | otherwise =
+        copyRequiredTexts
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (fileBytes, fileLength)
+            ]
+            >>= \case
+                Left _ -> pure 2
+                Right [path, expected, file] -> do
+                    rawIndices <- mapM
+                        (\index ->
+                            (peekByteOff
+                                    hunkIndices
+                                    (index * sizeOf (undefined :: CSize))
+                                    :: IO CSize))
+                        [0 .. fromIntegral hunkCount - 1]
+                    if any
+                        ((> toInteger (maxBound :: Int)) . toInteger)
+                        rawIndices
+                        then pure 2
+                        else
+                            case repositoryHunkMutation
+                                operation
+                                (Text.unpack file)
+                                (map fromIntegral rawIndices) of
+                                    Nothing -> pure 2
+                                    Just mutation -> do
+                                        started <- startRepositoryMutation
+                                            callback
+                                            context
+                                            (Text.unpack path)
+                                            expected
+                                            mutation
+                                        pure (if started then 0 else 3)
+                Right _ -> pure 3
+
+ha_repository_commit
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryResultCallback -> Ptr () -> IO CInt
+ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
+    messageBytes messageLength callback context
+    | callback == nullFunPtr = pure 1
+    | otherwise =
+        copyRequiredTexts
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (messageBytes, messageLength)
+            ] >>= \case
+                Left _ -> pure 2
+                Right [path, expected, message] -> do
+                    started <- startRepositoryWorker
+                        (emitRepositoryCancelled callback context) $
+                        prepareRepositoryResult callback context $
+                            (RepositoryReview.commitRepository
+                                (Text.unpack path)
+                                expected
+                                message)
+                    pure (if started then 0 else 3)
+                Right _ -> pure 3
+
+ha_repository_delivery_status
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
+ha_repository_delivery_status pathBytes pathLength snapshotBytes snapshotLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid
+            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
+                Right [path, snapshot] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitDeliveryStatusFailure callback context (-3)
+                                "repository delivery was cancelled") $
+                        prepareDeliveryResult terminal
+                            (RepositoryDelivery.repositoryDeliveryStatus
+                                (Text.unpack path)
+                                snapshot)
+                            (emitDeliveryStatusFailure callback context (-1)
+                                "repository delivery failed")
+                            (emitDeliveryStatusFailure callback context)
+                            (emitDeliveryStatus callback context)
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_push_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
+ha_repository_push_preview pathBytes pathLength snapshotBytes snapshotLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid
+            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
+                Right [path, snapshot] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPushPreviewFailure callback context (-3)
+                                "repository push preview was cancelled") $
+                        prepareDeliveryResult terminal
+                            (RepositoryDelivery.previewRepositoryPush
+                                (Text.unpack path)
+                                snapshot)
+                            (emitPushPreviewFailure callback context (-1)
+                                "repository push preview failed")
+                            (emitPushPreviewFailure callback context)
+                            (emitPushPreview callback context)
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_push_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
+ha_repository_push_confirm pathBytes pathLength tokenBytes tokenLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
+            pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
+                Right [path, token] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPushResultFailure callback context (-3)
+                                "repository push was cancelled") $
+                        prepareDeliveryResult terminal
+                            (RepositoryDelivery.confirmRepositoryPush
+                                (Text.unpack path)
+                                token)
+                            (emitPushResultFailure callback context (-1)
+                                "repository push failed")
+                            (emitPushResultFailure callback context)
+                            (\status ->
+                                        withText status.deliverySnapshotId
+                                            \snapshotPtr snapshotSize ->
+                                        withText status.deliveryHeadOid
+                                            \headPtr headSize ->
+                                                invokeRepositoryPushResultCallback
+                                                    callback context 0
+                                                    snapshotPtr snapshotSize
+                                                    headPtr headSize
+                                                    nullPtr 0)
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_pr_preview
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
+ha_repository_pr_preview pathBytes pathLength snapshotBytes snapshotLength
+    baseBytes baseLength titleBytes titleLength bodyBytes bodyLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid
+            snapshotBytes snapshotLength deliveryTokenLimit)
+        || not (deliveryInputValid baseBytes baseLength deliveryRefLimit)
+        || not (deliveryInputValid titleBytes titleLength deliveryTitleLimit)
+        || not (deliveryInputValid bodyBytes bodyLength deliveryBodyLimit) =
+            pure 2
+    | otherwise =
+        copyRequiredTexts
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (baseBytes, baseLength)
+            , (titleBytes, titleLength)
+            , (bodyBytes, bodyLength)
+            ] >>= \case
+                Right [path, snapshot, base, title, body] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPullRequestPreviewFailure
+                                callback context (-3)
+                                "pull-request preview was cancelled") $
+                        prepareDeliveryResult terminal
+                            (RepositoryDelivery.previewPullRequest
+                                (Text.unpack path)
+                                snapshot base title body)
+                            (emitPullRequestPreviewFailure
+                                callback context (-1)
+                                "pull-request preview failed")
+                            (emitPullRequestPreviewFailure callback context)
+                            (emitPullRequestPreview callback context)
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+ha_repository_pr_confirm
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
+ha_repository_pr_confirm pathBytes pathLength tokenBytes tokenLength
+    callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
+        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
+            pure 2
+    | otherwise =
+        copyRequiredTexts
+            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
+                Right [path, token] -> do
+                    terminal <- newMVar False
+                    started <- startRepositoryWorker
+                        (emitDeliveryOnce terminal $
+                            emitPullRequestResultFailure callback context (-3)
+                                "pull-request creation was cancelled") $
+                        prepareDeliveryResult terminal
+                            (RepositoryDelivery.createPullRequest
+                                (Text.unpack path)
+                                token)
+                            (emitPullRequestResultFailure callback context (-1)
+                                "pull-request creation failed")
+                            (emitPullRequestResultFailure callback context)
+                            (\url ->
+                                        withText url \urlPtr urlSize ->
+                                            invokeRepositoryPullRequestResultCallback
+                                                callback context 0
+                                                urlPtr urlSize nullPtr 0)
+                    pure (if started then 0 else 3)
+                _ -> pure 2
+
+startRepositoryMutation
+    :: FunPtr RepositoryResultCallback
+    -> Ptr ()
+    -> FilePath
+    -> Text
+    -> RepositoryReview.RepositoryMutation
+    -> IO Bool
+startRepositoryMutation callback context path expected mutation =
+    startRepositoryWorker (emitRepositoryCancelled callback context) $
+        prepareRepositoryResult callback context $
+            (RepositoryReview.mutateRepository path expected mutation)
+
+prepareRepositoryResult
+    :: FunPtr RepositoryResultCallback
+    -> Ptr ()
+    -> IO
+        (Either
+            RepositoryReview.RepositoryError
+            RepositoryReview.RepositorySnapshot)
+    -> IO (IO ())
+prepareRepositoryResult callback context action =
+    tryRepositorySynchronous action >>= \case
+        Left exception ->
+            pure
+                (emitRepositoryFailure callback context
+                    (Text.pack (show exception)))
+        Right (Left err) ->
+            pure (emitRepositoryError callback context err)
+        Right (Right snapshot) ->
+            pure
+                (emitRepositorySuccess
+                    callback context snapshot.snapshotId)
+
+startRepositoryWorker :: IO () -> IO (IO ()) -> IO Bool
+startRepositoryWorker onCancelled prepare =
+    tryRepositorySynchronous
+        (mask \_ -> do
+            gate <- newEmptyMVar
+            admitted <- modifyMVar repositoryWorkers \state ->
+                case state.repositoryWorkerBarrier of
+                    Just _ -> pure (state, False)
+                    Nothing -> do
+                        let workerId = state.repositoryWorkerNextId
+                        worker <- asyncWithUnmask \unmask -> do
+                            withRepositoryCallbackThread
+                                (((Just <$> (readMVar gate >> unmask prepare))
+                                    `catchAsync`
+                                        \(_ :: SomeAsyncException) ->
+                                            onCancelled >> pure Nothing)
+                                    >>= mapM_ id)
+                                `finally`
+                                unregisterRepositoryWorker workerId
+                        pure
+                            ( state
+                                { repositoryWorkerNextId = workerId + 1
+                                , repositoryWorkerActive =
+                                    Map.insert
+                                        workerId
+                                        worker
+                                        state.repositoryWorkerActive
+                                }
+                            , True
+                            )
+            when admitted (putMVar gate ())
+            pure admitted)
+        >>= \case
+            Left _ -> pure False
+            Right admitted -> pure admitted
+
+unregisterRepositoryWorker :: Int -> IO ()
+unregisterRepositoryWorker workerId =
+    modifyMVar repositoryWorkers \state ->
+        pure
+            ( state
+                { repositoryWorkerActive =
+                    Map.delete workerId state.repositoryWorkerActive
+                }
+            , ()
+            )
+
+ha_repository_cancel_all :: IO ()
+ha_repository_cancel_all =
+    isRepositoryCallbackThread >>= \case
+        True -> pure ()
+        False -> mask \restore -> do
+            admission <- modifyMVar repositoryWorkers \state ->
+                case state.repositoryWorkerBarrier of
+                    Just barrier ->
+                        pure (state, Left barrier)
+                    Nothing -> do
+                        barrier <- newEmptyMVar
+                        pure
+                            ( state
+                                { repositoryWorkerActive = Map.empty
+                                , repositoryWorkerBarrier = Just barrier
+                                }
+                            , Right
+                                ( barrier
+                                , Map.elems state.repositoryWorkerActive
+                                )
+                            )
+            case admission of
+                Left activeBarrier -> restore (readMVar activeBarrier)
+                Right (barrier, workers) ->
+                    restore
+                        (mapM_ cancel workers >> mapM_ waitCatch workers)
+                        `finally` do
+                            modifyMVar repositoryWorkers \state ->
+                                pure
+                                    ( state
+                                        { repositoryWorkerBarrier = Nothing }
+                                    , ()
+                                    )
+                            putMVar barrier ()
+
+-- Deterministic regression hook for the admission-barrier lifecycle. This is
+-- a Haskell test hook, not part of the C ABI.
+repositoryCancelAllAdmissionSmoke :: IO Bool
+repositoryCancelAllAdmissionSmoke = do
+    entered <- newEmptyMVar
+    cancelled <- newEmptyMVar
+    firstAccepted <- startRepositoryWorker (putMVar cancelled ()) do
+        putMVar entered ()
+        uninterruptibleMask_ (threadDelay 250_000)
+        pure (pure ())
+    if not firstAccepted
+        then pure False
+        else do
+            readMVar entered
+            withAsync ha_repository_cancel_all \canceller -> do
+                rejectedDuringBarrier <- awaitRejection 1000
+                _ <- waitCatch canceller
+                cancellationDelivered <- readMVar cancelled >> pure True
+                completed <- newEmptyMVar
+                acceptedAfter <- startRepositoryWorker
+                    (pure ())
+                    (pure (putMVar completed ()))
+                finishedAfter <- if acceptedAfter
+                    then readMVar completed >> pure True
+                    else pure False
+                pure
+                    ( rejectedDuringBarrier
+                        && cancellationDelivered
+                        && finishedAfter
+                    )
+  where
+    awaitRejection attempts
+        | attempts <= (0 :: Int) = pure False
+        | otherwise =
+            startRepositoryWorker (pure ()) (pure (pure ())) >>= \case
+                False -> pure True
+                True -> threadDelay 1000 >> awaitRejection (attempts - 1)
+
+repositoryCancelAllReentrancySmoke :: IO Bool
+repositoryCancelAllReentrancySmoke = do
+    completed <- newEmptyMVar
+    accepted <- startRepositoryWorker (pure ()) do
+        pure do
+            ha_repository_cancel_all
+            putMVar completed ()
+    if accepted
+        then readMVar completed >> pure True
+        else pure False
+
+repositoryCancelClassificationSmoke :: IO Bool
+repositoryCancelClassificationSmoke = do
+    entered <- newEmptyMVar
+    cancelled <- newEmptyMVar
+    synthesizedFailure <- newEmptyMVar
+    accepted <- startRepositoryWorker (putMVar cancelled ()) do
+        putMVar entered ()
+        tryRepositorySynchronous (threadDelay 30_000_000) >>= \case
+            Left _ -> putMVar synthesizedFailure ()
+            Right () -> pure ()
+        pure (pure ())
+    if not accepted
+        then pure False
+        else do
+            readMVar entered
+            ha_repository_cancel_all
+            cancellation <- tryReadMVar cancelled
+            failure <- tryReadMVar synthesizedFailure
+            pure (isJust cancellation && isNothing failure)
+
+repositoryTerminalThrowSmoke :: IO Bool
+repositoryTerminalThrowSmoke = do
+    cancelled <- newEmptyMVar
+    terminal <- newEmptyMVar
+    finished <- newEmptyMVar
+    accepted <- startRepositoryWorker (putMVar cancelled ()) do
+        pure
+            ((putMVar terminal () >> throwString "terminal callback failed")
+                `finally` putMVar finished ())
+    if not accepted
+        then pure False
+        else do
+            readMVar terminal
+            readMVar finished
+            ha_repository_cancel_all
+            cancellation <- tryReadMVar cancelled
+            pure (isNothing cancellation)
+
+{-# NOINLINE repositoryWorkers #-}
+repositoryWorkers :: MVar RepositoryWorkerState
+repositoryWorkers = unsafePerformIO
+    (newMVar RepositoryWorkerState
+        { repositoryWorkerNextId = 0
+        , repositoryWorkerActive = Map.empty
+        , repositoryWorkerBarrier = Nothing
+        })
+
+data RepositoryWorkerState = RepositoryWorkerState
+    { repositoryWorkerNextId :: !Int
+    , repositoryWorkerActive :: !(Map Int (Async ()))
+    , repositoryWorkerBarrier :: !(Maybe (MVar ()))
+    }
+
+{-# NOINLINE repositoryCallbackThreads #-}
+repositoryCallbackThreads :: MVar (Set.Set ThreadId)
+repositoryCallbackThreads = unsafePerformIO (newMVar Set.empty)
+
+withRepositoryCallbackThread :: IO value -> IO value
+withRepositoryCallbackThread action = do
+    thread <- myThreadId
+    modifyMVar repositoryCallbackThreads \threads ->
+        pure (Set.insert thread threads, ())
+    action `finally`
+        modifyMVar repositoryCallbackThreads \threads ->
+            pure (Set.delete thread threads, ())
+
+isRepositoryCallbackThread :: IO Bool
+isRepositoryCallbackThread = do
+    thread <- myThreadId
+    Set.member thread <$> readMVar repositoryCallbackThreads
+
+tryRepositorySynchronous
+    :: IO value
+    -> IO (Either SomeException value)
+tryRepositorySynchronous action =
+    tryAny action >>= \case
+        Left exception
+            | isAsyncException exception -> throwIO exception
+            | otherwise -> pure (Left exception)
+        Right value -> pure (Right value)
+
+data RepositoryCheckHandle = RepositoryCheckHandle
+    { repositoryCheckValue :: !(IORef (Maybe RepositoryReview.RepositoryCheck))
+    , repositoryCheckCancelRequested :: !(IORef Bool)
+    , repositoryCheckOwner :: !(Async ())
+    }
+
+ha_repository_check_start
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr () -> CSize
+    -> FunPtr RepositoryCheckOutputCallback
+    -> FunPtr RepositoryCheckExitCallback
+    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
+ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
+    executableBytes executableLength argumentsPointer argumentCount
+    outputCallback exitCallback context outCheck
+    | outputCallback == nullFunPtr
+        || exitCallback == nullFunPtr
+        || outCheck == nullPtr = pure 1
+    | argumentsPointer == nullPtr && argumentCount > 0 = pure 2
+    | argumentCount > fromIntegral maxRepositoryCheckArguments = pure 2
+    | otherwise =
+        copyRequiredTexts
+            [ (pathBytes, pathLength)
+            , (snapshotBytes, snapshotLength)
+            , (executableBytes, executableLength)
+            ] >>= \case
+                Left _ -> pure 2
+                Right [path, expected, executable] -> do
+                    copiedArguments <- copyRepositoryCheckArguments
+                        argumentsPointer argumentCount
+                    case copiedArguments of
+                        Left _ -> pure 2
+                        Right arguments -> mask \_ -> do
+                            poke outCheck nullPtr
+                            checkRef <- newIORef Nothing
+                            cancelRef <- newIORef False
+                            gate <- newEmptyMVar
+                            owner <- asyncWithUnmask \unmask ->
+                                readMVar gate >> do
+                                    -- asyncWithUnmask starts masked. Keep
+                                    -- acquisition and publication in that
+                                    -- masked region so ownership transfer is
+                                    -- atomic with respect to cancellation. Its
+                                    -- blocking I/O remains interruptible under
+                                    -- masked-interruptible semantics and owns
+                                    -- cleanup brackets.
+                                    started <- tryRepositorySynchronous
+                                        (RepositoryReview.startRepositoryCheck
+                                            (Text.unpack path)
+                                            expected
+                                            (Text.unpack executable)
+                                            (map Text.unpack arguments)
+                                            (\stream bytes ->
+                                                BS.useAsCStringLen bytes
+                                                    \(pointer, length) ->
+                                                        withRepositoryCallbackThread
+                                                            (invokeRepositoryCheckOutputCallback
+                                                                outputCallback
+                                                                context
+                                                                (case stream of
+                                                                    RepositoryReview.RepositoryCheckStdout -> 1
+                                                                    RepositoryReview.RepositoryCheckStderr -> 2)
+                                                                (castPtr pointer)
+                                                                (fromIntegral length)))
+                                            (\cancelled exitCode ->
+                                                withRepositoryCallbackThread
+                                                    (invokeRepositoryCheckExitCallback
+                                                        exitCallback
+                                                        context
+                                                        (if cancelled then 1 else 0)
+                                                        (case exitCode of
+                                                            System.Exit.ExitSuccess -> 0
+                                                            System.Exit.ExitFailure code ->
+                                                                fromIntegral code)
+                                                        nullPtr 0)))
+                                    case started of
+                                        Left exception ->
+                                            unmask
+                                                (withText
+                                                    (Text.pack (show exception))
+                                                    \errorPtr errorLength ->
+                                                        withRepositoryCallbackThread
+                                                            (invokeRepositoryCheckExitCallback
+                                                                exitCallback
+                                                                context 0 (-1)
+                                                                errorPtr errorLength))
+                                        Right (Left err) ->
+                                            unmask
+                                                (withText
+                                                    (RepositoryReview.repositoryErrorText
+                                                        err)
+                                                    \errorPtr errorLength ->
+                                                        withRepositoryCallbackThread
+                                                            (invokeRepositoryCheckExitCallback
+                                                                exitCallback
+                                                                context 0 (-1)
+                                                                errorPtr errorLength))
+                                        Right (Right check) -> do
+                                            writeIORef checkRef (Just check)
+                                            cancelRequested <- readIORef cancelRef
+                                            when cancelRequested
+                                                (RepositoryReview.cancelRepositoryCheck
+                                                    check)
+                                            unmask
+                                                (RepositoryReview.waitRepositoryCheck
+                                                    check)
+                                                `onException`
+                                                    RepositoryReview.cancelRepositoryCheck
+                                                        check
+                            stable <- newStablePtr RepositoryCheckHandle
+                                { repositoryCheckValue = checkRef
+                                , repositoryCheckCancelRequested = cancelRef
+                                , repositoryCheckOwner = owner
+                                }
+                                `onException` cancel owner
+                            (do
+                                poke outCheck (castStablePtrToPtr stable)
+                                -- No callback can begin before the owned
+                                -- handle is visible through out_check.
+                                putMVar gate ()
+                                pure 0)
+                                `onException` do
+                                    cancel owner
+                                    freeStablePtr stable
+                                    poke outCheck nullPtr
+                Right _ -> pure 3
+
+ha_repository_check_cancel :: Ptr () -> IO ()
+ha_repository_check_cancel pointer
+    | pointer == nullPtr = pure ()
+    | otherwise = do
+        isRepositoryCallbackThread >>= \case
+            True -> pure ()
+            False -> do
+                let stable =
+                        castPtrToStablePtr pointer
+                            :: StablePtr RepositoryCheckHandle
+                handle <- deRefStablePtr stable
+                writeIORef handle.repositoryCheckCancelRequested True
+                readIORef handle.repositoryCheckValue >>= mapM_
+                    RepositoryReview.cancelRepositoryCheck
+
+ha_repository_check_destroy :: Ptr () -> IO ()
+ha_repository_check_destroy pointer
+    | pointer == nullPtr = pure ()
+    | otherwise = do
+        isRepositoryCallbackThread >>= \case
+            True -> pure ()
+            False -> do
+                let stable =
+                        castPtrToStablePtr pointer
+                            :: StablePtr RepositoryCheckHandle
+                handle <- deRefStablePtr stable
+                _ <- waitCatch handle.repositoryCheckOwner
+                freeStablePtr stable
+
+repositoryCheckDestroyReentrancySmoke :: IO Bool
+repositoryCheckDestroyReentrancySmoke = do
+    gate <- newEmptyMVar
+    owner <- asyncWithUnmask \unmask -> unmask (readMVar gate)
+    value <- newIORef Nothing
+    cancelled <- newIORef False
+    stable <- newStablePtr RepositoryCheckHandle
+        { repositoryCheckValue = value
+        , repositoryCheckCancelRequested = cancelled
+        , repositoryCheckOwner = owner
+        }
+    let pointer = castStablePtrToPtr stable
+    result <- tryAny
+        (withRepositoryCallbackThread
+            (ha_repository_check_destroy pointer))
+    putMVar gate ()
+    ha_repository_check_destroy pointer
+    pure (isRight result)
+
+copyRepositoryCheckArguments
+    :: Ptr () -> CSize -> IO (Either () [Text])
+copyRepositoryCheckArguments pointer count
+    | count > fromIntegral maxRepositoryCheckArguments = pure (Left ())
+    | itemSize <= 0 = pure (Left ())
+    | otherwise = go 0 (0 :: Int) []
+  where
+    pointerSize = sizeOf (nullPtr :: Ptr ())
+    sizeSize = sizeOf (undefined :: CSize)
+    itemSize = pointerSize + sizeSize
+    countInt = fromIntegral count
+    go index total acc
+        | index >= countInt = pure (Right (reverse acc))
+        | index > maxBound `div` itemSize = pure (Left ())
+        | otherwise = do
+            let base = castPtr pointer `plusPtr` (index * itemSize)
+            bytes <- peekByteOff base 0 :: IO (Ptr Word8)
+            length <- peekByteOff base pointerSize :: IO CSize
+            if length > fromIntegral maxRepositoryCheckArgumentBytes
+                || toInteger total + toInteger length
+                    > toInteger maxRepositoryCheckTotalArgumentBytes
+                then pure (Left ())
+                else copyRequiredText bytes length >>= \case
+                    Left _ -> pure (Left ())
+                    Right value ->
+                        go
+                            (index + 1)
+                            (total + fromIntegral length)
+                            (value : acc)
+
+maxRepositoryCheckArguments :: Int
+maxRepositoryCheckArguments = 4096
+
+maxRepositoryCheckArgumentBytes :: Int
+maxRepositoryCheckArgumentBytes = 1024 * 1024
+
+maxRepositoryCheckTotalArgumentBytes :: Int
+maxRepositoryCheckTotalArgumentBytes = 8 * 1024 * 1024
+
+repositoryPathMutation
+    :: CInt -> FilePath -> Maybe RepositoryReview.RepositoryMutation
+repositoryPathMutation operation path = case operation of
+    0 -> Just (RepositoryReview.StagePath path)
+    1 -> Just (RepositoryReview.UnstagePath path)
+    2 -> Just (RepositoryReview.RestorePath path)
+    _ -> Nothing
+
+repositoryDiffKind
+    :: CInt -> Maybe RepositoryReview.RepositoryDiffKind
+repositoryDiffKind kind = case kind of
+    0 -> Just RepositoryReview.RepositoryWorktreeDiff
+    1 -> Just RepositoryReview.RepositoryStagedDiff
+    _ -> Nothing
+
+repositoryHunkMutation
+    :: CInt
+    -> FilePath
+    -> [Int]
+    -> Maybe RepositoryReview.RepositoryMutation
+repositoryHunkMutation operation path hunks = case operation of
+    0 -> Just (RepositoryReview.StageHunks path hunks)
+    1 -> Just (RepositoryReview.UnstageHunks path hunks)
+    2 -> Just (RepositoryReview.RestoreHunks path hunks)
+    _ -> Nothing
+
+withRepositorySnapshot
+    :: RepositoryReview.RepositorySnapshot
+    -> (CString -> CSize -> CString -> CSize -> CString -> CSize
+        -> CString -> CSize -> CString -> CSize -> IO value)
+    -> IO value
+withRepositorySnapshot snapshot action =
+    withText snapshot.snapshotId \snapshotPtr snapshotLength ->
+    withText (Text.pack snapshot.snapshotRoot) \rootPtr rootLength ->
+    withOptionalText snapshot.snapshotHead \headPtr headLength ->
+    withText snapshot.snapshotIndexFingerprint \indexPtr indexLength ->
+    withText snapshot.snapshotWorktreeFingerprint
+        \worktreePtr worktreeLength ->
+            action snapshotPtr snapshotLength rootPtr rootLength
+                headPtr headLength indexPtr indexLength
+                worktreePtr worktreeLength
+
+emitRepositorySuccess
+    :: FunPtr RepositoryResultCallback -> Ptr () -> Text -> IO ()
+emitRepositorySuccess callback context snapshotId =
+    withText snapshotId \snapshotPtr snapshotLength ->
+        invokeRepositoryResultCallback callback context 0
+            snapshotPtr snapshotLength nullPtr 0
+
+emitRepositoryFailure
+    :: FunPtr RepositoryResultCallback -> Ptr () -> Text -> IO ()
+emitRepositoryFailure callback context message =
+    withText message \errorPtr errorLength ->
+        invokeRepositoryResultCallback callback context (-1)
+            nullPtr 0 errorPtr errorLength
+
+emitRepositoryCancelled
+    :: FunPtr RepositoryResultCallback -> Ptr () -> IO ()
+emitRepositoryCancelled callback context =
+    withText "cancelled" \errorPtr errorLength ->
+        invokeRepositoryResultCallback callback context (-3)
+            nullPtr 0 errorPtr errorLength
+
+emitRepositoryError
+    :: FunPtr RepositoryResultCallback
+    -> Ptr ()
+    -> RepositoryReview.RepositoryError
+    -> IO ()
+emitRepositoryError callback context err =
+    case err of
+        RepositoryReview.StaleRepositorySnapshot _ actual ->
+            withText actual \snapshotPtr snapshotLength ->
+            withText (RepositoryReview.repositoryErrorText err)
+                \errorPtr errorLength ->
+                    invokeRepositoryResultCallback callback context (-2)
+                        snapshotPtr snapshotLength errorPtr errorLength
+        _ ->
+            emitRepositoryFailure
+                callback context (RepositoryReview.repositoryErrorText err)
+
+emitDeliveryOnce :: MVar Bool -> IO () -> IO ()
+emitDeliveryOnce terminal callback =
+    mask \_ -> do
+        shouldRun <- modifyMVar terminal \completed ->
+            pure (True, not completed)
+        when shouldRun callback
+
+prepareDeliveryResult
+    :: MVar Bool
+    -> IO (Either RepositoryDelivery.DeliveryError value)
+    -> IO ()
+    -> (CInt -> Text -> IO ())
+    -> (value -> IO ())
+    -> IO (IO ())
+prepareDeliveryResult terminal operation unexpectedFailure knownFailure success =
+    tryRepositorySynchronous operation >>= \case
+        Left _ ->
+            pure (emitDeliveryOnce terminal unexpectedFailure)
+        Right (Left err) ->
+            pure
+                (emitDeliveryOnce terminal $
+                    knownFailure
+                        (deliveryErrorStatus err)
+                        (RepositoryDelivery.deliveryErrorText err))
+        Right (Right value) ->
+            pure (emitDeliveryOnce terminal (success value))
+
+emitDeliveryStatus
+    :: FunPtr RepositoryDeliveryStatusCallback
+    -> Ptr ()
+    -> RepositoryDelivery.DeliveryStatus
+    -> IO ()
+emitDeliveryStatus callback context status =
+    withText status.deliverySnapshotId \snapshotPtr snapshotSize ->
+    withText status.deliveryHeadOid \headPtr headSize ->
+    withText status.deliveryBranch \branchPtr branchSize ->
+    withText status.deliveryRemote \remotePtr remoteSize ->
+    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
+    withText status.deliveryUpstreamOid \upstreamOidPtr upstreamOidSize ->
+        invokeRepositoryDeliveryStatusCallback
+            callback context 0
+            snapshotPtr snapshotSize headPtr headSize
+            branchPtr branchSize remotePtr remoteSize
+            upstreamPtr upstreamSize upstreamOidPtr upstreamOidSize
+            (fromIntegral status.deliveryAhead)
+            (fromIntegral status.deliveryBehind)
+            nullPtr 0
+
+emitDeliveryStatusFailure
+    :: FunPtr RepositoryDeliveryStatusCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitDeliveryStatusFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryDeliveryStatusCallback
+            callback context status
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            nullPtr 0 nullPtr 0 0 0 errorPtr errorSize
+
+emitPushPreview
+    :: FunPtr RepositoryPushPreviewCallback
+    -> Ptr ()
+    -> RepositoryDelivery.PushPreview
+    -> IO ()
+emitPushPreview callback context preview =
+    let status = preview.pushPreviewStatus
+        expires = fromIntegral
+            (floor preview.pushPreviewExpiresAt :: Integer)
+    in withText preview.pushPreviewConfirmation \tokenPtr tokenSize ->
+    withText status.deliveryHeadOid \headPtr headSize ->
+    withText status.deliveryBranch \branchPtr branchSize ->
+    withText status.deliveryRemote \remotePtr remoteSize ->
+    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
+        invokeRepositoryPushPreviewCallback
+            callback context 0 tokenPtr tokenSize expires
+            headPtr headSize branchPtr branchSize remotePtr remoteSize
+            upstreamPtr upstreamSize
+            (fromIntegral status.deliveryAhead)
+            (fromIntegral status.deliveryBehind)
+            nullPtr 0
+
+emitPushPreviewFailure
+    :: FunPtr RepositoryPushPreviewCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPushPreviewFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPushPreviewCallback
+            callback context status nullPtr 0 0
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            0 0 errorPtr errorSize
+
+emitPushResultFailure
+    :: FunPtr RepositoryPushResultCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPushResultFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPushResultCallback
+            callback context status
+            nullPtr 0 nullPtr 0 errorPtr errorSize
+
+emitPullRequestPreview
+    :: FunPtr RepositoryPullRequestPreviewCallback
+    -> Ptr ()
+    -> RepositoryDelivery.PullRequestPreview
+    -> IO ()
+emitPullRequestPreview callback context preview =
+    let expires = fromIntegral
+            (floor preview.pullRequestExpiresAt :: Integer)
+    in withText preview.pullRequestConfirmation \tokenPtr tokenSize ->
+    withText preview.pullRequestRepository \repositoryPtr repositorySize ->
+    withText preview.pullRequestBaseRef \basePtr baseSize ->
+    withText preview.pullRequestHeadRef \headPtr headSize ->
+    withText preview.pullRequestTitle \titlePtr titleSize ->
+        invokeRepositoryPullRequestPreviewCallback
+            callback context 0 tokenPtr tokenSize expires
+            repositoryPtr repositorySize basePtr baseSize
+            headPtr headSize titlePtr titleSize nullPtr 0
+
+emitPullRequestPreviewFailure
+    :: FunPtr RepositoryPullRequestPreviewCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPullRequestPreviewFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPullRequestPreviewCallback
+            callback context status nullPtr 0 0
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 errorPtr errorSize
+
+emitPullRequestResultFailure
+    :: FunPtr RepositoryPullRequestResultCallback
+    -> Ptr () -> CInt -> Text -> IO ()
+emitPullRequestResultFailure callback context status message =
+    withText message \errorPtr errorSize ->
+        invokeRepositoryPullRequestResultCallback
+            callback context status nullPtr 0 errorPtr errorSize
+
+deliveryErrorStatus :: RepositoryDelivery.DeliveryError -> CInt
+deliveryErrorStatus = \case
+    RepositoryDelivery.DeliveryStale _ -> -2
+    RepositoryDelivery.DeliveryConfirmationRejected _ -> -4
+    _ -> -1
+
+deliveryInputValid :: Ptr Word8 -> CSize -> Int -> Bool
+deliveryInputValid pointer length limit =
+    pointer /= nullPtr
+        && length > 0
+        && toInteger length <= toInteger limit
+
+deliveryPathLimit, deliveryTokenLimit, deliveryRefLimit :: Int
+deliveryPathLimit = 16 * 1024
+deliveryTokenLimit = 4 * 1024
+deliveryRefLimit = 1024
+
+deliveryTitleLimit, deliveryBodyLimit :: Int
+deliveryTitleLimit = 4 * 1024
+deliveryBodyLimit = 1024 * 1024
+
+copyRequiredText :: Ptr Word8 -> CSize -> IO (Either () Text)
+copyRequiredText pointer (CSize length)
+    | pointer == nullPtr || length == 0 = pure (Left ())
+    | toInteger length > toInteger (maxBound :: Int) = pure (Left ())
+    | toInteger length > toInteger maxRepositoryRequestItemBytes =
+        pure (Left ())
+    | otherwise = do
+        bytes <- BS.packCStringLen (castPtr pointer, fromIntegral length)
+        pure (first (const ()) (TextEncoding.decodeUtf8' bytes))
+
+copyRequiredTexts
+    :: [(Ptr Word8, CSize)]
+    -> IO (Either () [Text])
+copyRequiredTexts fields
+    | sum (map (toInteger . snd) fields)
+        > toInteger maxRepositoryRequestTotalBytes = pure (Left ())
+    | otherwise =
+        fmap sequence (mapM (uncurry copyRequiredText) fields)
+
+maxRepositoryRequestItemBytes :: Int
+maxRepositoryRequestItemBytes = 8 * 1024 * 1024
+
+maxRepositoryRequestTotalBytes :: Int
+maxRepositoryRequestTotalBytes = 16 * 1024 * 1024
+
+byteStringChunks :: Int -> BS.ByteString -> [BS.ByteString]
+byteStringChunks size bytes
+    | BS.null bytes = []
+    | otherwise =
+        let (chunk, remaining) = BS.splitAt size bytes
+        in chunk : byteStringChunks size remaining
 
 ha_learned_skills_list
     :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
