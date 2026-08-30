@@ -965,6 +965,10 @@ validRemoteUrl url =
                 not (BS.null host)
                     && BS8.elem '@' host
                     && BS.length path > 1
+                    -- A canonical SCP-like URL is `git@host:path`.
+                    -- Reject a second `@`, which denotes credentials in
+                    -- the authority and would be exposed in child argv.
+                    && not (BS8.elem '@' path)
                     && not (containsQueryOrFragment value)
 
 remoteCommandPrefix :: ValidatedRemote -> [String]
@@ -1395,12 +1399,34 @@ runCommand root executable arguments input timeoutMicros = do
                 withAsync (readBounded outputHandle) \outputReader ->
                     withAsync (readBounded errorHandle) \errorReader -> do
                         exitCode <- waitForProcess process
-                        -- Do not wait for pipe EOF before terminating residual
-                        -- descendants in the leader's dedicated group.
+                        inputFinished <- timeout processPipeTeardownMicros
+                            (wait inputWriter)
+                        case inputFinished of
+                            Just () -> pure ()
+                            Nothing -> do
+                                closeQuietly inputHandle
+                                cancel inputWriter
+                        let drainReaders =
+                                (,) <$> wait outputReader <*> wait errorReader
+                        -- Give ordinary buffered output a short chance to
+                        -- drain. The captured group is then terminated even
+                        -- when EOF already arrived: a descendant may close
+                        -- its pipes while continuing to run.
+                        naturallyDrained <- timeout
+                            processPipeTeardownMicros
+                            drainReaders
+                        terminateProcessGroup sigTERM processGroup process
+                        drainedAfterTerm <- case naturallyDrained of
+                            Just values -> pure (Just values)
+                            Nothing ->
+                                timeout processGroupTermGraceMicros drainReaders
+                        -- Always escalate the captured group so a descendant
+                        -- cannot outlive a successful leader.
                         terminateProcessGroup sigKILL processGroup process
-                        _ <- wait inputWriter
-                        drained <- timeout processPipeTeardownMicros
-                            ((,) <$> wait outputReader <*> wait errorReader)
+                        drained <- case drainedAfterTerm of
+                            Just values -> pure (Just values)
+                            Nothing ->
+                                timeout processPipeTeardownMicros drainReaders
                         case drained of
                             Nothing -> do
                                 closeQuietly outputHandle
@@ -1579,6 +1605,9 @@ networkTimeoutMicros = 60 * 1_000_000
 
 processPipeTeardownMicros :: Int
 processPipeTeardownMicros = 1_000_000
+
+processGroupTermGraceMicros :: Int
+processGroupTermGraceMicros = 2_000_000
 
 maxProcessOutputBytes :: Int
 maxProcessOutputBytes = 1024 * 1024

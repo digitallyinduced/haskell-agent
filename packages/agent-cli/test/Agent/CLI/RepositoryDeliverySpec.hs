@@ -90,6 +90,18 @@ spec = describe "repository delivery service" do
                             Text.isInfixOf (Text.pack credentialUrl)
                 Right _ -> expectationFailure "credential URL was accepted"
 
+    it "rejects credential-bearing SCP-like URLs" $
+        withDeliveryRepository \root _ -> do
+            snapshot <- expectRight =<< repositorySnapshot root
+            _ <- git root
+                [ "remote"
+                , "set-url"
+                , "origin"
+                , "git@owner:secret@example.test/repository.git"
+                ]
+            repositoryDeliveryStatus root snapshot.snapshotId
+                `shouldReturnSatisfying` isInvalid
+
     it "previews and confirms one exact fast-forward lease push once" $
         withDeliveryRepository \root remote -> do
             appendFile (root <> "/tracked.txt") "second\n"
@@ -359,8 +371,8 @@ spec = describe "repository delivery service" do
     it "kills a gh descendant retaining pipes after its leader exits" $
         withDeliveryRepository \root _ ->
             withFakeGh root \_ _ -> do
-                let descendantMarker = root <> "/gh-descendant-survived"
-                setEnv "GH_RETAIN_PIPE_MARKER" descendantMarker
+                let descendantPid = root <> "/gh-descendant.pid"
+                setEnv "GH_RETAIN_PIPE_MARKER" descendantPid
                 snapshot <- expectRight =<< repositorySnapshot root
                 result <- timeout 5_000_000
                     (previewPullRequest
@@ -368,8 +380,14 @@ spec = describe "repository delivery service" do
                 result `shouldSatisfy` \case
                     Just (Right _) -> True
                     _ -> False
-                threadDelay 2_500_000
-                doesFileExist descendantMarker `shouldReturn` False
+                pid <- words <$> readFile descendantPid
+                pid `shouldSatisfy` \case
+                    [_] -> True
+                    _ -> False
+                processGoneWithin
+                    3_000_000
+                    (head pid)
+                    `shouldReturn` True
 
     it "rejects a gh result URL for another repository" $
         withDeliveryRepository \root _ ->
@@ -465,7 +483,8 @@ withFakeGh root action = do
             , "set -eu"
             , "[ \"${GH_HOST:-}\" = '' ] || exit 65"
             , "if [ \"${GH_RETAIN_PIPE_MARKER:-}\" != '' ] && [ \"$1 $2\" = 'auth status' ]; then"
-            , "  (sleep 2; printf survived > \"$GH_RETAIN_PIPE_MARKER\") &"
+            , "  sleep 30 &"
+            , "  printf '%s\\n' \"$!\" > \"$GH_RETAIN_PIPE_MARKER\""
             , "  exit 0"
             , "fi"
             , "case \"$1 $2\" in"
@@ -577,6 +596,21 @@ shouldReturnSatisfying
     -> Expectation
 shouldReturnSatisfying action predicate =
     action >>= (`shouldSatisfy` predicate)
+
+processGoneWithin :: Int -> String -> IO Bool
+processGoneWithin remaining pid
+    | remaining <= 0 = fmap not processExists
+    | otherwise =
+        processExists >>= \case
+            False -> pure True
+            True -> do
+                threadDelay 100_000
+                processGoneWithin (remaining - 100_000) pid
+  where
+    processExists = do
+        (exitCode, _, _) <-
+            readCreateProcessWithExitCode (proc "kill" ["-0", pid]) ""
+        pure (exitCode == ExitSuccess)
 
 shellQuote :: String -> String
 shellQuote value = "'" <> concatMap escape value <> "'"
