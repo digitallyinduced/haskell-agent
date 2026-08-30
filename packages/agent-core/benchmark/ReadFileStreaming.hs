@@ -127,10 +127,10 @@ measure workload path args = do
 median :: [Sample] -> Sample
 median values =
     Sample
-        { elapsedMillis = middle (map elapsedMillis values)
-        , cpuMillis = middle (map cpuMillis values)
-        , allocatedBytes = middle (map allocatedBytes values)
-        , liveBytes = middle (map liveBytes values)
+        { elapsedMillis = middle (map (.elapsedMillis) values)
+        , cpuMillis = middle (map (.cpuMillis) values)
+        , allocatedBytes = middle (map (.allocatedBytes) values)
+        , liveBytes = middle (map (.liveBytes) values)
         }
   where
     middle xs = sort xs !! (length xs `div` 2)

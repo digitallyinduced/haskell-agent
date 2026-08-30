@@ -85,10 +85,10 @@ main = do
                 let median field = medianOf (map field measurements)
                 printf "%d,%s,%d,%.3f,%.3f,%d,%d\n"
                     sizeMb mode outputLineLimit
-                    (median elapsedMillis)
-                    (median cpuSeconds)
-                    (median allocatedBytes)
-                    (median liveBytes)
+                    (median (.elapsedMillis))
+                    (median (.cpuSeconds))
+                    (median (.allocatedBytes))
+                    (median (.liveBytes))
 
 writeFixture :: FilePath -> Int -> IO ()
 writeFixture path sizeMb = do
