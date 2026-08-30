@@ -182,6 +182,7 @@ effectiveHeadLimit args = case args.outputMode of
 data GrepTruncation
     = GrepComplete
     | GrepLineTruncated
+    | GrepLongLineTruncated
     | GrepByteTruncated
     deriving (Eq)
 
@@ -311,27 +312,20 @@ readBoundedStdout processHandle handle lineLimit byteLimit =
     consume bytes reversed totalBytes totalLines =
         case BS.elemIndex 10 bytes of
             Nothing
-                | BS.length bytes > grepLineByteLimit ->
+                | BS.length bytes > retainedLineLimit ->
                     truncateAndDrain
-                        (BS.take (min grepLineByteLimit
-                            (max 0 (byteLimit - totalBytes))) bytes)
+                        (BS.take retainedLineLimit bytes)
                         reversed
-                        GrepLineTruncated
+                        retainedLineTruncation
                 | otherwise ->
                     go bytes reversed totalBytes totalLines
             Just newlineIndex -> do
                 let line = BS.take (newlineIndex + 1) bytes
-                    remainingBytes = max 0 (byteLimit - totalBytes)
-                if BS.length line > grepLineByteLimit
+                if BS.length line > retainedLineLimit
                     then truncateAndDrain
-                        (BS.take (min grepLineByteLimit remainingBytes) line)
+                        (BS.take retainedLineLimit line)
                         reversed
-                        GrepLineTruncated
-                else if BS.length line > remainingBytes
-                    then truncateAndDrain
-                        (BS.take remainingBytes line)
-                        reversed
-                        GrepByteTruncated
+                        retainedLineTruncation
                     else
                         let nextReversed =
                                 if BS.null line then reversed else line : reversed
@@ -347,6 +341,12 @@ readBoundedStdout processHandle handle lineLimit byteLimit =
                                     nextReversed
                                     nextBytes
                                     (totalLines + 1)
+      where
+        remainingBytes = max 0 (byteLimit - totalBytes)
+        retainedLineLimit = min grepLineByteLimit remainingBytes
+        retainedLineTruncation
+            | remainingBytes <= grepLineByteLimit = GrepByteTruncated
+            | otherwise = GrepLongLineTruncated
 
     finishPending pending reversed totalBytes
         | BS.null pending = pure (finish reversed GrepComplete)
@@ -359,7 +359,7 @@ readBoundedStdout processHandle handle lineLimit byteLimit =
                     | BS.length pending > remainingBytes =
                         GrepByteTruncated
                     | BS.length pending > grepLineByteLimit =
-                        GrepLineTruncated
+                        GrepLongLineTruncated
                     | otherwise = GrepComplete
                 nextReversed =
                     if BS.null keep then reversed else keep : reversed
@@ -434,6 +434,10 @@ formatGrepCard cwd raw limit truncation
                 | lineTruncated =
                     "\n[at least " <> Text.pack (show limit)
                         <> " lines; output truncated]"
+                | truncation == GrepLongLineTruncated =
+                    "\n[output truncated: a matching line exceeded "
+                        <> Text.pack (show grepLineByteLimit)
+                        <> " bytes]"
                 | truncation == GrepByteTruncated =
                     "\n[output truncated after "
                         <> Text.pack (show grepOutputByteLimit)

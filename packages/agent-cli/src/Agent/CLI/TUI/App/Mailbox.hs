@@ -287,13 +287,18 @@ enqueueMailboxEvent (AppEventMailbox stateRef) event = do
         -- admitting exactly one lets the consumer make progress while still
         -- preventing any additional payload from accumulating behind it.
         firstOversizedSingleton =
-            -- A keyed update may replace the queue's sole existing event.
-            -- Permit that replacement too; otherwise repeated oversized
-            -- snapshots can block forever before the consumer sees one.
-            count == 1
+            Seq.null state.mailboxPendingEvents
+                && count == 1
+        oversizedKeyedReplacement =
+            Seq.length state.mailboxPendingEvents == 1
+                && count == 1
+                && isJust (appEventCoalesceKey event)
     check
         ( count <= countLimit
-            && (payloadBytes <= byteLimit || firstOversizedSingleton)
+            && ( payloadBytes <= byteLimit
+                || firstOversizedSingleton
+                || oversizedKeyedReplacement
+               )
         )
     writeTVar stateRef state
         { mailboxPendingEvents = pending
@@ -323,6 +328,14 @@ appendAppEventAccounted event pending oldBytes =
             _ ->
                 pendingAppEventsLogicalBytes updated
     in (updated, bytes)
+
+appEventCoalesceKey :: AppEvent -> Maybe PendingEventCoalesceKey
+appEventCoalesceKey = \case
+    AppUi uiEvent ->
+        pendingEventCoalesceKey
+            (PendingUi (PendingExactUi uiEvent))
+    event ->
+        pendingEventCoalesceKey (PendingEvent event)
 
 appendAppEvent :: AppEvent -> Seq PendingAppEvent -> Seq PendingAppEvent
 appendAppEvent event pending = case event of
