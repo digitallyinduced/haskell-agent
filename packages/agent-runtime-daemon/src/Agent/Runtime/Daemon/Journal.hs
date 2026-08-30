@@ -285,7 +285,7 @@ persistTask journal task =
         ensureSnapshotFits journal.config updatedSnapshot
         compacted <- persistOrPoison journal $ do
             appendEventFile journal.config event
-            writeSnapshot journal.config (snapshotAnchor updatedSnapshot updated.retainedEvents)
+            writeSnapshot journal.config updatedSnapshot
             enforceRetention journal.config updated
         publish journal event
         pure (compacted, event)
@@ -405,12 +405,6 @@ validateRecoveryOrigin snapshotExists snapshotSequence events =
                 unless (first.sequenceNumber == expected) $
                     throwIO (JournalEventGap expected first.sequenceNumber)
             | snapshotExists
-            , first.sequenceNumber < snapshotSequence ->
-                throwIO $
-                    JournalCorrupt
-                        "events.jsonl"
-                        "retained event suffix contains a stale prefix before its snapshot anchor"
-            | snapshotExists
             , lastEvent.sequenceNumber < snapshotSequence ->
                 throwIO $
                     JournalCorrupt
@@ -490,12 +484,8 @@ enforceRetention config journalState = do
                                 journalState.retainedEvents
                 byteBounded = retainWithinBytes config.maximumJournalBytes countBounded
                 compacted = journalState {retainedEvents = byteBounded}
+            writeSnapshot config compacted.durableSnapshot
             rewriteEvents config byteBounded
-            -- The first retained event is the durable anchor for this
-            -- suffix.  Persist the rewritten events before advancing the
-            -- snapshot anchor so an interrupted compaction still leaves a
-            -- recoverable (old snapshot, new suffix) pair.
-            writeSnapshot config (snapshotAnchor compacted.durableSnapshot byteBounded)
             pure compacted
         else pure journalState
 
@@ -509,16 +499,6 @@ retainWithinBytes maximumBytes events =
         | otherwise = event : go (used + size) rest
       where
         size = BS.length (encodeLine event)
-
--- | A snapshot is valid alongside a retained suffix when its sequence is the
--- suffix's first event (the anchor), or when the suffix is empty.  The task
--- map is still the latest durable state; recovery skips the anchor event and
--- applies everything after it.
-snapshotAnchor :: JournalSnapshot -> Seq EventEnvelope -> JournalSnapshot
-snapshotAnchor saved events =
-    case Seq.lookup 0 events of
-        Nothing -> saved
-        Just first -> saved {lastSequence = first.sequenceNumber}
 
 readSnapshot :: JournalConfig -> IO (Bool, JournalSnapshot)
 readSnapshot config = do
