@@ -43,8 +43,7 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
-    other-modules:    Agent.CLI.AccountPicker
-                    , Agent.CLI.AgentSessions.Render
+    other-modules:    Agent.CLI.AgentSessions.Render
                     , Agent.CLI.AgentViewport.Status
                     , Agent.CLI.Approval.Decision
                     , Agent.CLI.Auth.Grok
@@ -84,7 +83,6 @@ library
                     , Agent.CLI.Runtime.Orchestration.Tools
                     , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
-                    , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Runtime.Persistence
                     , Agent.CLI.Runtime.Recap
                     , Agent.CLI.Runtime.Repl
@@ -139,6 +137,7 @@ library
                     , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.AccountPicker
                     , Agent.CLI.AccountSelection
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
@@ -208,6 +207,7 @@ library
                     , Agent.CLI.ProviderTransition
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
+                    , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.Session.ConversationStore
