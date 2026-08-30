@@ -77,6 +77,7 @@ import Agent.CLI.SessionTitle
     , shouldRequestSessionTitle
     , takeSessionTitleResults
     , titleRefreshIndex
+    , withSessionTitleForeground
     )
 import Agent.CLI.Status (formatUsageWithRate)
 import Agent.CLI.Style
@@ -188,13 +189,14 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- boundary from an earlier attempt is already represented by the live and
     -- durable transcripts and must not affect this turn's suffix calculation.
     writeIORef env.sessionAutomaticCompaction Nothing
-    bracket_
-        env.sessionBeginWindowTitleBusy
-        env.sessionEndWindowTitleBusy
-        (withLiveTranscript env.sessionConversation \beforeItems ->
-            runOneTurnBusy
-                includeTurnContext env beforeItems promptText inputs)
-        `finally` writeIORef env.sessionAutomaticCompaction Nothing
+    withSessionTitleForeground env.sessionTitleManager $
+        bracket_
+            env.sessionBeginWindowTitleBusy
+            env.sessionEndWindowTitleBusy
+            (withLiveTranscript env.sessionConversation \beforeItems ->
+                runOneTurnBusy
+                    includeTurnContext env beforeItems promptText inputs)
+            `finally` writeIORef env.sessionAutomaticCompaction Nothing
 
 runOneTurnBusy
     :: Bool
