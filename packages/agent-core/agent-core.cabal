@@ -143,6 +143,7 @@ benchmark grep-streaming-bench
                     , process
                     , safe-exceptions
                     , time
+                    , unix
 
 benchmark output-artifact-bench
     import:           common-opts

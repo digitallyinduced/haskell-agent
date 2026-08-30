@@ -7,7 +7,8 @@
 module Main (main) where
 
 import Control.Concurrent.Async (withAsync, wait)
-import Control.Exception.Safe (evaluate, finally)
+import Control.Exception (evaluate)
+import Control.Exception.Safe (finally)
 import Control.Monad (forM_, replicateM)
 import qualified Data.ByteString as BS
 import Data.List (sort)
