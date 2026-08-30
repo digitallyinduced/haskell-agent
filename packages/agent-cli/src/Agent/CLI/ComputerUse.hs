@@ -11,6 +11,7 @@ module Agent.CLI.ComputerUse
     , parseDisplaySize
     , parseSessionLocked
     , validateComputerCall
+    , validateComputerCallForDisplay
     ) where
 
 import Agent.Loop (ImageAttachment(..))
@@ -77,30 +78,51 @@ executeComputerCall call
         case unlocked of
             Left err -> pure (Left err)
             Right () -> do
-                actionResult <- foldM run (Right ()) call.computerActions
-                case actionResult of
+                dimensions <- mainDisplayLogicalSize
+                case dimensions of
                     Left err -> pure (Left err)
-                    Right () -> screenshotMacOS >>= \case
-                        Left err -> pure (Left err)
-                        Right ImageAttachment{imageMime, imageBytes} ->
-                            pure $ Right $
-                                TextEncoding.decodeUtf8 $ LBS.toStrict $
-                                    Aeson.encode ComputerCallOutput
-                                        { computerOutputItemId = Nothing
-                                        , computerOutputCallId =
-                                            call.computerCallId
-                                        , screenshotDataUrl =
-                                            dataUrl imageMime imageBytes
-                                        -- Reaching the handler means this
-                                        -- exact call was explicitly approved.
-                                        , acknowledgedChecks =
-                                            call.pendingSafetyChecks
-                                        , computerOutputStatus = Nothing
-                                        , computerOutputExtra = KeyMap.empty
-                                        }
+                    Right display
+                        | Left err <-
+                            validateComputerCallForDisplay display call ->
+                            pure (Left err)
+                        | otherwise -> do
+                            actionResult <-
+                                foldM run (Right ()) call.computerActions
+                            case actionResult of
+                                Left err -> pure (Left err)
+                                Right () -> do
+                                    currentDisplay <- mainDisplayLogicalSize
+                                    case currentDisplay of
+                                        Left err -> pure (Left err)
+                                        Right value
+                                            | value /= display ->
+                                                pure (Left
+                                                    "The main display changed during computer use; take a fresh screenshot before continuing.")
+                                            | otherwise ->
+                                                screenshotMainDisplay display
+                                                    >>= \case
+                                                        Left err ->
+                                                            pure (Left err)
+                                                        Right image ->
+                                                            pure (Right
+                                                                (encodeComputerOutput
+                                                                    call image))
   where
     run (Left err) _ = pure (Left err)
     run (Right ()) action = executeAction action
+
+encodeComputerOutput :: ComputerCall -> ImageAttachment -> Text
+encodeComputerOutput call ImageAttachment{imageMime, imageBytes} =
+    TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+        ComputerCallOutput
+            { computerOutputItemId = Nothing
+            , computerOutputCallId = call.computerCallId
+            , screenshotDataUrl = dataUrl imageMime imageBytes
+            -- Reaching the handler means this exact call was approved.
+            , acknowledgedChecks = call.pendingSafetyChecks
+            , computerOutputStatus = Nothing
+            , computerOutputExtra = KeyMap.empty
+            }
 
 validateComputerCall :: ComputerCall -> Either Text ()
 validateComputerCall call
@@ -113,6 +135,31 @@ validateComputerCall call
             <> map validateAction call.computerActions) =
         Left err
     | otherwise = Right ()
+
+-- | Validate all model-space coordinates before the first action in a batch.
+-- The per-action JXA checks remain as a second line of defense if the display
+-- configuration changes while the batch is executing.
+validateComputerCallForDisplay :: (Int, Int) -> ComputerCall -> Either Text ()
+validateComputerCallForDisplay (width, height) call = do
+    validateComputerCall call
+    case firstJust (map validatePoint (computerPoints call.computerActions)) of
+        Just err -> Left err
+        Nothing -> Right ()
+  where
+    validatePoint ComputerPoint{pointX, pointY}
+        | pointX < 0 || pointY < 0 || pointX >= width || pointY >= height =
+            Just "Computer point is outside the main display."
+        | otherwise = Nothing
+
+computerPoints :: [ComputerAction] -> [ComputerPoint]
+computerPoints = concatMap \case
+    ClickAction{clickX, clickY} -> [ComputerPoint clickX clickY]
+    DoubleClickAction{doubleClickX, doubleClickY} ->
+        [ComputerPoint doubleClickX doubleClickY]
+    ScrollAction{scrollX, scrollY} -> [ComputerPoint scrollX scrollY]
+    MoveAction{moveX, moveY} -> [ComputerPoint moveX moveY]
+    DragAction{dragPath} -> dragPath
+    _ -> []
 
 validateSafetyCheck :: SafetyCheck -> Maybe Text
 validateSafetyCheck check
@@ -129,18 +176,45 @@ validateAction = \case
     ClickAction { clickButton, clickKeys }
         | exceedsText 32 clickButton ->
             Just "Computer mouse button exceeds 32 characters."
-        | otherwise -> validateKeys clickKeys
-    DoubleClickAction { doubleClickKeys } -> validateKeys doubleClickKeys
-    ScrollAction { scrollKeys } -> validateKeys scrollKeys
-    MoveAction { moveKeys } -> validateKeys moveKeys
+        | Just err <- validateKeys clickKeys -> Just err
+        | Left err <- buttonNumber clickButton -> Just err
+        | Left err <- modifierFlags clickKeys -> Just err
+        | otherwise -> Nothing
+    DoubleClickAction { doubleClickKeys }
+        | Just err <- validateKeys doubleClickKeys -> Just err
+        | Left err <- modifierFlags doubleClickKeys -> Just err
+        | otherwise -> Nothing
+    ScrollAction { scrollDx, scrollDy, scrollKeys }
+        | any (\delta -> abs (toInteger delta) > 100000)
+            [scrollDx, scrollDy] ->
+            Just "Computer scroll delta exceeds 100000 pixels."
+        | Just err <- validateKeys scrollKeys -> Just err
+        | Left err <- modifierFlags scrollKeys -> Just err
+        | otherwise -> Nothing
+    MoveAction { moveKeys }
+        | Just err <- validateKeys moveKeys -> Just err
+        | Left err <- modifierFlags moveKeys -> Just err
+        | otherwise -> Nothing
     DragAction { dragPath, dragKeys }
         | exceedsList 1024 dragPath ->
             Just "Computer drag path exceeds 1024 points."
-        | otherwise -> validateKeys dragKeys
-    KeypressAction keys -> validateKeys keys
+        | null dragPath -> Just "Computer drag path is empty."
+        | null (drop 1 dragPath) ->
+            Just "Computer drag path needs at least two points."
+        | Just err <- validateKeys dragKeys -> Just err
+        | Left err <- modifierFlags dragKeys -> Just err
+        | otherwise -> Nothing
+    TypeAction value
+        | exceedsText 8192 value ->
+            Just "Computer text input exceeds the 8192-character limit."
+        | otherwise -> Nothing
+    KeypressAction keys ->
+        either Just (const Nothing) (keyCombinationScript keys)
     UnknownComputerAction value
         | exceedsText 128 value.tag ->
             Just "Computer action type exceeds 128 characters."
+        | otherwise ->
+            Just ("Unsupported computer action: " <> safeQuoted 128 value.tag)
     _ -> Nothing
 
 validateKeys :: [Text] -> Maybe Text
@@ -162,26 +236,20 @@ exceedsText limit = not . Text.null . Text.drop limit
 executeAction :: ComputerAction -> IO (Either Text ())
 executeAction = \case
     ScreenshotAction -> pure (Right ())
-    WaitAction milliseconds
-        | milliseconds < 0 || milliseconds > 30000 ->
-            pure (Left "Computer wait must be between 0 and 30000 milliseconds.")
-        | otherwise -> do
-            threadDelay (milliseconds * 1000)
-            pure (Right ())
+    WaitAction -> do
+        threadDelay 2000000
+        pure (Right ())
     action@ClickAction{} -> runPointerAction action
     action@DoubleClickAction{} -> runPointerAction action
     action@ScrollAction{} -> runPointerAction action
     action@MoveAction{} -> runPointerAction action
     action@DragAction{} -> runPointerAction action
-    TypeAction value
-        | exceedsText 8192 value ->
-            pure (Left "Computer text input exceeds the 8192-character limit.")
-        | otherwise ->
-            runJxa (keyboardPrelude <> typeTextCommand value)
+    TypeAction value ->
+        runJxa (keyboardPrelude <> typeTextCommand value)
     KeypressAction keys ->
         either (pure . Left) runJxa (keyCombinationScript keys)
     UnknownComputerAction value ->
-        pure (Left ("Unsupported computer action: " <> value.tag))
+        pure (Left ("Unsupported computer action: " <> safeQuoted 128 value.tag))
 
 runPointerAction :: ComputerAction -> IO (Either Text ())
 runPointerAction =
@@ -222,9 +290,14 @@ pointerScript action = do
             case dragPath of
                 [] -> Left "Computer drag path is empty."
                 [_] -> Left "Computer drag path needs at least two points."
-                ComputerPoint { pointX, pointY } : rest ->
+                first@ComputerPoint { pointX, pointY } : rest ->
                     pure $
-                        "down(" <> ints [pointX, pointY] <> "," <> flags
+                        Text.concat
+                            [ "check(" <> ints [px, py] <> ");"
+                            | ComputerPoint
+                                { pointX = px, pointY = py } <- first : rest
+                            ]
+                            <> "down(" <> ints [pointX, pointY] <> "," <> flags
                             <> ");"
                             <> Text.concat
                                 [ "delay(0.02); drag(" <> ints [px, py]
@@ -242,7 +315,7 @@ pointerPrelude = Text.unlines
     , "ObjC.import('Foundation');"
     , "ObjC.import('ApplicationServices');"
     , "const tap=$.kCGHIDEventTap, left=0;"
-    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(d&&Boolean(d.CGSSessionScreenIsLocked)) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
+    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(!d) throw new Error('macOS GUI session state is unavailable'); if(Boolean(d.CGSSessionScreenIsLocked)) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
     , "assertReady();"
     , "const bounds=$.CGDisplayBounds($.CGMainDisplayID());"
     , "let last=$.CGPointMake(0,0);"
@@ -251,7 +324,9 @@ pointerPrelude = Text.unlines
     , "function post(t,x,y,b,f,c){check(x,y); last=$.CGPointMake(x,y); const e=$.CGEventCreateMouseEvent(null,t,last,b); $.CGEventSetFlags(e,f); if(c) $.CGEventSetIntegerValueField(e,$.kCGMouseEventClickState,c); $.CGEventPost(tap,e);}"
     , "function move(x,y,f){post($.kCGEventMouseMoved,x,y,left,f,0);}"
     , "function click(x,y,b,f,count){const k=kinds(b); post(k[0],x,y,b,f,1); post(k[1],x,y,b,f,1); if(count===2){delay(0.08); post(k[0],x,y,b,f,2); post(k[1],x,y,b,f,2);}}"
-    , "function scroll(dx,dy,f){const e=$.CGEventCreateScrollWheelEvent(null,$.kCGScrollEventUnitPixel,2,dy,dx); $.CGEventSetFlags(e,f); $.CGEventPost(tap,e);}"
+    -- The Responses API follows browser-wheel signs (positive means down/right);
+    -- CoreGraphics uses the opposite convention for both pixel-scroll axes.
+    , "function scroll(dx,dy,f){const e=$.CGEventCreateScrollWheelEvent(null,$.kCGScrollEventUnitPixel,2,-dy,-dx); $.CGEventSetFlags(e,f); $.CGEventPost(tap,e);}"
     , "function down(x,y,f){post($.kCGEventLeftMouseDown,x,y,left,f,1);}"
     , "function drag(x,y,f){post($.kCGEventLeftMouseDragged,x,y,left,f,1);}"
     , "function up(f){post($.kCGEventLeftMouseUp,Number(last.x),Number(last.y),left,f,1);}"
@@ -263,10 +338,12 @@ keyboardPrelude = Text.unlines
     , "ObjC.import('Foundation');"
     , "ObjC.import('ApplicationServices');"
     , "const tap=$.kCGHIDEventTap;"
-    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(d&&Boolean(d.CGSSessionScreenIsLocked)) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
+    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(!d) throw new Error('macOS GUI session state is unavailable'); if(Boolean(d.CGSSessionScreenIsLocked)) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
     , "assertReady();"
     , "function key(code,flags){const d=$.CGEventCreateKeyboardEvent(null,code,true),u=$.CGEventCreateKeyboardEvent(null,code,false); $.CGEventSetFlags(d,flags); $.CGEventSetFlags(u,flags); $.CGEventPost(tap,d); $.CGEventPost(tap,u);}"
-    , "function typeText(raw){const value=$(raw),n=Number(value.length); const d=$.CGEventCreateKeyboardEvent(null,0,true),u=$.CGEventCreateKeyboardEvent(null,0,false); $.CGEventKeyboardSetUnicodeString(d,n,value); $.CGEventKeyboardSetUnicodeString(u,n,value); $.CGEventPost(tap,d); $.CGEventPost(tap,u);}"
+    -- Keep each Unicode payload small enough for Quartz and avoid splitting a
+    -- UTF-16 surrogate pair across events.
+    , "function typeText(raw){const value=String(raw); for(let i=0;i<value.length;){let end=Math.min(i+32,value.length); if(end<value.length&&end>i){const c=value.charCodeAt(end-1); if(c>=0xD800&&c<=0xDBFF) end--;} const chunk=value.slice(i,end),n=chunk.length,v=$(chunk); const d=$.CGEventCreateKeyboardEvent(null,0,true),u=$.CGEventCreateKeyboardEvent(null,0,false); $.CGEventKeyboardSetUnicodeString(d,n,v); $.CGEventKeyboardSetUnicodeString(u,n,v); $.CGEventPost(tap,d); $.CGEventPost(tap,u); i=end;}}"
     ]
 
 keyCombinationScript :: [Text] -> Either Text Text
@@ -300,14 +377,39 @@ keyCode = \case
     "return" -> Just 36
     "tab" -> Just 48
     "space" -> Just 49
-    "delete" -> Just 51
     "backspace" -> Just 51
     "escape" -> Just 53
     "esc" -> Just 53
+    "command" -> Just 55
+    "cmd" -> Just 55
+    "meta" -> Just 55
+    "shift" -> Just 56
+    "capslock" -> Just 57
+    "caps_lock" -> Just 57
+    "option" -> Just 58
+    "alt" -> Just 58
+    "control" -> Just 59
+    "ctrl" -> Just 59
+    "home" -> Just 115
+    "pageup" -> Just 116
+    "page_up" -> Just 116
+    "delete" -> Just 117
+    "del" -> Just 117
+    "end" -> Just 119
+    "pagedown" -> Just 121
+    "page_down" -> Just 121
     "left" -> Just 123
+    "arrowleft" -> Just 123
+    "arrow_left" -> Just 123
     "right" -> Just 124
+    "arrowright" -> Just 124
+    "arrow_right" -> Just 124
     "down" -> Just 125
+    "arrowdown" -> Just 125
+    "arrow_down" -> Just 125
     "up" -> Just 126
+    "arrowup" -> Just 126
+    "arrow_up" -> Just 126
     _ -> Nothing
 
 -- ANSI virtual key codes are needed only for modified printable shortcuts.
@@ -363,41 +465,49 @@ javascriptString =
     TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
 
 screenshotMacOS :: IO (Either Text ImageAttachment)
-screenshotMacOS = do
+screenshotMacOS =
+    ensureUnlockedSession >>= \case
+        Left err -> pure (Left err)
+        Right () -> screenshotUnlockedMacOS
+
+screenshotUnlockedMacOS :: IO (Either Text ImageAttachment)
+screenshotUnlockedMacOS = do
     dimensions <- mainDisplayLogicalSize
     case dimensions of
         Left err -> pure (Left err)
-        Right (width, height) -> do
-            temporaryDirectory <- getTemporaryDirectory
-            attempted <- tryAny do
-                (path, handle) <- openBinaryTempFile temporaryDirectory
-                    "agent-computer-use-.png"
-                hClose handle
-                let cleanup = removeFile path
-                flip finally cleanup do
-                    capture <- readProcessWithExitCode
-                        "/usr/sbin/screencapture"
-                        ["-x", "-m", "-C", "-t", "png", path]
+        Right display -> screenshotMainDisplay display
+
+screenshotMainDisplay :: (Int, Int) -> IO (Either Text ImageAttachment)
+screenshotMainDisplay (width, height) = do
+    temporaryDirectory <- getTemporaryDirectory
+    attempted <- tryAny do
+        (path, handle) <- openBinaryTempFile temporaryDirectory
+            "agent-computer-use-.png"
+        hClose handle
+        let cleanup = removeFile path
+        flip finally cleanup do
+            capture <- readProcessWithExitCode
+                "/usr/sbin/screencapture"
+                ["-x", "-m", "-C", "-t", "png", path]
+                ""
+            case capture of
+                (ExitFailure _, _, stderr) ->
+                    pure (Left (commandError "screencapture" stderr))
+                (ExitSuccess, _, _) -> do
+                    resized <- readProcessWithExitCode
+                        "/usr/bin/sips"
+                        [ "-z", show height, show width, path ]
                         ""
-                    case capture of
+                    case resized of
                         (ExitFailure _, _, stderr) ->
-                            pure (Left (commandError "screencapture" stderr))
+                            pure (Left (commandError "screenshot resize" stderr))
                         (ExitSuccess, _, _) -> do
-                            resized <- readProcessWithExitCode
-                                "/usr/bin/sips"
-                                [ "-z", show height, show width, path ]
-                                ""
-                            case resized of
-                                (ExitFailure _, _, stderr) ->
-                                    pure (Left (commandError "screenshot resize" stderr))
-                                (ExitSuccess, _, _) -> do
-                                    bytes <- BS.readFile path
-                                    pure $ if BS.null bytes
-                                        then Left
-                                            "Screen capture returned an empty image. Grant Screen Recording permission to the terminal or agent app."
-                                        else Right
-                                            (ImageAttachment "image/png" bytes)
-            pure $ either (Left . Text.pack . show) id attempted
+                            bytes <- BS.readFile path
+                            pure $ if BS.null bytes
+                                then Left
+                                    "Screen capture returned an empty image. Grant Screen Recording permission to the terminal or agent app."
+                                else Right (ImageAttachment "image/png" bytes)
+    pure $ either (Left . Text.pack . show) id attempted
 
 mainDisplayLogicalSize :: IO (Either Text (Int, Int))
 mainDisplayLogicalSize = do
@@ -436,6 +546,7 @@ ensureUnlockedSession = do
     let script = Text.unlines
             [ "ObjC.import('CoreGraphics');"
             , "const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary());"
+            , "if(!d) throw new Error('macOS GUI session state is unavailable');"
             , "String(Boolean(d && d.CGSSessionScreenIsLocked));"
             ]
     attempted <- tryAny $ readProcessWithExitCode
@@ -503,7 +614,7 @@ summarizeComputerCall call =
             withKeys scrollKeys $ "scroll by " <> ints [scrollDx, scrollDy]
         MoveAction { moveX, moveY, moveKeys } ->
             withKeys moveKeys $ "move pointer to " <> ints [moveX, moveY]
-        WaitAction ms -> "wait " <> Text.pack (show ms) <> "ms"
+        WaitAction -> "wait 2s"
         DragAction { dragPath, dragKeys } ->
             withKeys dragKeys $
                 "drag through "

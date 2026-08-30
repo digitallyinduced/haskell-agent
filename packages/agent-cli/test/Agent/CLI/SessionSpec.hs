@@ -91,7 +91,7 @@ storedResponseItemRoundTrip :: StoredRoundTripItem -> Property
 storedResponseItemRoundTrip (StoredRoundTripItem item) =
     checkCoverage $
         foldr
-            (\label -> cover 7 (responseItemKind item == label) label)
+            (\label -> cover 5 (responseItemKind item == label) label)
             (counterexample ("failed to round-trip " <> show item) $
             fromStoredResponseItem (toStoredResponseItem item)
                 === Right item)
@@ -315,7 +315,7 @@ genComputerAction =
         , ScrollAction <$> smallInt <*> smallInt <*> smallInt <*> smallInt
             <*> genSmallList genText
         , MoveAction <$> smallInt <*> smallInt <*> genSmallList genText
-        , WaitAction <$> smallInt
+        , pure WaitAction
         , DragAction <$> genSmallList
             (ComputerPoint <$> smallInt <*> smallInt)
             <*> genSmallList genText

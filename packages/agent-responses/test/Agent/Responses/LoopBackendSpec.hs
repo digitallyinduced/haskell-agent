@@ -31,6 +31,7 @@ import Agent.Responses.Types
     , ComputerCallOutput(..)
     , FunctionCallOutput(..)
     , InternalChatMetadata(..)
+    , ItemStatus(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
@@ -92,6 +93,23 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 output.computerOutputCallId `shouldBe` "call-1"
                 output.screenshotDataUrl `shouldBe` "data:image/png;base64,AA=="
             other -> expectationFailure ("unexpected output: " <> show other)
+
+    it "marks rejected or failed computer calls incomplete" do
+        case toolResultToItem ToolCallResult
+                { callId = "call-failed"
+                , output = "Tool call rejected by user."
+                , callKind = ComputerCallKind
+                } of
+            ComputerCallOutputItem output -> do
+                output.computerOutputCallId `shouldBe` "call-failed"
+                output.computerOutputStatus `shouldBe` Just ItemIncomplete
+                output.screenshotDataUrl `shouldSatisfy`
+                    ("data:image/png;base64," `Text.isPrefixOf`)
+            other -> expectationFailure ("unexpected output: " <> show other)
+
+    it "uses the durationless computer wait action shape" do
+        Aeson.toJSON WaitAction `shouldBe`
+            Aeson.object ["type" Aeson..= ("wait" :: Text.Text)]
 
     it "preserves unknown native computer protocol fields" do
         let safety = SafetyCheck

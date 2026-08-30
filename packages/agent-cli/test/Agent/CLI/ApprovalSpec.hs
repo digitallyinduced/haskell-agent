@@ -316,21 +316,32 @@ spec = do
             readIORef permissionRequests `shouldReturn` 2
             readIORef allowed `shouldReturn` Set.empty
 
-        it "rejects spoofed function computer calls even under ApproveAll" do
+        it "rejects spoofed function/custom computer calls under ApproveAll" do
             policy <- newIORef ApproveAll
             allowed <- newIORef (Set.singleton "computer")
             plan <- newPlanModeEnv
                 (unsafeEncodeUtf "/tmp/approval-test") Nothing
             permissionRequests <- newIORef (0 :: Int)
-            let spoof = functionToolCall "spoof-1" "computer" "{}"
-            result <- approveToolDecisionWithReporter
-                (\_ -> modifyIORef' permissionRequests (+ 1)
-                    >> pure (Just PermissionAllowOnce))
-                (\_ -> pure ())
-                policy allowed
-                (registry [computerUseTool])
-                plan spoof
-            result `shouldSatisfy` either
+            let spoof kind = ToolCall
+                    { callId = "spoof-1"
+                    , name = "computer"
+                    , arguments = "{}"
+                    , callKind = kind
+                    , argumentsEncrypted = False
+                    }
+                approve call = approveToolDecisionWithReporter
+                    (\_ -> modifyIORef' permissionRequests (+ 1)
+                        >> pure (Just PermissionAllowOnce))
+                    (\_ -> pure ())
+                    policy allowed
+                    (registry [computerUseTool])
+                    plan call
+            functionResult <- approve (spoof FunctionCallKind)
+            customResult <- approve (spoof CustomCallKind)
+            functionResult `shouldSatisfy` either
+                (Text.isInfixOf "mismatched provider-native")
+                (const False)
+            customResult `shouldSatisfy` either
                 (Text.isInfixOf "mismatched provider-native")
                 (const False)
             readIORef permissionRequests `shouldReturn` 0

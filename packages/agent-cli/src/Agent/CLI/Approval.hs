@@ -271,6 +271,11 @@ toggleAlwaysApprove policyRef projectRoot = do
         _ -> "auto-approve off (saved for project)")
 
 childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
+childApprove _ tools call
+    | Just tool <- lookupRegisteredTool call.name tools
+    , not (toolAcceptsCall tool call) =
+        pure $ Left
+            "Mismatched provider-native tool call kind requires parent review."
 childApprove _ _ call
     | call.callKind == ComputerCallKind =
         pure $ Left

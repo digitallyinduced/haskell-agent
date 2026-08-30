@@ -373,7 +373,7 @@ toolResultToItem result = case result.callKind of
                 , computerOutputCallId = result.callId
                 , screenshotDataUrl = transparentPixelDataUrl
                 , acknowledgedChecks = []
-                , computerOutputStatus = Nothing
+                , computerOutputStatus = Just ItemIncomplete
                 , computerOutputExtra = KeyMap.empty
                 }
 

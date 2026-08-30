@@ -420,7 +420,7 @@ data ComputerAction
         , moveY :: !Int
         , moveKeys :: ![Text]
         }
-    | WaitAction !Int
+    | WaitAction
     | DragAction
         { dragPath :: ![ComputerPoint]
         , dragKeys :: ![Text]
@@ -468,8 +468,7 @@ instance ToJSON ComputerAction where
                 , "y" .= moveY
                 , "keys" .= moveKeys
                 ]
-        WaitAction milliseconds -> object
-            [ "type" .= ("wait" :: Text), "ms" .= milliseconds ]
+        WaitAction -> object ["type" .= ("wait" :: Text)]
         DragAction { dragPath, dragKeys } -> object
             [ "type" .= ("drag" :: Text)
             , "path" .= dragPath
@@ -502,7 +501,7 @@ instance FromJSON ComputerAction where
                 <$> o .: "x"
                 <*> o .: "y"
                 <*> o .:? "keys" .!= []
-            "wait" -> WaitAction <$> o .:? "ms" .!= 1000
+            "wait" -> pure WaitAction
             "drag" -> DragAction
                 <$> o .:? "path" .!= []
                 <*> o .:? "keys" .!= []

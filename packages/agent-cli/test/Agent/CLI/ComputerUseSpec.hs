@@ -8,6 +8,7 @@ import Agent.CLI.ComputerUse
     , pointerScript
     , summarizeComputerCall
     , validateComputerCall
+    , validateComputerCallForDisplay
     )
 import Agent.CLI.SessionAdmin (sessionToolEvent)
 import Agent.Responses.Types
@@ -31,6 +32,27 @@ spec = do
                             && "kCGEventFlagMaskShift"
                                 `Text.isInfixOf` script)
 
+        it "preflights every drag point before pressing the mouse button" do
+            pointerScript
+                (DragAction [ComputerPoint 10 20, ComputerPoint 30 40] [])
+                `shouldSatisfy` either
+                    (const False)
+                    ("check(10,20);check(30,40);down(10,20"
+                        `Text.isInfixOf`)
+
+        it "maps browser scroll signs to CoreGraphics and caps deltas" do
+            pointerScript (ScrollAction 12 34 50 (-60) [])
+                `shouldSatisfy` either
+                    (const False)
+                    ("2,-dy,-dx" `Text.isInfixOf`)
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ScrollAction 0 0 100001 0 []]
+                    }
+                `shouldBe` Left
+                    "Computer scroll delta exceeds 100000 pixels."
+
         it "rejects unknown mouse buttons instead of changing them to left" do
             pointerScript (ClickAction 12 34 "sideways" [])
                 `shouldBe` Left
@@ -48,6 +70,16 @@ spec = do
                         "CGEventCreateKeyboardEvent" `Text.isInfixOf` script
                             && not ("System Events" `Text.isInfixOf` script))
 
+        it "fails closed when macOS GUI session state is unavailable" do
+            pointerScript (ClickAction 12 34 "left" [])
+                `shouldSatisfy` either
+                    (const False)
+                    ("if(!d) throw new Error" `Text.isInfixOf`)
+            keyCombinationScript ["enter"]
+                `shouldSatisfy` either
+                    (const False)
+                    ("if(!d) throw new Error" `Text.isInfixOf`)
+
         it "validates logical main-display dimensions" do
             parseDisplaySize "2056,1329\n" `shouldBe` Just (2056, 1329)
             parseDisplaySize "4112,-1" `shouldBe` Nothing
@@ -63,6 +95,21 @@ spec = do
                     (\script ->
                         "kCGEventFlagMaskCommand" `Text.isInfixOf` script
                             && "key(0," `Text.isInfixOf` script)
+            keyCombinationScript ["🙂"] `shouldSatisfy`
+                either (const False)
+                    (\script ->
+                        "value.slice(i,end)" `Text.isInfixOf` script
+                            && "charCodeAt(end-1)" `Text.isInfixOf` script)
+
+        it "normalizes provider special-key names to macOS virtual keys" do
+            keyCombinationScript ["ARROWLEFT"] `shouldSatisfy`
+                either (const False) ("key(123,0)" `Text.isInfixOf`)
+            keyCombinationScript ["PAGEUP"] `shouldSatisfy`
+                either (const False) ("key(116,0)" `Text.isInfixOf`)
+            keyCombinationScript ["DELETE"] `shouldSatisfy`
+                either (const False) ("key(117,0)" `Text.isInfixOf`)
+            keyCombinationScript ["BACKSPACE"] `shouldSatisfy`
+                either (const False) ("key(51,0)" `Text.isInfixOf`)
 
         it "fails closed on malformed session lock output" do
             parseSessionLocked "false\n" `shouldBe` Right False
@@ -111,6 +158,70 @@ spec = do
                         , DragAction
                             (replicate 1024 (ComputerPoint 0 0))
                             []
+                        ]
+                    }
+                `shouldBe` Right ()
+
+        it "prevalidates every action before a batch can change the desktop" do
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ ScreenshotAction
+                        , TypeAction (Text.replicate 8193 "x")
+                        ]
+                    }
+                `shouldBe` Left
+                    "Computer text input exceeds the 8192-character limit."
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ ScreenshotAction
+                        , DragAction [ComputerPoint 1 2] []
+                        ]
+                    }
+                `shouldBe` Left
+                    "Computer drag path needs at least two points."
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ ScreenshotAction
+                        , KeypressAction ["hyper", "a"]
+                        ]
+                    }
+                `shouldBe` Left
+                    "Unsupported computer modifier: hyper"
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ ScreenshotAction
+                        , UnknownComputerAction
+                            (TaggedObject "future_action" KeyMap.empty)
+                        ]
+                    }
+                `shouldBe` Left
+                    "Unsupported computer action: \"future_action\""
+
+        it "prevalidates every coordinate against the main display" do
+            validateComputerCallForDisplay
+                (1440, 900)
+                exampleCall
+                    { computerActions =
+                        [ ClickAction 20 30 "left" []
+                        , DragAction
+                            [ ComputerPoint 100 100
+                            , ComputerPoint 1440 899
+                            ]
+                            []
+                        ]
+                    }
+                `shouldBe` Left
+                    "Computer point is outside the main display."
+            validateComputerCallForDisplay
+                (1440, 900)
+                exampleCall
+                    { computerActions =
+                        [ ScrollAction 1439 899 0 100 []
+                        , MoveAction 0 0 []
                         ]
                     }
                 `shouldBe` Right ()
