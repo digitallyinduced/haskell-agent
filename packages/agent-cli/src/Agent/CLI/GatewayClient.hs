@@ -1,8 +1,14 @@
 -- | HTTPS device authorization and restricted gateway credential storage.
 module Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , GatewayAuthorization(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
+    , startGatewayAuthorization
+    , pollGatewayAuthorization
+    , saveGatewayCredential
+    , removeGatewayCredential
+    , openGatewayAuthorizationPage
     , connectGateway
     , disconnectGateway
     , gatewayCredentialPath
@@ -19,6 +25,7 @@ module Agent.CLI.GatewayClient
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.CLI.Options (GatewayCommand (..))
 import Agent.Json.Decode qualified as Hermes
+import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
@@ -31,6 +38,7 @@ import Data.Text qualified as Text
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types (hContentType)
+import Network.URI qualified as URI
 import System.Directory.OsPath qualified as Directory
 import System.Exit (ExitCode (..))
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
@@ -43,6 +51,22 @@ data GatewayCredential = GatewayCredential
     , gatewayAccessToken :: !Text
     }
     deriving (Eq)
+
+-- | A validated gateway base URL paired with its short-lived device flow.
+--
+-- Keeping the normalized base URL in the value prevents UI callers from
+-- accidentally saving a different origin from the one that issued the code.
+data GatewayAuthorization = GatewayAuthorization
+    { authorizationBaseUrl :: !Text
+    , authorizationDevice :: !GatewayDeviceAuthorization
+    }
+    deriving (Eq)
+
+instance Show GatewayAuthorization where
+    show authorization =
+        "GatewayAuthorization { authorizationBaseUrl = "
+            <> show authorization.authorizationBaseUrl
+            <> ", authorizationDevice = <redacted> }"
 
 instance Show GatewayCredential where
     show credential =
@@ -77,7 +101,21 @@ data GatewayDeviceAuthorization = GatewayDeviceAuthorization
     , expiresInSeconds :: !Int
     , pollIntervalSeconds :: !Int
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show GatewayDeviceAuthorization where
+    show device =
+        "GatewayDeviceAuthorization { deviceCode = <redacted>, userCode = "
+            <> show device.userCode
+            <> ", verificationUri = "
+            <> show device.verificationUri
+            <> ", verificationUriComplete = "
+            <> show device.verificationUriComplete
+            <> ", expiresInSeconds = "
+            <> show device.expiresInSeconds
+            <> ", pollIntervalSeconds = "
+            <> show device.pollIntervalSeconds
+            <> " }"
 
 gatewayDeviceDecoder :: Hermes.Decoder GatewayDeviceAuthorization
 gatewayDeviceDecoder =
@@ -97,7 +135,20 @@ data GatewayPollResult
     | GatewayAccessDenied
     | GatewayExpired
     | GatewayPollFailed !Text
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show GatewayPollResult where
+    show result = case result of
+        GatewayAuthorized _ websocketUrl ->
+            "GatewayAuthorized <redacted> " <> show websocketUrl
+        GatewayAuthorizationPending interval ->
+            "GatewayAuthorizationPending " <> show interval
+        GatewaySlowDown interval ->
+            "GatewaySlowDown " <> show interval
+        GatewayAccessDenied -> "GatewayAccessDenied"
+        GatewayExpired -> "GatewayExpired"
+        GatewayPollFailed code ->
+            "GatewayPollFailed " <> show code
 
 gatewayPollDecoder :: Hermes.Decoder GatewayPollResult
 gatewayPollDecoder =
@@ -154,37 +205,94 @@ loadGatewayCredentialAt home = do
                 Right bytes ->
                     case Hermes.decodeEither gatewayCredentialDecoder (LBS.toStrict bytes) of
                         Left err -> Left (Hermes.jsonErrorMessage err)
-                        Right credential -> Right (Just credential)
+                        Right credential ->
+                            case validateGatewayCredential credential of
+                                Left err -> Left err
+                                Right () -> Right (Just credential)
 
 saveGatewayCredentialAt :: OsPath -> GatewayCredential -> IO (Either Text ())
-saveGatewayCredentialAt home credential = do
-    let path = gatewayCredentialPath home
-        directory = takeDirectory path
-    result <- tryAny do
-        Directory.createDirectoryIfMissing True directory
-        setFileMode (unsafeToFilePath directory) 0o700
-        writeLazyFileAtomically path 0o600 (Aeson.encode credential)
-    pure case result of
-        Left exception -> Left (Text.pack (show exception))
-        Right () -> Right ()
+saveGatewayCredentialAt home credential =
+    case validateGatewayCredential credential of
+        Left err -> pure (Left err)
+        Right () -> do
+            let path = gatewayCredentialPath home
+                directory = takeDirectory path
+            result <- tryAny do
+                Directory.createDirectoryIfMissing True directory
+                setFileMode (unsafeToFilePath directory) 0o700
+                writeLazyFileAtomically path 0o600 (Aeson.encode credential)
+            pure case result of
+                Left exception -> Left (Text.pack (show exception))
+                Right () -> Right ()
+
+validateGatewayCredential :: GatewayCredential -> Either Text ()
+validateGatewayCredential credential = do
+    _ <- validateBaseUrl credential.gatewayBaseUrl
+    validateGatewayWebSocketUrl credential.gatewayWebSocketUrl
+    whenEither
+        (Text.null (Text.strip credential.gatewayAccessToken))
+        "Gateway access token cannot be empty."
+  where
+    whenEither condition message
+        | condition = Left message
+        | otherwise = Right ()
+
+saveGatewayCredential :: GatewayCredential -> IO (Either Text ())
+saveGatewayCredential credential =
+    tryAny Directory.getHomeDirectory >>= \case
+        Left exception -> pure (Left (Text.pack (show exception)))
+        Right home -> saveGatewayCredentialAt home credential
+
+startGatewayAuthorization
+    :: Text
+    -> IO (Either Text GatewayAuthorization)
+startGatewayAuthorization rawBaseUrl =
+    case validateBaseUrl rawBaseUrl of
+        Left err -> pure (Left err)
+        Right baseUrl -> do
+            tryAny newTlsManager >>= \case
+                Left exception ->
+                    pure (Left (Text.pack (show exception)))
+                Right manager ->
+                    fmap (GatewayAuthorization baseUrl) <$>
+                        postJson manager
+                            (baseUrl
+                                <> "/api/v1/agent-connections/device")
+                            (Aeson.object
+                                [ "client_name"
+                                    .= ("haskell-agent" :: Text)
+                                ])
+                            gatewayDeviceDecoder
+
+pollGatewayAuthorization
+    :: GatewayAuthorization
+    -> IO (Either Text GatewayPollResult)
+pollGatewayAuthorization authorization = do
+    tryAny newTlsManager >>= \case
+        Left exception ->
+            pure (Left (Text.pack (show exception)))
+        Right manager ->
+            pollGatewayAuthorizationWith manager authorization
+
+openGatewayAuthorizationPage :: GatewayAuthorization -> IO Bool
+openGatewayAuthorizationPage =
+    openBrowser
+        . (.verificationUriComplete)
+        . (.authorizationDevice)
 
 connectGateway :: Text -> IO ()
 connectGateway rawBaseUrl = do
-    baseUrl <- either failText pure (validateBaseUrl rawBaseUrl)
+    authorization <-
+        startGatewayAuthorization rawBaseUrl >>= either failText pure
     manager <- newTlsManager
-    device <-
-        postJson manager (baseUrl <> "/api/v1/agent-connections/device")
-            (Aeson.object ["client_name" .= ("haskell-agent" :: Text)])
-            gatewayDeviceDecoder
-            >>= either failText pure
+    let device = authorization.authorizationDevice
     putStrLn ("Enter code " <> Text.unpack device.userCode <> " at:")
     putStrLn (Text.unpack device.verificationUri)
-    opened <- openBrowser device.verificationUriComplete
+    opened <- openGatewayAuthorizationPage authorization
     when (not opened) $
         putStrLn "Could not open a browser automatically."
-    credential <- pollUntilAuthorized manager baseUrl device
-    home <- Directory.getHomeDirectory
-    saveGatewayCredentialAt home credential >>= either failText pure
+    credential <- pollUntilAuthorized manager authorization
+    saveGatewayCredential credential >>= either failText pure
     putStrLn "Gateway connection saved."
 
 showGatewayStatus :: IO ()
@@ -198,11 +306,19 @@ showGatewayStatus =
 
 disconnectGateway :: IO ()
 disconnectGateway = do
-    home <- Directory.getHomeDirectory
-    let path = gatewayCredentialPath home
-    exists <- Directory.doesFileExist path
-    when exists (Directory.removeFile path)
+    removeGatewayCredential >>= either failText pure
     putStrLn "Gateway connection removed."
+
+removeGatewayCredential :: IO (Either Text ())
+removeGatewayCredential = do
+    result <- tryAny do
+        home <- Directory.getHomeDirectory
+        let path = gatewayCredentialPath home
+        exists <- Directory.doesFileExist path
+        when exists (Directory.removeFile path)
+    pure case result of
+        Left exception -> Left (Text.pack (show exception))
+        Right () -> Right ()
 
 runGatewayCommand :: GatewayCommand -> IO ()
 runGatewayCommand = \case
@@ -212,20 +328,19 @@ runGatewayCommand = \case
 
 pollUntilAuthorized
     :: HTTP.Manager
-    -> Text
-    -> GatewayDeviceAuthorization
+    -> GatewayAuthorization
     -> IO GatewayCredential
-pollUntilAuthorized manager baseUrl device =
+pollUntilAuthorized manager authorization =
     go device.expiresInSeconds (max 1 device.pollIntervalSeconds)
   where
+    baseUrl = authorization.authorizationBaseUrl
+    device = authorization.authorizationDevice
     go remaining interval
         | remaining <= 0 = failText "Gateway authorization expired."
         | otherwise = do
             threadDelay (interval * 1_000_000)
             result <-
-                postJson manager (baseUrl <> "/api/v1/agent-connections/token")
-                    (Aeson.object ["device_code" .= device.deviceCode])
-                    gatewayPollDecoder
+                pollGatewayAuthorizationWith manager authorization
                     >>= either failText pure
             case result of
                 GatewayAuthorized accessToken websocketUrl ->
@@ -239,12 +354,31 @@ pollUntilAuthorized manager baseUrl device =
                     let next = maybe interval (max 1) serverInterval
                      in go (remaining - next) next
                 GatewaySlowDown serverInterval ->
-                    let next = maybe (interval + 5) (max (interval + 1)) serverInterval
+                    let next =
+                            maybe
+                                (interval + 5)
+                                (max (interval + 5))
+                                serverInterval
                      in go (remaining - next) next
                 GatewayAccessDenied -> failText "Gateway authorization was denied."
                 GatewayExpired -> failText "Gateway authorization expired."
                 GatewayPollFailed code ->
                     failText ("Gateway authorization failed: " <> code)
+
+pollGatewayAuthorizationWith
+    :: HTTP.Manager
+    -> GatewayAuthorization
+    -> IO (Either Text GatewayPollResult)
+pollGatewayAuthorizationWith manager authorization =
+    postJson
+        manager
+        (authorization.authorizationBaseUrl
+            <> "/api/v1/agent-connections/token")
+        (Aeson.object
+            [ "device_code"
+                .= authorization.authorizationDevice.deviceCode
+            ])
+        gatewayPollDecoder
 
 postJson
     :: HTTP.Manager
@@ -277,20 +411,38 @@ postJson manager url payload decoder = do
 validateBaseUrl :: Text -> Either Text Text
 validateBaseUrl raw
     | Text.null base = Left "Gateway URL cannot be empty."
-    | "https://" `Text.isPrefixOf` lower = Right base
-    | any localOrigin
-        [ "http://127.0.0.1"
-        , "http://localhost"
-        , "http://[::1]"
-        ] = Right base
-    | otherwise = Left "Gateway URL must use HTTPS (HTTP is allowed only for localhost development)."
+    | otherwise = do
+        uri <- maybe
+            (Left "Gateway URL is invalid.")
+            Right
+            (URI.parseURI (Text.unpack base))
+        authority <- maybe
+            (Left "Gateway URL must include a host.")
+            Right
+            (URI.uriAuthority uri)
+        whenEither
+            (null (URI.uriRegName authority))
+            "Gateway URL must include a host."
+        whenEither
+            (not (null (URI.uriUserInfo authority))
+                || not (null (URI.uriQuery uri))
+                || not (null (URI.uriFragment uri)))
+            "Gateway URL cannot contain user info, a query, or a fragment."
+        case Text.toLower (Text.pack (URI.uriScheme uri)) of
+            "https:" -> Right base
+            "http:"
+                | localHost (URI.uriRegName authority) -> Right base
+            _ ->
+                Left
+                    "Gateway URL must use HTTPS (HTTP is allowed only for localhost development)."
   where
     base = Text.dropWhileEnd (== '/') (Text.strip raw)
-    lower = Text.toLower base
-    localOrigin origin =
-        lower == origin
-            || (origin <> ":") `Text.isPrefixOf` lower
-            || (origin <> "/") `Text.isPrefixOf` lower
+    localHost rawHost =
+        Text.toLower (Text.pack rawHost)
+            `elem` ["localhost", "127.0.0.1", "::1", "[::1]"]
+    whenEither condition message
+        | condition = Left message
+        | otherwise = Right ()
 
 openBrowser :: Text -> IO Bool
 openBrowser url = do
