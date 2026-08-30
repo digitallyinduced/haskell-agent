@@ -48,6 +48,54 @@ spec = describe "gateway device authorization" do
             `shouldBe` Right
                 (GatewayAuthorized "secret" "wss://gateway/v1/responses")
 
+    it "decodes and validates the authorization-code response contract" do
+        let payload =
+                "{\"access_token\":\"hag_secret\",\"token_type\":\"Bearer\",\
+                \\"base_url\":\"https://platform.digitallyinduced.com\",\
+                \\"websocket_url\":\"wss://platform.digitallyinduced.com/v1/responses\"}"
+            expectedResponse =
+                GatewayAuthorizationCodeResponse
+                    { authorizationAccessToken = "hag_secret"
+                    , authorizationTokenType = "Bearer"
+                    , authorizationBaseUrl =
+                        "https://platform.digitallyinduced.com"
+                    , authorizationWebSocketUrl =
+                        "wss://platform.digitallyinduced.com/v1/responses"
+                    }
+        Aeson.eitherDecodeStrict' payload `shouldBe` Right expectedResponse
+        validateGatewayAuthorizationCodeResponse
+            "https://platform.digitallyinduced.com"
+            expectedResponse
+            `shouldBe` Right
+                (GatewayCredential
+                    "https://platform.digitallyinduced.com"
+                    "wss://platform.digitallyinduced.com/v1/responses"
+                    "hag_secret")
+
+    it "rejects token responses for another origin or token scheme" do
+        let response =
+                GatewayAuthorizationCodeResponse
+                    { authorizationAccessToken = "hag_secret"
+                    , authorizationTokenType = "Bearer"
+                    , authorizationBaseUrl =
+                        "https://platform.digitallyinduced.com"
+                    , authorizationWebSocketUrl =
+                        "wss://platform.digitallyinduced.com/v1/responses"
+                    }
+            validate =
+                validateGatewayAuthorizationCodeResponse
+                    "https://platform.digitallyinduced.com"
+        validate response { authorizationTokenType = "bearer" }
+            `shouldBe` Left "The gateway returned an unsupported token type."
+        validate
+            response
+                { authorizationBaseUrl = "https://example.com"
+                , authorizationWebSocketUrl =
+                    "wss://example.com/v1/responses"
+                }
+            `shouldBe` Left
+                "The gateway returned a credential for a different origin."
+
     it "redacts gateway secrets from Show" do
         let credential =
                 GatewayCredential "https://gateway" "wss://gateway/v1/responses" "secret"
@@ -75,6 +123,20 @@ spec = describe "gateway device authorization" do
             `shouldSatisfy` not . Text.isInfixOf "USER-SECRET"
         renderedPoll `shouldSatisfy` not . Text.isInfixOf "secret"
         renderedPoll `shouldSatisfy` not . Text.isInfixOf "wss://gateway"
+        let renderedCodeResponse =
+                Text.pack $
+                    show
+                        GatewayAuthorizationCodeResponse
+                            { authorizationAccessToken = "oauth-secret"
+                            , authorizationTokenType = "Bearer"
+                            , authorizationBaseUrl = "https://gateway"
+                            , authorizationWebSocketUrl =
+                                "wss://gateway/v1/responses"
+                            }
+        renderedCodeResponse
+            `shouldSatisfy` not . Text.isInfixOf "oauth-secret"
+        renderedCodeResponse
+            `shouldSatisfy` not . Text.isInfixOf "wss://gateway"
 
     it "allows local HTTP development without trusting lookalike hosts" do
         validateBaseUrl "http://localhost:8080"
