@@ -211,7 +211,6 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Resume
-                    , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Session
                     , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
