@@ -28,8 +28,8 @@ import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
 import Agent.ToolDispatch
     ( ToolCall(..)
-    , ToolCallKind(..)
     , canonicalToolName
+    , isComputerToolCallKind
     )
 import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode
@@ -170,7 +170,7 @@ approveToolDecisionWithReporterAndPersistence requestPermission report persistAl
                     if isPlanFileWrite planActive planPath call
                         then pure (Right True)
                         else do
-                            if call.callKind == ComputerCallKind
+                            if isComputerToolCallKind call.callKind
                                 then requestPermission call >>= \case
                                     Nothing -> pure (Right False)
                                     Just PermissionDeny -> pure (Right False)
@@ -277,7 +277,7 @@ childApprove _ tools call
         pure $ Left
             "Mismatched provider-native tool call kind requires parent review."
 childApprove _ _ call
-    | call.callKind == ComputerCallKind =
+    | isComputerToolCallKind call.callKind =
         pure $ Left
             "Computer use requires an explicit parent approval for every call."
 childApprove policy tools call = case policy of

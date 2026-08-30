@@ -59,6 +59,8 @@ module Agent.Responses.Types
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , computerFunctionNamespace
+    , computerFunctionName
 
       -- * Response
     , Response(..)

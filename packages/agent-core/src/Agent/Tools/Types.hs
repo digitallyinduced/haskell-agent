@@ -336,8 +336,10 @@ toolAcceptsCall :: AppTool -> ToolCall -> Bool
 toolAcceptsCall tool call =
     case (tool.appToolSchema, call.callKind) of
         (HostedComputerSchema, ComputerCallKind) -> True
+        (HostedComputerSchema, ComputerFunctionCallKind) -> True
         (HostedComputerSchema, _) -> False
         (_, ComputerCallKind) -> False
+        (_, ComputerFunctionCallKind) -> False
         _ -> True
 
 jsonToolParameters :: AppTool -> Maybe [PropertySchema]

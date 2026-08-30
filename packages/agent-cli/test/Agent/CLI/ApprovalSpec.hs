@@ -270,22 +270,21 @@ spec = do
             let request _ = do
                     modifyIORef' permissionRequests (+ 1)
                     pure (Just PermissionAllowTool)
-                computerCall = ToolCall
+                computerCall kind = ToolCall
                     { callId = "computer-1"
                     , name = "computer"
                     , arguments = "{}"
-                    , callKind = ComputerCallKind
+                    , callKind = kind
                     , argumentsEncrypted = False
                     }
-            approveToolDecisionWithReporter
-                request (\_ -> pure ()) policy allowed
-                (registry [mutatingTool]) plan computerCall
-                `shouldReturn` Right True
-            approveToolDecisionWithReporter
-                request (\_ -> pure ()) policy allowed
-                (registry [mutatingTool]) plan computerCall
-                `shouldReturn` Right True
-            readIORef permissionRequests `shouldReturn` 2
+                approve kind = approveToolDecisionWithReporter
+                    request (\_ -> pure ()) policy allowed
+                    (registry [mutatingTool]) plan (computerCall kind)
+            mapM_ (\kind -> do
+                approve kind `shouldReturn` Right True
+                approve kind `shouldReturn` Right True)
+                [ComputerCallKind, ComputerFunctionCallKind]
+            readIORef permissionRequests `shouldReturn` 4
             readIORef policy `shouldReturn` ApproveAll
             readIORef allowed `shouldReturn` Set.empty
 
@@ -298,22 +297,21 @@ spec = do
             let request _ = do
                     modifyIORef' permissionRequests (+ 1)
                     pure (Just PermissionAllowTool)
-                computerCall = ToolCall
+                computerCall kind = ToolCall
                     { callId = "computer-1"
                     , name = "computer"
                     , arguments = "{}"
-                    , callKind = ComputerCallKind
+                    , callKind = kind
                     , argumentsEncrypted = False
                     }
-            approveToolDecisionWithReporter
-                request (\_ -> pure ()) policy allowed
-                (registry [mutatingTool]) plan computerCall
-                `shouldReturn` Right True
-            approveToolDecisionWithReporter
-                request (\_ -> pure ()) policy allowed
-                (registry [mutatingTool]) plan computerCall
-                `shouldReturn` Right True
-            readIORef permissionRequests `shouldReturn` 2
+                approve kind = approveToolDecisionWithReporter
+                    request (\_ -> pure ()) policy allowed
+                    (registry [mutatingTool]) plan (computerCall kind)
+            mapM_ (\kind -> do
+                approve kind `shouldReturn` Right True
+                approve kind `shouldReturn` Right True)
+                [ComputerCallKind, ComputerFunctionCallKind]
+            readIORef permissionRequests `shouldReturn` 4
             readIORef allowed `shouldReturn` Set.empty
 
         it "rejects spoofed function/custom computer calls under ApproveAll" do
@@ -352,19 +350,21 @@ spec = do
                 `shouldReturn` Right True
 
         it "never lets a child bypass computer approval" do
-            let computerCall = ToolCall
+            let computerCall kind = ToolCall
                     { callId = "computer-1"
                     , name = "computer"
                     , arguments = "{}"
-                    , callKind = ComputerCallKind
+                    , callKind = kind
                     , argumentsEncrypted = False
                     }
-            childApprove ApproveAll
-                (registry [mutatingTool])
-                computerCall
-                `shouldReturn`
-                    Left
-                        "Computer use requires an explicit parent approval for every call."
+            mapM_ (\kind ->
+                childApprove ApproveAll
+                    (registry [mutatingTool])
+                    (computerCall kind)
+                    `shouldReturn`
+                        Left
+                            "Computer use requires an explicit parent approval for every call.")
+                [ComputerCallKind, ComputerFunctionCallKind]
 
         it "allows only read-only tools under DenyMutating" do
             childApprove DenyMutating (registry [readOnlyTool]) readOnlyCall

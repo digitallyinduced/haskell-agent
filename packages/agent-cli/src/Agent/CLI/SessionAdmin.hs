@@ -17,7 +17,10 @@ import Agent.CLI.Database.Storage
     ( postgresStorageCommandEnv
     , runStorageCommand
     )
-import Agent.CLI.ComputerUse (summarizeComputerCall)
+import Agent.CLI.ComputerUse
+    ( summarizeComputerCall
+    , summarizeComputerToolCall
+    )
 import Agent.CLI.Login
     ( AccountBilling(..)
     , LoginAccount(..)
@@ -52,6 +55,7 @@ import Agent.CLI.SessionLock
     )
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (providerSlug)
+import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
     ( ComputerCall(..)
     , ComputerCallOutput(..)
@@ -60,6 +64,8 @@ import Agent.Responses.Types
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , ResponseItem(..)
+    , computerFunctionName
+    , computerFunctionNamespace
     )
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
@@ -76,10 +82,11 @@ import Control.Monad
     , when
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Int (Int64)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -308,12 +315,29 @@ sessionToolEvents turn =
 
 sessionToolEvent :: ResponseItem -> Maybe Aeson.Value
 sessionToolEvent = \case
+    item@(FunctionCallItem call)
+        | call.namespace == Just computerFunctionNamespace
+        , call.name == computerFunctionName ->
+            let summary = fromMaybe "Computer action"
+                    (responseItemToToolCall item
+                        >>= summarizeComputerToolCall)
+            in Just $
+                toolStartedJSON
+                    call.callId
+                    "computer"
+                    (TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                        Aeson.object ["summary" Aeson..= summary])
     FunctionCallItem call ->
         Just (toolStartedJSON call.callId call.name call.arguments)
     CustomToolCallItem call ->
         Just (toolStartedJSON call.callId call.name call.input)
     FunctionCallOutputItem result ->
-        Just (toolFinishedJSON result.callId (renderToolValue result.output))
+        Just
+            (toolFinishedJSON
+                result.callId
+                (if containsInputImage result.output
+                    then "Screenshot captured"
+                    else renderToolValue result.output))
     CustomToolCallOutputItem result ->
         Just (toolFinishedJSON result.callId (renderToolValue result.output))
     ComputerCallItem call ->
@@ -331,6 +355,14 @@ sessionToolEvent = \case
                 result.computerOutputCallId
                 "Screenshot captured")
     _ -> Nothing
+
+containsInputImage :: Aeson.Value -> Bool
+containsInputImage = \case
+    Aeson.Object object ->
+        KeyMap.lookup "type" object == Just (Aeson.String "input_image")
+            || any containsInputImage object
+    Aeson.Array values -> any containsInputImage values
+    _ -> False
 
 toolStartedJSON :: Text -> Text -> Text -> Aeson.Value
 toolStartedJSON callId name arguments =
