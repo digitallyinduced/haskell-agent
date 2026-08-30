@@ -474,6 +474,26 @@ int32_t ha_gateway_connect_poll(
     ha_gateway_poll_callback callback,
     void *context
 );
+/*
+ * Exchanges a browser authorization code using its PKCE verifier. On success
+ * the trusted runtime has validated the returned Bearer credential and
+ * gateway origins, then atomically persisted it; no secret is returned.
+ * The result callback receives status 0 for success or -1 with an error.
+ */
+int32_t ha_gateway_connect_exchange(
+    const uint8_t *base_url,
+    size_t base_url_length,
+    const uint8_t *client_id,
+    size_t client_id_length,
+    const uint8_t *authorization_code,
+    size_t authorization_code_length,
+    const uint8_t *code_verifier,
+    size_t code_verifier_length,
+    const uint8_t *redirect_uri,
+    size_t redirect_uri_length,
+    ha_gateway_result_callback callback,
+    void *context
+);
 int32_t ha_gateway_disconnect(
     ha_gateway_result_callback callback,
     void *context

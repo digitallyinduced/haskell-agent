@@ -73,6 +73,7 @@ import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
+    , exchangeGatewayAuthorizationCode
     , loadGatewayCredential
     , pollGatewayAuthorizationAndSave
     , removeGatewayCredential
@@ -643,6 +644,12 @@ foreign export ccall ha_gateway_connect_poll
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
     -> FunPtr GatewayPollCallback -> Ptr () -> IO CInt
 
+foreign export ccall ha_gateway_connect_exchange
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize
+    -> FunPtr GatewayResultCallback -> Ptr () -> IO CInt
+
 foreign export ccall ha_gateway_disconnect
     :: FunPtr GatewayResultCallback -> Ptr () -> IO CInt
 
@@ -935,6 +942,51 @@ ha_gateway_connect_poll
                         invokeGatewayPollError callback context err
                     Right (Right result) ->
                         invokeGatewayPollResult callback context result
+        pure 0
+
+ha_gateway_connect_exchange
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> Ptr Word8 -> CSize
+    -> FunPtr GatewayResultCallback -> Ptr () -> IO CInt
+ha_gateway_connect_exchange
+    baseUrlBytes (CSize baseUrlLength)
+    clientIdBytes (CSize clientIdLength)
+    codeBytes (CSize codeLength)
+    verifierBytes (CSize verifierLength)
+    redirectUriBytes (CSize redirectUriLength)
+    callback context
+    | callback == nullFunPtr = pure 1
+    | anyNonEmptyNull
+        [ (baseUrlBytes, baseUrlLength)
+        , (clientIdBytes, clientIdLength)
+        , (codeBytes, codeLength)
+        , (verifierBytes, verifierLength)
+        , (redirectUriBytes, redirectUriLength)
+        ] = pure 2
+    | otherwise = do
+        baseUrl <- decodeInput baseUrlBytes baseUrlLength
+        clientId <- decodeInput clientIdBytes clientIdLength
+        code <- decodeInput codeBytes codeLength
+        verifier <- decodeInput verifierBytes verifierLength
+        redirectUri <- decodeInput redirectUriBytes redirectUriLength
+        _ <- forkIO do
+            tryAny
+                (exchangeGatewayAuthorizationCode
+                    baseUrl
+                    clientId
+                    code
+                    verifier
+                    redirectUri)
+                >>= \case
+                    Left exception ->
+                        invokeGatewayResultError callback context
+                            (Text.pack (show exception))
+                    Right (Left err) ->
+                        invokeGatewayResultError callback context err
+                    Right (Right ()) ->
+                        invokeGatewayResultCallback callback context
+                            0 nullPtr 0
         pure 0
 
 ha_gateway_disconnect

@@ -45,7 +45,7 @@ int ha_image_attachment_abi_smoke(void) {
 }
 
 /*
- * Compile the four gateway function/callback signatures as a native consumer
+ * Compile the gateway function/callback signatures as a native consumer
  * and exercise their synchronous argument validation without network or
  * credential-store access.
  */
@@ -57,6 +57,12 @@ int ha_gateway_abi_smoke(void) {
     const uint8_t base_url[] = "https://platform.digitallyinduced.com";
     const uint8_t client_name[] = "native-smoke";
     const uint8_t device_code[] = "device-code";
+    const uint8_t client_id[] = "haskell-agent-macos";
+    const uint8_t authorization_code[] = "authorization-code";
+    const uint8_t code_verifier[] =
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
+    const uint8_t redirect_uri[] =
+        "haskell-agent-auth://gateway/callback";
 
     if (HA_GATEWAY_CONNECTED != 0 || HA_GATEWAY_DISCONNECTED != 1
             || HA_GATEWAY_ERROR != -1 || HA_GATEWAY_POLL_AUTHORIZED != 0
@@ -79,8 +85,17 @@ int ha_gateway_abi_smoke(void) {
             poll_callback, NULL) != 1) {
         return 23;
     }
-    if (ha_gateway_disconnect(result_callback, NULL) != 1) {
+    if (ha_gateway_connect_exchange(
+            base_url, sizeof(base_url) - 1,
+            client_id, sizeof(client_id) - 1,
+            authorization_code, sizeof(authorization_code) - 1,
+            code_verifier, sizeof(code_verifier) - 1,
+            redirect_uri, sizeof(redirect_uri) - 1,
+            result_callback, NULL) != 1) {
         return 24;
+    }
+    if (ha_gateway_disconnect(result_callback, NULL) != 1) {
+        return 25;
     }
     return 0;
 }
