@@ -21,17 +21,28 @@ jobs:
         include:
           - system: x86_64-linux
             runner: '["self-hosted", "haskell-agent", "office-builder", "x86_64-linux"]'
+            install-nix: false
           - system: aarch64-darwin
-            runner: '["self-hosted", "haskell-agent", "ihp-ci-mac", "aarch64-darwin"]'
+            runner: '"macos-15"'
+            install-nix: true
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 90
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
+      ATTIC_FLAKE: github:zhaofengli/attic/7a19204df10d606c5070e6bb72615c3461900c05#attic
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
+
+      - name: Install Nix on the ephemeral macOS runner
+        if: matrix.install-nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          determinate: false
+          extra-conf: |
+            sandbox = true
 
       - name: Build install closure
         id: build
@@ -64,12 +75,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          attic_bin="$(command -v attic || true)"
-          if [[ -z "$attic_bin" && -x /run/current-system/sw/bin/attic ]]; then
-            attic_bin=/run/current-system/sw/bin/attic
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" && -x /run/current-system/sw/bin/nix ]]; then
+            nix_bin=/run/current-system/sw/bin/nix
           fi
-          if [[ -z "$attic_bin" ]]; then
-            echo "::error title=Missing Attic binary::attic is required to publish haskell-agent"
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to run the pinned Attic client"
             exit 1
           fi
           if [[ -z "$ATTIC_TOKEN" ]]; then
@@ -83,7 +94,7 @@ jobs:
           chmod 700 "$HOME" "$XDG_CONFIG_HOME"
           trap 'rm -rf "$HOME"' EXIT
 
-          "$attic_bin" login di \
+          "$nix_bin" run "$ATTIC_FLAKE" -- login di \
             https://cache.digitallyinduced.com \
             "$ATTIC_TOKEN"
-          "$attic_bin" push --jobs 4 di:public "$OUT_PATH"
+          "$nix_bin" run "$ATTIC_FLAKE" -- push --jobs 4 di:public "$OUT_PATH"
