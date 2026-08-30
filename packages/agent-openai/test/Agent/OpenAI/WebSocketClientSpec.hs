@@ -88,6 +88,37 @@ spec = do
         validateGatewayWebSocketUrl "https://gateway.example/v1/responses"
             `shouldSatisfy` isLeft
 
+  describe "shouldFallbackDirectCodexHandshakeToHttp" do
+    let direct = Credential
+            { accessToken = "token"
+            , accountId = "chatgpt-account"
+            , leaseId = Nothing
+            , provider = OpenAIProvider
+            }
+        gateway = direct
+            { accountId = "wss://gateway.example/v1/responses" }
+
+    it "accepts exact direct WebSocket handshake 403 and 426 failures" do
+        shouldFallbackDirectCodexHandshakeToHttp direct
+            (HttpError 403 "WebSocket handshake returned HTTP 403")
+            `shouldBe` True
+        shouldFallbackDirectCodexHandshakeToHttp direct
+            (HttpError 426 "WebSocket handshake returned HTTP 426")
+            `shouldBe` True
+
+    it "does not hide application permission errors or authentication failures" do
+        shouldFallbackDirectCodexHandshakeToHttp direct
+            (HttpError 403 "model access denied")
+            `shouldBe` False
+        shouldFallbackDirectCodexHandshakeToHttp direct
+            (HttpError 401 "WebSocket handshake returned HTTP 401")
+            `shouldBe` False
+
+    it "keeps gateway credentials WebSocket-only" do
+        shouldFallbackDirectCodexHandshakeToHttp gateway
+            (HttpError 403 "WebSocket handshake returned HTTP 403")
+            `shouldBe` False
+
   describe "buildWsPayloadWithOptions" do
     it "forces store=false for the Codex WebSocket contract" do
         let request = sampleRequest { store = Just True }
