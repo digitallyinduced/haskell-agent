@@ -129,6 +129,54 @@ spec = describe "provider-native agent tracking" do
         view.nativeAgentStatus `shouldBe` "done"
         nativeAgentTranscript view `shouldBe` ["review complete"]
 
+    it "replaces live parent snapshots with canonical state on every restore" do
+        let live =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ NativeAgentStarted
+                        "parent" Nothing "Live parent" Nothing
+                    , NativeAgentStarted
+                        "child" (Just "parent") "Child" Nothing
+                    ]
+            call = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "parent"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments =
+                    "{\"description\":\"Persisted parent\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "parent"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding $
+                        Aeson.toEncoding ("persisted" :: String)
+                , status = Just ItemCompleted
+                }
+            restore =
+                restoreNativeAgents AgentRoot [call, output]
+            restored =
+                iterate restore live
+                    !! (nativeAgentMaxEntries * 4)
+            parent = lookupView "parent" restored
+            child =
+                find
+                    ((== AgentNative "child") . (.agentTarget))
+                    (nativeAgentEntries AgentRoot restored)
+        nativeAgentStoreSize restored `shouldBe` 2
+        parent.nativeAgentLabel `shouldBe` "Persisted parent"
+        parent.nativeAgentStatus `shouldBe` "done"
+        (.agentPath) <$> child
+            `shouldBe` Just "/native/Persisted parent/Child"
+
     it "does not restore unpaired or non-Claude canonical calls" do
         let call identifier provider = FunctionCallItem FunctionCall
                 { itemId = Nothing

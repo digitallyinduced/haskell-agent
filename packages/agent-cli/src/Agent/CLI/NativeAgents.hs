@@ -229,8 +229,11 @@ restoreNativeAgents selected items current =
     normalizeStore NativeAgentStore
         { storeAgents = Map.union liveUnpersisted canonicalAgents
         , storeOrder =
-            canonicalOrder
-                <> Seq.filter (`Map.member` liveUnpersisted) current.storeOrder
+            uniqueOrder $
+                canonicalOrder
+                    <> Seq.filter
+                        (`Map.member` liveUnpersisted)
+                        current.storeOrder
         , storeSelected = selectedIdentifier
         , storeBytes =
             retainedBytes (Map.union liveUnpersisted canonicalAgents)
@@ -258,7 +261,9 @@ restoreNativeAgents selected items current =
                         case Map.lookup identifier current.storeAgents
                                 >>= (.nativeAgentParent) of
                             Nothing -> found
-                            Just parent -> Set.insert parent found)
+                            Just parent
+                                | Map.member parent canonicalAgents -> found
+                                | otherwise -> Set.insert parent found)
                     ids
                     ids
         in if Set.size withParents == Set.size ids
@@ -576,6 +581,15 @@ alterTouched identifier update store =
 touchOrder :: Text -> Seq Text -> Seq Text
 touchOrder identifier order =
     Seq.filter (/= identifier) order :|> identifier
+
+uniqueOrder :: Seq Text -> Seq Text
+uniqueOrder =
+    snd . foldl' keepFirst (Set.empty, Seq.empty)
+  where
+    keepFirst (seen, order) identifier
+        | Set.member identifier seen = (seen, order)
+        | otherwise =
+            (Set.insert identifier seen, order :|> identifier)
 
 appendOutput :: Int -> Text -> NativeOutput -> NativeOutput
 appendOutput budget chunk output
