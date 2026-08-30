@@ -2,7 +2,14 @@ module Agent.Tools.FileSystem.Grep (grepTool) where
 
 import Agent.Json.Decode (Decoder)
 import Agent.OsPath (fromText, unsafeToFilePath)
-import Agent.ToolArgs (objectArgs, optBool, optInt, optText, reqText)
+import Agent.ToolArgs
+    ( objectArgs
+    , optBool
+    , optInt
+    , optText
+    , rejectField
+    , reqText
+    )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -60,9 +67,6 @@ import System.IO
     , hClose
     )
 
-data GrepOutputMode = GrepContent | GrepFilesWithMatches | GrepCount
-    deriving (Eq, Show)
-
 data GrepArgs = GrepArgs
     { pattern :: Text
     , path :: Maybe Text
@@ -74,12 +78,12 @@ data GrepArgs = GrepArgs
     , fileType :: Maybe Text
     , headLimit :: Maybe Int
     , multiline :: Bool
-    , outputMode :: GrepOutputMode
     }
 
 grepArgsDecoder :: Decoder GrepArgs
 grepArgsDecoder = objectArgs \object -> do
-        modeText <- optText object "output_mode"
+        rejectField object "output_mode"
+            "output_mode is not supported by the Codex grep contract"
         GrepArgs
             <$> reqText object "pattern"
             <*> optText object "path"
@@ -91,13 +95,6 @@ grepArgsDecoder = objectArgs \object -> do
             <*> optText object "type"
             <*> optInt object "head_limit"
             <*> (fromMaybe False <$> optBool object "multiline")
-            <*> pure (parseOutputMode modeText)
-
-parseOutputMode :: Maybe Text -> GrepOutputMode
-parseOutputMode = \case
-    Just "files_with_matches" -> GrepFilesWithMatches
-    Just "count" -> GrepCount
-    _ -> GrepContent
 
 grepTool :: ToolEnv -> AppTool
 grepTool env = withToolResourceClaims (grepClaims env) $
@@ -166,8 +163,13 @@ runGrep env args = do
                 let limit = effectiveHeadLimit args
                 canonicalCwd <- canonicalizePath (unsafeToFilePath env.toolCwd)
                 runRipgrep rgPath canonicalCwd path args >>= \case
-                    Left err -> pure (Left err)
-                    Right (raw, truncation) -> pure $ Right
+                    GrepFailed raw diagnostic ->
+                        pure $ Left (formatGrepFailure
+                            env.toolCwd
+                            raw
+                            limit
+                            diagnostic)
+                    GrepSucceeded raw truncation -> pure $ Right
                         (formatGrepCard
                             env.toolCwd
                             raw
@@ -175,9 +177,8 @@ runGrep env args = do
                             truncation)
 
 effectiveHeadLimit :: GrepArgs -> Int
-effectiveHeadLimit args = case args.outputMode of
-    GrepContent -> max 1 (min 2000 (fromMaybe 200 args.headLimit))
-    _ -> max 1 (min 10000 (fromMaybe 500 args.headLimit))
+effectiveHeadLimit args =
+    max 1 (min 2000 (fromMaybe 200 args.headLimit))
 
 data GrepTruncation
     = GrepComplete
@@ -191,12 +192,16 @@ data GrepCapture = GrepCapture
     , captureTruncation :: !GrepTruncation
     }
 
+data GrepRunResult
+    = GrepSucceeded !Text !GrepTruncation
+    | GrepFailed !Text !Text
+
 runRipgrep
     :: FilePath
     -> FilePath
     -> OsPath
     -> GrepArgs
-    -> IO (Either Text (Text, GrepTruncation))
+    -> IO GrepRunResult
 runRipgrep rgPath workspace path args = mask \restore -> do
     let absoluteSearchPath = unsafeToFilePath path
         workspaceRelativePath = makeRelative workspace absoluteSearchPath
@@ -210,12 +215,8 @@ runRipgrep rgPath workspace path args = mask \restore -> do
                 (Just workspace, workspaceRelativePath)
             | otherwise =
                 (Nothing, absoluteSearchPath)
-    let modeFlags = case args.outputMode of
-            GrepContent -> ["--heading", "--with-filename", "--line-number"]
-            GrepFilesWithMatches -> ["--files-with-matches"]
-            GrepCount -> ["--count"]
-        rgArgs = concat
-            [ modeFlags
+    let rgArgs = concat
+            [ ["--heading", "--with-filename", "--line-number"]
             , ["--no-config", "--color=never", "--max-columns", "1000"]
             , maybe [] (\g -> ["--glob", Text.unpack g]) args.glob
             , maybe [] (\n -> ["-B", show n]) args.before
@@ -260,21 +261,20 @@ runRipgrep rgPath workspace path args = mask \restore -> do
             stderr = decodeDiagnostic stderrCapture
         case code of
             ExitSuccess ->
-                pure $ Right (raw, stdoutCapture.captureTruncation)
+                pure $ GrepSucceeded raw stdoutCapture.captureTruncation
             -- terminateProcess is deliberate once an output cap is known.
             -- A signal exit on that path still represents a successful,
             -- bounded search.
             ExitFailure _
                 | stdoutCapture.captureTruncation /= GrepComplete ->
-                    pure $ Right (raw, stdoutCapture.captureTruncation)
+                    pure $ GrepSucceeded raw stdoutCapture.captureTruncation
             ExitFailure 1
                 | Text.null raw ->
                     if Text.null stderr
-                        then pure (Right ("", GrepComplete))
-                        else pure (Left stderr)
+                        then pure (GrepSucceeded "" GrepComplete)
+                        else pure (GrepFailed "" stderr)
             ExitFailure _ ->
-                pure $ Left $
-                    if Text.null stderr then raw else stderr)
+                pure $ GrepFailed raw stderr)
         `onException`
             cleanup [handle | Just handle <- [mIn, mOut, mErr]]
 
@@ -415,6 +415,15 @@ decodeDiagnostic capture =
             <> Text.pack (show grepDiagnosticByteLimit)
             <> " bytes]"
         else decoded
+
+formatGrepFailure :: OsPath -> Text -> Int -> Text -> Text
+formatGrepFailure cwd raw limit diagnostic =
+    Text.intercalate "\n" . filter (not . Text.null) $
+        [ if Text.null (Text.strip raw)
+            then ""
+            else formatGrepCard cwd raw limit GrepComplete
+        , diagnostic
+        ]
 
 formatGrepCard
     :: OsPath
