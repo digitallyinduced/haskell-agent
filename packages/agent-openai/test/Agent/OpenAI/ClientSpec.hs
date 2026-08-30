@@ -15,10 +15,12 @@ import Agent.OpenAI.WebSocketClient
 import Agent.Provider
 import Agent.Responses.Types
 import Control.Concurrent (threadDelay)
+import Control.Monad (replicateM_)
 import Control.Retry (constantDelay, limitRetries)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.CaseInsensitive as CI
@@ -509,6 +511,88 @@ spec = do
                 response <- expectRight result
                 extractAssistantText response `shouldBe` Just "from-sse"
 
+        it "incrementally parses a long SSE event split across tiny chunks" do
+            recorded <- newIORef []
+            let longText = Text.replicate (2 * 1024 * 1024) "x"
+                handler _request =
+                    pure $ fragmentedSseCompleted 257 longText
+            withMockResponses recorded handler \baseUrl -> do
+                response <- expectRight =<<
+                    createCodexMessageWithProviderAt
+                        baseUrl
+                        (staticBearerProvider "router-key")
+                        (helloRequest "hi")
+                extractAssistantText response `shouldBe` Just longText
+
+        it "sniffs SSE from a proxy that labels it application/json" do
+            recorded <- newIORef []
+            let handler _request =
+                    pure $ sseCompletedWithContentType
+                        "application/json"
+                        "mislabeled-sse"
+            withMockResponses recorded handler \baseUrl -> do
+                response <- expectRight =<<
+                    createCodexMessageWithProviderAt
+                        baseUrl
+                        (staticBearerProvider "router-key")
+                        (helloRequest "hi")
+                extractAssistantText response `shouldBe` Just "mislabeled-sse"
+
+        it "returns typed terminal SSE errors" do
+            recorded <- newIORef []
+            let handler _request = pure sseInvalidRequest
+            withMockResponses recorded handler \baseUrl -> do
+                result <- createCodexMessageWithProviderAt
+                    baseUrl
+                    (staticBearerProvider "router-key")
+                    (helloRequest "hi")
+                result `shouldBe` Left (ProviderError
+                    InvalidRequestError
+                    "bad streamed request (code: invalid_request_error)"
+                    Nothing)
+
+        it "times out when a successful SSE stream stops before terminal" do
+            reads <- newIORef (0 :: Int)
+            let readChunk = do
+                    readNumber <- atomicModifyIORef' reads \count ->
+                        (count + 1, count)
+                    if readNumber == 0
+                        then pure (Just ": keepalive\n\n")
+                        else threadDelay 200_000 >> pure Nothing
+            result <- readCodexSseChunks
+                20_000 (Just "gpt-test") readChunk []
+            result `shouldBe` Left (ConnectionError
+                "Codex HTTP response idle timeout")
+
+        it "rejects successful JSON bodies above 64 MiB" do
+            recorded <- newIORef []
+            let handler _request = pure oversizedSuccessfulJson
+            withMockResponses recorded handler \baseUrl -> do
+                result <- createCodexMessageWithProviderAt
+                    baseUrl
+                    (staticBearerProvider "router-key")
+                    (helloRequest "hi")
+                result `shouldBe` Left (ProviderError
+                    PayloadTooLargeError
+                    "Codex successful JSON response exceeds 67108864 bytes"
+                    Nothing)
+
+        it "caps non-2xx diagnostics and marks their body truncated" do
+            recorded <- newIORef []
+            let handler _request = pure oversizedBadRequest
+            withMockResponses recorded handler \baseUrl -> do
+                result <- createCodexMessageWithProviderAt
+                    baseUrl
+                    (staticBearerProvider "router-key")
+                    (helloRequest "hi")
+                case result of
+                    Left (HttpError 400 message) -> do
+                        message `shouldSatisfy` Text.isSuffixOf
+                            "[response body truncated after 1048576 bytes]"
+                        Text.length message `shouldSatisfy` (< 1_049_000)
+                    other -> expectationFailure
+                        ("expected truncated HTTP 400, got " <> show other)
+
         it "advertises remote compaction v2 and merges its streamed output item" do
             recorded <- newIORef []
             let handler _request = pure sseCompactionCompleted
@@ -609,7 +693,10 @@ jsonResponse headers output = Wai.responseLBS HTTP.status200
         ]))
 
 sseCompleted :: Text -> Wai.Response
-sseCompleted text =
+sseCompleted = sseCompletedWithContentType "text/event-stream"
+
+sseCompletedWithContentType :: BS.ByteString -> Text -> Wai.Response
+sseCompletedWithContentType contentType text =
     let payload = Aeson.object
             [ "type" .= ("response.completed" :: Text)
             , "response" .= Aeson.object
@@ -624,8 +711,74 @@ sseCompleted text =
             <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode payload))
             <> "\n\n"
     in Wai.responseLBS HTTP.status200
-        [("Content-Type", "text/event-stream")]
+        [("Content-Type", contentType)]
         (LBS.fromStrict (Text.encodeUtf8 body))
+
+fragmentedSseCompleted :: Int -> Text -> Wai.Response
+fragmentedSseCompleted fragmentBytes text =
+    let payload = Aeson.object
+            [ "type" .= ("response.completed" :: Text)
+            , "response" .= Aeson.object
+                [ "id" .= ("resp-fragmented" :: Text)
+                , "created_at" .= (0 :: Int)
+                , "model" .= ("gpt-test" :: Text)
+                , "status" .= ("completed" :: Text)
+                , "output" .= [assistantMessage text]
+                ]
+            ]
+        body = LBS.toStrict $
+            "event: response.completed\ndata: "
+                <> Aeson.encode payload
+                <> "\n\n"
+        fragments
+            | BS.null body = []
+            | otherwise = unfoldChunks body
+        unfoldChunks bytes
+            | BS.null bytes = []
+            | otherwise =
+                let (prefix, suffix) = BS.splitAt fragmentBytes bytes
+                in prefix : unfoldChunks suffix
+    in Wai.responseStream HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        \send flush ->
+            mapM_ (\chunk -> send (Builder.byteString chunk) >> flush) fragments
+
+sseInvalidRequest :: Wai.Response
+sseInvalidRequest =
+    let payload = Aeson.object
+            [ "type" .= ("error" :: Text)
+            , "error" .= Aeson.object
+                [ "type" .= ("invalid_request_error" :: Text)
+                , "code" .= ("invalid_request_error" :: Text)
+                , "message" .= ("bad streamed request" :: Text)
+                ]
+            ]
+        body = "event: error\ndata: "
+            <> Aeson.encode payload
+            <> "\n\n"
+    in Wai.responseLBS HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        body
+
+oversizedSuccessfulJson :: Wai.Response
+oversizedSuccessfulJson =
+    Wai.responseStream HTTP.status200
+        [("Content-Type", "application/json")]
+        \send flush -> do
+            replicateM_ 65 (send (Builder.byteString oneMiBSpaces) >> flush)
+
+oversizedBadRequest :: Wai.Response
+oversizedBadRequest =
+    Wai.responseStream HTTP.status400
+        [("Content-Type", "text/plain")]
+        \send flush -> do
+            replicateM_ 2 (send (Builder.byteString oneMiBX) >> flush)
+
+oneMiBSpaces :: BS.ByteString
+oneMiBSpaces = BS.replicate (1024 * 1024) 0x20
+
+oneMiBX :: BS.ByteString
+oneMiBX = BS.replicate (1024 * 1024) 0x78
 
 hangingSseCompleted :: Text -> Wai.Response
 hangingSseCompleted text =

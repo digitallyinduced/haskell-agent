@@ -28,6 +28,10 @@ mkDerivation {
     filepath hspec http-types retry temporary text time unix vector wai
     warp websockets
   ];
+  benchmarkHaskellDepends = [
+    agent-core agent-responses-types base bytestring safe-exceptions
+    text
+  ];
   description = "Haskell client for the OpenAI Responses API";
   license = lib.meta.getLicenseFromSpdxId "MIT";
   mainProgram = "agent-openai-login";
