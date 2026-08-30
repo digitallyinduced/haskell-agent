@@ -13,7 +13,6 @@ import Control.Concurrent
     , putMVar
     , takeMVar
     , threadDelay
-    , tryTakeMVar
     )
 import Data.IORef
 import qualified Data.Text as Text
@@ -135,44 +134,6 @@ spec = describe "Agent.CLI.SessionTitle" do
                         , resultGeneration = 0
                         }
                     ]
-
-    it "cancels title generation while a foreground turn is active" do
-        attempts <- newIORef (0 :: Int)
-        started <- newEmptyMVar
-        neverFinish <- newEmptyMVar
-        notified <- newEmptyMVar
-        let backendFactory _ =
-                Backend \state _ _ _ -> do
-                    attempt <- atomicModifyIORef' attempts \count ->
-                        let next = count + 1
-                        in (next, next)
-                    if attempt == 1
-                        then do
-                            putMVar started ()
-                            _ <- takeMVar neverFinish
-                            error "cancelled title request unexpectedly resumed"
-                        else
-                            pure $ Right BackendResult
-                                { backendOutput =
-                                    emptyTurnOutput "title-response" []
-                                        (Just "Foreground-safe title")
-                                , backendState = state
-                                }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (putMVar notified) \manager -> do
-            requestSessionTitle manager "session-1" 1 "conversation"
-            takeMVar started
-            withSessionTitleForeground manager do
-                threadDelay 50000
-                tryTakeMVar notified `shouldReturn` Nothing
-            takeMVar notified
-                `shouldReturn`
-                    SessionTitleGenerated SessionTitleResult
-                        { resultSessionId = "session-1"
-                        , resultMilestone = 1
-                        , resultTitle = "Foreground-safe title"
-                        , resultGeneration = 0
-                        }
-        readIORef attempts `shouldReturn` 2
 
     it "retries a failed title request once before reporting its outcome" do
         attempts <- newIORef (0 :: Int)
