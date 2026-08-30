@@ -564,14 +564,17 @@ alterTouched
     -> NativeAgentStore
     -> NativeAgentStore
 alterTouched identifier update store =
-    let oldBytes = maybe 0
-            nativeAgentViewBytes
-            (Map.lookup identifier store.storeAgents)
-        next = update (Map.lookup identifier store.storeAgents)
+    let previous = Map.lookup identifier store.storeAgents
+        canonicalIdentifier =
+            maybe identifier (.nativeAgentId) previous
+        oldBytes = maybe 0 nativeAgentViewBytes previous
+        next = update previous
         nextBytes = nativeAgentViewBytes next
     in store
-        { storeAgents = Map.insert identifier next store.storeAgents
-        , storeOrder = touchOrder identifier store.storeOrder
+        { storeAgents =
+            Map.insert canonicalIdentifier next store.storeAgents
+        , storeOrder =
+            touchOrder canonicalIdentifier store.storeOrder
         , storeBytes =
             saturatingNativeAdd
                 (max 0 (store.storeBytes - oldBytes))
