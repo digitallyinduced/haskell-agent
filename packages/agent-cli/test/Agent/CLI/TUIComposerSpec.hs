@@ -1,6 +1,11 @@
 module Agent.CLI.TUIComposerSpec (spec) where
 
-import Agent.CLI.Dictation (insertDictation)
+import Agent.CLI.Dictation
+    ( DictationBackend(..)
+    , dictationBackendForProvider
+    , insertDictation
+    )
+import Agent.Provider (Provider(..))
 import Agent.CLI.Input
     ( ReplLine(..)
     , displayEditorText
@@ -219,6 +224,18 @@ spec = describe "fullscreen composer" do
             `shouldBe` ("please fix this now", 15)
         insertDictation "hello" 5 ", world"
             `shouldBe` ("hello, world", 12)
+
+    it "routes dictation through the active model provider" do
+        dictationBackendForProvider OpenAIProvider
+            `shouldBe` Right OpenAIDictation
+        dictationBackendForProvider XAIProvider
+            `shouldBe` Right XAIDictation
+        dictationBackendForProvider OpenRouterProvider
+            `shouldBe` Left
+                "Dictation is not supported for openrouter models"
+        dictationBackendForProvider ClaudeCodeProvider
+            `shouldBe` Left
+                "Dictation is not supported for claude-code models"
 
     it "keeps dictation stop keys inside the composer" do
         dictationKeyAction (V.EvKey V.KEnter [])

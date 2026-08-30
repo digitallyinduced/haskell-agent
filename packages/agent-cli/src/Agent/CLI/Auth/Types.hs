@@ -12,6 +12,8 @@ module Agent.CLI.Auth.Types
     , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
     , grokOAuthOptionsFromAuthJson
+    , gatewayAuthSelectionId
+    , isGatewayLoadedAuth
     , managedAuthSelectionId
     , nonEmptyText
     , openAIOAuthClientId
@@ -60,6 +62,13 @@ data LoadedAuth = LoadedAuth
     -- | Live OpenAI OAuth pool, when authentication uses one.
     , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
+
+gatewayAuthSelectionId :: Text
+gatewayAuthSelectionId = "gateway"
+
+isGatewayLoadedAuth :: LoadedAuth -> Bool
+isGatewayLoadedAuth loaded =
+    loaded.loadedSelectionId == Just gatewayAuthSelectionId
 
 managedAuthSelectionId :: Text -> Text
 managedAuthSelectionId managedId = "managed:" <> managedId

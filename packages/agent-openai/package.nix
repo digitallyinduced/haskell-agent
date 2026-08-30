@@ -2,9 +2,9 @@
 , agent-responses-types, async, base, base64-bytestring, bytestring
 , case-insensitive, containers, directory, exceptions, filepath
 , HsOpenSSL, hspec, http-client, http-conduit, http-streams
-, http-types, io-streams, lib, network-uri, retry, safe-exceptions
-, scientific, template-haskell, temporary, text, time, unix, vector
-, wai, warp, websockets, wuss
+, http-types, io-streams, lib, network, network-uri, retry
+, safe-exceptions, scientific, template-haskell, temporary, text
+, time, unix, vector, wai, warp, websockets, wuss
 }:
 mkDerivation {
   pname = "agent-openai";
@@ -14,10 +14,10 @@ mkDerivation {
   isExecutable = true;
   libraryHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types
-    base base64-bytestring bytestring containers directory exceptions
-    filepath HsOpenSSL http-client http-conduit http-streams io-streams
-    network-uri retry safe-exceptions scientific template-haskell text
-    time unix vector websockets wuss
+    async base base64-bytestring bytestring containers directory
+    exceptions filepath HsOpenSSL http-client http-conduit http-streams
+    io-streams network-uri retry safe-exceptions scientific
+    template-haskell text time unix vector websockets wuss
   ];
   executableHaskellDepends = [
     agent-core base directory filepath text
@@ -25,8 +25,8 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types
     async base base64-bytestring bytestring case-insensitive directory
-    filepath hspec http-types retry temporary text time unix vector wai
-    warp websockets
+    filepath hspec http-types network retry safe-exceptions temporary
+    text time unix vector wai warp websockets
   ];
   benchmarkHaskellDepends = [
     agent-core agent-responses agent-responses-types base bytestring

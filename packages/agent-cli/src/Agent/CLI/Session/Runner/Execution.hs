@@ -810,6 +810,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     forM_ fullscreen \runtime ->
         setFullscreenSessionActions
             runtime
+            (Just provider)
             (requestCancel toolEnv.toolCancel)
             (\text -> do
                 images <- loadImagesFromPastedText text

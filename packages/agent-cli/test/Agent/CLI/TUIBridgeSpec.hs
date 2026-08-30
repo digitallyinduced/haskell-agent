@@ -19,12 +19,14 @@ import Agent.CLI.TUI.Types
     , AppEventMailbox(..)
     , AppEventMailboxState(..)
     , FullscreenRuntime(..)
+    , FullscreenSessionActions(..)
     , PendingAppEvent(..)
     , PendingUiEvent(..)
     , SyntaxHighlighterState(..)
     )
 import Agent.TUI.Model
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
+import Agent.Provider (Provider(XAIProvider))
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
@@ -257,6 +259,7 @@ spec = describe "fullscreen TUI bridge" do
         runtime.runtimeCancel
         setFullscreenSessionActions
             runtime
+            (Just XAIProvider)
             (modifyIORef' calls (<> ["new cancel"]))
             (const
                 (modifyIORef' calls (<> ["new steer"])
@@ -274,6 +277,8 @@ spec = describe "fullscreen TUI bridge" do
         runtime.runtimeRestartEffort "high"
         runtime.runtimeAgentSelect AgentRoot
         decision <- runtime.runtimeCtrlC
+        actions <- readIORef runtime.runtimeSessionActions
+        actions.sessionProvider `shouldBe` Just XAIProvider
         readIORef calls `shouldReturn`
             ["old cancel", "new cancel", "new steer", "new btw", "new recap", "new effort", "new agent"]
         decision `shouldBe` SoftCancel

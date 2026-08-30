@@ -11,11 +11,14 @@ module Agent.CLI.Auth
     , grokEmailFromAuthJson
     , grokNeedsRefresh
     , grokOAuthOptionsFromAuthJson
+    , gatewayAuthSelectionId
+    , isGatewayLoadedAuth
     , externalAuthSelectionId
     , externalGrokTokenProvider
     , hasOpenAiAuth
     , loadAuth
     , loadAuthForAccount
+    , loadOpenAiDictationAuth
     , managedAuthSelectionId
     , managedGrokTokenProvider
     , ExternalGrokLoaded(..)
@@ -43,6 +46,7 @@ import Agent.CLI.Auth.Grok
     )
 import Agent.CLI.Auth.OpenAI
     ( loadOpenAi
+    , loadOpenAiDictationAuth
     , openAiAuthStateChanged
     , preferredOpenAiTokenProvider
     )
@@ -58,6 +62,8 @@ import Agent.CLI.Auth.Types
     , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
     , grokOAuthOptionsFromAuthJson
+    , gatewayAuthSelectionId
+    , isGatewayLoadedAuth
     , managedAuthSelectionId
     , openAIOAuthClientId
     , openaiAuthStateFromJson
@@ -70,7 +76,12 @@ import Agent.CLI.CredentialStore
     , loadManagedCredentials
     )
 import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.CLI.GatewayClient
+    ( GatewayCredential (..)
+    , loadGatewayCredential
+    )
 import Agent.Error (ApiError(..))
+import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import qualified Agent.Claude.Auth as ClaudeCode
 import Agent.Provider
     ( AccountFailure(..)
@@ -107,24 +118,59 @@ import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.OsPath (unsafeEncodeUtf, (</>))
 
 loadAuth :: Maybe Provider -> IO (Either Text LoadedAuth)
-loadAuth requested = runExceptT do
-    provider <- detectProvider requested
-    case provider of
-        XAIProvider -> loadXai Nothing
-        OpenAIProvider -> loadOpenAi
-        OpenRouterProvider -> loadOpenRouter Nothing
-        ClaudeCodeProvider -> loadClaudeCode
+loadAuth requested =
+    if maybe True (== OpenAIProvider) requested
+        then loadGatewayCredential >>= \case
+            Left err -> pure (Left ("cannot load gateway credential: " <> err))
+            Right (Just gateway) -> pure (gatewayLoadedAuth gateway)
+            Right Nothing -> loadProvider
+        else loadProvider
+  where
+    loadProvider = runExceptT do
+        provider <- detectProvider requested
+        case provider of
+            XAIProvider -> loadXai Nothing
+            OpenAIProvider -> loadOpenAi
+            OpenRouterProvider -> loadOpenRouter Nothing
+            ClaudeCodeProvider -> loadClaudeCode
+
+gatewayLoadedAuth :: GatewayCredential -> Either Text LoadedAuth
+gatewayLoadedAuth gateway = do
+    validateGatewayWebSocketUrl gateway.gatewayWebSocketUrl
+    let credential =
+            Credential
+                { accessToken = gateway.gatewayAccessToken
+                , accountId = gateway.gatewayWebSocketUrl
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+    pure LoadedAuth
+            { loadedProvider = OpenAIProvider
+            , loadedTokenProvider =
+                staticCredentialProvider SubscriptionBilled credential
+            , loadedAccountLabel = const (pure gateway.gatewayBaseUrl)
+            , loadedSelectionId = Just gatewayAuthSelectionId
+            , loadedOpenAiPool = Nothing
+            }
 
 -- | Load one specific account for providers whose HTTP backends can swap
 -- token sources without reconnecting a long-lived transport.
 loadAuthForAccount :: Provider -> Text -> IO (Either Text LoadedAuth)
-loadAuthForAccount provider selectionId = runExceptT case provider of
-    XAIProvider -> loadXai (Just selectionId)
-    OpenRouterProvider -> loadOpenRouter (Just selectionId)
-    OpenAIProvider ->
-        throwE "OpenAI account selection is handled by the live account pool"
-    ClaudeCodeProvider ->
-        throwE "Claude Code accounts are managed by `claude auth login`"
+loadAuthForAccount provider selectionId =
+    if provider == OpenAIProvider
+        then loadGatewayCredential >>= \case
+            Left err -> pure (Left ("cannot load gateway credential: " <> err))
+            Right (Just gateway) -> pure (gatewayLoadedAuth gateway)
+            Right Nothing -> loadProvider
+        else loadProvider
+  where
+    loadProvider = runExceptT case provider of
+        XAIProvider -> loadXai (Just selectionId)
+        OpenRouterProvider -> loadOpenRouter (Just selectionId)
+        OpenAIProvider ->
+            throwE "OpenAI account selection is handled by the live account pool"
+        ClaudeCodeProvider ->
+            throwE "Claude Code accounts are managed by `claude auth login`"
 
 -- | Ask the token source whether it has a usable credential now without
 -- making a model request, preserving a successful checkout for later use.
@@ -373,8 +419,14 @@ hasOpenAiAuth = do
     envJson <- lookupNonEmpty "CODEX_AUTH_JSON"
     envToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     home <- getHomeDirectory
+    configuredCodexHome <- lookupNonEmpty "CODEX_HOME"
+    let codexDirectory =
+            maybe
+                (home </> unsafeEncodeUtf ".codex")
+                (unsafeEncodeUtf . Text.unpack)
+                configuredCodexHome
     file <- doesFileExist
-        (home </> unsafeEncodeUtf ".codex" </> unsafeEncodeUtf "auth.json")
+        (codexDirectory </> unsafeEncodeUtf "auth.json")
     managed <- hasManagedProvider OpenAIProvider
     pure (isJust envJson || isJust envToken || file || managed)
 

@@ -3,6 +3,7 @@ module Agent.CLI.AccountSelection
     ( AccountCandidate(..)
     , SelectedAccount(..)
     , accountCapacity
+    , loadedAuthSupportsUsageAccountSelection
     , providerSupportsUsageAccountSelection
     , selectCandidates
     , selectAccount
@@ -21,6 +22,7 @@ import Agent.CLI.Login
     )
 import Agent.CLI.Auth
     ( LoadedAuth(..)
+    , isGatewayLoadedAuth
     , loadAuth
     , loadAuthForAccount
     , probeLoadedAuthCredential
@@ -57,6 +59,14 @@ providerSupportsUsageAccountSelection = \case
     XAIProvider -> True
     OpenRouterProvider -> True
     ClaudeCodeProvider -> False
+
+-- | Whether startup may replace the loaded credential with a usage-ranked
+-- local account. A connected gateway is already the user's selected
+-- credential source, even though it routes an OpenAI model.
+loadedAuthSupportsUsageAccountSelection :: LoadedAuth -> Bool
+loadedAuthSupportsUsageAccountSelection loaded =
+    not (isGatewayLoadedAuth loaded)
+        && providerSupportsUsageAccountSelection loaded.loadedProvider
 
 -- | Provider-neutral input to the pure account ranking policy. A missing
 -- capacity means that the account could not be verified.
