@@ -23,7 +23,7 @@ import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
-import Agent.Loop (LoopConfig, TokenUsage)
+import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import Agent.MCP (McpFleet, McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams)
@@ -51,6 +51,7 @@ data SessionEnv = SessionEnv
     , sessionConnection :: !Text
     , sessionModelCatalog :: !ModelCatalog
     , sessionDialect :: !Dialect
+    , sessionRecordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , sessionUnavailableProviders :: !(IORef (Set Provider))
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionConversation :: !(IORef LiveConversation)

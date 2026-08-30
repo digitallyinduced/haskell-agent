@@ -3,6 +3,7 @@ module Agent.CLI.ToolsSpec (spec) where
 import Agent.CLI.Tools
 import Agent.CLI.CodeModeRuntime
     ( CodeModeToolProjection(..)
+    , imageGenerationCodeModeProjection
     , projectCodeModeTools
     )
 import Agent.Dialect
@@ -65,6 +66,21 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+    it "nests only imagegen for code-only models when full code mode is off" do
+        let tools = map testTool ["read_file", "imagegen", "shell_command"]
+        case imageGenerationCodeModeProjection CodeOnlyToolMode tools of
+            Just projection -> do
+                map (.appToolName) projection.directCodeModeTools
+                    `shouldBe` ["read_file", "shell_command"]
+                map (.appToolName) projection.nestedCodeModeTools
+                    `shouldBe` ["imagegen"]
+            Nothing ->
+                expectationFailure "expected an image-generation projection"
+        case imageGenerationCodeModeProjection ConventionalToolMode tools of
+            Nothing -> pure ()
+            Just _ ->
+                expectationFailure
+                    "conventional models should keep imagegen direct"
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch : _ -> pure ()
@@ -252,6 +268,36 @@ spec = describe "schemasFromAppTools" do
             [_, FunctionToolValue _, NamespaceToolValue namespace] -> do
                 namespace.name `shouldBe` "collaboration"
             other -> expectationFailure ("expected namespace tool, got " <> show other)
+
+    it "emits imagegen in the reserved image_gen namespace with its raw schema" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "prompt" Aeson..= Aeson.object
+                        ["type" Aeson..= ("string" :: Text)]
+                    ]
+                , "required" Aeson..= (["prompt"] :: [Text])
+                , "additionalProperties" Aeson..= False
+                ]
+            imagegen = rawJsonAppTool
+                "imagegen"
+                "Generate an image."
+                parameters
+                AlwaysAllowed
+                (noArgsTool "imagegen" (pure (Right "ok")))
+        case schemasFromAppTools codexDialect [imagegen] of
+            [_, NamespaceToolValue namespace] -> do
+                namespace.name `shouldBe` "image_gen"
+                case namespace.tools of
+                    [FunctionToolValue tool] -> do
+                        tool.name `shouldBe` "imagegen"
+                        tool.strict `shouldBe` Just False
+                        tool.parameters `shouldBe`
+                            Just (rawJsonValue parameters)
+                    other -> expectationFailure
+                        ("expected one imagegen function, got " <> show other)
+            other -> expectationFailure
+                ("expected image_gen namespace, got " <> show other)
 
     it "omits an empty required list from reserved collaboration schemas" do
         let wait = jsonAppTool "wait_agent" "Wait."
