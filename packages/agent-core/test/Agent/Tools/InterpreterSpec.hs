@@ -6,8 +6,12 @@ import Agent.ToolDispatch
     ( ToolArgumentStreamEvent(..)
     , ToolCall(..)
     , ToolCallStreamRef(..)
+    , ToolHandlerResult(..)
     , functionToolCall
     , noArgsTool
+    , streamingRichTextTool
+    , typedRichToolWithCall
+    , typedStreamingRichTool
     , typedStreamingTool
     , typedTool
     , typedToolWithCall
@@ -105,6 +109,22 @@ spec = describe "streamed tool interpreters" do
             result `shouldBe` Just (Right "full:snap")
             readIORef snapshots `shouldReturn` ["part:snap"]
 
+    describe "rich handlers" do
+        forM_
+            [ ("typed rich", typedRichEcho)
+            , ("typed streaming rich", typedStreamingRichEcho)
+            , ("freeform streaming rich", streamingRichEcho)
+            ]
+            \(label, mkTool) ->
+                it ("defers " <> label <> " handlers to ordinary dispatch") do
+                    runs <- newIORef (0 :: Int)
+                    result <- evalStreamedWithRef
+                        mkTool
+                        runs
+                        "{\"message\":\"image\"}"
+                    result `shouldBe` Nothing
+                    readIORef runs `shouldReturn` 0
+
     describe "noArgsTool" do
         it "runs on ToolDone even with empty arguments" do
             (runs, result) <- runCounting noArgsEcho ""
@@ -161,6 +181,23 @@ evalStreamed
     -> IO (Maybe (Either Text Text))
 evalStreamed mkTool chunks json = do
     runs <- newIORef (0 :: Int)
+    evalStreamedWithRefAndChunks mkTool runs chunks json
+
+evalStreamedWithRef
+    :: (IORef Int -> AppTool)
+    -> IORef Int
+    -> Text
+    -> IO (Maybe (Either Text Text))
+evalStreamedWithRef mkTool runs =
+    evalStreamedWithRefAndChunks mkTool runs []
+
+evalStreamedWithRefAndChunks
+    :: (IORef Int -> AppTool)
+    -> IORef Int
+    -> [Text]
+    -> Text
+    -> IO (Maybe (Either Text Text))
+evalStreamedWithRefAndChunks mkTool runs chunks json =
     bracket
         (newToolSpeculationRuntime [mkTool runs])
         closeToolSpeculationRuntime
@@ -270,6 +307,36 @@ noArgsEcho runs =
         noArgsTool "echo" $ do
             modifyIORef' runs (+ 1)
             pure (Right "ok")
+
+typedRichEcho :: IORef Int -> AppTool
+typedRichEcho runs =
+    jsonTool "echo" "echo" [] True ParallelSafe $
+        typedRichToolWithCall "echo" echoArgsDecoder $
+            \_call EchoArgs{message} -> do
+                modifyIORef' runs (+ 1)
+                pure (richResult message)
+
+typedStreamingRichEcho :: IORef Int -> AppTool
+typedStreamingRichEcho runs =
+    jsonTool "echo" "echo" [] True ParallelSafe $
+        typedStreamingRichTool "echo" echoArgsDecoder $
+            \_emit EchoArgs{message} -> do
+                modifyIORef' runs (+ 1)
+                pure (richResult message)
+
+streamingRichEcho :: IORef Int -> AppTool
+streamingRichEcho runs =
+    jsonTool "echo" "echo" [] True ParallelSafe $
+        streamingRichTextTool "echo" \_emit message -> do
+            modifyIORef' runs (+ 1)
+            pure (richResult message)
+
+richResult :: Text -> Either Text ToolHandlerResult
+richResult message =
+    Right ToolHandlerResult
+        { resultText = "rich:" <> message
+        , resultImages = []
+        }
 
 echoJson :: EchoMessage -> Text
 echoJson (EchoMessage message) =

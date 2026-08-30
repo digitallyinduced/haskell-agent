@@ -21,6 +21,8 @@ import Agent.ToolDispatch
     , ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , finishToolException
+    , finishToolResult
     )
 import Agent.Tools.Scheduling
     ( ToolSchedulingPlan(..)
@@ -921,15 +923,15 @@ runPreparedToolCall config runtime (PreparedToolCall call approval) = do
                                 >> config.loopOnEvent
                                     (ToolOutputUpdated call.callId output)) >>= \case
                         Left exception ->
-                            toolExceptionResult config call exception
+                            finishToolException
+                                config.loopDispatch
+                                call
+                                exception
                         Right (Just toolResult) ->
-                            pure ToolCallResult
-                                { callId = call.callId
-                                , output =
-                                    config.loopDispatch.toolDispatchFormatResult
-                                        toolResult
-                                , callKind = call.callKind
-                                }
+                            finishToolResult
+                                config.loopDispatch
+                                call
+                                toolResult
                         Right Nothing ->
                             dispatchRegisteredToolCall
                                 config.loopDispatch
@@ -947,22 +949,3 @@ runPreparedToolCall config runtime (PreparedToolCall call approval) = do
                                 call
             config.loopOnEvent (ToolFinished result)
             pure (Just result)
-
-
-toolExceptionResult
-    :: LoopConfig
-    -> ToolCall
-    -> SomeException
-    -> IO ToolCallResult
-toolExceptionResult config call exception = do
-    _ <-
-        tryAny
-            (config.loopDispatch.toolDispatchOnException call.name exception)
-    pure ToolCallResult
-        { callId = call.callId
-        , output =
-            config.loopDispatch.toolDispatchFormatException
-                call.name
-                exception
-        , callKind = call.callKind
-        }

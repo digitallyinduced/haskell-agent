@@ -944,6 +944,160 @@ spec = describe "runLoop" do
     it "discards streamed tool speculation when a call is retracted" do
         assertSpeculationResetAfter (ToolRetracted "retry-call")
 
+    it "applies output finalization to a tool speculation hit" do
+        finalized <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config0 <- testConfig backend
+        let dispatch = config0.loopDispatch
+                { toolDispatchFinalizeOutput = \call output -> do
+                    modifyIORef' finalized (<> [(call.callId, output)])
+                    pure ("finalized:" <> output)
+                }
+            config = config0 { loopDispatch = dispatch }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef finalized `shouldReturn` [("c1", "echo:hi")]
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "hello"])
+            , ( Just "resp-1"
+              , [CompletedTool (functionResult "c1" "finalized:echo:hi")]
+              )
+            ]
+
+    it "keeps speculative output when its finalizer fails" do
+        exceptions <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config0 <- testConfig backend
+        let dispatch = config0.loopDispatch
+                { toolDispatchOnException = \name _ ->
+                    modifyIORef' exceptions (<> [name])
+                , toolDispatchFinalizeOutput = \_ _ ->
+                    Exception.throwIO (userError "finalizer failed")
+                }
+            config = config0 { loopDispatch = dispatch }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef exceptions `shouldReturn` ["echo"]
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "hello"])
+            , ( Just "resp-1"
+              , [CompletedTool (functionResult "c1" "echo:hi")]
+              )
+            ]
+
+    it "finalizes exceptions raised while consuming tool speculation" do
+        calls <- newIORef (0 :: Int)
+        exceptions <- newIORef []
+        finalized <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "explode" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        let handler =
+                typedTool "explode" echoArgsDecoder \(EchoArgs _) -> do
+                    modifyIORef' calls (+ 1)
+                    Exception.throwIO (userError "boom")
+        config0 <- testConfig backend
+        let dispatch = config0.loopDispatch
+                { toolDispatchOnException = \name _ ->
+                    modifyIORef' exceptions (<> [name])
+                , toolDispatchFinalizeOutput = \call output -> do
+                    modifyIORef' finalized (<> [(call.callId, output)])
+                    pure ("finalized:" <> output)
+                }
+            config = config0
+                { loopTools = registryFromHandlers [handler]
+                , loopDispatch = dispatch
+                }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef calls `shouldReturn` 1
+        readIORef exceptions `shouldReturn` ["explode"]
+        outputs <- readIORef finalized
+        outputs `shouldSatisfy` \case
+            [("c1", output)] -> "boom" `Text.isInfixOf` output
+            _ -> False
+        seen <- readIORef submissions
+        case seen of
+            [_, (Just "resp-1", [CompletedTool result])] ->
+                result.output `shouldSatisfy`
+                    Text.isPrefixOf "finalized:"
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "defers rich tool speculation so image results are preserved" do
+        calls <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "image" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        let image = ToolResultImage
+                { imageUrl = "data:image/png;base64,AA=="
+                , imageDetail = Just "high"
+                }
+            handler =
+                typedRichToolWithCall "image" echoArgsDecoder $
+                    \_call EchoArgs{message} -> do
+                        modifyIORef' calls (+ 1)
+                        pure $ Right ToolHandlerResult
+                            { resultText = "image:" <> message
+                            , resultImages = [image]
+                            }
+            expected = ToolCallResultWithImages
+                { callId = "c1"
+                , output = "image:hi"
+                , callKind = FunctionCallKind
+                , toolResultImages = [image]
+                }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromHandlers [handler]
+                }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef calls `shouldReturn` 1
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "hello"])
+            , (Just "resp-1", [CompletedTool expected])
+            ]
+
     it "returns explicit backend state and progress after success" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
