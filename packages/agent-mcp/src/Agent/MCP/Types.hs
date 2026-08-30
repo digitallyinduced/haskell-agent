@@ -386,24 +386,37 @@ data McpFleetLease = McpFleetLease
     , mcpLeaseRelease :: !(IO ())
     }
 
+-- | Resources owned by a local stdio transport.
+data McpStdioTransport = McpStdioTransport
+    { stdioInput :: !Handle
+    , stdioProcess :: !ProcessHandle
+    , stdioGroupId :: !(Maybe ProcessGroupID)
+    , stdioWriteLock :: !(MVar ())
+    , stdioStderr :: !(IORef CapturedStderr)
+    , stdioReader :: !(IORef (Maybe (Async ())))
+    , stdioStderrReader :: !(IORef (Maybe (Async ())))
+    }
+
+-- | State owned by a remote Streamable HTTP transport.
+data McpHttpTransport = McpHttpTransport
+    { httpUrl :: !Text
+    , httpSession :: !(IORef (Maybe Text))
+    -- ^ Legacy session id. Modern servers never mint one.
+    }
+
+-- | The live transport owned by one MCP client.
+data McpClientTransport
+    = McpClientStdio !McpStdioTransport
+    | McpClientHttp !McpHttpTransport
+
 -- | One connection to an MCP server over stdio or Streamable HTTP.
 data McpClient = McpClient
     { clientConfig :: !McpServerConfig
     , clientHooks :: !McpHostHooks
-    , clientHttpSession :: !(IORef (Maybe Text))
-    -- ^ Legacy Streamable HTTP session id. Modern servers never mint one.
-    -- Stdio transports own a process and input pipe; remote HTTP transports
-    -- leave these fields empty and perform requests synchronously.
-    , clientInput :: !(Maybe Handle)
-    , clientProcess :: !(Maybe ProcessHandle)
-    , clientGroupId :: !(Maybe ProcessGroupID)
+    , clientTransport :: !McpClientTransport
     , clientNextId :: !(IORef Int)
     , clientPending :: !(TVar (IntMap.IntMap PendingRequest))
     , clientFailure :: !(TVar (Maybe Text))
-    , clientWriteLock :: !(MVar ())
-    , clientStderr :: !(IORef CapturedStderr)
-    , clientReader :: !(IORef (Maybe (Async ())))
-    , clientStderrReader :: !(Maybe (Async ()))
     , clientWorkers :: !(TVar [Async ()])
     -- ^ Background work owned by the client: handlers for server-initiated
     -- requests and long-lived subscription streams.

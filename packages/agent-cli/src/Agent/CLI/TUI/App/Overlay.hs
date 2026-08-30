@@ -143,7 +143,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
-import Data.Char (isControl, isSpace)
+import Data.Char (isControl, isPrint, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
 import Data.List ( find , findIndex , intersperse , nub , sort , sortOn )
@@ -394,7 +394,15 @@ confirmResumeId sessionId = do
                     resolveResume True
 
 handleChoiceKey :: V.Event -> EventM Name AppState ()
-handleChoiceKey = \case
+handleChoiceKey event = do
+    state <- get
+    case state.appChoice of
+        Just choice
+            | choice.choiceSearch -> handleFilterChoiceKey event
+        _ -> handleStaticChoiceKey event
+
+handleStaticChoiceKey :: V.Event -> EventM Name AppState ()
+handleStaticChoiceKey = \case
     V.EvKey V.KUp [] -> moveChoice (-1)
     V.EvKey V.KDown [] -> moveChoice 1
     V.EvKey V.KBackTab [] -> moveChoice (-1)
@@ -432,10 +440,86 @@ handleChoiceKey = \case
                         <$> state.appChoice
                 }
 
+handleFilterChoiceKey :: V.Event -> EventM Name AppState ()
+handleFilterChoiceKey event = case event of
+    V.EvKey V.KUp [] -> moveFilteredChoice (-1)
+    V.EvKey V.KDown [] -> moveFilteredChoice 1
+    V.EvKey V.KBackTab [] -> moveFilteredChoice (-1)
+    V.EvKey (V.KChar '\t') [] -> moveFilteredChoice 1
+    V.EvKey V.KPageUp [] ->
+        vScrollPage (viewportScroll OverlayViewport) Up
+    V.EvKey V.KPageDown [] ->
+        vScrollPage (viewportScroll OverlayViewport) Down
+    V.EvMouseDown _ _ V.BScrollUp _ ->
+        vScrollBy (viewportScroll OverlayViewport) (-mouseScrollLines)
+    V.EvMouseDown _ _ V.BScrollDown _ ->
+        vScrollBy (viewportScroll OverlayViewport) mouseScrollLines
+    V.EvKey V.KEnter [] -> resolveChoice True
+    V.EvKey V.KEsc [] -> resolveChoice False
+    V.EvKey V.KBS [] -> updateChoiceQuery (Text.dropEnd 1)
+    V.EvKey (V.KChar char) []
+        | isPrint char ->
+            updateChoiceQuery (`Text.snoc` char)
+    V.EvPaste bytes ->
+        updateChoiceQuery
+            (<> Text.filter isPrint (Composer.decodePaste bytes))
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveChoice False)
+    _ -> pure ()
+  where
+    moveFilteredChoice delta = do
+        modify' \state ->
+            state
+                { appChoice =
+                    (\choice ->
+                        let count = length (choiceVisibleRows choice)
+                        in choice
+                            { choiceIndex =
+                                if count == 0
+                                    then 0
+                                    else
+                                        (choice.choiceIndex + delta)
+                                            `mod` count
+                            })
+                        <$> state.appChoice
+                }
+
+    updateChoiceQuery update = do
+        modify' \state ->
+            state
+                { appChoice =
+                    (\choice ->
+                        choice
+                            { choiceQuery = update choice.choiceQuery
+                            , choiceIndex = 0
+                            })
+                        <$> state.appChoice
+                }
+        vScrollToBeginning (viewportScroll OverlayViewport)
+
 confirmChoiceAt :: Int -> EventM Name AppState ()
 confirmChoiceAt index = do
     state <- get
     case state.appChoice of
+        Just choice
+            | choice.choiceSearch ->
+                case findIndex
+                        ((== index) . fst)
+                        (choiceVisibleRows choice) of
+                    Just visibleIndex -> do
+                        modify' \current ->
+                            current
+                                { appChoice =
+                                    (\overlay ->
+                                        overlay
+                                            { choiceIndex = visibleIndex })
+                                        <$> current.appChoice
+                                }
+                        resolveChoice True
+                    Nothing -> pure ()
         Just choice
             | index >= 0
             , index < length choice.choiceRows -> do
@@ -601,7 +685,7 @@ resolveChoice confirmed = do
         Just reply ->
             liftIO $ reply $
                 if confirmed
-                    then (.choiceIndex) <$> state.appChoice
+                    then state.appChoice >>= selectedChoiceIndex
                     else Nothing
     modify' \current ->
         current
@@ -733,6 +817,105 @@ resolveTextPrompt confirmed = do
             , appTextReply = Nothing
             }
     resumeNativeProgressIfRunning
+
+isMetaConsoleToggle :: V.Event -> Bool
+isMetaConsoleToggle = \case
+    V.EvKey (V.KChar 'k') modifiers ->
+        modifiers == [V.MMeta] || modifiers == [V.MAlt]
+    _ -> False
+
+openMetaConsole :: EventM Name AppState ()
+openMetaConsole = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    modify' \current ->
+        current
+            { appMetaConsole =
+                Just MetaConsoleOverlay
+                    { metaConsoleDraft = ""
+                    , metaConsoleCursor = 0
+                    }
+            , appAgentHover = Nothing
+            , appHoveredControl = Nothing
+            , appPressedControl = Nothing
+            }
+
+closeMetaConsole :: EventM Name AppState ()
+closeMetaConsole = do
+    modify' \state -> state { appMetaConsole = Nothing }
+    resumeNativeProgressIfRunning
+
+handleMetaConsoleKey :: V.Event -> EventM Name AppState ()
+handleMetaConsoleKey event
+    | isMetaConsoleToggle event =
+        closeMetaConsole
+    | otherwise = case event of
+        V.EvKey V.KEsc [] ->
+            closeMetaConsole
+        V.EvKey V.KEnter [] ->
+            submitMetaConsole
+        _ ->
+            modify' \state ->
+                state
+                    { appMetaConsole =
+                        (\overlay ->
+                            fromMaybe
+                                overlay
+                                (applyMetaConsoleEdit event overlay))
+                            <$> state.appMetaConsole
+                    }
+
+-- | Reuse the prompt editor so Meta Console cursor movement and deletion stay
+-- grapheme-safe without coupling its state to blocking text prompts.
+applyMetaConsoleEdit
+    :: V.Event
+    -> MetaConsoleOverlay
+    -> Maybe MetaConsoleOverlay
+applyMetaConsoleEdit event overlay = do
+    edited <-
+        applyTextPromptEdit
+            event
+            TextOverlay
+                { textTitle = ""
+                , textBody = ""
+                , textDraft = overlay.metaConsoleDraft
+                , textCursor = overlay.metaConsoleCursor
+                , textInputMode = TextInputPlain
+                }
+    pure MetaConsoleOverlay
+        { metaConsoleDraft = edited.textDraft
+        , metaConsoleCursor = edited.textCursor
+        }
+
+submitMetaConsole :: EventM Name AppState ()
+submitMetaConsole = do
+    state <- get
+    case (Text.strip . (.metaConsoleDraft)) <$> state.appMetaConsole of
+        Nothing ->
+            pure ()
+        Just request
+            | Text.null request ->
+                pure ()
+            | otherwise -> do
+                let queued = state.appUi.uiRunning
+                liftIO $ atomically $
+                    Composer.appendFullscreenInput
+                        state.appRuntime.runtimeInput
+                        FullscreenInput
+                            { fullscreenInputLine = ReplMeta request
+                            , fullscreenInputQueued = queued
+                            , fullscreenInputDisplay = Nothing
+                            }
+                if queued
+                    then
+                        applyLocalUiEvent $
+                            UiSetNotice $
+                                Just $
+                                    progressNotice
+                                        "Meta Console request queued for the next safe boundary."
+                    else
+                        applyLocalUiEvent (UiSetAwaitingInput False)
+                closeMetaConsole
 
 
 handleCtrlC :: EventM Name AppState CtrlCDecision

@@ -25,6 +25,11 @@ import Agent.Dialect
     , grokBuildPublicToolName
     )
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
+import Agent.OpenAI.ImageGeneration
+    ( imageGenerationNamespace
+    , imageGenerationNamespaceDescription
+    , imageGenerationToolName
+    )
 import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
@@ -91,12 +96,20 @@ hostedSearchToolCollisions =
 schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
 schemasFromAppTools dialect tools = case dialectToolLayout dialect of
     CollaborationNamespaceLayout ->
-        let (multi, rest) = partition isMultiAgentTool tools
+        let (multi, nonMulti) = partition isMultiAgentTool tools
+            (imageGeneration, rest) =
+                partition isImageGenerationTool nonMulti
             base = hostedSearchTools dialect
                 ++ mapMaybe (schemaFromAppTool dialect) rest
-        in if null multi
-            then base
-            else base ++ [multiAgentNamespaceTool multi]
+            imageNamespaces =
+                [ imageGenerationNamespaceTool imageGeneration
+                | not (null imageGeneration)
+                ]
+            collaborationNamespaces =
+                [ multiAgentNamespaceTool multi
+                | not (null multi)
+                ]
+        in base ++ imageNamespaces ++ collaborationNamespaces
     FlatToolLayout ->
         hostedSearchTools dialect ++ mapMaybe (schemaFromAppTool dialect) tools
     NoHostToolLayout ->
@@ -104,6 +117,10 @@ schemasFromAppTools dialect tools = case dialectToolLayout dialect of
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
+
+isImageGenerationTool :: AppTool -> Bool
+isImageGenerationTool tool =
+    tool.appToolName == imageGenerationToolName
 
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
 schemaFromAppTool dialect tool
@@ -189,9 +206,22 @@ grokPublicText =
 -- | Codex collaboration namespace: nested non-strict function tools.
 multiAgentNamespaceTool :: [AppTool] -> ResponseTool
 multiAgentNamespaceTool tools =
+    namespaceTool
+        multiAgentNamespace
+        "Tools for spawning and managing sub-agents."
+        tools
+
+imageGenerationNamespaceTool :: [AppTool] -> ResponseTool
+imageGenerationNamespaceTool =
+    namespaceTool
+        imageGenerationNamespace
+        imageGenerationNamespaceDescription
+
+namespaceTool :: Text -> Text -> [AppTool] -> ResponseTool
+namespaceTool namespaceName namespaceDescription tools =
     NamespaceToolValue NamespaceTool
-        { name = multiAgentNamespace
-        , description = Just "Tools for spawning and managing sub-agents."
+        { name = namespaceName
+        , description = Just namespaceDescription
         , tools = map nestedFunction tools
         }
   where
@@ -201,21 +231,20 @@ multiAgentNamespaceTool tools =
             , description = Just tool.appToolDescription
             , strict = Just False
             , parameters = Just . rawJsonFromEncoding . Aeson.toEncoding $
-                namespaceParameters (appToolJsonParameters tool)
+                namespaceParameters tool
             }
 
-    namespaceParameters parameters = case parametersObjectLoose parameters of
+    namespaceParameters tool = case parametersValue tool of
         Aeson.Object schema
             | Just (Aeson.Array required) <- KeyMap.lookup "required" schema
             , null required -> Aeson.Object (KeyMap.delete "required" schema)
         schema -> schema
 
-appToolJsonParameters :: AppTool -> [PropertySchema]
-appToolJsonParameters tool = case tool.appToolSchema of
-    JsonFunctionSchema parameters -> parameters
-    RawJsonFunctionSchema _ -> []
-    FreeformApplyPatchSchema -> []
-    FreeformGrammarSchema _ _ -> []
+    parametersValue tool = case tool.appToolSchema of
+        JsonFunctionSchema parameters -> parametersObjectLoose parameters
+        RawJsonFunctionSchema parameters -> parameters
+        FreeformApplyPatchSchema -> Aeson.object []
+        FreeformGrammarSchema _ _ -> Aeson.object []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

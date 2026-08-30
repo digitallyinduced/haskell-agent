@@ -73,6 +73,7 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
     , kittyEscapeCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
+    , kittySuperCsiBodies
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
     )
@@ -783,6 +784,12 @@ fullscreenVtyConfig =
                ]
             <> [ ( Nothing
                  , "\ESC[" <> body
+                 , V.EvKey (V.KChar 'k') [V.MMeta]
+                 )
+               | body <- kittySuperCsiBodies 'k'
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
                  , V.EvKey (V.KChar '_') [V.MCtrl]
                  )
                | body <- kittyCtrlUnderscoreCsiBodies
@@ -868,6 +875,21 @@ requestFullscreenChoiceWithBody runtime title body initial rows = do
     reply <- newEmptyTMVarIO
     enqueueAppEvent runtime
         (AppAskChoice ChoiceDialog title body initial rows reply)
+    atomically (readTMVar reply)
+
+-- | Open a choice overlay whose rows can be narrowed by typing. The returned
+-- index always refers to the original row list, even while the visible rows
+-- are filtered.
+requestFullscreenFilterChoice
+    :: FullscreenRuntime
+    -> Text
+    -> Int
+    -> [(Text, Text)]
+    -> IO (Maybe Int)
+requestFullscreenFilterChoice runtime title initial rows = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskFilterChoice title initial rows reply)
     atomically (readTMVar reply)
 
 requestFullscreenOnboarding

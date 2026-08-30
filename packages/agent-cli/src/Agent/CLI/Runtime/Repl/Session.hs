@@ -108,7 +108,7 @@ import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth ()
 import Agent.CLI.Startup.Format ()
 import Agent.CLI.StartupContext ()
-import Agent.CLI.Status ( formatTokenUsage )
+import Agent.CLI.Status ( formatTokenUsageOrZero )
 import Agent.CLI.Style
     ( cliWindowTitle, glyphOk, glyphSession, roleError, roleMuted )
 import Agent.CLI.Subagents.Runtime ()
@@ -121,7 +121,8 @@ import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createWorktree, worktreeRoot )
+import Agent.CLI.Worktree
+    ( createManagedWorktreeWithProgress, worktreeProgressMessage )
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect ( dialectId, dialectSlug )
@@ -427,11 +428,7 @@ handleSessionAction
         let toolNames =
                 Set.toAscList
                     slashCatalog.slashCatalogToolNames
-            usageText =
-                let formatted = formatTokenUsage usage
-                in if Text.null formatted
-                    then "0 in · 0 out"
-                    else formatted
+            usageText = formatTokenUsageOrZero usage
             message = Text.unlines $
                 [ "session: "
                     <> fromMaybe "(not persisted)" sessionId
@@ -516,8 +513,11 @@ handleSessionAction
                                                         Right message ->
                                                             finishAfk message
     ReplWorktree -> do
-        result <- withReplActivity "Creating worktree…" $
-            createWorktree cwd (worktreeRoot env.sessionHome)
+        result <- withReplActivity \report ->
+            createManagedWorktreeWithProgress
+                (report . worktreeProgressMessage)
+                env.sessionHome
+                cwd
         case result of
             Left err -> do
                 color <- resolveColor stderr
@@ -654,13 +654,15 @@ handleSessionAction
         ShellBash -> "bash"
         ShellBoth -> "ghci + bash"
         ShellNone -> "none"
-    withReplActivity message action = do
+    withReplActivity action =
+        action reportReplActivity `finally` clearReplActivity
+    reportReplActivity message =
         case fullscreen of
             Nothing -> renderEvent render (ActivityUpdated message)
             Just runtime ->
                 emitUiEvent runtime
                     (UiSetNotice (Just (progressNotice message)))
-        action `finally`
-            case fullscreen of
-                Nothing -> clearThinking render
-                Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
+    clearReplActivity =
+        case fullscreen of
+            Nothing -> clearThinking render
+            Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)

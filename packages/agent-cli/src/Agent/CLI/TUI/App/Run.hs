@@ -400,6 +400,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appResumeSearch = Nothing
         , appTextPrompt = Nothing
         , appTextReply = Nothing
+        , appMetaConsole = Nothing
         , appSlashDismissed = False
         , appPasted = False
         , appHistory = Bridge.trimHistory history

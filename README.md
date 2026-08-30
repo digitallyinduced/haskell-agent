@@ -77,6 +77,10 @@ have to be.
 - **Built-in coding tools:** run shell commands, opt into a persistent GHCi
   workspace, search the web, and connect local MCP servers. Approval policies
   keep mutating operations under user control.
+- **Natural-language Meta Console:** press `Cmd+K` (`Alt+K` on terminals that
+  report it that way), or use `/meta <request>`, to preview and apply typed
+  model, account, MCP, web-fetch, LSP, shell, and concurrency configuration
+  changes without adding the request to the coding conversation.
 - **Guided agent workflows:** use plan mode, reusable skills, and scoped learned
   guidance for repeatable tasks and project or user preferences.
 - **Multimodal input and live voice dictation:** attach images and files, or
@@ -141,6 +145,25 @@ Start in an isolated Git worktree:
 ```console
 agent-cli --worktree
 ```
+
+By default, managed worktrees fetch and branch from the selected remote's latest
+default commit. Repositories without remotes instead branch from the current
+local `HEAD`. To disable fetching, add this to `~/.haskell-agent/config.json`:
+
+```json
+{
+  "version": 1,
+  "worktree": {
+    "fetchLatestUpstream": false
+  }
+}
+```
+
+This policy applies to `--worktree`, `/worktree`, and subagent worktrees. The
+remote is selected from the current branch's configured remote, then
+`upstream`, `origin`, or the repository's sole remote. When a remote exists, a
+fetch failure aborts worktree creation rather than falling back to a stale
+commit.
 
 Use `--provider openai`, `--provider xai`, `--provider openrouter`, or
 `--provider claude-code` to override automatic provider detection. Claude Code
@@ -222,6 +245,20 @@ for details.
 Use `/mcp` to manage local stdio MCP servers, or configure them in
 `~/.haskell-agent/config.json`. See the [MCP guide](docs/mcp.md) for the
 configuration schema, startup strategies, and tool exposure rules.
+
+### Meta Console
+
+Press `Cmd+K` to open a compact configuration prompt over the current session,
+then describe a change such as “add the MCP server at
+`https://example.com/mcp`” or “connect my Grok account”. `/meta <request>` is
+the keyboard-independent fallback.
+
+Meta Console uses a private, tool-free planner with no coding transcript. Its
+typed plan is validated and previewed before execution, and the normal
+approval policy still applies. Secrets are requested only through masked
+host-owned prompts and are never returned to the planner. See the
+[Meta Console guide](docs/meta-console.md) for supported actions and safety
+details.
 
 ### Secret entry
 

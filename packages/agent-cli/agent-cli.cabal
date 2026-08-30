@@ -43,9 +43,9 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
-    other-modules:    Agent.CLI.AccountPicker
-                    , Agent.CLI.AgentSessions.Render
+    other-modules:    Agent.CLI.AgentSessions.Render
                     , Agent.CLI.AgentViewport.Status
+                    , Agent.CLI.Approval.Decision
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
@@ -137,9 +137,11 @@ library
                     , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.AccountPicker
                     , Agent.CLI.AccountSelection
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
+                    , Agent.CLI.AgentViewport.Runtime
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
@@ -149,6 +151,7 @@ library
                     , Agent.CLI.Clipboard
                     , Agent.CLI.CodeModeRuntime
                     , Agent.CLI.Compaction
+                    , Agent.CLI.Context
                     , Agent.CLI.Connectivity
                     , Agent.CLI.Command
                     , Agent.CLI.ComputerUse
@@ -159,17 +162,20 @@ library
                     , Agent.CLI.Database
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
+                    , Agent.CLI.Desktop
                     , Agent.CLI.Duration
                     , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
                     , Agent.CLI.Environment
                     , Agent.CLI.Error
+                    , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
                     , Agent.CLI.Input.Display
+                    , Agent.CLI.Input.Editor
                     , Agent.CLI.Input.Paste
                     , Agent.CLI.Input.History
                     , Agent.CLI.Input.KeyDecoder
@@ -181,6 +187,7 @@ library
                     , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
+                    , Agent.CLI.MetaConsole
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
                     , Agent.CLI.McpManager
@@ -204,6 +211,7 @@ library
                     , Agent.CLI.ProviderTransition
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
+                    , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.Session.ConversationStore
@@ -223,6 +231,7 @@ library
                     , Agent.CLI.Terminal
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
+                    , Agent.CLI.Transcript
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
@@ -395,6 +404,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
+                    , Agent.CLI.AgentViewportRuntimeSpec
                     , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec
@@ -403,12 +413,15 @@ test-suite agent-cli-test
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.ContextSpec
                     , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
+                    , Agent.CLI.DesktopSpec
                     , Agent.CLI.ErrorSpec
+                    , Agent.CLI.ExternalProgramSpec
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.ImagePreviewSpec
@@ -418,6 +431,8 @@ test-suite agent-cli-test
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.McpManagerSpec
+                    , Agent.CLI.MetaConsoleSpec
+                    , Agent.CLI.MetaConsoleRuntimeSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
@@ -445,6 +460,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.TextLayoutSpec
+                    , Agent.CLI.TranscriptSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionHistorySpec

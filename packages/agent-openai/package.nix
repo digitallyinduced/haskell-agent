@@ -14,10 +14,10 @@ mkDerivation {
   isExecutable = true;
   libraryHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types
-    base bytestring containers directory exceptions filepath HsOpenSSL
-    http-client http-conduit http-streams io-streams network-uri retry
-    safe-exceptions scientific template-haskell text time unix vector
-    websockets wuss
+    base base64-bytestring bytestring containers directory exceptions
+    filepath HsOpenSSL http-client http-conduit http-streams io-streams
+    network-uri retry safe-exceptions scientific template-haskell text
+    time unix vector websockets wuss
   ];
   executableHaskellDepends = [
     agent-core base directory filepath text

@@ -3,6 +3,7 @@ module Agent.CLI.ToolsSpec (spec) where
 import Agent.CLI.Tools
 import Agent.CLI.CodeModeRuntime
     ( CodeModeToolProjection(..)
+    , imageGenerationCodeModeProjection
     , projectCodeModeTools
     )
 import Agent.Dialect
@@ -23,11 +24,17 @@ import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
+import Agent.Codex.Dialect.Runtime
+    ( CodexCodingTools(..)
+    , newCodexCodingTools
+    )
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.CodeMode.Tool (ToolMode(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolSchema(..)
+    , defaultToolEnv
     , freeformApplyPatchAppTool
     , jsonAppTool
     , rawJsonAppTool
@@ -59,6 +66,21 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+    it "nests only imagegen for code-only models when full code mode is off" do
+        let tools = map testTool ["read_file", "imagegen", "shell_command"]
+        case imageGenerationCodeModeProjection CodeOnlyToolMode tools of
+            Just projection -> do
+                map (.appToolName) projection.directCodeModeTools
+                    `shouldBe` ["read_file", "shell_command"]
+                map (.appToolName) projection.nestedCodeModeTools
+                    `shouldBe` ["imagegen"]
+            Nothing ->
+                expectationFailure "expected an image-generation projection"
+        case imageGenerationCodeModeProjection ConventionalToolMode tools of
+            Nothing -> pure ()
+            Just _ ->
+                expectationFailure
+                    "conventional models should keep imagegen direct"
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch : _ -> pure ()
@@ -70,6 +92,48 @@ spec = describe "schemasFromAppTools" do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
+
+    it "keeps shell_command workdir optional in direct and code-only mode" do
+        env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
+        bracket
+            (newCodexCodingTools env Nothing Nothing)
+            (.codexClose)
+            \coding ->
+                case
+                    [ tool
+                    | tool <- coding.codexAppTools
+                    , tool.appToolName == "shell_command"
+                    ] of
+                    [shell] -> do
+                        shell.appToolSchema `shouldSatisfy` \case
+                            RawJsonFunctionSchema _ -> True
+                            _ -> False
+
+                        assertOptionalShellSchema $
+                            schemasFromAppTools
+                                codexDialect
+                                coding.codexAppTools
+
+                        let projection =
+                                projectCodeModeTools
+                                    CodeOnlyToolMode
+                                    coding.codexAppTools
+                            projectedSchemas tools =
+                                [ tool.appToolSchema
+                                | tool <- tools
+                                , tool.appToolName == "shell_command"
+                                ]
+                        projectedSchemas projection.directCodeModeTools
+                            `shouldBe` [shell.appToolSchema]
+                        projectedSchemas projection.nestedCodeModeTools
+                            `shouldBe` [shell.appToolSchema]
+                        assertOptionalShellSchema $
+                            schemasFromAppToolsCodeMode
+                                codexDialect
+                                projection.directCodeModeTools
+                    other -> expectationFailure
+                        ("expected one shell_command app tool, got "
+                            <> show (map (.appToolName) other))
 
     it "does not advertise harness tools to the Claude Code subprocess" do
         schemasFromAppTools claudeCodeDialect [jsonTool, patchTool]
@@ -204,6 +268,36 @@ spec = describe "schemasFromAppTools" do
             [_, FunctionToolValue _, NamespaceToolValue namespace] -> do
                 namespace.name `shouldBe` "collaboration"
             other -> expectationFailure ("expected namespace tool, got " <> show other)
+
+    it "emits imagegen in the reserved image_gen namespace with its raw schema" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "prompt" Aeson..= Aeson.object
+                        ["type" Aeson..= ("string" :: Text)]
+                    ]
+                , "required" Aeson..= (["prompt"] :: [Text])
+                , "additionalProperties" Aeson..= False
+                ]
+            imagegen = rawJsonAppTool
+                "imagegen"
+                "Generate an image."
+                parameters
+                AlwaysAllowed
+                (noArgsTool "imagegen" (pure (Right "ok")))
+        case schemasFromAppTools codexDialect [imagegen] of
+            [_, NamespaceToolValue namespace] -> do
+                namespace.name `shouldBe` "image_gen"
+                case namespace.tools of
+                    [FunctionToolValue tool] -> do
+                        tool.name `shouldBe` "imagegen"
+                        tool.strict `shouldBe` Just False
+                        tool.parameters `shouldBe`
+                            Just (rawJsonValue parameters)
+                    other -> expectationFailure
+                        ("expected one imagegen function, got " <> show other)
+            other -> expectationFailure
+                ("expected image_gen namespace, got " <> show other)
 
     it "omits an empty required list from reserved collaboration schemas" do
         let wait = jsonAppTool "wait_agent" "Wait."
@@ -385,3 +479,17 @@ decodeRaw decoder =
 
 rawJsonValue :: Aeson.ToJSON value => value -> RawJson
 rawJsonValue = rawJsonFromEncoding . Aeson.toEncoding
+
+assertOptionalShellSchema :: [ResponseTool] -> Expectation
+assertOptionalShellSchema tools =
+    case functionToolsNamed "shell_command" tools of
+        [shell] -> do
+            shell.strict `shouldBe` Just False
+            required_ shell `shouldBe` Just ["command"]
+            shell.description `shouldSatisfy`
+                maybe False (Text.isInfixOf "`workdir` is optional")
+            propertyNames shell `shouldMatchList`
+                ["command", "workdir", "timeout_ms", "yield_time_ms"]
+            propertyType "workdir" shell `shouldBe` Just "string"
+        other -> expectationFailure
+            ("expected one shell_command function schema, got " <> show other)

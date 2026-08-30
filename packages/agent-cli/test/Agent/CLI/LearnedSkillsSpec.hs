@@ -395,5 +395,6 @@ shouldNotContainText actual expected =
 approvalLabel :: ApprovalRule -> Text
 approvalLabel = \case
     AlwaysReadOnly -> "read-only"
+    AlwaysAllowed -> "always-allowed"
     AlwaysPrompt -> "prompt"
     ClassifyReadOnly _ -> "classified"

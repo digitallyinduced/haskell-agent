@@ -57,7 +57,12 @@ import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..), ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallKind(..)
+    , ToolCallResult(..)
+    , ToolResultImage(..)
+    )
 import Test.Hspec
 
 spec :: Spec
@@ -118,6 +123,34 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                             any isInputFile ps && any isInputImage ps
                     _ -> expectationFailure "expected multimodal message parts"
             other -> expectationFailure ("unexpected items: " <> show other)
+
+    it "encodes rich function outputs as image content followed by the hint" do
+        case toolResultToItem ToolCallResultWithImages
+                { callId = "image-call"
+                , output = "saved under generated_images"
+                , callKind = FunctionCallKind
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/png;base64,AA=="
+                        , imageDetail = Just "high"
+                        }
+                    ]
+                } of
+            FunctionCallOutputItem output ->
+                Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                    [ InputImagePart
+                        { detail = Just "high"
+                        , fileId = Nothing
+                        , imageUrl = Just "data:image/png;base64,AA=="
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    , InputTextPart
+                        { text = "saved under generated_images"
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    ]
+            other -> expectationFailure
+                ("expected function output, got " <> show other)
 
     it "reacquires a credential after an authentication rejection" do
         attempts <- newIORef []
@@ -461,11 +494,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         map encodedField (requestInputItems request) !! 1
             `shouldBe` Just (Aeson.String "opaque")
 
--- | Streamed tool calls are announced immediately, while argument deltas map
--- to activity updates at coarse boundaries. Without the projected activity
--- below, a model writing a large call — or degenerating into a repetition
--- loop inside one — looks like endless silent reasoning until the provider's
--- output-token cap fails the turn.
+-- | Streamed tool calls are announced immediately. Shell argument deltas
+-- repaint that call with the partial command, while other tools retain coarse
+-- activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
     it "publishes a streamed function call immediately" do
@@ -474,7 +505,27 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         events `shouldBe`
             [ ToolStarted
                 (functionToolCall "call-1" "shell_command" "")
-            , ActivityUpdated "Writing shell_command call…"
+            ]
+
+    it "repaints a streamed shell call with its partial command" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        first <- projectEvent
+            (argumentsDelta "fc-1" "{\"command\":\"git sta")
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"git sta\"}")
+            ]
+        second <- projectEvent (argumentsDelta "fc-1" "tus\"}")
+        second `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"git status\"}")
             ]
 
     it "replaces streamed tool metadata with the canonical done item" do
@@ -529,7 +580,7 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 }
             ]
 
-    it "reports argument progress at chunk boundaries" do
+    it "does not replace a shell preview with coarse argument activity" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
         quiet <- projectEvent
@@ -537,27 +588,23 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         quiet `shouldBe` []
         loud <- projectEvent
             (argumentsDelta "fc-1" (Text.replicate 9900 "y"))
-        loud `shouldBe`
-            [ActivityUpdated "Writing shell_command call… (10k chars)"]
+        loud `shouldBe` []
 
     it "warns once per runaway argument window" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
         let bigDelta = Text.replicate 60000 "z"
         first <- projectEvent (argumentsDelta "fc-1" bigDelta)
-        first `shouldBe`
-            [ActivityUpdated "Writing shell_command call… (60k chars)"]
+        first `shouldBe` []
         second <- projectEvent (argumentsDelta "fc-1" bigDelta)
         second `shouldBe`
-            [ ActivityUpdated "Writing shell_command call… (120k chars)"
-            , WarningRaised
+            [ WarningRaised
                 ("The model has streamed 120k chars of shell_command "
                     <> "arguments in one response; it may be stuck in a "
                     <> "repetition loop.")
             ]
         third <- projectEvent (argumentsDelta "fc-1" bigDelta)
-        third `shouldBe`
-            [ActivityUpdated "Writing shell_command call… (180k chars)"]
+        third `shouldBe` []
 
     it "counts custom tool input as argument streaming" do
         projectEvent <- newStreamEventToLoopEvents False

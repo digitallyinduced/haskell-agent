@@ -30,8 +30,7 @@ import Control.Concurrent.Async
     , waitCatch
     )
 import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar_
+    ( modifyMVar_
     , newMVar
     , readMVar
     , withMVar
@@ -89,7 +88,7 @@ import Data.IORef
     , writeIORef
     )
 import qualified Data.IntMap.Strict as IntMap
-import Data.List (find, foldl')
+import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Scientific (floatingOrInteger)
@@ -124,7 +123,6 @@ import System.IO
     , hSetBuffering
     )
 import System.IO.Unsafe (unsafePerformIO)
-import System.Posix.Types (ProcessGroupID)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
@@ -194,18 +192,31 @@ startMcpClientWith hooks eraHint config = case config.mcpServerUrl of
                 hSetBinaryMode output True
                 hSetBinaryMode errOutput True
                 hSetBuffering input LineBuffering
+                writeLock <- newMVar ()
+                stderrRef <- newIORef emptyCapturedStderr
+                readerRef <- newIORef Nothing
+                stderrReaderRef <- newIORef Nothing
+                let transport = McpStdioTransport
+                        { stdioInput = input
+                        , stdioProcess = processHandle
+                        , stdioGroupId = groupId
+                        , stdioWriteLock = writeLock
+                        , stdioStderr = stderrRef
+                        , stdioReader = readerRef
+                        , stdioStderrReader = stderrReaderRef
+                        }
                 client <-
                     newClientRecord hooks eraHint config
-                        (Just input) (Just processHandle) groupId
+                        (McpClientStdio transport)
                 stderrReader <- asyncWithUnmask \unmask ->
-                    unmask (stderrLoop errOutput client.clientStderr)
+                    unmask (stderrLoop errOutput transport.stdioStderr)
                         `finally` void (tryAny (hClose errOutput))
-                let withStderr = client { clientStderrReader = Just stderrReader }
+                writeIORef transport.stdioStderrReader (Just stderrReader)
                 reader <- asyncWithUnmask \unmask ->
-                    unmask (readerLoop withStderr output)
+                    unmask (readerLoop client output)
                         `finally` void (tryAny (hClose output))
-                writeIORef withStderr.clientReader (Just reader)
-                pure withStderr
+                writeIORef transport.stdioReader (Just reader)
+                pure client
             _ -> do
                 let (_, _, _, processHandle) = created
                 groupId <- getPid processHandle
@@ -223,46 +234,39 @@ startMcpHttpClient
     -> McpServerConfig
     -> IO McpClient
 startMcpHttpClient hooks eraHint config =
-    -- HTTP has no subprocess or background reader.  Its lifecycle is driven
-    -- by requestMcp and closeMcpClient below.
-    newClientRecord hooks eraHint config Nothing Nothing Nothing
+    case config.mcpServerUrl of
+        Nothing ->
+            ioError (userError "MCP HTTP client requires a server URL")
+        Just url -> do
+            -- HTTP has no subprocess or background reader. Its lifecycle is
+            -- driven by requestMcp and closeMcpClient below.
+            session <- newIORef Nothing
+            newClientRecord hooks eraHint config
+                (McpClientHttp (McpHttpTransport url session))
 
 newClientRecord
     :: McpHostHooks
     -> Maybe McpProtocolEra
     -> McpServerConfig
-    -> Maybe Handle
-    -> Maybe ProcessHandle
-    -> Maybe ProcessGroupID
+    -> McpClientTransport
     -> IO McpClient
-newClientRecord hooks eraHint config input processHandle groupId = do
+newClientRecord hooks eraHint config transport = do
     nextId <- newIORef 1
     pending <- newTVarIO IntMap.empty
     failure <- newTVarIO Nothing
-    writeLock <- newMVar ()
-    stderrRef <- newIORef emptyCapturedStderr
     closed <- newMVar False
     lifecycle <- newTVarIO ClientPending
     serverInfo <- newTVarIO Nothing
     discoveredSkills <- newTVarIO []
-    session <- newIORef Nothing
-    reader <- newIORef Nothing
     workers <- newTVarIO []
     eventHandler <- newIORef (const (pure ()))
     pure McpClient
         { clientConfig = config
         , clientHooks = hooks
-        , clientHttpSession = session
-        , clientInput = input
-        , clientProcess = processHandle
-        , clientGroupId = groupId
+        , clientTransport = transport
         , clientNextId = nextId
         , clientPending = pending
         , clientFailure = failure
-        , clientWriteLock = writeLock
-        , clientStderr = stderrRef
-        , clientReader = reader
-        , clientStderrReader = Nothing
         , clientWorkers = workers
         , clientClosed = closed
         , clientLifecycle = lifecycle
@@ -600,7 +604,11 @@ legacyClientCapabilities elicitEnabled = object $
 
 startupFailure :: McpClient -> Text -> IO a
 startupFailure client err = do
-    stderrText <- capturedStderrText <$> readIORef client.clientStderr
+    stderrText <- case client.clientTransport of
+        McpClientStdio transport ->
+            capturedStderrText <$> readIORef transport.stdioStderr
+        McpClientHttp _ ->
+            pure ""
     ioError . userError . Text.unpack $
         redactConfiguredValues client.clientConfig
             (err <> if Text.null stderrText then "" else "\nstderr:\n" <> stderrText)
@@ -611,7 +619,9 @@ discoverMcpTools :: McpClient -> IO ([McpTool], [Text])
 discoverMcpTools client = do
     tools <- paginate client "tools/list" "tools" mcpToolDecoder
         >>= either (ioError . userError . Text.unpack . renderMcpError) pure
-    let isHttp = isJust client.clientConfig.mcpServerUrl
+    let isHttp = case client.clientTransport of
+            McpClientHttp _ -> True
+            McpClientStdio _ -> False
         annotated =
             [ (tool.discoveredName, annotateHeaderParams isHttp tool)
             | tool <- tools
@@ -1220,12 +1230,13 @@ requestMcpFull client request = do
             let meta = metaSeries client era request requestId elicitEnabled
                 message = requestEnvelope (Just requestId) request.requestMethod
                     (request.requestParams <> meta)
-            case client.clientConfig.mcpServerUrl of
-                Just url ->
-                    httpExchange client url era request (Just (requestId, pending)) message
+            case client.clientTransport of
+                McpClientHttp transport ->
+                    httpExchange client transport era request
+                        (Just (requestId, pending)) message
                         `finally` unregister requestId
-                Nothing ->
-                    sendMessage client message >>= \case
+                McpClientStdio transport ->
+                    sendMessage client transport message >>= \case
                         Left err -> do
                             unregister requestId
                             pure (Left (McpTransportError err))
@@ -1614,26 +1625,29 @@ sendNotification
     -> Series
     -> IO (Either McpError ())
 sendNotification client method parameters =
-    case client.clientConfig.mcpServerUrl of
-        Just url -> do
+    case client.clientTransport of
+        McpClientHttp transport -> do
             era <- mcpClientEra client
-            void <$> httpExchange client url era
+            void <$> httpExchange client transport era
                 (clientRequest client method parameters)
                 Nothing
                 (requestEnvelope Nothing method parameters)
-        Nothing ->
+        McpClientStdio transport ->
             either (Left . McpTransportError) Right
-                <$> sendMessage client (requestEnvelope Nothing method parameters)
+                <$> sendMessage client transport
+                    (requestEnvelope Nothing method parameters)
 
-sendMessage :: McpClient -> Aeson.Encoding -> IO (Either Text ())
-sendMessage client message =
+sendMessage
+    :: McpClient
+    -> McpStdioTransport
+    -> Aeson.Encoding
+    -> IO (Either Text ())
+sendMessage client transport message =
     tryAny
-        (case client.clientInput of
-            Nothing -> ioError (userError "MCP client has no stdio transport")
-            Just input -> withMVar client.clientWriteLock \_ -> do
-                LBS.hPutStr input
+        (withMVar transport.stdioWriteLock \_ -> do
+                LBS.hPutStr transport.stdioInput
                     (AesonEncodingInternal.encodingToLazyByteString message <> "\n")
-                hFlush input)
+                hFlush transport.stdioInput)
         >>= \case
             Left exception -> do
                 let err = "MCP write failed: " <> exceptionSummary exception
@@ -1737,13 +1751,14 @@ handleServerRequest client requestId method params =
 
 sendResponse :: McpClient -> Aeson.Encoding -> IO (Either McpError ())
 sendResponse client message =
-    case client.clientConfig.mcpServerUrl of
-        Just url -> do
+    case client.clientTransport of
+        McpClientHttp transport -> do
             era <- mcpClientEra client
-            void <$> httpExchange client url era
+            void <$> httpExchange client transport era
                 (clientRequest client "" mempty) Nothing message
-        Nothing ->
-            either (Left . McpTransportError) Right <$> sendMessage client message
+        McpClientStdio transport ->
+            either (Left . McpTransportError) Right
+                <$> sendMessage client transport message
 
 handleNotification :: McpClient -> Text -> Maybe RawJson -> IO ()
 handleNotification client method params =
@@ -1834,15 +1849,15 @@ data HttpOutcome
 -- present, then carries the result.
 httpExchange
     :: McpClient
-    -> Text
+    -> McpHttpTransport
     -> Maybe McpProtocolEra
     -> McpRequest
     -> Maybe (Int, PendingRequest)
     -> Aeson.Encoding
     -> IO (Either McpError RawJson)
-httpExchange client url era request pending message = do
-    baseRequest <- parseRequest (Text.unpack url)
-    session <- readIORef client.clientHttpSession
+httpExchange client transport era request pending message = do
+    baseRequest <- parseRequest (Text.unpack transport.httpUrl)
+    session <- readIORef transport.httpSession
     negotiated <- readTVarIO client.clientServerInfo
     tokenResult <- configuredAccessToken client
     let body = AesonEncodingInternal.encodingToLazyByteString message
@@ -1896,7 +1911,7 @@ httpExchange client url era request pending message = do
                 headers = responseHeaders response
             when (responseEra /= Just McpEraModern) $
                 forM_ (lookup "Mcp-Session-Id" headers)
-                    (writeIORef client.clientHttpSession . Just . TextEncoding.decodeUtf8)
+                    (writeIORef transport.httpSession . Just . TextEncoding.decodeUtf8)
             if status == 401 || status == 403
                 then pure (HttpUnauthorized status headers)
                 else if status < 200 || status >= 300
@@ -2260,14 +2275,16 @@ closeMcpClient client =
                     writeTVar client.clientWorkers []
                     pure current
                 mapM_ stopWorker workers
-                forM_ client.clientInput \input ->
-                    void $ tryAny (hClose input)
-                forM_ client.clientProcess $ \processHandle ->
-                    terminateProcessGroup client.clientGroupId processHandle
-                when (isJust client.clientConfig.mcpServerUrl) $
-                    closeHttpSession client
-                readIORef client.clientReader >>= mapM_ stopWorker
-                forM_ client.clientStderrReader stopWorker
+                case client.clientTransport of
+                    McpClientStdio transport -> do
+                        void $ tryAny (hClose transport.stdioInput)
+                        terminateProcessGroup
+                            transport.stdioGroupId
+                            transport.stdioProcess
+                        readIORef transport.stdioReader >>= mapM_ stopWorker
+                        readIORef transport.stdioStderrReader >>= mapM_ stopWorker
+                    McpClientHttp transport ->
+                        closeHttpSession client transport
                 failClient client.clientPending client.clientFailure
                     "MCP server closed"
                 pure True
@@ -2276,14 +2293,14 @@ closeMcpClient client =
 -- the server assigned a session id.  Failure is intentionally ignored during
 -- shutdown: the local client is already being closed and the server may have
 -- expired the session independently.
-closeHttpSession :: McpClient -> IO ()
-closeHttpSession client = do
-    session <- readIORef client.clientHttpSession
+closeHttpSession :: McpClient -> McpHttpTransport -> IO ()
+closeHttpSession client transport = do
+    session <- readIORef transport.httpSession
     era <- mcpClientEra client
-    case (client.clientConfig.mcpServerUrl, session, era) of
-        (Just url, Just sessionId, era')
+    case (session, era) of
+        (Just sessionId, era')
             | era' /= Just McpEraModern -> void $ tryAny do
-                request <- parseRequest (Text.unpack url)
+                request <- parseRequest (Text.unpack transport.httpUrl)
                 bearer <- either (const Nothing) id <$> configuredAccessToken client
                 let request' = request
                         { HC.method = "DELETE"

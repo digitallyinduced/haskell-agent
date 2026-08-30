@@ -12,11 +12,18 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
+    , cmd "view-plan" ["show-plan", "plan-view"] "/view-plan" "Show the saved session plan" False
+    , cmd "queue" [] "/queue" "Show prompts waiting in the input queue" False
+    , cmd "transcript" ["log"] "/transcript" "Open the session transcript in a pager" False
+    , cmd "edit-prompt" [] "/edit-prompt" "Edit a prompt draft without submitting it" False
+    , cmd "context" [] "/context" "Show context-window usage and estimates" False
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
+    , cmd "meta" ["configure"] "/meta <REQUEST>" "Configure the harness without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
     , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
+    , cmd "desktop" [] "/desktop" "Open this conversation in the Haskell Agent desktop app" False
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
     , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True

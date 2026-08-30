@@ -110,6 +110,28 @@ spec = describe "dispatchToolCall" do
             (functionToolCall "call-1" "echo" "{\"message\":\"hello\"}")
         result `shouldBe` functionResult "call-1" "call-1:hello"
 
+    it "preserves rich image results without exposing image data in Show" do
+        let secretDataUrl = "data:image/png;base64,c2VjcmV0"
+        result <- dispatchToolCall testConfig
+            [ typedRichToolWithCall "echo" echoArgsDecoder
+                \_call (EchoArgs message) ->
+                    pure $ Right ToolHandlerResult
+                        { resultText = "echo:" <> message
+                        , resultImages =
+                            [ ToolResultImage
+                                { imageUrl = secretDataUrl
+                                , imageDetail = Just "high"
+                                }
+                            ]
+                        }
+            ]
+            (functionToolCall "call-1" "echo" "{\"message\":\"hello\"}")
+        result.output `shouldBe` "echo:hello"
+        toolCallResultImages result `shouldBe`
+            [ToolResultImage secretDataUrl (Just "high")]
+        show result `shouldContain` "images = <1>"
+        show result `shouldNotContain` "c2VjcmV0"
+
     it "turns typed decode failures into formatted tool output" do
         result <- dispatchToolCall testConfig
             [ typedTool "echo" echoArgsDecoder \(EchoArgs message) ->

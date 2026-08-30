@@ -608,7 +608,7 @@ spec = describe "code-mode Bun host" do
                     defaultLoopDispatch
                     [toolHandlerOf doubleTool]
                     call
-                pure (Right result.output)
+                pure (Right result)
         created <- newCodeModeToolSet
             CodeOnlyToolMode
             ImageDetailVisible
@@ -644,7 +644,7 @@ spec = describe "code-mode Bun host" do
                     defaultLoopDispatch
                     [toolHandlerOf patchTool]
                     call
-                pure (Right result.output)
+                pure (Right result)
         created <- newCodeModeToolSet
             CodeOnlyToolMode
             ImageDetailVisible
@@ -670,7 +670,8 @@ spec = describe "code-mode Bun host" do
                 AlwaysReadOnly
                 ParallelSafe
                 (typedTool "lookup" emptyObjectDecoder \() -> pure (Right "value"))
-            invoke _ = pure (Right "value")
+            invoke _ = pure
+                (Right (ToolCallResult "nested" "value" FunctionCallKind))
         codeOnly <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [plainNested lookupTool]
@@ -697,7 +698,8 @@ spec = describe "code-mode Bun host" do
             (not . Text.isInfixOf "### `lookup`")
 
     it "fails closed before advertising a missing worker" do
-        let invoke _ = pure (Right "value")
+        let invoke _ = pure
+                (Right (ToolCallResult "nested" "value" FunctionCallKind))
         unavailable <- newCodeModeToolSet
             CodeOnlyToolMode
             ImageDetailVisible
@@ -728,7 +730,7 @@ spec = describe "code-mode Bun host" do
                     defaultLoopDispatch
                     [toolHandlerOf (mkTool "look-up"), toolHandlerOf (mkTool "look_up")]
                     call
-                pure (Right result.output)
+                pure (Right result)
         created <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [plainNested (mkTool "look-up"), plainNested (mkTool "look_up")]
@@ -758,7 +760,7 @@ spec = describe "code-mode Bun host" do
                     defaultLoopDispatch
                     [toolHandlerOf lookupTool]
                     call
-                pure (Right result.output)
+                pure (Right result)
         created <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [ CodeModeNestedSpec

@@ -91,7 +91,8 @@ library
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Loop.Internal
+    other-modules:    Agent.Loop.EventPump
+                    , Agent.Loop.Internal
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types

@@ -17,7 +17,10 @@ import Agent.MCP.Client
     )
 import Agent.MCP.Types
     ( McpClient(..)
+    , McpClientTransport(..)
     , McpHeaderParam(..)
+    , McpHttpTransport(..)
+    , McpStdioTransport(..)
     , McpTool(..)
     )
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder, rawJsonFromEncoding)
@@ -65,6 +68,7 @@ import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
+    , listDirectory
     , removeDirectoryRecursive
     , removeFile
     , withCurrentDirectory
@@ -102,6 +106,36 @@ spec = describe "Agent.MCP" do
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "super-secret"
+
+    describe "client transport" do
+        it "stores only HTTP state for an HTTP client" $
+            bracket (startMcpClient workerClientConfig) closeMcpClient \client ->
+                case client.clientTransport of
+                    McpClientHttp transport -> do
+                        transport.httpUrl `shouldBe` "http://127.0.0.1:1/mcp"
+                        readIORef transport.httpSession `shouldReturn` Nothing
+                    McpClientStdio _ ->
+                        expectationFailure "expected an HTTP transport"
+
+        it "stores only process state for a stdio client" $
+            withFakeServer \script ->
+                bracket
+                    (startMcpClient (baseConfig "stdio-transport" script))
+                    closeMcpClient
+                    \client -> case client.clientTransport of
+                        McpClientStdio transport -> do
+                            readIORef transport.stdioReader >>= \case
+                                Just _ -> pure ()
+                                Nothing ->
+                                    expectationFailure
+                                        "stdio response reader was not started"
+                            readIORef transport.stdioStderrReader >>= \case
+                                Just _ -> pure ()
+                                Nothing ->
+                                    expectationFailure
+                                        "stdio stderr reader was not started"
+                        McpClientHttp _ ->
+                            expectationFailure "expected a stdio transport"
 
     describe "client worker lifecycle" do
         it "does not start owned workers after the client is closed" $
@@ -280,6 +314,23 @@ spec = describe "Agent.MCP" do
                 updates <- readIORef progress
                 updates `shouldContain` [["first", "second"]]
                 last updates `shouldBe` []
+
+    it "starts other servers while a progress callback is stalled" $
+        withConcurrentFakeServer \script barrier -> do
+            started <- timeout 5000000 $
+                startMcpFleetWithProgress
+                    (\case
+                        [_] -> waitForConcurrentStarts barrier
+                        _ -> pure ())
+                    [ concurrentConfig script barrier "first"
+                    , concurrentConfig script barrier "second"
+                    ]
+            case started of
+                Nothing ->
+                    expectationFailure
+                        "fleet startup deadlocked behind the progress callback"
+                Just fleet ->
+                    bracket (pure fleet) closeMcpFleet \_ -> pure ()
 
     it "reports failed configured servers without hiding healthy ones" $
         withFakeServer \script -> do
@@ -805,6 +856,18 @@ waitForCatalogEntry fleet name = go (300 :: Int)
     go remaining = do
         entries <- readTVarIO fleet.mcpFleetCatalog
         if Map.member name entries
+            then pure ()
+            else threadDelay 10000 >> go (remaining - 1)
+
+waitForConcurrentStarts :: FilePath -> IO ()
+waitForConcurrentStarts barrier = go (300 :: Int)
+  where
+    go 0 =
+        expectationFailure
+            "other MCP servers did not start while progress reporting was blocked"
+    go remaining = do
+        starts <- listDirectory barrier
+        if length starts >= 2
             then pure ()
             else threadDelay 10000 >> go (remaining - 1)
 
