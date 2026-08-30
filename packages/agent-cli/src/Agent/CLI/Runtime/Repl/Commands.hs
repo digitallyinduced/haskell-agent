@@ -31,7 +31,7 @@ import Agent.CLI.Command
                  ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
                  ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplViewPlan, ReplQueue, ReplTranscript, ReplEditPrompt,
-                 ReplContext,
+                 ReplContext, ReplHistory, ReplFind,
                  ReplBtw, ReplMetaConsole, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplInit, ReplReview, ReplDiff,
@@ -76,9 +76,12 @@ import Agent.CLI.GitDiff
 import Agent.CLI.Input
     ( formatPasteChip,
       readApprovalLine,
+      readChoiceSelection,
       readChoiceSelectionAt,
+      readReplHistory,
       readModalText,
       submissionPromptText,
+      truncateDisplayText,
       ReplLine(ReplText, ReplMeta, ReplEof, ReplQuitInterrupt, ReplCycleMode,
                ReplClipboardPaste, ReplClipboardPasteOrText, ReplChooseModel,
                ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage,
@@ -200,6 +203,7 @@ import Agent.CLI.TUI.App
       commitFullscreenHistoryTurn,
       emitUiEvent,
       requestFullscreenChoiceWithBody,
+      requestFullscreenFilterChoice,
       requestFullscreenSecret,
       requestFullscreenText,
       queuedFullscreenInputDisplays,
@@ -314,7 +318,7 @@ import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( intercalate, map, null, pack, replace, strip, toLower )
+    ( intercalate, map, null, pack, replace, strip, toCaseFold, toLower )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn, readFile )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -932,6 +936,39 @@ handleReplLine
                                     activeTools
                         displayInfo message (Text.putStrLn message)
                         continue
+                    ReplHistory -> do
+                        prompts <-
+                            filter
+                                ((/= "/history")
+                                    . Text.toCaseFold
+                                    . Text.strip)
+                                <$> readReplHistory
+                        case prompts of
+                            [] -> do
+                                let message =
+                                        "No prompt history is available."
+                                displayInfo message (Text.putStrLn message)
+                                continue
+                            _ -> do
+                                selected <- case fullscreen of
+                                    Just runtime ->
+                                        requestFullscreenFilterChoice
+                                            runtime
+                                            "Prompt history"
+                                            0
+                                            [ (historyLabel prompt, "")
+                                            | prompt <- prompts
+                                            ]
+                                            >>= pure . (>>= (`listAt` prompts))
+                                    Nothing ->
+                                        readChoiceSelection
+                                            (\active prompt ->
+                                                (if active
+                                                    then roleSuccess color
+                                                    else roleMuted color)
+                                                    (historyLabel prompt))
+                                            prompts
+                                maybe continue continueWith selected
                     ReplTranscript -> do
                         outcome <- case persist of
                             PersistenceDisabled ->
@@ -972,6 +1009,45 @@ handleReplLine
                                 | otherwise ->
                                     displayInfo message (Text.putStrLn message)
                         continue
+                    ReplFind maybeQuery ->
+                        loadPersistedTranscript >>= \case
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                                continue
+                            Right Nothing -> do
+                                let message =
+                                        "No conversation transcript is available yet."
+                                displayInfo message (Text.putStrLn message)
+                                continue
+                            Right (Just (meta, blocks)) -> do
+                                let query = fromMaybe "" maybeQuery
+                                    matches =
+                                        Transcript.searchTranscriptBlocks
+                                            query
+                                            blocks
+                                if null matches
+                                    then do
+                                        let message =
+                                                "No transcript blocks matched “"
+                                                    <> query
+                                                    <> "”."
+                                        displayInfo message
+                                            (Text.putStrLn message)
+                                    else
+                                        legacy
+                                            (openPager
+                                                (Transcript.renderTranscriptMarkdown
+                                                    meta
+                                                    matches))
+                                            >>= \case
+                                                Left err ->
+                                                    displayError err $
+                                                        Text.hPutStrLn stderr
+                                                            (roleError color err)
+                                                Right () -> pure ()
+                                continue
                     ReplEditPrompt -> do
                         legacy editPrompt >>= \case
                             Left err -> do
@@ -1719,6 +1795,26 @@ handleReplLine
                     )
             Right result -> result
 
+    loadPersistedTranscript =
+        case persist of
+            PersistenceDisabled -> pure (Right Nothing)
+            PersistenceEnabled slotRef ->
+                readIORef slotRef >>= \case
+                    PersistencePending{} -> pure (Right Nothing)
+                    PersistenceActive handle ->
+                        loadSession
+                            databasePool
+                            (sessionsRoot home)
+                            handle.sessionMeta.metaId
+                            >>= pure . fmap
+                                (\(meta, turns) ->
+                                    let blocks =
+                                            foldTranscriptTurns
+                                                (zip [0 ..] turns)
+                                    in if null blocks
+                                        then Nothing
+                                        else Just (meta, blocks))
+
     openPager markdown = do
         outcome <- tryAny do
             resolveExternalProgram
@@ -1737,6 +1833,15 @@ handleReplLine
                         <> Text.pack (show exception)
                     )
             Right result -> result
+
+    historyLabel =
+        truncateDisplayText 120 . Text.replace "\n" " ↵ "
+
+    listAt index values
+        | index < 0 = Nothing
+        | otherwise = case drop index values of
+            value : _ -> Just value
+            [] -> Nothing
 
 formatQueuedPrompts :: [Text] -> Text
 formatQueuedPrompts [] = "No prompts are queued."

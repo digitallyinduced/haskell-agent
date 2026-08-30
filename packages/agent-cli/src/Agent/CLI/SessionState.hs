@@ -17,6 +17,10 @@ import Data.Text (Text)
 -- but they must keep this state object alive.
 data SessionState = SessionState
     { sessionDraft :: !(IORef Text)
+    -- | A prompt submitted as the first interactive turn after rebuilding a
+    -- session (for example a @/fork@ directive). Unlike 'CliOptions.optPrompt',
+    -- this does not turn the invocation into one-shot mode.
+    , sessionInitialPrompt :: !(IORef (Maybe Text))
     , sessionConversation :: !(IORef LiveConversation)
     , sessionPreviewId :: !(IORef Int)
     }
@@ -24,10 +28,12 @@ data SessionState = SessionState
 newSessionState :: IO SessionState
 newSessionState = do
     draft <- newIORef ""
+    initialPrompt <- newIORef Nothing
     conversation <- newIORef =<< newConversationStore Nothing [] []
     previewId <- newIORef 1
     pure SessionState
         { sessionDraft = draft
+        , sessionInitialPrompt = initialPrompt
         , sessionConversation = conversation
         , sessionPreviewId = previewId
         }

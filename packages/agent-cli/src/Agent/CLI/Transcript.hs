@@ -8,6 +8,7 @@ module Agent.CLI.Transcript
     , foldTranscriptTurns
     , renderTranscriptMarkdown
     , renderSessionTranscript
+    , searchTranscriptBlocks
     , markdownFence
     ) where
 
@@ -103,6 +104,24 @@ renderTranscriptMarkdown meta blocks =
                 | Text.null (Text.strip detail) = []
                 | otherwise = ["", "**Details**", "", markdownFence detail]
         in bodyLines <> detailLines <> stateLine
+
+-- | Match transcript blocks case-insensitively across their visible fields.
+-- An empty query deliberately returns the complete transcript so @/find@
+-- can hand search control to the pager.
+searchTranscriptBlocks :: Text -> [UiBlock] -> [UiBlock]
+searchTranscriptBlocks rawQuery blocks
+    | Text.null query = blocks
+    | otherwise = filter matches blocks
+  where
+    query = Text.toCaseFold (Text.strip rawQuery)
+    matches block =
+        any
+            (Text.isInfixOf query . Text.toCaseFold)
+            [ block.blockTitle
+            , block.blockBody
+            , block.blockDetail
+            , block.blockTimestamp
+            ]
 
 shown :: Show a => a -> Text
 shown = Text.pack . show
