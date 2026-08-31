@@ -37,7 +37,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar)
-import Control.Exception.Safe (bracket, tryAny, tryIO)
+import Control.Exception.Safe (bracket, tryIO)
 import Control.Monad (replicateM)
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Either (isLeft, isRight)
@@ -49,16 +49,24 @@ import System.Directory
     , createDirectory
     , createDirectoryIfMissing
     , createDirectoryLink
+    , doesFileExist
     , getTemporaryDirectory
     , listDirectory
     , removeDirectoryRecursive
     )
+import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeFileName)
 import System.IO (IOMode(..), hClose, openFile)
-import System.IO.Error (alreadyInUseErrorType, mkIOError)
+import System.IO.Error
+    ( alreadyInUseErrorType
+    , isDoesNotExistError
+    , isPermissionError
+    , mkIOError
+    )
 import System.Info (os)
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Files (deviceID, fileID, getFileStatus)
+import System.Process (readProcessWithExitCode)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -268,9 +276,12 @@ spec = describe "Agent.Tools.IO" do
             resolveUnderCwd env
                 (fromFilePath ("/private/tmp" </> relative))
                 `shouldReturn` expected
-            resolveUnderCwd env
+            devTmpAliases <- pathsReferToSameFile "/dev/../tmp" "/tmp"
+            devTmp <- resolveUnderCwd env
                 (fromFilePath ("/dev/../tmp" </> relative))
-                `shouldReturn` expected
+            if devTmpAliases
+                then devTmp `shouldBe` expected
+                else devTmp `shouldSatisfy` isLeft
             readIORef requests `shouldReturn` []
             varPrivateAliases <-
                 pathsReferToSameFile "/var/../private/tmp" "/private/tmp"
@@ -375,11 +386,16 @@ spec = describe "Agent.Tools.IO" do
                     (const False)
             normalizedPrefixTraversal <- resolveUnderCwd env
                 (fromFilePath "/dev/../tmp/../outside.txt")
-            normalizedPrefixTraversal `shouldSatisfy`
-                either
-                    (Text.isInfixOf
-                        "escapes the private session temp directory")
-                    (const False)
+            normalizedPrefixTraversal `shouldSatisfy` isLeft
+            devTmpAliases <- pathsReferToSameFile "/dev/../tmp" "/tmp"
+            if devTmpAliases
+                then
+                    normalizedPrefixTraversal `shouldSatisfy`
+                        either
+                            (Text.isInfixOf
+                                "escapes the private session temp directory")
+                            (const False)
+                else pure ()
             readIORef requests `shouldReturn` []
 
     it "does not normalize through a missing pre-alias component" do
@@ -451,6 +467,7 @@ spec = describe "Agent.Tools.IO" do
             result `shouldSatisfy` isLeft
 
     it "sets the private temp environment for shell commands" do
+        requireProcessSandbox
         withTempDir \dir -> do
             let workspace = dir </> "workspace"
                 scratch = dir </> "scratch"
@@ -470,6 +487,7 @@ spec = describe "Agent.Tools.IO" do
         if os /= "darwin"
             then pendingWith "the process-level Seatbelt boundary is macOS-only"
             else withTempDir \dir -> do
+                requireProcessSandbox
                 let workspace = dir </> "workspace"
                     sessions =
                         dir </> ".haskell-agent" </> "tmp" </> "sessions"
@@ -640,6 +658,7 @@ checkForegroundOutputCap dir = do
     result.commandStdout `shouldSatisfy` Text.isInfixOf "[truncated"
 
 checkBackgroundOutputArtifact dir = do
+    requireProcessSandbox
     let osDir = fromFilePath dir
     base <- defaultToolEnv osDir
     setToolSessionTmp base (Just osDir)
@@ -656,6 +675,7 @@ checkBackgroundOutputArtifact dir = do
                 Right output -> Text.length output `shouldBe` 131072
 
 checkForegroundOutputArtifact dir = do
+    requireProcessSandbox
     let osDir = fromFilePath dir
     base <- defaultToolEnv osDir
     setToolSessionTmp base (Just osDir)
@@ -697,6 +717,35 @@ checkBackgroundOutputCap dir = do
     Text.length result.commandStdout `shouldSatisfy` (< 128)
     result.commandStdout `shouldSatisfy` Text.isInfixOf "[truncated"
 
+requireProcessSandbox :: IO ()
+requireProcessSandbox
+    | os /= "darwin" = pure ()
+    | otherwise = do
+        doesFileExist "/usr/bin/sandbox-exec" >>= \case
+            False -> pendingWith
+                "sandbox-exec is unavailable in this test environment"
+            True -> do
+                probe <- tryIO $
+                    readProcessWithExitCode
+                        "/usr/bin/sandbox-exec"
+                        ["-p", "(version 1) (allow default)", "/usr/bin/true"]
+                        ""
+                case probe of
+                    Left err
+                        | isPermissionError err -> pendingWith
+                            "sandbox-exec is unavailable in this test environment"
+                        | otherwise -> ioError err
+                    Right (ExitSuccess, _, _) -> pure ()
+                    Right (ExitFailure 71, _, stderr)
+                        | "sandbox_apply: Operation not permitted"
+                            `Text.isInfixOf` Text.pack stderr ->
+                            pendingWith
+                                "sandbox-exec is unavailable in this test environment"
+                    Right result ->
+                        expectationFailure $
+                            "sandbox-exec capability probe failed unexpectedly: "
+                                <> show result
+
 checkConcurrentAtomicWrites :: FilePath -> IO ()
 checkConcurrentAtomicWrites dir = do
     let path = fromFilePath (dir </> "state.json")
@@ -734,11 +783,15 @@ startAppend path (payload, var) =
 
 pathsReferToSameFile :: FilePath -> FilePath -> IO Bool
 pathsReferToSameFile left right =
-    tryAny
+    tryIO
         ((,)
             <$> getFileStatus left
             <*> getFileStatus right) >>= \case
-        Left _ -> pure False
+        Left err
+            | isPermissionError err || isDoesNotExistError err ->
+                pure False
+            | otherwise ->
+                ioError err
         Right (leftStatus, rightStatus) ->
             pure $
                 deviceID leftStatus == deviceID rightStatus
@@ -752,8 +805,16 @@ withTempDir action = do
         removeDirectoryRecursive
         action
 
-withSystemTempDir :: (FilePath -> IO a) -> IO a
-withSystemTempDir =
-    bracket
-        (mkdtemp "/tmp/agent-io-host-XXXXXX")
-        removeDirectoryRecursive
+withSystemTempDir :: (FilePath -> IO ()) -> IO ()
+withSystemTempDir action =
+    tryIO (mkdtemp "/tmp/agent-io-host-XXXXXX") >>= \case
+        Left err
+            | isPermissionError err ->
+            pendingWith
+                "the test environment cannot create a directory under /tmp"
+            | otherwise -> ioError err
+        Right dir ->
+            bracket
+                (pure dir)
+                removeDirectoryRecursive
+                action

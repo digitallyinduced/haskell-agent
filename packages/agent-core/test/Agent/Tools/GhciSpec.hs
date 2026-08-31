@@ -29,20 +29,24 @@ import Agent.Tools.Types
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
-import Control.Exception.Safe (SomeException, bracket, try)
+import Control.Exception.Safe (SomeException, bracket, try, tryIO)
 import Data.Either (isRight)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
     , createDirectoryIfMissing
+    , doesFileExist
     , getTemporaryDirectory
     , removeDirectoryRecursive
     )
+import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.Info (os)
+import System.IO.Error (isPermissionError)
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Types (ProcessID)
+import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -212,6 +216,7 @@ spec = describe "Agent.Tools.Ghci" do
         if os /= "darwin"
             then pendingWith "the process-level Seatbelt boundary is macOS-only"
             else withTempEnv \env -> do
+                requireProcessSandbox
                 let workspace = toFilePath env.toolCwd
                     sessions =
                         workspace
@@ -241,6 +246,7 @@ spec = describe "Agent.Tools.Ghci" do
                         Text.isInfixOf "sibling-secret"
 
     it "refreshes the private temp environment after suspension" do
+        requireProcessSandbox
         withTempEnv \env -> do
             let firstScratch = toFilePath env.toolCwd </> "first-session"
                 nextScratch = toFilePath env.toolCwd </> "next-session"
@@ -474,6 +480,35 @@ waitForProcessDeath pid = go (200 :: Int)
 processAlive :: ProcessID -> IO Bool
 processAlive pid =
     isRight <$> try @_ @SomeException (signalProcess nullSignal pid)
+
+requireProcessSandbox :: IO ()
+requireProcessSandbox
+    | os /= "darwin" = pure ()
+    | otherwise = do
+        doesFileExist "/usr/bin/sandbox-exec" >>= \case
+            False -> pendingWith
+                "sandbox-exec is unavailable in this test environment"
+            True -> do
+                probe <- tryIO $
+                    readProcessWithExitCode
+                        "/usr/bin/sandbox-exec"
+                        ["-p", "(version 1) (allow default)", "/usr/bin/true"]
+                        ""
+                case probe of
+                    Left err
+                        | isPermissionError err -> pendingWith
+                            "sandbox-exec is unavailable in this test environment"
+                        | otherwise -> ioError err
+                    Right (ExitSuccess, _, _) -> pure ()
+                    Right (ExitFailure 71, _, stderr)
+                        | "sandbox_apply: Operation not permitted"
+                            `Text.isInfixOf` Text.pack stderr ->
+                            pendingWith
+                                "sandbox-exec is unavailable in this test environment"
+                    Right result ->
+                        expectationFailure $
+                            "sandbox-exec capability probe failed unexpectedly: "
+                                <> show result
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action =

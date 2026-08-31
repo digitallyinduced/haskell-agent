@@ -7,6 +7,7 @@ import Agent.XAI.Options
     , grokUserAgent
     )
 import Agent.XAI.Usage
+import Agent.XAI.TestSupport (withLoopbackApplication)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.CaseInsensitive as CI
@@ -14,7 +15,6 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import Test.Hspec
 
 spec :: Spec
@@ -69,7 +69,7 @@ spec = do
     describe "fetchGrokUsageFrom" do
         it "uses the current Grok CLI proxy authentication contract" do
             headersSeen <- newEmptyMVar
-            Warp.testWithApplication
+            withLoopbackApplication
                 (pure (billingApp headersSeen))
                 \port -> do
                     result <- fetchGrokUsageFrom

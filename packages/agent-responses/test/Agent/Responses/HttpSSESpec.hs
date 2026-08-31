@@ -3,6 +3,7 @@ module Agent.Responses.HttpSSESpec (spec) where
 import Agent.Error (ApiError(..))
 import Agent.Responses.HttpSSE
 import Agent.Responses.StreamAssembly
+import Agent.Responses.TestSupport (requireLoopbackListener)
 import Agent.Responses.Types
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
@@ -18,6 +19,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "performResponsesHttpSse" do
     it "assembles events online, emits in wire order, and stops at terminal" do
+        requireLoopbackListener
         seen <- newIORef []
         testWithApplication (pure streamApplication) \port -> do
             result <- performResponsesHttpSse
@@ -43,6 +45,7 @@ spec = describe "performResponsesHttpSse" do
                 ] `shouldBe` ["{\"path\":\"README.md\"}"]
 
     it "caps oversized non-success response bodies with a truthful marker" do
+        requireLoopbackListener
         testWithApplication (pure oversizedFailureApplication) \port -> do
             result <- performResponsesHttpSse
                 testConfig

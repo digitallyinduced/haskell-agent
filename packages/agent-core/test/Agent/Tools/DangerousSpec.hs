@@ -13,7 +13,8 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (tryIO)
+import System.IO.Error (isDoesNotExistError, isPermissionError)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Files (deviceID, fileID, getFileStatus)
 import Test.Hspec
@@ -187,16 +188,25 @@ spec = do
                 `shouldBe` replicate 4 True
 
         it "resolves relative aliases against the shell working directory" do
-            -- /dev exists in the Nix build sandbox, unlike /usr. Using an
-            -- existing prefix makes each parent traversal meaningful under
-            -- real filesystem semantics.
+            -- Using an existing prefix makes each parent traversal meaningful
+            -- under real filesystem semantics. Some nested macOS sandboxes
+            -- prohibit inspecting the resulting /tmp path.
             let cwd = unsafeEncodeUtf "/dev"
-            mapM (commandUsesHardcodedSystemTmpAt cwd)
-                [ "cat ../tmp/other-session"
-                , "cat ./../tmp/other-session"
-                , "cat ../dev/../tmp/other-session"
-                ]
-                `shouldReturn` replicate 3 True
+            devTmpAliases <- pathsReferToSameFile "/dev/../tmp" "/tmp"
+            if devTmpAliases
+                then
+                    mapM (commandUsesHardcodedSystemTmpAt cwd)
+                        [ "cat ../tmp/other-session"
+                        , "cat ./../tmp/other-session"
+                        , "cat ../dev/../tmp/other-session"
+                        ]
+                        `shouldReturn` replicate 3 True
+                else
+                    pendingWith
+                        "the test environment cannot inspect the /tmp alias"
+
+        it "does not classify unrelated relative path candidates as temp aliases" do
+            let cwd = unsafeEncodeUtf "/dev"
             mapM (commandUsesHardcodedSystemTmpAt cwd)
                 [ "cat tmp/project-file"
                 , "cat ../tmpfile"
@@ -386,11 +396,15 @@ spec = do
 
 pathsReferToSameFile :: FilePath -> FilePath -> IO Bool
 pathsReferToSameFile left right =
-    tryAny
+    tryIO
         ((,)
             <$> getFileStatus left
             <*> getFileStatus right) >>= \case
-        Left _ -> pure False
+        Left err
+            | isPermissionError err || isDoesNotExistError err ->
+                pure False
+            | otherwise ->
+                ioError err
         Right (leftStatus, rightStatus) ->
             pure $
                 deviceID leftStatus == deviceID rightStatus

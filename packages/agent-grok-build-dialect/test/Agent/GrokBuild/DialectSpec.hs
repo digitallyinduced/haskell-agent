@@ -42,7 +42,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (readMVar)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, tryIO)
 import Data.Bits ((.&.))
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -55,10 +55,14 @@ import System.Directory
     , doesFileExist
     , removeDirectoryRecursive
     )
+import System.Exit (ExitCode(..))
 import System.FilePath (makeRelative, takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.Info (os)
+import System.IO.Error (isPermissionError)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
+import System.Process (readProcessWithExitCode)
 import Test.Hspec
 
 spec :: Spec
@@ -275,6 +279,7 @@ spec = describe "Grok Build dialect" do
                     `shouldBe` scratch
 
     it "checks temp traversal while holding the persistent shell state" do
+        requireProcessSandbox
         withTempDir \dir -> do
             let scratch = dir </> "session-scratch"
             createDirectory scratch
@@ -308,6 +313,7 @@ spec = describe "Grok Build dialect" do
                         (const False)
 
     it "recreates shell state after the session temp directory changes" do
+        requireProcessSandbox
         withTempDir \dir -> do
             let firstScratch = dir </> "first-session"
                 nextScratch = dir </> "next-session"
@@ -349,6 +355,7 @@ spec = describe "Grok Build dialect" do
                 result.commandStdout `shouldBe` "reset-ok"
 
     it "stops background tasks when the session temp directory changes" do
+        requireProcessSandbox
         withTempDir \dir -> do
             let firstScratch = dir </> "first-session"
                 nextScratch = dir </> "next-session"
@@ -393,6 +400,35 @@ spec = describe "Grok Build dialect" do
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir = withSystemTempDirectory "agent-grok-build-dialect"
+
+requireProcessSandbox :: IO ()
+requireProcessSandbox
+    | os /= "darwin" = pure ()
+    | otherwise = do
+        doesFileExist "/usr/bin/sandbox-exec" >>= \case
+            False -> pendingWith
+                "sandbox-exec is unavailable in this test environment"
+            True -> do
+                probe <- tryIO $
+                    readProcessWithExitCode
+                        "/usr/bin/sandbox-exec"
+                        ["-p", "(version 1) (allow default)", "/usr/bin/true"]
+                        ""
+                case probe of
+                    Left err
+                        | isPermissionError err -> pendingWith
+                            "sandbox-exec is unavailable in this test environment"
+                        | otherwise -> ioError err
+                    Right (ExitSuccess, _, _) -> pure ()
+                    Right (ExitFailure 71, _, stderr)
+                        | "sandbox_apply: Operation not permitted"
+                            `Text.isInfixOf` Text.pack stderr ->
+                            pendingWith
+                                "sandbox-exec is unavailable in this test environment"
+                    Right result ->
+                        expectationFailure $
+                            "sandbox-exec capability probe failed unexpectedly: "
+                                <> show result
 
 waitForFile :: FilePath -> IO Bool
 waitForFile path = go (100 :: Int)

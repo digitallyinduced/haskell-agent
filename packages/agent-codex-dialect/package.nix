@@ -1,6 +1,6 @@
 { mkDerivation, agent-core, agent-json, async, base, containers
-, directory, filepath, hspec, lib, safe-exceptions, text, time
-, transformers, unix
+, directory, filepath, hspec, lib, process, safe-exceptions, text
+, time, transformers, unix
 }:
 mkDerivation {
   pname = "agent-codex-dialect";
@@ -11,8 +11,8 @@ mkDerivation {
     safe-exceptions text time transformers unix
   ];
   testHaskellDepends = [
-    agent-core base directory filepath hspec safe-exceptions text time
-    unix
+    agent-core base directory filepath hspec process safe-exceptions
+    text time unix
   ];
   description = "Codex model-facing dialect for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

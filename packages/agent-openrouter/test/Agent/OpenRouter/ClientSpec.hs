@@ -4,6 +4,7 @@ module Agent.OpenRouter.ClientSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenRouter.Client
 import Agent.OpenRouter.Options
+import Agent.OpenRouter.TestSupport (withLoopbackApplication)
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
 import qualified Agent.Json.Decode as Json
@@ -20,7 +21,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -207,7 +207,7 @@ withMockOpenRouter
     -> (ClientOptions -> IO a)
     -> IO a
 withMockOpenRouter recorded handler action =
-    Warp.testWithApplication (pure app) \port ->
+    withLoopbackApplication (pure app) \port ->
         action defaultClientOptions
             { baseUrl = "http://127.0.0.1:" <> show port <> "/v1"
             , requestTimeoutSeconds = 10

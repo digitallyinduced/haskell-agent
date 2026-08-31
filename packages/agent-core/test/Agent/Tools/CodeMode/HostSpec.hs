@@ -28,6 +28,7 @@ import Control.Concurrent
     ( newEmptyMVar
     , putMVar
     , readMVar
+    , takeMVar
     , threadDelay
     )
 import Control.Concurrent.Async (async, cancel, wait, withAsync)
@@ -228,32 +229,38 @@ spec = describe "code-mode Bun host" do
         closeCodeModeHost host
 
     it "returns an already-observed natural completion instead of termination" do
-        let config = defaultCodeModeConfig
+        handlerStarted <- newEmptyMVar
+        releaseHandler <- newEmptyMVar
+        let handler name _
+                | name == "gate" = do
+                    putMVar handlerStarted ()
+                    readMVar releaseHandler
+                    pure (Right Null)
+                | otherwise = pure (Left "unexpected tool call")
+            config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
-                (\_ _ -> pure $ Left "no tools")
-        host <- newCodeModeHost config
-        started <- execCodeCell
-            host
-            "await new Promise(resolve => setTimeout(resolve, 20)); text(\"done\");"
-            []
-            1
-        started `shouldBe`
-            Right CodeModeRunning
-                { cellId = "1"
-                , cellOutput = emptyContent
-                }
-        -- Bun and the host monitor share a heavily loaded CI runner with the
-        -- rest of the flake checks. Wait well beyond the 20 ms JavaScript
-        -- timer so termination tests an already-observed result rather than
-        -- racing timer scheduling.
-        threadDelay 1000000
-        terminated <- terminateCodeCell host "1"
-        terminated `shouldBe`
-            Right CodeModeFinished
-                { cellId = "1"
-                , cellValue = textContent "done"
-                }
-        closeCodeModeHost host
+                handler
+        bracket (newCodeModeHost config) closeCodeModeHost \host -> do
+            started <- execCodeCell
+                host
+                "await tools.gate({}); store(\"completion-marker\", true); text(\"done\");"
+                ["gate"]
+                1
+            started `shouldBe`
+                Right CodeModeRunning
+                    { cellId = "1"
+                    , cellOutput = emptyContent
+                    }
+            timeout 5000000 (readMVar handlerStarted) `shouldReturn` Just ()
+            putMVar releaseHandler ()
+            timeout 5000000 (waitForCompletionMarker host 100)
+                `shouldReturn` Just True
+            terminated <- terminateCodeCell host "1"
+            terminated `shouldBe`
+                Right CodeModeFinished
+                    { cellId = "1"
+                    , cellValue = textContent "done"
+                    }
 
     it "does not expose Node globals" do
         let config = defaultCodeModeConfig
@@ -304,28 +311,40 @@ spec = describe "code-mode Bun host" do
         closeCodeModeHost host
 
     it "returns output accumulated after the last timed yield on termination" do
-        let config = defaultCodeModeConfig
-                "data/code-mode/worker.mjs"
-                (\_ _ -> pure $ Left "no tools")
-        host <- newCodeModeHost config
-        started <- execCodeCell
-            host
-            "await new Promise(resolve => setTimeout(resolve, 30)); text(\"late\"); await new Promise(() => {});"
-            []
-            10
-        started `shouldBe`
-            Right CodeModeRunning
-                { cellId = "1"
-                , cellOutput = emptyContent
-                }
-        threadDelay 50000
-        terminated <- terminateCodeCell host "1"
-        terminated `shouldBe`
-            Right CodeModeTerminated
-                { cellId = "1"
-                , cellValue = textContent "late"
-                }
-        closeCodeModeHost host
+        handlerStarted <- newEmptyMVar
+        releaseHandler <- newEmptyMVar
+        notification <- newEmptyMVar
+        let handler name _
+                | name == "gate" = do
+                    putMVar handlerStarted ()
+                    readMVar releaseHandler
+                    pure (Right Null)
+                | otherwise = pure (Left "unexpected tool call")
+            config =
+                (defaultCodeModeConfig "data/code-mode/worker.mjs" handler)
+                    { notifyHandler = putMVar notification
+                    }
+        bracket (newCodeModeHost config) closeCodeModeHost \host -> do
+            started <- execCodeCell
+                host
+                "await tools.gate({}); text(\"late\"); notify(\"late-content-observed\"); await new Promise(() => {});"
+                ["gate"]
+                1
+            started `shouldBe`
+                Right CodeModeRunning
+                    { cellId = "1"
+                    , cellOutput = emptyContent
+                    }
+            timeout 5000000 (readMVar handlerStarted) `shouldReturn` Just ()
+            putMVar releaseHandler ()
+            observed <- timeout 5000000 (takeMVar notification)
+            observed `shouldBe` Just "late-content-observed"
+            terminated <- terminateCodeCell host "1"
+            terminated `shouldBe`
+                Right CodeModeTerminated
+                    { cellId = "1"
+                    , cellValue = textContent "late"
+                    }
 
     it "exposes helper content and ignores JavaScript completion values" do
         let config = defaultCodeModeConfig
@@ -828,6 +847,46 @@ textContent value = Aeson.object
             ]
         ]
     ]
+
+waitForCompletionMarker :: CodeModeHost -> Int -> IO Bool
+waitForCompletionMarker _ 0 = do
+    expectationFailure "completion-marker was never observed"
+    pure False
+waitForCompletionMarker host attempts = do
+    initial <- execCodeCell
+        host
+        "text(load(\"completion-marker\") === true ? \"ready\" : \"waiting\");"
+        []
+        3000
+    case initial of
+        Right CodeModeFinished { cellValue } ->
+            handleMarker cellValue
+        Right CodeModeRunning { cellId = identifier } -> do
+            completed <- waitCodeCell host identifier 3000
+            case completed of
+                Right CodeModeFinished { cellValue } ->
+                    handleMarker cellValue
+                unexpected -> do
+                    _ <- terminateCodeCell host identifier
+                    expectationFailure $
+                        "completion-marker probe did not finish: "
+                            <> show unexpected
+                    pure False
+        unexpected -> do
+            expectationFailure $
+                "completion-marker probe did not start: " <> show unexpected
+            pure False
+  where
+    handleMarker value
+        | value == textContent "ready" = pure True
+        | value == textContent "waiting" = do
+            threadDelay 10000
+            waitForCompletionMarker host (attempts - 1)
+        | otherwise = do
+            expectationFailure $
+                "completion-marker probe returned unexpected value: "
+                    <> show value
+            pure False
 
 withEnvironmentOverride :: String -> String -> IO a -> IO a
 withEnvironmentOverride name value action =

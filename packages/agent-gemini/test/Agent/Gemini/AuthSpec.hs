@@ -1,6 +1,7 @@
 module Agent.Gemini.AuthSpec (spec) where
 
 import Agent.Gemini.Auth
+import Agent.Gemini.TestSupport (withLoopbackApplication)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (bracket)
@@ -17,7 +18,7 @@ import Network.HTTP.Types
 import qualified Network.Socket as Net
 import qualified Network.Socket.ByteString as Net
 import Network.Wai
-import Network.Wai.Handler.Warp
+import Network.Wai.Handler.Warp (Port)
 import qualified System.Timeout as Timeout
 import Test.Hspec
 import Text.Read (readMaybe)
@@ -59,7 +60,7 @@ spec = do
 
         it "accepts a callback request split across TCP reads" do
             recorded <- newIORef []
-            testWithApplication (pure (tokenApp recorded)) \port -> do
+            withLoopbackApplication (pure (tokenApp recorded)) \port -> do
                 presentedUrl <- newEmptyMVar
                 let options = (testOAuthOptions port) { timeoutSeconds = 5 }
                 (result, ()) <- concurrently
@@ -75,7 +76,7 @@ spec = do
 
         it "exchanges a code and refreshes without losing the refresh token" do
             recorded <- newIORef []
-            testWithApplication (pure (tokenApp recorded)) \port -> do
+            withLoopbackApplication (pure (tokenApp recorded)) \port -> do
                 let options = testOAuthOptions port
                 exchangeAuthorizationCode
                     options
@@ -104,12 +105,12 @@ spec = do
                     any (Text.isInfixOf "refresh_token=refresh-old")
 
         it "fetches the account email with a bearer token" do
-            testWithApplication (pure userInfoApp) \port ->
+            withLoopbackApplication (pure userInfoApp) \port ->
                 fetchUserEmail (testOAuthOptions port) "secret-access"
                     `shouldReturn` Right "person@example.com"
 
         it "bounds authenticated endpoint waits" do
-            testWithApplication (pure slowApp) \port -> do
+            withLoopbackApplication (pure slowApp) \port -> do
                 let options = (testOAuthOptions port) { timeoutSeconds = 1 }
                 result <- Timeout.timeout 2_000_000
                     (fetchUserEmail options "secret-access")
@@ -128,7 +129,7 @@ spec = do
                 `shouldNotContain` Text.unpack defaultOAuthOptions.clientSecret
 
         it "does not expose token-form secrets in endpoint errors" do
-            testWithApplication (pure echoingTokenErrorApp) \port -> do
+            withLoopbackApplication (pure echoingTokenErrorApp) \port -> do
                 result <- refreshAccessToken
                     (testOAuthOptions port)
                     "refresh-must-stay-secret"
@@ -136,7 +137,7 @@ spec = do
                 show result `shouldNotContain` "server-echoed-sensitive-body"
 
         it "redacts bearer tokens echoed by authenticated endpoints" do
-            testWithApplication (pure echoingBearerErrorApp) \port -> do
+            withLoopbackApplication (pure echoingBearerErrorApp) \port -> do
                 result <- fetchUserEmail
                     (testOAuthOptions port)
                     "access-must-stay-secret"
@@ -145,9 +146,9 @@ spec = do
 
         it "never forwards OAuth credentials or token forms across redirects" do
             redirected <- newIORef []
-            testWithApplication (pure (redirectTargetApp redirected))
+            withLoopbackApplication (pure (redirectTargetApp redirected))
                 \targetPort ->
-                    testWithApplication
+                    withLoopbackApplication
                         (pure (redirectingApp targetPort))
                         \originPort -> do
                             refreshAccessToken
@@ -181,7 +182,7 @@ spec = do
     describe "Code Assist setup" do
         it "uses an existing Code Assist project without onboarding" do
             calls <- newIORef []
-            testWithApplication (pure (existingUserApp calls)) \port -> do
+            withLoopbackApplication (pure (existingUserApp calls)) \port -> do
                 result <- setupCodeAssist (testCodeAssistOptions port) "bearer"
                 result `shouldBe` Right CodeAssistUser
                     { projectId = "managed-project"
@@ -192,7 +193,7 @@ spec = do
                     ["/v1internal:loadCodeAssist"]
 
         it "prefers paid-tier metadata for an existing account" do
-            testWithApplication (pure paidUserApp) \port ->
+            withLoopbackApplication (pure paidUserApp) \port ->
                 setupCodeAssist (testCodeAssistOptions port) "bearer"
                     `shouldReturn` Right CodeAssistUser
                         { projectId = "paid-project"
@@ -201,7 +202,7 @@ spec = do
                         }
 
         it "fills missing paid-tier fields from the current tier" do
-            testWithApplication (pure partialPaidUserApp) \port ->
+            withLoopbackApplication (pure partialPaidUserApp) \port ->
                 setupCodeAssist (testCodeAssistOptions port) "bearer"
                     `shouldReturn` Right CodeAssistUser
                         { projectId = "paid-project"
@@ -212,7 +213,7 @@ spec = do
         it "presents one-time account validation and retries setup" do
             calls <- newIORef (0 :: Int)
             presented <- newIORef []
-            testWithApplication (pure (validationRequiredApp calls)) \port -> do
+            withLoopbackApplication (pure (validationRequiredApp calls)) \port -> do
                 result <- setupCodeAssistWithValidation
                     (testCodeAssistOptions port)
                     "bearer"
@@ -229,7 +230,7 @@ spec = do
 
         it "includes the configured project for standard-tier onboarding" do
             bodies <- newIORef []
-            testWithApplication (pure (standardOnboardingApp bodies)) \port -> do
+            withLoopbackApplication (pure (standardOnboardingApp bodies)) \port -> do
                 let options = (testCodeAssistOptions port)
                         { configuredProject = Just "billing-project" }
                 setupCodeAssist options "bearer"
@@ -246,7 +247,7 @@ spec = do
                     (BS.isInfixOf "\"duetProject\":\"billing-project\"")
 
         it "rejects a failed onboarding operation even with a configured project" do
-            testWithApplication (pure failedOnboardingApp) \port -> do
+            withLoopbackApplication (pure failedOnboardingApp) \port -> do
                 let options = (testCodeAssistOptions port)
                         { configuredProject = Just "billing-project" }
                 setupCodeAssist options "bearer"
@@ -254,7 +255,7 @@ spec = do
                         "Gemini Code Assist onboarding failed (code 9): precondition failed"
 
         it "redacts bearer tokens from decoded setup errors" do
-            testWithApplication (pure echoingOnboardingErrorApp) \port -> do
+            withLoopbackApplication (pure echoingOnboardingErrorApp) \port -> do
                 let options = (testCodeAssistOptions port)
                         { configuredProject = Just "billing-project" }
                 result <- setupCodeAssist options "secret-bearer"
@@ -264,7 +265,7 @@ spec = do
         it "onboards the default free tier and polls the operation" do
             calls <- newIORef []
             bodies <- newIORef []
-            testWithApplication (pure (onboardingApp calls bodies)) \port -> do
+            withLoopbackApplication (pure (onboardingApp calls bodies)) \port -> do
                 result <- setupCodeAssist (testCodeAssistOptions port) "bearer"
                 result `shouldBe` Right CodeAssistUser
                     { projectId = "new-managed-project"

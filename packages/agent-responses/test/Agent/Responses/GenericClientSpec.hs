@@ -5,6 +5,7 @@ import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
 import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.GenericClient
 import Agent.Responses.Request (setResponseModel)
+import Agent.Responses.TestSupport (requireLoopbackListener)
 import Agent.Responses.Types
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
@@ -133,6 +134,7 @@ spec = do
 
     describe "createResponseWithProviderPolicy" do
         it "applies provider hooks through the shared transport and retry path" do
+            requireLoopbackListener
             attempts <- newIORef (0 :: Int)
             recordedModels <- newIORef []
             recordedHeaders <- newIORef []
@@ -153,6 +155,7 @@ spec = do
             readIORef recordedHeaders `shouldReturn` [True, True]
 
         it "classifies a valid oversized error before adding truncation context" do
+            requireLoopbackListener
             Warp.testWithApplication (pure oversizedRateLimitApp) \port -> do
                 let boundedOptions = options
                         { baseUrl =

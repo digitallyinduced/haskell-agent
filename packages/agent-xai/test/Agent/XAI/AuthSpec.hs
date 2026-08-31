@@ -3,6 +3,7 @@ module Agent.XAI.AuthSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.XAI.Auth
+import Agent.XAI.TestSupport (withLoopbackApplication)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64.URL as Base64Url
@@ -13,7 +14,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import Test.Hspec
 
 spec :: Spec
@@ -197,7 +197,7 @@ withMockAuth
     -> (OAuthOptions -> IO a)
     -> IO a
 withMockAuth recorded handler action =
-    Warp.testWithApplication (pure app) \port ->
+    withLoopbackApplication (pure app) \port ->
         action (defaultOAuthOptions testClientId)
             { issuer = "http://127.0.0.1:" <> show port }
   where

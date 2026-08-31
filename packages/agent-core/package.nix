@@ -20,8 +20,8 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-json agent-responses-types async base base64-bytestring
     bytestring containers crypton-connection directory filepath hspec
-    QuickCheck retry safe-exceptions stm text time tls unix websockets
-    yaml
+    process QuickCheck retry safe-exceptions stm text time tls unix
+    websockets yaml
   ];
   benchmarkHaskellDepends = [
     aeson agent-json async base bytestring directory filepath process

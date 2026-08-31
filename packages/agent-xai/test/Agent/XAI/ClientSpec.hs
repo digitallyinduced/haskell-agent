@@ -4,6 +4,7 @@ module Agent.XAI.ClientSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.XAI.Client
 import Agent.XAI.Options
+import Agent.XAI.TestSupport (withLoopbackApplication)
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
 import qualified Agent.Json.Decode as Json
@@ -22,7 +23,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -303,7 +303,7 @@ withMockGrokTimeout
     -> (ClientOptions -> IO a)
     -> IO a
 withMockGrokTimeout timeoutSecs recorded handler action =
-    Warp.testWithApplication (pure app) \port ->
+    withLoopbackApplication (pure app) \port ->
         action defaultClientOptions
             { baseUrl = "http://127.0.0.1:" <> show port <> "/v1"
             , requestTimeoutSeconds = timeoutSecs
