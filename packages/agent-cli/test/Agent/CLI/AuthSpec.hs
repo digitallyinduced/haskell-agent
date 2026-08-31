@@ -109,7 +109,8 @@ spec = do
                     loadAuth (Just OpenAIProvider) >>= \case
                         Left err -> expectationFailure (Text.unpack err)
                         Right loaded -> do
-                            loaded.loadedOpenAiPool `shouldBe` Nothing
+                            loaded.loadedOpenAiPool
+                                `shouldSatisfy` isNothing
                             gatewayCredential <-
                                 getNextToken
                                     loaded.loadedTokenProvider
