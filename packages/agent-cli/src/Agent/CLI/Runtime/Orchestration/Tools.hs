@@ -10,7 +10,7 @@ import Agent.CLI.AgentSessions
       AgentSessionToolsEnv(toolsSessionStatus, AgentSessionToolsEnv,
                            toolsPool, toolsRoot, toolsProvider, toolsConnection, toolsModel,
                            toolsTransportModel, toolsDialect, toolsAllowedModels,
-                           toolsChildModelAllowed,
+                           toolsResolveModelOption,
                            toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn) )
 import Agent.CLI.AgentViewport ()
@@ -703,18 +703,28 @@ runAgentTools
                     _ ->
                         Nothing
         childModelAllowed
+            | Just resolve <- gatewayChildModelOption =
+                Just \modelId -> isJust <$> resolve modelId
+            | otherwise = Nothing
+        gatewayChildModelOption
             | isNothing gatewayAllowedChildModels = Nothing
             | otherwise =
-                Just \modelId ->
+                Just \requested ->
                     readIORef gatewayModelsRef >>= \case
-                        Nothing -> pure False
+                        Nothing -> pure Nothing
                         Just access ->
                             cachedGatewayModels access >>= \case
-                                Nothing -> pure False
+                                Nothing -> pure Nothing
                                 Just modelIds ->
                                     pure
-                                        (Text.strip modelId
-                                            `elem` map Text.strip modelIds)
+                                        (resolveModelOptionById
+                                            (gatewayModelOptions
+                                                catalog
+                                                (builtinConnectionId
+                                                    OpenAIProvider)
+                                                OpenAIProvider
+                                                modelIds)
+                                            (Text.strip requested))
         sendToRoot message = do
             enqueuePendingInput pendingNotices (AgentMessage message) >>= \case
                 Left err -> pure (Left err)
@@ -1073,7 +1083,7 @@ runAgentTools
             , toolsTransportModel = inferredTarget.targetWireModelId
             , toolsDialect = dialectId
             , toolsAllowedModels = gatewayAllowedChildModels
-            , toolsChildModelAllowed = childModelAllowed
+            , toolsResolveModelOption = gatewayChildModelOption
             , toolsCwd = cwd
             , toolsEffort = effortText
             , toolsCurrentSessionId =

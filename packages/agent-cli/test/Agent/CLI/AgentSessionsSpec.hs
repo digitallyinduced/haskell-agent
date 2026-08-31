@@ -1,7 +1,7 @@
 module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.CLI.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
@@ -117,11 +117,31 @@ spec = describe "Agent.CLI.AgentSessions" do
 
     it "uses refreshed organization models for persisted child sessions" $
         withTempEnv \env launched -> do
-            currentModels <- newIORef ["company-a"]
+            let gatewayOption model dialect = ModelOption
+                    { modelTarget = ModelTarget
+                        { targetProvider = OpenAIProvider
+                        , targetConnectionId = "openai"
+                        , targetModelId = model
+                        , targetWireModelId = model
+                        , targetDialect = dialect
+                        }
+                    , modelContextWindow = Nothing
+                    , modelLabel = Nothing
+                    , modelFallbackPriority = Nothing
+                    }
+            currentModels <-
+                newIORef [gatewayOption "company-a" CodexDialect]
             let scopedEnv = env
                     { toolsAllowedModels = Just ["company-a"]
-                    , toolsChildModelAllowed =
-                        Just (\model -> elem model <$> readIORef currentModels)
+                    , toolsResolveModelOption =
+                        Just \model ->
+                            lookup model
+                                . map
+                                    (\option ->
+                                        ( option.modelTarget.targetModelId
+                                        , option
+                                        ))
+                                <$> readIORef currentModels
                     }
                 createTool = head (agentSessionTools scopedEnv)
             case createTool.appToolSchema of
@@ -138,12 +158,15 @@ spec = describe "Agent.CLI.AgentSessions" do
                 "{\"message\":\"not yet\",\"model\":\"company-b\"}"
             rejected `shouldSatisfy`
                 Text.isInfixOf "not allowed by this organization"
-            writeIORef currentModels ["company-b"]
+            writeIORef
+                currentModels
+                [gatewayOption "company-b" GenericResponsesDialect]
             accepted <- runTool scopedEnv "create_agent_session"
                 "{\"message\":\"now approved\",\"model\":\"company-b\"}"
             accepted `shouldSatisfy` Text.isInfixOf "Status: running"
             [(handle, _)] <- readIORef launched
             handle.sessionMeta.metaModel `shouldBe` "company-b"
+            handle.sessionMeta.metaDialect `shouldBe` GenericResponsesDialect
 
     it "inherits the active dialect and resolves explicit model overrides" $
         withTempEnv \env launched -> do
@@ -606,7 +629,7 @@ withTempEnv action =
                 , toolsTransportModel = "model-1"
                 , toolsDialect = GrokBuildDialect
                 , toolsAllowedModels = Nothing
-                , toolsChildModelAllowed = Nothing
+                , toolsResolveModelOption = Nothing
                 , toolsCwd = fromFilePath "/tmp/work"
                 , toolsEffort = "low"
                 , toolsCurrentSessionId = pure Nothing

@@ -95,7 +95,7 @@ import Control.Exception.Safe
 import Control.Monad (void)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
@@ -109,7 +109,7 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsTransportModel :: !Text
     , toolsDialect :: !DialectId
     , toolsAllowedModels :: !(Maybe [Text])
-    , toolsChildModelAllowed :: !(Maybe (Text -> IO Bool))
+    , toolsResolveModelOption :: !(Maybe (Text -> IO (Maybe ModelOption)))
     , toolsCwd :: !OsPath
     , toolsEffort :: !Text
     , toolsCurrentSessionId :: !(IO (Maybe Text))
@@ -318,9 +318,9 @@ createAgentSessionTool env = jsonTool
         (runCreateAgentSession env))
   where
     modelPropertyType =
-        case env.toolsChildModelAllowed of
-            Just _ -> PropertyString
-            Nothing ->
+        if isJust env.toolsResolveModelOption
+            then PropertyString
+            else
                 maybe
                     PropertyString
                     (PropertyEnum . normalizedAllowedModels)
@@ -343,20 +343,60 @@ runCreateAgentSession env args
         pure (Left "create_agent_session title must be at most 100 characters")
     | otherwise = do
         let model = fromMaybe env.toolsModel normalizedOverride
-        modelAllowed <- case env.toolsChildModelAllowed of
-            Just isAllowed -> isAllowed model
-            Nothing ->
-                pure
-                    (allowedModelOverride
-                        env.toolsAllowedModels
-                        normalizedOverride)
-        if not modelAllowed
-            then
-                pure
-                    (Left
-                        "The requested session model is not allowed by this organization.")
-            else do
-                target <- case normalizedOverride of
+        resolveSessionTarget env normalizedOverride model >>= \case
+            Left err -> pure (Left err)
+            Right target -> do
+                let title = case Text.strip <$> args.title of
+                        Just value | not (Text.null value) -> value
+                        _ -> sessionTitleFromPrompt args.message
+                    spec = SessionCreate
+                        { createPool = env.toolsPool
+                        , createRoot = env.toolsRoot
+                        , createTarget = target.modelTarget
+                        , createCwd = env.toolsCwd
+                        , createEffort =
+                            fromMaybe env.toolsEffort args.reasoningEffort
+                        , createTitleHint = Just title
+                        , createTitleIsManual =
+                            maybe False
+                                (not . Text.null . Text.strip)
+                                args.title
+                        }
+                handle <- createSession spec
+                launchToolSessionTurn env handle args.message >>= \case
+                    Left err -> pure $ Left $
+                        "created session " <> handle.sessionMeta.metaId
+                            <> " but failed to start it: " <> err
+                    Right result -> pure (Right result)
+  where
+    normalizedOverride = normalizeModelOverride args.model
+
+resolveSessionTarget
+    :: AgentSessionToolsEnv
+    -> Maybe Text
+    -> Text
+    -> IO (Either Text ModelOption)
+resolveSessionTarget env normalizedOverride model =
+    case normalizedOverride of
+        Just requested
+            | Just resolve <- env.toolsResolveModelOption ->
+                resolve requested >>= \case
+                    Nothing -> pure (Left notAllowed)
+                    Just option -> pure (Right option)
+        _ -> do
+            modelAllowed <- case env.toolsResolveModelOption of
+                Just resolve -> isJust <$> resolve model
+                Nothing -> pure
+                    (case normalizedOverride of
+                        Nothing -> True
+                        Just requested ->
+                            maybe
+                                True
+                                (elem requested . normalizedAllowedModels)
+                                env.toolsAllowedModels)
+            if not modelAllowed
+                then pure (Left notAllowed)
+                else Right <$> case normalizedOverride of
                     Nothing ->
                         pure ModelOption
                             { modelTarget = ModelTarget
@@ -384,38 +424,9 @@ runCreateAgentSession env args
                             , modelLabel = Nothing
                             , modelFallbackPriority = Nothing
                             }
-                let title = case Text.strip <$> args.title of
-                        Just value | not (Text.null value) -> value
-                        _ -> sessionTitleFromPrompt args.message
-                    spec = SessionCreate
-                        { createPool = env.toolsPool
-                        , createRoot = env.toolsRoot
-                        , createTarget = target.modelTarget
-                        , createCwd = env.toolsCwd
-                        , createEffort =
-                            fromMaybe env.toolsEffort args.reasoningEffort
-                        , createTitleHint = Just title
-                        , createTitleIsManual =
-                            maybe False
-                                (not . Text.null . Text.strip)
-                                args.title
-                        }
-                handle <- createSession spec
-                launchToolSessionTurn env handle args.message >>= \case
-                    Left err -> pure $ Left $
-                        "created session " <> handle.sessionMeta.metaId
-                            <> " but failed to start it: " <> err
-                    Right result -> pure (Right result)
   where
-    normalizedOverride = normalizeModelOverride args.model
-    allowedModelOverride allowed requested =
-        case requested of
-            Nothing -> True
-            Just requestedModel ->
-                maybe
-                    True
-                    (elem requestedModel . normalizedAllowedModels)
-                    allowed
+    notAllowed =
+        "The requested session model is not allowed by this organization."
 
 normalizeModelOverride :: Maybe Text -> Maybe Text
 normalizeModelOverride requested = do
