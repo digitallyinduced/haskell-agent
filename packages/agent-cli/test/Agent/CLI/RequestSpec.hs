@@ -120,8 +120,8 @@ spec = describe "requestParams" do
             _ -> expectationFailure
                 "expected additional_tools and base-instructions input prefix"
 
-    it "projects hosted computer into the Responses Lite function harness" do
-        let computerTool = knownResponseTool ToolComputer
+    it "groups the computer harness with ordinary Responses Lite functions" do
+        let computerTool = functionTool computerFunctionName
             params =
                 requestParams
                     OpenAIProvider
@@ -135,15 +135,14 @@ spec = describe "requestParams" do
         map toolIdentity (additionalToolValues params)
             `shouldBe`
                 [ (Just "web_search", Nothing)
-                , (Just "namespace", Just computerFunctionNamespace)
                 , (Just "namespace", Just "functions")
                 ]
-        map toolIdentity
-            (computerNamespaceTools (additionalToolValues params))
-            `shouldBe` [(Just "function", Just computerFunctionName)]
+        map (jsonTextField "name")
+            (functionsNamespaceTools (additionalToolValues params))
+            `shouldBe` map Just [computerFunctionName, "lookup"]
 
-    it "keeps hosted computer native for the standard Responses API" do
-        let computerTool = knownResponseTool ToolComputer
+    it "keeps the computer harness an ordinary standard Responses function" do
+        let computerTool = functionTool computerFunctionName
             params =
                 requestParams
                     OpenAIProvider
@@ -155,6 +154,8 @@ spec = describe "requestParams" do
         params.tools `shouldBe` Just [computerTool]
         jsonArrayField "tools" (Aeson.toJSON params)
             `shouldBe` [Aeson.toJSON computerTool]
+        map toolIdentity (jsonArrayField "tools" (Aeson.toJSON params))
+            `shouldBe` [(Just "function", Just computerFunctionName)]
 
     it "groups function and custom tools into the functions namespace" do
         let params =
@@ -190,7 +191,7 @@ spec = describe "requestParams" do
             _ -> expectationFailure "expected three top-level Lite tools"
 
     it "refreshes the Lite prefix without dropping pending input" do
-        let computerTool = knownResponseTool ToolComputer
+        let computerTool = functionTool computerFunctionName
             pending = userMessage "keep me"
             original = appendInputItem pending $
                 requestParams
@@ -214,15 +215,13 @@ spec = describe "requestParams" do
         refreshed.tools `shouldBe` Nothing
         map (jsonTextField "name")
             (functionsNamespaceTools (additionalToolValues refreshed))
-            `shouldBe` [Just "new"]
+            `shouldBe` map Just ["new", computerFunctionName]
         map toolIdentity (additionalToolValues refreshed)
-            `shouldBe`
-                [ (Just "namespace", Just "functions")
-                , (Just "namespace", Just computerFunctionNamespace)
-                ]
+            `shouldBe` [(Just "namespace", Just "functions")]
         instructionsOnly.tools `shouldBe` Nothing
-        computerNamespaceTools (additionalToolValues instructionsOnly)
-            `shouldSatisfy` (not . null)
+        map (jsonTextField "name")
+            (functionsNamespaceTools (additionalToolValues instructionsOnly))
+            `shouldBe` map Just ["new", computerFunctionName]
         case refreshed.input of
             Just (ResponseInputItems [_additional, base, suffix]) -> do
                 base `shouldSatisfy` isInstructionText "new instructions"
@@ -293,7 +292,7 @@ spec = describe "requestParams" do
             `shouldNotBe` requestToolIdentities old
 
     it "rebuilds request dialect fields when models cross the Lite boundary" do
-        let computerTool = knownResponseTool ToolComputer
+        let computerTool = functionTool computerFunctionName
             pending = userMessage "pending"
             genericText = ResponseTextConfig
                 { format = Just ResponseFormatJsonObject
@@ -319,8 +318,10 @@ spec = describe "requestParams" do
             `shouldBe`
                 [ (Just "web_search", Nothing)
                 , (Just "namespace", Just "functions")
-                , (Just "namespace", Just computerFunctionNamespace)
                 ]
+        map (jsonTextField "name")
+            (functionsNamespaceTools (additionalToolValues lite))
+            `shouldBe` map Just ["lookup", computerFunctionName]
         lite.parallelToolCalls `shouldBe` Just False
         fmap (.context) lite.reasoning `shouldBe` Just (Just "all_turns")
         fmap (.verbosity) lite.text `shouldBe` Just (Just "low")
@@ -447,13 +448,6 @@ functionsNamespaceTools =
         . findValue
             (\value -> toolIdentity value
                 == (Just "namespace", Just "functions"))
-
-computerNamespaceTools :: [Aeson.Value] -> [Aeson.Value]
-computerNamespaceTools =
-    maybe [] (jsonArrayField "tools")
-        . findValue
-            (\value -> toolIdentity value
-                == (Just "namespace", Just computerFunctionNamespace))
 
 findValue :: (value -> Bool) -> [value] -> Maybe value
 findValue predicate = \case

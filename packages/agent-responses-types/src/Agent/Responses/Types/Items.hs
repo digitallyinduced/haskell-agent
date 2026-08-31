@@ -41,12 +41,15 @@ module Agent.Responses.Types.Items
 import Agent.Responses.Types.Common
 import Agent.Responses.Types.Content
 import Agent.Responses.Types.Items.Known
+import qualified Agent.Json.Decode as Json
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Hermes as Hermes
 import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 
 data ResponseMessage = ResponseMessage
@@ -231,9 +234,13 @@ data SafetyCheck = SafetyCheck
     } deriving stock (Eq, Show)
 
 instance ToJSON SafetyCheck where
-    toJSON SafetyCheck{safetyCheckId, safetyCheckCode, safetyCheckMessage} = objectWith
-        [Just (field "id" safetyCheckId), optionalField "code" safetyCheckCode,
-         optionalField "message" safetyCheckMessage]
+    toJSON SafetyCheck
+        { safetyCheckId, safetyCheckCode, safetyCheckMessage, safetyCheckExtra } =
+            objectWithExtra safetyCheckExtra
+                [ Just (field "id" safetyCheckId)
+                , optionalField "code" safetyCheckCode
+                , optionalField "message" safetyCheckMessage
+                ]
 
 instance FromJSON SafetyCheck where
     parseJSON = withObject "SafetyCheck" \object ->
@@ -251,12 +258,15 @@ data ComputerCall = ComputerCall
 
 instance ToJSON ComputerCall where
     toJSON ComputerCall{computerCallItemId, computerCallId, computerActions,
-            pendingSafetyChecks, computerCallStatus} = objectWith
-        [ Just (field "type" ("computer_call" :: Text))
-        , optionalField "id" computerCallItemId, Just (field "call_id" computerCallId)
-        , Just (field "actions" computerActions)
-        , optionalField "pending_safety_checks" (nonEmpty pendingSafetyChecks)
-        , optionalField "status" computerCallStatus ]
+            pendingSafetyChecks, computerCallStatus, computerCallExtra} =
+        objectWithExtra computerCallExtra
+            [ Just (field "type" ("computer_call" :: Text))
+            , optionalField "id" computerCallItemId
+            , Just (field "call_id" computerCallId)
+            , Just (field "actions" computerActions)
+            , optionalField "pending_safety_checks" (nonEmpty pendingSafetyChecks)
+            , optionalField "status" computerCallStatus
+            ]
       where nonEmpty [] = Nothing; nonEmpty xs = Just xs
 
 data ComputerCallOutput = ComputerCallOutput
@@ -267,13 +277,21 @@ data ComputerCallOutput = ComputerCallOutput
 
 instance ToJSON ComputerCallOutput where
     toJSON ComputerCallOutput{computerOutputItemId, computerOutputCallId,
-            screenshotDataUrl, acknowledgedChecks, computerOutputStatus} = objectWith
-        [ Just (field "type" ("computer_call_output" :: Text))
-        , optionalField "id" computerOutputItemId, Just (field "call_id" computerOutputCallId)
-        , Just (field "output" (object ["type" .= ("computer_screenshot" :: Text),
-            "image_url" .= screenshotDataUrl, "detail" .= ("original" :: Text)]))
-        , optionalField "acknowledged_safety_checks" (nonEmpty acknowledgedChecks)
-        , optionalField "status" computerOutputStatus ]
+            screenshotDataUrl, acknowledgedChecks, computerOutputStatus,
+            computerOutputExtra} =
+        objectWithExtra computerOutputExtra
+            [ Just (field "type" ("computer_call_output" :: Text))
+            , optionalField "id" computerOutputItemId
+            , Just (field "call_id" computerOutputCallId)
+            , Just (field "output" (object
+                [ "type" .= ("computer_screenshot" :: Text)
+                , "image_url" .= screenshotDataUrl
+                , "detail" .= ("original" :: Text)
+                ]))
+            , optionalField "acknowledged_safety_checks"
+                (nonEmpty acknowledgedChecks)
+            , optionalField "status" computerOutputStatus
+            ]
       where nonEmpty [] = Nothing; nonEmpty xs = Just xs
 
 
@@ -799,38 +817,84 @@ computerActionDecoder = Hermes.object do
         _ -> pure (UnknownComputerAction (TaggedObject wireType))
 
 safetyCheckDecoder :: Hermes.Decoder SafetyCheck
-safetyCheckDecoder = Hermes.object $
-    SafetyCheck <$> Hermes.atKey "id" Hermes.text
-        <*> optionalAtKey "code" Hermes.text
-        <*> optionalAtKey "message" Hermes.text
-        <*> pure KeyMap.empty
+safetyCheckDecoder = Json.withOwnedRawJson \raw ->
+    Hermes.object $
+        SafetyCheck <$> Hermes.atKey "id" Hermes.text
+            <*> optionalAtKey "code" Hermes.text
+            <*> optionalAtKey "message" Hermes.text
+            <*> pure (extraFieldsFromRaw ["id", "code", "message"] raw)
 
 computerCallDecoder :: Hermes.Decoder ComputerCall
-computerCallDecoder = Hermes.object $
-    ComputerCall <$> optionalAtKey "id" Hermes.text
-        <*> Hermes.atKey "call_id" Hermes.text
-        <*> (maybe [] id <$> optionalAtKey "actions" (Hermes.list computerActionDecoder))
-        <*> (maybe [] id <$> optionalAtKey "pending_safety_checks" (Hermes.list safetyCheckDecoder))
-        <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure KeyMap.empty
+computerCallDecoder = Json.withOwnedRawJson \raw ->
+    Hermes.object $
+        ComputerCall <$> optionalAtKey "id" Hermes.text
+            <*> Hermes.atKey "call_id" Hermes.text
+            <*> (maybe [] id
+                <$> optionalAtKey "actions" (Hermes.list computerActionDecoder))
+            <*> (maybe [] id
+                <$> optionalAtKey
+                    "pending_safety_checks"
+                    (Hermes.list safetyCheckDecoder))
+            <*> optionalAtKey "status" itemStatusDecoder
+            <*> pure (extraFieldsFromRaw
+                [ "type", "id", "call_id", "actions"
+                , "pending_safety_checks", "status"
+                ]
+                raw)
 
 computerScreenshotDataUrlDecoder :: Hermes.Decoder Text
 computerScreenshotDataUrlDecoder = Hermes.object $
     maybe "" id <$> optionalAtKey "image_url" Hermes.text
 
 computerCallOutputDecoder :: Hermes.Decoder ComputerCallOutput
-computerCallOutputDecoder = Hermes.object $
-    ComputerCallOutput <$> optionalAtKey "id" Hermes.text
-        <*> Hermes.atKey "call_id" Hermes.text
-        <*> (maybe "" id <$> optionalAtKey "output" computerScreenshotDataUrlDecoder)
-        <*> (maybe [] id <$> optionalAtKey "acknowledged_safety_checks" (Hermes.list safetyCheckDecoder))
-        <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure KeyMap.empty
+computerCallOutputDecoder = Json.withOwnedRawJson \raw ->
+    Hermes.object $
+        ComputerCallOutput <$> optionalAtKey "id" Hermes.text
+            <*> Hermes.atKey "call_id" Hermes.text
+            <*> (maybe "" id
+                <$> optionalAtKey "output" computerScreenshotDataUrlDecoder)
+            <*> (maybe [] id
+                <$> optionalAtKey
+                    "acknowledged_safety_checks"
+                    (Hermes.list safetyCheckDecoder))
+            <*> optionalAtKey "status" itemStatusDecoder
+            <*> pure (extraFieldsFromRaw
+                [ "type", "id", "call_id", "output"
+                , "acknowledged_safety_checks", "status"
+                ]
+                raw)
 
-intAtKey key = fromIntegral <$> Hermes.atKey key integerDecoder
+objectWithExtra :: Aeson.Object -> [Maybe Field] -> Aeson.Value
+objectWithExtra extra members =
+    case objectWith members of
+        Aeson.Object known -> Aeson.Object (KeyMap.union known extra)
+        value -> value
 
+extraFieldsFromRaw reserved raw =
+    case Aeson.decodeStrict' raw of
+        Just (Aeson.Object object) ->
+            foldr (KeyMap.delete . Key.fromText) object reserved
+        _ -> KeyMap.empty
+
+intAtKey :: Text -> Hermes.FieldsDecoder Int
+intAtKey key =
+    Hermes.atKey key integerDecoder >>= boundedComputerInt key
+
+optionalIntAtKeyWithDefault :: Text -> Int -> Hermes.FieldsDecoder Int
 optionalIntAtKeyWithDefault key fallback =
-    maybe fallback fromIntegral <$> optionalAtKey key integerDecoder
+    optionalAtKey key integerDecoder >>= \case
+        Nothing -> pure fallback
+        Just value -> boundedComputerInt key value
+
+boundedComputerInt :: MonadFail parser => Text -> Integer -> parser Int
+boundedComputerInt key value
+    | value < toInteger (minBound :: Int)
+        || value > toInteger (maxBound :: Int) =
+            fail $
+                "integer at key "
+                    <> Text.unpack key
+                    <> " is outside the platform Int range"
+    | otherwise = pure (fromInteger value)
 
 functionCallDecoder :: Hermes.Decoder FunctionCall
 functionCallDecoder = Hermes.object $

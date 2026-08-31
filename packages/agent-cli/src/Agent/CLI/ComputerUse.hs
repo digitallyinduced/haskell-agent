@@ -1,6 +1,7 @@
--- | Provider-native computer use backed by macOS screen capture and input.
+-- | Function-based computer use backed by macOS screen capture and input.
 module Agent.CLI.ComputerUse
     ( computerUseTool
+    , computerFunctionParameters
     , executeComputerCall
     , screenshotMacOS
     , summarizeComputerCall
@@ -42,6 +43,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (finally, tryAny)
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
@@ -57,14 +59,13 @@ import System.IO (hClose, openBinaryTempFile)
 import System.Process (readProcessWithExitCode)
 import Text.Read (readMaybe)
 
--- | A dedicated schema constructor, rather than the name @computer@, marks
--- this as the provider-hosted computer tool. That prevents an MCP/function
--- tool with the same name from accidentally acquiring desktop control.
+-- | A dedicated internal schema marker, rather than a provider-native wire
+-- type, keeps this privileged handler separate from caller-defined functions.
 computerUseTool :: AppTool
 computerUseTool = AppTool
     { appToolName = "computer"
     , appToolDescription =
-        "Control the main macOS display using screenshots, pointer, keyboard, and scrolling."
+        "Run one or more approved actions on the main macOS display and receive a fresh screenshot. Start with screenshot when the UI state is unknown."
     , appToolSchema = HostedComputerSchema
     , appToolHandler = handler
     , appToolApproval = AlwaysPrompt
@@ -100,6 +101,114 @@ computerToolInputDecoder =
         case Aeson.eitherDecodeStrict' bytes of
             Left err -> fail err
             Right input -> pure input
+
+-- | Strict parameters for the ordinary @computer_use@ function. Actions stay
+-- typed internally even though the provider sees a normal function call.
+computerFunctionParameters :: Aeson.Value
+computerFunctionParameters = Aeson.object
+    [ "type" Aeson..= ("object" :: Text)
+    , "properties" Aeson..= Aeson.object
+        [ "actions" Aeson..= Aeson.object
+            [ "type" Aeson..= ("array" :: Text)
+            , "description" Aeson..=
+                ("Ordered desktop actions. Coordinates are logical pixels on the main display." :: Text)
+            , "items" Aeson..= Aeson.object
+                [ "anyOf" Aeson..= computerActionSchemas ]
+            , "minItems" Aeson..= (1 :: Int)
+            , "maxItems" Aeson..= (128 :: Int)
+            ]
+        ]
+    , "required" Aeson..= ["actions" :: Text]
+    , "additionalProperties" Aeson..= False
+    ]
+
+computerActionSchemas :: [Aeson.Value]
+computerActionSchemas =
+    [ actionSchema "screenshot" []
+    , actionSchema "click"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("button", enumProperty
+            ["left", "right", "middle", "back", "forward"])
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "double_click"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "scroll"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("scroll_x", integerProperty)
+        , ("scroll_y", integerProperty)
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "move"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "drag"
+        [ ("path", Aeson.object
+            [ "type" Aeson..= ("array" :: Text)
+            , "items" Aeson..= Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "x" Aeson..= integerProperty
+                    , "y" Aeson..= integerProperty
+                    ]
+                , "required" Aeson..= ["x" :: Text, "y"]
+                , "additionalProperties" Aeson..= False
+                ]
+            , "minItems" Aeson..= (2 :: Int)
+            , "maxItems" Aeson..= (1024 :: Int)
+            ])
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "type"
+        [ ("text", Aeson.object
+            [ "type" Aeson..= ("string" :: Text)
+            , "maxLength" Aeson..= (8192 :: Int)
+            ])
+        ]
+    , actionSchema "keypress" [("keys", keysProperty)]
+    , actionSchema "wait" []
+    ]
+  where
+    integerProperty :: Aeson.Value
+    integerProperty = Aeson.object ["type" Aeson..= ("integer" :: Text)]
+    keysProperty :: Aeson.Value
+    keysProperty = Aeson.object
+        [ "type" Aeson..= ("array" :: Text)
+        , "items" Aeson..= Aeson.object
+            [ "type" Aeson..= ("string" :: Text)
+            , "maxLength" Aeson..= (64 :: Int)
+            ]
+        , "maxItems" Aeson..= (16 :: Int)
+        ]
+    enumProperty :: [Text] -> Aeson.Value
+    enumProperty values = Aeson.object
+        [ "type" Aeson..= ("string" :: Text)
+        , "enum" Aeson..= values
+        ]
+
+actionSchema :: Text -> [(Text, Aeson.Value)] -> Aeson.Value
+actionSchema actionType properties = Aeson.object
+    [ "type" Aeson..= ("object" :: Text)
+    , "properties" Aeson..= Aeson.Object
+        (KeyMap.fromList
+            ((Key.fromText "type", enumProperty [actionType])
+                : [(Key.fromText name, value) | (name, value) <- properties]))
+    , "required" Aeson..= ("type" : map fst properties)
+    , "additionalProperties" Aeson..= False
+    ]
+  where
+    enumProperty :: [Text] -> Aeson.Value
+    enumProperty values = Aeson.object
+        [ "type" Aeson..= ("string" :: Text)
+        , "enum" Aeson..= values
+        ]
 
 computerCallFromInput :: ToolCall -> ComputerToolInput -> ComputerCall
 computerCallFromInput call input = ComputerCall
@@ -179,6 +288,8 @@ encodeComputerOutput call ImageAttachment{imageMime, imageBytes} =
 
 validateComputerCall :: ComputerCall -> Either Text ()
 validateComputerCall call
+    | null call.computerActions =
+        Left "Computer call requires at least one action."
     | exceedsList 128 call.computerActions =
         Left "Computer call exceeds the 128-action limit."
     | exceedsList 64 call.pendingSafetyChecks =

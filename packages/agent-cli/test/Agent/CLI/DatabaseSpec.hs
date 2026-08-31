@@ -45,7 +45,9 @@ import Agent.Tools.Types
     ( appToolHandlers
     )
 import Agent.ToolDispatch (dispatchToolCall)
-import Control.Exception.Safe (displayException)
+import Control.Exception.Safe (displayException, finally, onException)
+import Data.Aeson ((.=), object)
+import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -342,6 +344,11 @@ assertDataPage = \case
               , Aeson.String "first"
               , Aeson.Bool True
               , object ["priority" .= (2 :: Int)]
+              ]
+            , [ Aeson.Number 2
+              , Aeson.String "second"
+              , Aeson.Bool False
+              , object ["priority" .= (1 :: Int)]
               ]
             ]
 

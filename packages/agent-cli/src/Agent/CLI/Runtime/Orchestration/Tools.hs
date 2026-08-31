@@ -379,7 +379,7 @@ runAgentTools
     baseToolEnv
     catalog
     checkStartupUsageInBackground
-    configuredOptionTarget
+    _configuredOptionTarget
     customResponses
     cwd
     databaseScopes
@@ -395,11 +395,11 @@ runAgentTools
     processRuntime
     projectRoot
     projectSettings
-    projectTarget
+    _projectTarget
     resolveActiveAccountLabel
     resumeLock
     resumed
-    resumedTarget
+    _resumedTarget
     root
     selectHttpAccount
     selectableTokenProvider
@@ -464,14 +464,7 @@ runAgentTools
             (maybe fallbackModel (.targetModelId) targetHint)
             options.optModel
         rawTarget = (rawModelOption provider model).modelTarget
-        inferredTarget0 =
-            fromMaybe rawTarget $
-                transitionTarget
-                    <|> configuredOptionTarget
-                    <|> resumedTarget
-                    <|> if isNothing options.optModel
-                        then projectTarget
-                        else Nothing
+        inferredTarget0 = fromMaybe rawTarget targetHint
         transportModel = case customResponses of
             Just _ ->
                 \name ->

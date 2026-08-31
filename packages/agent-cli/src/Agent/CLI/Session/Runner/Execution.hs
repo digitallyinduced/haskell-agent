@@ -119,7 +119,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
       withIoLock action = withMVar ioLock (const action)
       requestRootAccess root =
           approveFilesystemRootAccess policyRef $
-              withMVar ioLock \_ ->
+              case startup.startupNativeHooks of
+                Just hooks -> hooks.nativeRequestRootAccess root
+                Nothing -> withMVar ioLock \_ ->
                   case promptRequest of
                       Just request
                           | isJust request.managedTurnBridgeDirectory ->
@@ -452,9 +454,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , renderWorkspace = toText cwd
             }
         emitLoop event = do
+            recordAgentViewportEvent agentViewportRuntime event
             forM_ startup.startupNativeHooks \hooks ->
                 hooks.nativeOnLoopEvent event
-            recordAgentViewportEvent agentViewportRuntime event
             managedLoopPublisher event
             case fullscreen of
                 Nothing -> renderEvent render event
@@ -735,19 +737,23 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     acquireSessionActivityLock
                         handle.sessionDir
                         handle.sessionMeta.metaId >>= \case
-                            Left err -> fail (Text.unpack err)
+                            -- The activity lock is an external status marker;
+                            -- the lifetime session lock remains authoritative.
+                            Left _ -> pure False
                             Right lock -> do
                                 writeIORef turnActivityRef (Just lock)
                                 pure True
                 else pure False
-        beginTurnActivity = do
+        beginTurnActivity = mask_ do
+            -- Mark first so a concurrently completed first persistence sees
+            -- the active turn and attempts the activity marker itself.
+            writeIORef turnIsActiveRef True
             case persist of
                 PersistenceDisabled -> pure ()
                 PersistenceEnabled slotRef ->
                     readIORef slotRef >>= \case
                         PersistencePending{} -> pure ()
                         PersistenceActive handle -> void (acquireTurnActivity handle)
-            writeIORef turnIsActiveRef True
         endTurnActivity = do
             writeIORef turnIsActiveRef False
             atomicModifyIORef' turnActivityRef
@@ -769,9 +775,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 then (Nothing, ())
                                 else (current, ()))
         onPersistedWithActivity handle = do
-            -- Preserve the established lock order: own the session before its
-            -- activity marker. Publish the native session ID only after both
-            -- locks are established so observers never see an idle new turn.
+            -- Preserve the established lock order: own the session before
+            -- attempting its best-effort activity marker.
             onPersisted handle
             active <- readIORef turnIsActiveRef
             acquired <-

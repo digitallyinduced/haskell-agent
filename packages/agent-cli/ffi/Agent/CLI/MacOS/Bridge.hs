@@ -118,11 +118,11 @@ import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
-    , exchangeGatewayAuthorizationCode
+    , exchangeNativeGatewayAuthorizationCode
     , loadGatewayCredential
-    , pollGatewayAuthorizationAndSave
+    , pollNativeGatewayAuthorizationAndSave
     , removeGatewayCredential
-    , startGatewayAuthorization
+    , startNativeGatewayAuthorization
     )
 import qualified Agent.OpenAI.Login as OpenAILogin
 import qualified Agent.OpenAI.Auth as OpenAIAuth
@@ -213,6 +213,7 @@ import Agent.Store.Postgres.Custom
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , isComputerToolCallKind
     )
 import Agent.Tools.PlanMode
@@ -343,6 +344,7 @@ import Foreign
 import Foreign.C.String (CString)
 import Foreign.C.Types (CDouble(..), CInt(..), CLLong(..), CSize(..))
 import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Marshal.Utils (fillBytes)
 import System.Directory
     ( getTemporaryDirectory
     , removeFile
@@ -794,10 +796,10 @@ instance Aeson.FromJSON TurnStart where
         turnStartCwd <- object .: "cwd"
         turnStartProvider <- object .:? "provider"
         turnStartModel <- object .:? "model"
-        rawEffort <- object .:? "effort"
-        turnStartEffort <- traverse
+        turnStartEffort <- object .:? "effort"
+        _ <- traverse
             (either fail pure . parseEffort)
-            rawEffort
+            turnStartEffort
         turnStartWorktree <- object .:? "worktree" Aeson..!= False
         turnStartComputerUse <-
             object .:? "computerUse" Aeson..!= False
@@ -3464,7 +3466,9 @@ ha_gateway_connect_start
         baseUrl <- decodeInput baseUrlBytes baseUrlLength
         clientName <- decodeInput clientNameBytes clientNameLength
         _ <- forkIO do
-            tryAny (startGatewayAuthorization baseUrl clientName) >>= \case
+            tryAny
+                (startNativeGatewayAuthorization baseUrl clientName)
+                >>= \case
                 Left exception ->
                     invokeGatewayConnectStartError callback context
                         (Text.pack (show exception))
@@ -3492,7 +3496,7 @@ ha_gateway_connect_poll
         deviceCode <- decodeInput deviceCodeBytes deviceCodeLength
         _ <- forkIO do
             tryAny
-                (pollGatewayAuthorizationAndSave baseUrl deviceCode)
+                (pollNativeGatewayAuthorizationAndSave baseUrl deviceCode)
                 >>= \case
                     Left exception ->
                         invokeGatewayPollError callback context
@@ -3531,7 +3535,7 @@ ha_gateway_connect_exchange
         redirectUri <- decodeInput redirectUriBytes redirectUriLength
         _ <- forkIO do
             tryAny
-                (exchangeGatewayAuthorizationCode
+                (exchangeNativeGatewayAuthorizationCode
                     baseUrl
                     clientId
                     code
@@ -4875,6 +4879,9 @@ invokeBrowserCommand host command =
             withText argument2 \argument2Ptr argument2Length ->
                 allocaBytes browserOutputCapacity \output ->
                     alloca \outputLength -> do
+                        -- The callback controls the reported length. Zero the
+                        -- buffer so unwritten stack bytes are never exposed.
+                        fillBytes output 0 browserOutputCapacity
                         poke outputLength 0
                         status <- invokeBrowserCallback
                             registration.browserCallback
@@ -4971,9 +4978,13 @@ runNativeTurn
                             (sendEvent callback context)
             , nativeOnSessionId = \sessionId -> do
                 writeIORef sessionIdRef (Just sessionId)
-                void $ atomically $ acceptEngineCommand
-                    commands
-                    (EngineTaskSession control.turnControlId sessionId)
+                atomically do
+                    writeTVar
+                        control.turnControlSessionId
+                        (Just sessionId)
+                    void $ acceptEngineCommand
+                        commands
+                        (EngineTaskSession control.turnControlId sessionId)
                 sendEvent callback context $
                     Aeson.object
                         [ "event" Aeson..= ("turn.session" :: Text)
@@ -4986,6 +4997,8 @@ runNativeTurn
                 atomically . writeTVar control.turnControlAgentSnapshot
             , nativeRequestApproval =
                 requestApproval callback context control
+            , nativeRequestRootAccess =
+                requestRootAccessFromClient callback context control
             , nativeTools = nativeBrowserTools
             , nativePlanHooks =
                 nativePlanModeHooks control interactions
@@ -5418,6 +5431,36 @@ requestApprovalFromClient callback context control call = do
                     (Set.insert call.name)
         _ -> pure ()
     pure (Just choice)
+
+requestRootAccessFromClient
+    :: FunPtr EventCallback
+    -> Ptr ()
+    -> TurnControl
+    -> OsPath
+    -> IO Bool
+requestRootAccessFromClient callback context control root = do
+    path <- Text.pack <$> decodeFS root
+    choice <- requestApprovalFromClient callback context control ToolCall
+        { callId = control.turnControlId <> "-filesystem-root-access"
+        , name = "filesystem_root_access"
+        , arguments =
+            TextEncoding.decodeUtf8
+                . LBS.toStrict
+                . Aeson.encode
+                $ Aeson.object ["path" Aeson..= path]
+        , callKind = FunctionCallKind
+        , argumentsEncrypted = False
+        }
+    -- Root grants are maintained by the filesystem permission store, not by
+    -- the per-turn "allow this tool" shortcut used for ordinary tool calls.
+    atomically $
+        modifyTVar'
+            control.turnControlAllowedTools
+            (Set.delete "filesystem_root_access")
+    pure $ case choice of
+        Nothing -> False
+        Just PermissionDeny -> False
+        Just _ -> True
 
 resolveApproval :: TurnControl -> BridgeRequest -> IO Aeson.Value
 resolveApproval control request =

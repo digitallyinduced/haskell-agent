@@ -156,6 +156,11 @@ spec = describe "native browser callback ABI" do
             invokeBrowserCommand host BrowserSnapshot `shouldReturn`
                 Left "The browser returned invalid UTF-8."
 
+    it "zeroes callback output before trusting its reported length" do
+        withBrowserHost unwrittenOutputCallback \host ->
+            invokeBrowserCommand host BrowserSnapshot `shouldReturn`
+                Right "\NUL\NUL"
+
     it "renders stable fallback errors for host statuses" do
         browserStatusMessage 1 `shouldBe`
             "The browser host rejected an invalid argument."
@@ -239,6 +244,11 @@ invalidUtf8Callback :: BrowserCallback
 invalidUtf8Callback _ _ _ _ _ _ _ _ _
         output outputCapacity outputLength =
     writeResult (BS.pack [0xff]) output outputCapacity outputLength
+
+unwrittenOutputCallback :: BrowserCallback
+unwrittenOutputCallback _ _ _ _ _ _ _ _ _ _ _ outputLength = do
+    poke outputLength 2
+    pure 0
 
 writeResult :: ByteString -> Ptr a -> CSize -> Ptr CSize -> IO CInt
 writeResult result output (CSize capacity) outputLength

@@ -244,6 +244,39 @@ spec = do
                                     \refusing to send a router model with \
                                     \direct OpenAI credentials")
 
+        it "retains handshake failure classification behind the router guard" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    loaded <-
+                        loadAuth (Just OpenAIProvider) >>= expectRightResult
+                    let guarded =
+                            gatewayRouterTokenProvider
+                                loaded.loadedTokenProvider
+                    attempts <- newIORef ([] :: [Text])
+                    result <- runWithTokenProvider guarded \credential -> do
+                        modifyIORef' attempts (<> [credential.accountId])
+                        pure
+                            ( Left
+                                (HttpError
+                                    403
+                                    "WebSocket handshake returned HTTP 403")
+                                :: Either ApiError Text
+                            )
+                    result `shouldBe`
+                        Left
+                            (CredentialError
+                                "the connected gateway is unavailable; \
+                                \refusing to send a router model with \
+                                \direct OpenAI credentials")
+                    readIORef attempts `shouldReturn`
+                        ["wss://gateway.example/v1/responses"]
+
         it "falls back after a gateway WebSocket handshake 403" $
             withTempHome \home ->
                 withCleanOpenAiEnv do

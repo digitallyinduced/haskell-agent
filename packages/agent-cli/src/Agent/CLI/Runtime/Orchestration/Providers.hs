@@ -34,6 +34,7 @@ import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
 import Agent.CLI.GatewayBridge ()
+import Agent.CLI.GatewayModels (catalogUsesGateway)
 import Agent.CLI.Input ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -361,7 +362,7 @@ runAgentProviders
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
                                 let selectableOpenAiPool
-                                        | isGatewayLoadedAuth loaded = Nothing
+                                        | catalogUsesGateway catalog = Nothing
                                         | otherwise = loaded.loadedOpenAiPool
                                     selectAccount = case selectableOpenAiPool of
                                         Nothing -> Nothing

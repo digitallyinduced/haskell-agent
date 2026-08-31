@@ -30,6 +30,7 @@ module Agent.CLI.Login
     , runFullscreenLoginManager
     , runLoginManager
     , selectGatewayLoginFlow
+    , storeConnectedCredential
     ) where
 
 import Agent.CLI.Auth

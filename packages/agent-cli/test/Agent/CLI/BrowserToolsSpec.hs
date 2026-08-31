@@ -80,7 +80,7 @@ spec = describe "native browser tools" do
         back <- run "browser_back"
         back.output `shouldBe` "BrowserBack"
 
-    it "prompts only for page interactions that can submit data" do
+    it "prompts for interactions and navigation that can send requests" do
         let approvals =
                 [ (tool.appToolName, tool.appToolApproval)
                 | tool <- browserTools successHandler
@@ -88,7 +88,7 @@ spec = describe "native browser tools" do
         lookup "browser_snapshot" approvals `shouldSatisfyApproval`
             isAlwaysReadOnly
         lookup "browser_navigate" approvals `shouldSatisfyApproval`
-            isAlwaysReadOnly
+            isAlwaysPrompt
         lookup "browser_click" approvals `shouldSatisfyApproval`
             isAlwaysPrompt
         lookup "browser_type" approvals `shouldSatisfyApproval`
@@ -98,11 +98,11 @@ spec = describe "native browser tools" do
         lookup "browser_scroll" approvals `shouldSatisfyApproval`
             isAlwaysReadOnly
         lookup "browser_back" approvals `shouldSatisfyApproval`
-            isAlwaysReadOnly
+            isAlwaysPrompt
         lookup "browser_forward" approvals `shouldSatisfyApproval`
-            isAlwaysReadOnly
+            isAlwaysPrompt
         lookup "browser_reload" approvals `shouldSatisfyApproval`
-            isAlwaysReadOnly
+            isAlwaysPrompt
 
     it "rejects invalid URLs before invoking the host" do
         invoked <- newIORef False
@@ -231,10 +231,10 @@ spec = describe "native browser tools" do
             "between -10000 and 10000"
         shouldFailWith "browser_scroll"
             "{\"delta_x\":\"down\",\"delta_y\":1}"
-            "Expected number for key: delta_x"
+            "INCORRECT_TYPE"
         shouldFailWith "browser_scroll"
             "{\"delta_x\":1e999,\"delta_y\":1}"
-            "delta_x must be a finite number"
+            "Problem while parsing a number"
 
 successHandler :: BrowserCommand -> IO (Either Text Text)
 successHandler _ = pure (Right "ok")

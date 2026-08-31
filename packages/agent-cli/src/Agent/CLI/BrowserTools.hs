@@ -62,17 +62,17 @@ browserTools handler =
     , noArgumentTool
         "browser_back"
         "Navigate the active browser view back one page."
-        AlwaysReadOnly
+        AlwaysPrompt
         BrowserBack
     , noArgumentTool
         "browser_forward"
         "Navigate the active browser view forward one page."
-        AlwaysReadOnly
+        AlwaysPrompt
         BrowserForward
     , noArgumentTool
         "browser_reload"
         "Reload the current page in the active browser view."
-        AlwaysReadOnly
+        AlwaysPrompt
         BrowserReload
     ]
   where
@@ -82,7 +82,7 @@ browserTools handler =
         [ PropertySchema "url" PropertyString True $ Just
             "Absolute HTTP or HTTPS URL to open."
         ]
-        AlwaysReadOnly
+        AlwaysPrompt
         TurnSequential
         (typedTool "browser_navigate" navigateArgsDecoder runNavigate)
 

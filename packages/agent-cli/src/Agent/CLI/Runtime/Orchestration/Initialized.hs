@@ -22,6 +22,7 @@ import Agent.CLI.Auth
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       gatewayAuthSelectionId,
       gatewayRouterTokenProvider,
+      isGatewayLoadedAuth,
       preferredOpenAiTokenProvider,
       loadAuth,
       loadAuthForAccount,
@@ -454,7 +455,11 @@ runAgentInitializedWithLock
     let gatewayTarget candidate =
             candidate >>= \target ->
                 if isGatewayModelId target.targetModelId
-                    then Just target
+                    then
+                        (.modelTarget)
+                            <$> resolveConfiguredModel
+                                catalog
+                                target.targetModelId
                     else Nothing
         targetHint
             | gatewayMode =
@@ -626,6 +631,10 @@ runAgentInitializedWithLock
                                                 , selected.selectedAccountId
                                                 )
                                             ))
+    when (gatewayMode /= isGatewayLoadedAuth loaded) $
+        startupDie startup
+            "gateway model routing and loaded credentials disagree; refusing \
+            \to start with an unsafe transport configuration"
     case (transitionTarget, resumed) of
         (Just target, _)
             | not gatewayMode

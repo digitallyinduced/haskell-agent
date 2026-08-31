@@ -347,7 +347,7 @@ int ha_data_browser_abi_smoke(void) {
     }
     if (ha_data_rows_load(
             NULL, 0, HA_DATA_SCOPE_USER,
-            object_name, sizeof(object_name) - 1, 1, 100,
+            object_name, sizeof(object_name) - 1, -1, 100,
             data_rows_callback, NULL) != 3) {
         return 33;
     }

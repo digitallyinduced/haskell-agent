@@ -407,7 +407,9 @@ acceptedHandler registry call = do
         then Just tool.appToolHandler
         else Nothing
 
--- | Provider-native calls may only reach their matching hosted handler.
+-- | Privileged computer calls may only reach their dedicated handler. This
+-- prevents a caller-defined function/custom tool from acquiring desktop
+-- control, and keeps legacy native calls away from ordinary handlers.
 toolAcceptsCall :: AppTool -> ToolCall -> Bool
 toolAcceptsCall tool call =
     case (tool.appToolSchema, call.callKind) of

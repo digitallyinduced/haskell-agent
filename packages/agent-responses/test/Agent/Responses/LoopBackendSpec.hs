@@ -19,6 +19,7 @@ import Agent.Provider
     , tokenProvider
     )
 import Agent.Json (rawJsonFromEncoding)
+import qualified Agent.Json.Decode as Json
 import Agent.Responses.LoopBackend
     ( newStreamEventToLoopEvents
     , statelessResponsesBackend
@@ -52,13 +53,18 @@ import Agent.Responses.Types
     , ResponseInput(..)
     , ResponseCreateParams(..)
     , TaggedObject(..)
+    , computerFunctionNamespace
+    , computerFunctionName
     , defaultResponseCreateParams
+    , legacyComputerFunctionName
     )
+import Agent.Responses.Types.Items (responseItemDecoder)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson.Key as Key
 import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Either (isLeft)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Agent.ToolDispatch
@@ -76,24 +82,64 @@ spec = do
 
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
-    it "round-trips native computer calls through structured screenshot output" do
-        let call = ComputerCall
-                { computerCallItemId = Just "item-1"
-                , computerCallId = "call-1"
-                , computerActions =
-                    [ClickAction 20 30 "left" [], TypeAction "secret"]
-                , pendingSafetyChecks = []
-                , computerCallStatus = Nothing
-                , computerCallExtra = KeyMap.empty
+    it "rejects computer coordinates outside the platform Int range" do
+        let tooLarge = toInteger (maxBound :: Int) + 1
+            payload = LBS.toStrict $ Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("computer_call" :: Text.Text)
+                , "call_id" Aeson..= ("call-overflow" :: Text.Text)
+                , "actions" Aeson..=
+                    [ Aeson.object
+                        [ "type" Aeson..= ("click" :: Text.Text)
+                        , "x" Aeson..= tooLarge
+                        , "y" Aeson..= (0 :: Int)
+                        ]
+                    ]
+                ]
+        Json.decodeEither responseItemDecoder payload
+            `shouldSatisfy` isLeft
+
+    it "routes the reserved ordinary computer function to the harness" do
+        let call = FunctionCall
+                { itemId = Nothing
+                , callId = "call-1"
+                , name = computerFunctionName
+                , namespace = Just "functions"
+                , provider = Nothing
+                , arguments =
+                    "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}"
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
                 }
-        case responseItemToToolCall (ComputerCallItem call) of
+        case responseItemToToolCall (FunctionCallItem call) of
             Just projected -> do
                 projected.callId `shouldBe` "call-1"
                 projected.name `shouldBe` "computer"
-                projected.callKind `shouldBe` ComputerCallKind
+                projected.callKind `shouldBe` ComputerFunctionCallKind
                 projected.argumentsEncrypted `shouldBe` True
             Nothing -> expectationFailure "computer call was not projected"
-        let outputValue = ComputerCallOutput
+
+    it "routes the standard computer function without a namespace" do
+        let call = FunctionCall
+                { itemId = Nothing
+                , callId = "call-standard"
+                , name = computerFunctionName
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments =
+                    "{\"actions\":[{\"type\":\"screenshot\"}]}"
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
+                }
+        case responseItemToToolCall (FunctionCallItem call) of
+            Just projected -> do
+                projected.name `shouldBe` "computer"
+                projected.callKind `shouldBe` ComputerFunctionCallKind
+            Nothing -> expectationFailure
+                "standard computer function was not routed"
+
+    it "returns computer results as text plus a fresh user screenshot" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
                 { computerOutputItemId = Nothing
                 , computerOutputCallId = "ignored"
                 , screenshotDataUrl = "data:image/png;base64,AA=="
@@ -101,20 +147,280 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , computerOutputStatus = Nothing
                 , computerOutputExtra = KeyMap.empty
                 }
-            encodedJson = Aeson.toJSON outputValue
-            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
-                outputValue
-        (jsonField "output" encodedJson >>= jsonField "detail")
-            `shouldBe` Just (Aeson.String "original")
-        case toolResultToItem ToolCallResult
+            result = ToolCallResult
                 { callId = "call-1"
                 , output = encoded
-                , callKind = ComputerCallKind
-                } of
-            ComputerCallOutputItem output -> do
-                output.computerOutputCallId `shouldBe` "call-1"
-                output.screenshotDataUrl `shouldBe` "data:image/png;base64,AA=="
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            [FunctionCallOutputItem output, MessageItem observation] -> do
+                Aeson.toJSON output.output `shouldBe`
+                    Aeson.String "Computer action completed."
+                case observation.content of
+                    MessageContentParts
+                        [InputTextPart{}, InputImagePart{imageUrl, detail}] -> do
+                            imageUrl `shouldBe`
+                                Just "data:image/png;base64,AA=="
+                            detail `shouldBe` Just "auto"
+                    other -> expectationFailure
+                        ("expected screenshot observation, got " <> show other)
+            other -> expectationFailure
+                ("unexpected computer continuation: " <> show other)
+
+    it "keeps computer output before its observation in standard and Lite requests" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/png;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.empty
+                    }
+            inputs =
+                turnInputsToItems
+                    [ CompletedTool ToolCallResult
+                        { callId = "call-function"
+                        , output = encoded
+                        , callKind = ComputerFunctionCallKind
+                        }
+                    ]
+            standard = withRequestInput defaultResponseCreateParams inputs
+            additional =
+                UnknownResponseItem TaggedObject
+                    { tag = "additional_tools" }
+            lite =
+                withRequestInput
+                    defaultResponseCreateParams
+                        { input = Just (ResponseInputItems [additional]) }
+                    inputs
+            assertContinuation expectedDetail = \case
+                [ FunctionCallOutputItem output
+                    , MessageItem ResponseMessage
+                        { role = RoleUser
+                        , content =
+                            MessageContentParts
+                                [ InputTextPart{}
+                                    , InputImagePart{detail}
+                                    ]
+                        }
+                    ] -> do
+                        Aeson.toJSON output.output `shouldBe`
+                            Aeson.String "Computer action completed."
+                        detail `shouldBe` expectedDetail
+                other -> expectationFailure
+                    ("unexpected computer continuation: " <> show other)
+        case standard.input of
+            Just (ResponseInputItems continuation) ->
+                assertContinuation (Just "auto") continuation
+            other -> expectationFailure
+                ("unexpected standard continuation: " <> show other)
+        case lite.input of
+            Just (ResponseInputItems (_ : continuation)) ->
+                assertContinuation Nothing continuation
+            other -> expectationFailure
+                ("unexpected Lite continuation: " <> show other)
+
+    it "does not reuse a screenshot when the latest computer call fails" do
+        let successful = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/png;base64,STALE"
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.empty
+                    }
+            inputs =
+                [ CompletedTool ToolCallResult
+                    { callId = "call-success"
+                    , output = successful
+                    , callKind = ComputerFunctionCallKind
+                    }
+                , CompletedTool ToolCallResult
+                    { callId = "call-failed"
+                    , output = "Computer input failed after changing the UI."
+                    , callKind = ComputerFunctionCallKind
+                    }
+                ]
+        case turnInputsToItems inputs of
+            [ FunctionCallOutputItem first
+                , FunctionCallOutputItem second
+                ] -> do
+                    Aeson.toJSON first.output `shouldBe`
+                        Aeson.String "Computer action completed."
+                    Aeson.toJSON second.output `shouldBe`
+                        Aeson.String
+                            "Computer input failed after changing the UI."
+            other -> expectationFailure
+                ("stale screenshot was reused: " <> show other)
+
+    it "normalizes native computer calls and outputs at the wire boundary" do
+        let call =
+                ComputerCall
+                    { computerCallItemId = Just "native-item"
+                    , computerCallId = "native-call"
+                    , computerActions = [TypeAction "secret"]
+                    , pendingSafetyChecks = []
+                    , computerCallStatus = Just ItemCompleted
+                    , computerCallExtra = KeyMap.empty
+                    }
+            output =
+                ComputerCallOutput
+                    { computerOutputItemId = Just "native-output"
+                    , computerOutputCallId = "native-call"
+                    , screenshotDataUrl = "data:image/png;base64,NATIVE"
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Just ItemCompleted
+                    , computerOutputExtra = KeyMap.empty
+                    }
+            request =
+                withRequestInput
+                    defaultResponseCreateParams
+                    [ComputerCallItem call, ComputerCallOutputItem output]
+        case responseItemToToolCall (ComputerCallItem call) of
+            Just projected -> do
+                projected.name `shouldBe` "computer"
+                projected.callKind `shouldBe` ComputerCallKind
+                projected.argumentsEncrypted `shouldBe` True
+            Nothing -> expectationFailure "native computer call was not projected"
+        case request.input of
+            Just
+                (ResponseInputItems
+                    [ FunctionCallItem function
+                        , FunctionCallOutputItem functionOutput
+                        , MessageItem ResponseMessage
+                            { role = RoleUser
+                            , content =
+                                MessageContentParts
+                                    [ InputTextPart{}
+                                        , InputImagePart{imageUrl}
+                                        ]
+                            }
+                        ]) -> do
+                            function.itemId `shouldBe` Nothing
+                            function.name `shouldBe` computerFunctionName
+                            function.namespace `shouldBe` Nothing
+                            function.callId `shouldBe` "native-call"
+                            functionOutput.itemId `shouldBe` Nothing
+                            functionOutput.callId `shouldBe` "native-call"
+                            Aeson.toJSON functionOutput.output `shouldBe`
+                                Aeson.String "Computer action completed."
+                            imageUrl `shouldBe`
+                                Just "data:image/png;base64,NATIVE"
+            other -> expectationFailure
+                ("legacy computer history reached the wire: " <> show other)
+
+    it "normalizes the earlier Lite computer namespace" do
+        let call =
+                FunctionCall
+                    { itemId = Just "legacy-function-item"
+                    , callId = "legacy-function-call"
+                    , name = legacyComputerFunctionName
+                    , namespace = Just computerFunctionNamespace
+                    , provider = Nothing
+                    , arguments =
+                        "{\"actions\":[{\"type\":\"screenshot\"}]}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    }
+            output =
+                FunctionCallOutput
+                    { itemId = Just "legacy-output-item"
+                    , callId = "legacy-function-call"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , output =
+                        rawJsonFromEncoding . Aeson.toEncoding $
+                            [ Aeson.object
+                                [ "type" Aeson..=
+                                    ("input_image" :: Text.Text)
+                                , "image_url" Aeson..=
+                                    ( "data:image/jpeg;base64,LITE"
+                                        :: Text.Text
+                                    )
+                                , "detail" Aeson..=
+                                    ("original" :: Text.Text)
+                                ]
+                            ]
+                    , status = Nothing
+                    }
+            request =
+                withRequestInput
+                    defaultResponseCreateParams
+                    [FunctionCallItem call, FunctionCallOutputItem output]
+        case request.input of
+            Just
+                (ResponseInputItems
+                    [ FunctionCallItem function
+                        , FunctionCallOutputItem functionOutput
+                        , MessageItem ResponseMessage
+                            { content =
+                                MessageContentParts
+                                    [ InputTextPart{}
+                                        , InputImagePart{imageUrl}
+                                        ]
+                            }
+                        ]) -> do
+                            function.itemId `shouldBe` Nothing
+                            function.name `shouldBe` computerFunctionName
+                            function.namespace `shouldBe` Nothing
+                            functionOutput.itemId `shouldBe` Nothing
+                            Aeson.toJSON functionOutput.output `shouldBe`
+                                Aeson.String "Computer action completed."
+                            imageUrl `shouldBe`
+                                Just "data:image/jpeg;base64,LITE"
+            other -> expectationFailure
+                ("legacy Lite history reached the wire: " <> show other)
+
+    it "returns rejected legacy computer calls as ordinary text output" do
+        case
+            toolResultToItem
+                ToolCallResult
+                    { callId = "call-failed"
+                    , output = "Tool call rejected by user."
+                    , callKind = ComputerCallKind
+                    } of
+            FunctionCallOutputItem output -> do
+                output.callId `shouldBe` "call-failed"
+                Aeson.toJSON output.output `shouldBe`
+                    Aeson.String "Tool call rejected by user."
             other -> expectationFailure ("unexpected output: " <> show other)
+
+    it "does not text-truncate large computer screenshots" do
+        let screenshot =
+                "data:image/png;base64,"
+                    <> Text.replicate (2 * 1024 * 1024) "A"
+            encoded =
+                TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                    ComputerCallOutput
+                        { computerOutputItemId = Nothing
+                        , computerOutputCallId = "ignored"
+                        , screenshotDataUrl = screenshot
+                        , acknowledgedChecks = []
+                        , computerOutputStatus = Nothing
+                        , computerOutputExtra = KeyMap.empty
+                        }
+        case
+            turnInputsToItems
+                [ CompletedTool
+                    ToolCallResult
+                        { callId = "call-large"
+                        , output = encoded
+                        , callKind = ComputerCallKind
+                        }
+                ] of
+            [FunctionCallOutputItem{}, MessageItem observation] ->
+                case observation.content of
+                    MessageContentParts
+                        [InputTextPart{}, InputImagePart{imageUrl}] ->
+                            imageUrl `shouldBe` Just screenshot
+                    other -> expectationFailure
+                        ("expected large screenshot, got " <> show other)
+            other -> expectationFailure
+                ("unexpected large continuation: " <> show other)
+
     it "encodes file attachments as input_file parts" do
         let image = ImageAttachment "image/png" "png-bytes"
             file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
@@ -385,7 +691,11 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , FunctionCallOutputItem FunctionCallOutput{output}
                 ]) -> do
                     detail `shouldBe` Nothing
-                    output `shouldBe` toolOutputValue
+                    Aeson.toJSON output `shouldBe` Aeson.object
+                        [ "type" Aeson..= ("input_image" :: Text.Text)
+                        , "image_url" Aeson..=
+                            ("data:image/png;base64,AA==" :: Text.Text)
+                        ]
             other -> expectationFailure
                 ("unexpected normalized Lite input: " <> show other)
 

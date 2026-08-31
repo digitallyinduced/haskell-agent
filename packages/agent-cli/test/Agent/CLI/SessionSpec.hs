@@ -390,6 +390,13 @@ genTaggedObject prefix =
     TaggedObject
         <$> ((prefix <>) <$> genText)
 
+withoutReservedKeys :: [Text.Text] -> Aeson.Object -> Aeson.Object
+withoutReservedKeys names object =
+    foldr (KeyMap.delete . Key.fromText) object names
+
+genJsonObject :: Gen Aeson.Object
+genJsonObject = sized genJsonObjectAt
+
 genJsonObjectAt :: Int -> Gen Aeson.Object
 genJsonObjectAt size = do
     count <- chooseInt (0, min 4 (max 0 size))
@@ -1401,6 +1408,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnResponseId = response
                         , turnItems = []
                         , turnUsage = usage
+                        , turnProviderTelemetry = []
                         , turnEffect = effect
                         }
                     first = turn "one" (Just "resp-1") TranscriptAppend

@@ -72,6 +72,7 @@ data NativeRunHooks = NativeRunHooks
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())
     , nativeRequestApproval :: !(ToolCall -> IO (Maybe PermissionChoice))
+    , nativeRequestRootAccess :: !(OsPath -> IO Bool)
     , nativeTools :: ![AppTool]
     , nativePlanHooks :: !PlanModeHooks
     , nativeInteractionMode :: !NativeInteractionMode

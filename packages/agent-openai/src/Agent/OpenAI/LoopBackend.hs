@@ -30,6 +30,7 @@ module Agent.OpenAI.LoopBackend
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput
+    , normalizeResponseInputItems
     ) where
 
 import Agent.Error
@@ -77,8 +78,10 @@ import Agent.Responses.LoopBackend
     , toolResultToItem
     , turnInputsToItems
     , withRequestInput
+    , normalizeResponseInputItems
     )
 import Agent.Responses.Types
+import Agent.ToolDispatch (ToolCallKind(..), ToolCallResult(..))
 import qualified Agent.Transport.WebSocket as WebSocket
 import Control.Concurrent (threadDelay)
 import Control.Applicative ((<|>))
@@ -565,6 +568,22 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
         ToolUpdated {} -> True
         _ -> False
 
+hasLegacyComputerContinuation :: [ResponseItem] -> [TurnInput] -> Bool
+hasLegacyComputerContinuation history inputs =
+    any isNativeComputerItem history
+        || any isNativeComputerResult inputs
+  where
+    isNativeComputerItem = \case
+        ComputerCallItem{} -> True
+        ComputerCallOutputItem{} -> True
+        FunctionCallItem call ->
+            call.name == legacyComputerFunctionName
+                && call.namespace == Just computerFunctionNamespace
+        _ -> False
+    isNativeComputerResult = \case
+        CompletedTool result -> result.callKind == ComputerCallKind
+        _ -> False
+
 -- | Errors that indicate the Codex Responses WebSocket transport is
 -- unavailable rather than that the logical request itself was rejected.
 isOpenAiWebSocketTransportFailure :: ApiError -> Bool
@@ -722,6 +741,8 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
             fullRequest = withRequestInput baseParams (history <> newItems)
             (initialRequest, initialPrevious) =
                 case previousResponseId of
+                    _ | hasLegacyComputerContinuation history inputs ->
+                        (fullRequest, Nothing)
                     Nothing | not (null history) -> (fullRequest, Nothing)
                     _ -> (deltaRequest, previousResponseId)
         result <- sendRetrying onLoopEvent initialRequest initialPrevious
@@ -740,7 +761,10 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                     { backendOutput = responseToTurnOutput response
                     , backendState =
                         advanceBackendSnapshot snapshot
-                            (history <> newItems <> response.output)
+                            ( normalizeResponseInputItems
+                                (history <> newItems)
+                                <> response.output
+                            )
                             (Just BackendContinuation
                                 { continuationProvider = "openai.responses"
                                 , continuationToken = response.responseId

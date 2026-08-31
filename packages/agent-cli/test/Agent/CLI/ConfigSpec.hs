@@ -5,6 +5,7 @@ import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import Agent.MCP (McpProtocolPreference(..))
 import qualified Data.ByteString.Lazy as LBS
+import Data.Either (isRight)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as Text

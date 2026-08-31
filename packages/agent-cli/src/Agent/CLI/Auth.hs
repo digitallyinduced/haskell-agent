@@ -360,7 +360,7 @@ gatewayFallbackTokenProvider gatewayCredential directProvider = do
 -- metadata atomically.
 gatewayRouterTokenProvider :: TokenProvider -> TokenProvider
 gatewayRouterTokenProvider provider =
-    tokenProvider (tokenProviderBillingMode provider) \failed ->
+    tokenProviderWithNextToken provider \failed ->
         getNextToken provider failed >>= \case
             Right credential
                 | isGatewayWebSocketCredential credential ->

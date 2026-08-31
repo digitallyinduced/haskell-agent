@@ -10,6 +10,7 @@ import Agent.CLI.AccountPicker
       accountPickerMatches,
       accountPickerMatchesRequest,
       accountPickerRow,
+      loadAllAccountPickerOptions,
       loadAllAccountPickerOptionsCached )
 import Agent.CLI.AccountSelection ()
 import Agent.CLI.Afk ()
