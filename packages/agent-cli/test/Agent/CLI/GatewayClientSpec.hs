@@ -52,6 +52,152 @@ spec = describe "gateway device authorization" do
             `shouldBe` Right
                 (GatewayAuthorized "secret" "wss://gateway/v1/responses")
 
+    it "builds the registered loopback Authorization Code + PKCE request" do
+        gatewayAuthorizationUrl
+            defaultGatewayBaseUrl
+            "http://127.0.0.1:54321/oauth2callback"
+            "0123456789abcdefghijklmnopqrstuvwxyz"
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+            "Marc's Mac"
+            `shouldBe` Right
+                "https://platform.digitallyinduced.com/connect/agent/authorize\
+                \?response_type=code\
+                \&client_id=haskell-agent-cli\
+                \&redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Foauth2callback\
+                \&state=0123456789abcdefghijklmnopqrstuvwxyz\
+                \&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+                \&code_challenge_method=S256\
+                \&client_name=Marc%27s%20Mac"
+        gatewayPkceChallenge
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+            `shouldBe`
+                "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+    it "accepts only the exact IPv4 loopback redirect contract" do
+        let authorize redirect =
+                gatewayAuthorizationUrl
+                    defaultGatewayBaseUrl
+                    redirect
+                    "0123456789abcdefghijklmnopqrstuvwxyz"
+                    "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+                    "Haskell Agent CLI"
+        authorize "http://127.0.0.1:1/oauth2callback"
+            `shouldSatisfy` not . isLeft
+        authorize "http://localhost:54321/oauth2callback"
+            `shouldBe` Left "Gateway OAuth redirect URI is invalid."
+        authorize "http://127.0.0.1:54321/other"
+            `shouldBe` Left "Gateway OAuth redirect URI is invalid."
+        authorize "https://127.0.0.1:54321/oauth2callback"
+            `shouldBe` Left "Gateway OAuth redirect URI is invalid."
+        map authorize
+            [ "http://127.0.0.1:0/oauth2callback"
+            , "http://127.0.0.1:65536/oauth2callback"
+            , "http://127.0.0.1:not-a-port/oauth2callback"
+            , "http://127.0.0.1:54321/oauth2callback?next=evil"
+            , "http://127.0.0.1:54321/oauth2callback#fragment"
+            , "http://user@127.0.0.1:54321/oauth2callback"
+            , "http://127.0.0.1.example:54321/oauth2callback"
+            ]
+            `shouldSatisfy` all isLeft
+
+    it "validates callback method, path, singleton state, and errors" do
+        let state = "0123456789abcdefghijklmnopqrstuvwxyz"
+            callback target =
+                validateGatewayAuthorizationCallback
+                    state
+                    ("GET " <> target <> " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        callback
+            "/oauth2callback?code=hac_secret&state=0123456789abcdefghijklmnopqrstuvwxyz"
+            `shouldBe` Right "hac_secret"
+        callback
+            "/oauth2callback?code=hac_secret&state=wrong"
+            `shouldBe` Left "Gateway OAuth callback state mismatch."
+        callback
+            "/other?code=hac_secret&state=0123456789abcdefghijklmnopqrstuvwxyz"
+            `shouldBe` Left "Gateway OAuth callback path is invalid."
+        validateGatewayAuthorizationCallback
+            state
+            "POST /oauth2callback?code=hac_secret&state=0123456789abcdefghijklmnopqrstuvwxyz HTTP/1.1\r\n\r\n"
+            `shouldBe` Left "Gateway OAuth callback must use GET."
+        callback
+            "/oauth2callback?error=access_denied&state=0123456789abcdefghijklmnopqrstuvwxyz"
+            `shouldBe` Left
+                "Gateway authorization was not granted: access_denied."
+        callback
+            "/oauth2callback?code=hac_secret&state=0123456789abcdefghijklmnopqrstuvwxyz&state=0123456789abcdefghijklmnopqrstuvwxyz"
+            `shouldBe` Left
+                "Gateway OAuth callback contains duplicate or invalid state parameters."
+        callback
+            "/oauth2callback?code=first&code=second&state=0123456789abcdefghijklmnopqrstuvwxyz"
+            `shouldBe` Left
+                "Gateway OAuth callback contains duplicate or invalid code parameters."
+        callback
+            "/oauth2callback?error=%3Cscript%3E&state=0123456789abcdefghijklmnopqrstuvwxyz"
+            `shouldBe` Left "Gateway authorization was not granted."
+
+    it "decodes and validates a same-origin bearer response" do
+        let payload =
+                "{\"access_token\":\"hag_secret\",\"token_type\":\"Bearer\",\
+                \\"base_url\":\"https://platform.digitallyinduced.com\",\
+                \\"websocket_url\":\"wss://platform.digitallyinduced.com/v1/responses\"}"
+            response =
+                GatewayAuthorizationCodeResponse
+                    { authorizationAccessToken = "hag_secret"
+                    , authorizationTokenType = "Bearer"
+                    , authorizationResponseBaseUrl =
+                        "https://platform.digitallyinduced.com"
+                    , authorizationWebSocketUrl =
+                        "wss://platform.digitallyinduced.com/v1/responses"
+                    }
+        Hermes.decodeEither
+            gatewayAuthorizationCodeDecoder
+            payload
+            `shouldBe` Right response
+        validateGatewayAuthorizationCodeResponse
+            defaultGatewayBaseUrl response
+            `shouldBe` Right
+                GatewayCredential
+                    { gatewayBaseUrl =
+                        "https://platform.digitallyinduced.com"
+                    , gatewayWebSocketUrl =
+                        "wss://platform.digitallyinduced.com/v1/responses"
+                    , gatewayAccessToken = "hag_secret"
+                    }
+
+    it "rejects OAuth responses with the wrong scheme or origin" do
+        let response =
+                GatewayAuthorizationCodeResponse
+                    { authorizationAccessToken = "hag_secret"
+                    , authorizationTokenType = "Bearer"
+                    , authorizationResponseBaseUrl =
+                        "https://platform.digitallyinduced.com"
+                    , authorizationWebSocketUrl =
+                        "wss://platform.digitallyinduced.com/v1/responses"
+                    }
+            validate =
+                validateGatewayAuthorizationCodeResponse
+                    defaultGatewayBaseUrl
+        validate response { authorizationTokenType = "bearer" }
+            `shouldBe`
+                Left "The gateway returned an unsupported token type."
+        validate
+            response
+                { authorizationResponseBaseUrl = "https://example.com"
+                , authorizationWebSocketUrl =
+                    "wss://example.com/v1/responses"
+                }
+            `shouldBe`
+                Left
+                    "The gateway returned a credential for a different origin."
+        validate
+            response
+                { authorizationWebSocketUrl =
+                    "wss://example.com/v1/responses"
+                }
+            `shouldBe`
+                Left
+                    "The gateway returned a WebSocket URL for a different origin."
+
     it "redacts the bearer credential from Show" do
         let credential =
                 GatewayCredential "https://gateway" "wss://gateway/v1/responses" "secret"
@@ -66,6 +212,15 @@ spec = describe "gateway device authorization" do
                 600
                 5)
             `shouldSatisfy` not . Text.isInfixOf "device-secret" . Text.pack
+        let browserResponse =
+                GatewayAuthorizationCodeResponse
+                    "oauth-secret"
+                    "Bearer"
+                    "https://gateway"
+                    "wss://gateway/secret-websocket"
+            rendered = Text.pack (show browserResponse)
+        rendered `shouldSatisfy` not . Text.isInfixOf "oauth-secret"
+        rendered `shouldSatisfy` not . Text.isInfixOf "secret-websocket"
 
     it "allows local HTTP development without trusting lookalike hosts" do
         validateBaseUrl "http://localhost:8080"

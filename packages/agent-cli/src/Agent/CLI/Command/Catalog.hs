@@ -35,7 +35,7 @@ slashCommands =
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
     , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
-    , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
+    , cmd "login" ["accounts"] "/login" "Log in to the platform or manage provider accounts" False
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
     , cmd "home" ["welcome"] "/home" "Return to the session picker" False
     , cmd "search" [] "/search <QUERY>" "Search past conversations and resume a match" True
