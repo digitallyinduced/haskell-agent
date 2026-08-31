@@ -30,6 +30,11 @@ import Agent.ReasoningEffort
     , parseReasoningEffort
     )
 import qualified Agent.ReasoningEffort as ReasoningEffort
+import Agent.CLI.Runtime.Options
+    ( ApprovalPolicy(..)
+    , GatewayCommand(..)
+    , defaultEffortFor
+    )
 import Agent.TUI.Motion (MotionMode(..))
 import Data.Foldable (asum)
 import qualified Data.List as List
@@ -52,12 +57,6 @@ data Command
     | RunAgent CliOptions
     deriving (Eq, Show)
 
-data GatewayCommand
-    = GatewayConnect Text
-    | GatewayStatus
-    | GatewayDisconnect
-    deriving (Eq, Show)
-
 data McpCommand
     = McpLogin Text [Text]
     | McpLogout Text
@@ -76,12 +75,6 @@ data ScreenMode
     = ScreenAuto
     | ScreenFullscreen
     | ScreenMinimal
-    deriving (Eq, Show)
-
-data ApprovalPolicy
-    = ApproveAll
-    | DenyMutating
-    | PromptMutating
     deriving (Eq, Show)
 
 data ApprovalAnswer
@@ -174,15 +167,6 @@ defaultCliOptions = CliOptions
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
-
--- | Provider default when @--effort@ is omitted. Grok runs at high effort.
-defaultEffortFor :: Provider -> ReasoningEffort
-defaultEffortFor = \case
-    XAIProvider -> EffortHigh
-    OpenAIProvider -> EffortMedium
-    OpenRouterProvider -> EffortMedium
-    GeminiProvider -> EffortMedium
-    ClaudeCodeProvider -> EffortXHigh
 
 isOneShot :: CliOptions -> Bool
 isOneShot options =

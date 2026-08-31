@@ -58,7 +58,7 @@ library
                     , Agent.Telegram.Types.State
                     , Agent.Telegram.Types.Wire
                     , Agent.Telegram.Voice
-    build-depends:    agent-cli >= 0.1 && < 0.2
+    build-depends:    agent-cli-runtime >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2

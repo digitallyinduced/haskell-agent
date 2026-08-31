@@ -25,7 +25,7 @@ import System.Directory
     , removePathForcibly
     )
 import System.FilePath ((</>))
-import Control.Exception (finally)
+import Control.Exception.Safe (finally)
 import Data.Unique (newUnique, hashUnique)
 import Test.Hspec
 

@@ -1,13 +1,13 @@
 module Agent.Telegram.Internal.Launch (runTelegram, runTelegramWithStore) where
 
 
-import Agent.CLI.AgentSessions
+import Agent.CLI.AgentSessions.Process
     ( SessionProcessLifetime(ScopedSessionProcesses)
     , closeSessionProcessManager
     , newSessionProcessManagerWithLifetime
     )
 import Agent.CLI.ManagedTurn ()
-import Agent.CLI.Options
+import Agent.CLI.Runtime.Options
     ( ApprovalPolicy(..)
     , defaultEffortFor
     )

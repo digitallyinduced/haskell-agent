@@ -357,7 +357,10 @@ are discussed in [`IDEAS.md`](IDEAS.md).
 ## Architecture
 
 ```text
-                 agent-cli / future native clients
+             agent-cli / agent-telegram / future clients
+                              |
+                    agent-cli-runtime
+        sessions | model catalog | auth | gateway processes
                               |
                    provider-neutral events
                               |
@@ -378,6 +381,13 @@ The provider-neutral loop sees typed turns, tool calls, tool results, usage,
 and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
+
+`agent-cli-runtime` is the headless frontend library shared by the terminal
+CLI and gateways. Interactive parsing, rendering, and TTY state remain in
+`agent-cli`, so Cabal builds of gateway libraries do not depend on or rebuild
+the terminal frontend. The packaged Telegram service still carries the
+`agent-cli` executable as a runtime dependency because managed child sessions
+launch that executable.
 
 `agent-claude` delegates its generic process transport, protocol decoding, and
 session client to

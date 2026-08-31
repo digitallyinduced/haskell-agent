@@ -1,0 +1,140 @@
+cabal-version:      3.0
+name:               agent-cli-runtime
+version:            0.1.0.0
+synopsis:           Headless shared runtime for agent frontends
+description:        Persisted sessions, model configuration, managed turns,
+                    gateway bridge protocol, authentication, and child-process
+                    lifecycle shared by non-terminal agent frontends.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+data-files:          config/models.default.json
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wincomplete-record-updates
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    autogen-modules:  Paths_agent_cli_runtime
+    other-modules:    Paths_agent_cli_runtime
+    exposed-modules:  Agent.CLI.AgentSessions.Process
+                    , Agent.CLI.Auth
+                    , Agent.CLI.Auth.Gemini
+                    , Agent.CLI.Auth.Grok
+                    , Agent.CLI.Auth.OpenAI
+                    , Agent.CLI.Auth.Types
+                    , Agent.CLI.CredentialStore
+                    , Agent.CLI.Duration
+                    , Agent.CLI.Environment
+                    , Agent.CLI.Error
+                    , Agent.CLI.GatewayBridge
+                    , Agent.CLI.GatewayClient
+                    , Agent.CLI.Json
+                    , Agent.CLI.ManagedTurn
+                    , Agent.CLI.ModelConfig
+                    , Agent.CLI.Models
+                    , Agent.CLI.Permission.Types
+                    , Agent.CLI.PrivateFileLock
+                    , Agent.CLI.Request
+                    , Agent.CLI.Runtime.Options
+                    , Agent.CLI.Session
+                    , Agent.CLI.Session.Codec
+                    , Agent.CLI.Session.StoreCodec
+                    , Agent.CLI.Session.TitlePolicy
+                    , Agent.CLI.Session.Types
+                    , Agent.CLI.SessionLock
+                    , Agent.CLI.Transcription
+    build-depends:    agent-claude >= 0.1 && < 0.2
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-gemini >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
+                    , agent-openai >= 0.1 && < 0.2
+                    , agent-openrouter >= 0.1 && < 0.2
+                    , agent-process >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
+                    , agent-xai >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , crypton
+                    , directory
+                    , entropy
+                    , filelock
+                    , filepath
+                    , http-client
+                    , http-client-tls
+                    , http-types
+                    , memory
+                    , network
+                    , network-uri
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , scientific
+                    , stm
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , transformers
+                    , unix
+                    , vector
+
+test-suite agent-cli-runtime-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.CLI.CredentialStoreSpec
+                    , Agent.CLI.EnvironmentSpec
+                    , Agent.CLI.ErrorSpec
+                    , Agent.CLI.GatewayBridgeSpec
+                    , Agent.CLI.GatewayClientSpec
+                    , Agent.CLI.ManagedTurnSpec
+                    , Agent.CLI.ModelConfigSpec
+                    , Agent.CLI.ModelsSpec
+                    , Agent.CLI.SessionSpec
+    build-depends:    agent-cli-runtime
+                    , agent-core
+                    , agent-json
+                    , agent-responses-types
+                    , agent-store
+                    , aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , QuickCheck
+                    , safe-exceptions
+                    , text
+                    , time
+                    , unix

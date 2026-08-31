@@ -11,8 +11,7 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
-data-files:         config/models.default.json
-                  , skills/add-model/SKILL.md
+data-files:         skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
                   , skills/post-task-learning-review/SKILL.md
                   , skills/telegram-agent/SKILL.md
@@ -46,12 +45,7 @@ library
     other-modules:    Agent.CLI.AgentSessions.Render
                     , Agent.CLI.AgentViewport.Status
                     , Agent.CLI.Approval.Decision
-                    , Agent.CLI.Auth.Grok
-                    , Agent.CLI.Auth.Gemini
-                    , Agent.CLI.Auth.OpenAI
-                    , Agent.CLI.Auth.Types
                     , Agent.CLI.Command.Types
-                    , Agent.CLI.Json
                     , Agent.CLI.Command.Catalog
                     , Agent.CLI.Command.Instructions
                     , Agent.CLI.Compaction.Continuation
@@ -69,7 +63,6 @@ library
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
-                    , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
                     , Agent.CLI.Runtime.Orchestration
@@ -101,8 +94,6 @@ library
                     , Agent.CLI.Session.Lifecycle
                     , Agent.CLI.Session.Retry
                     , Agent.CLI.Session.Runner
-                    , Agent.CLI.Session.Codec
-                    , Agent.CLI.Session.Types
                     , Agent.CLI.Session.Runner.Execution
                     , Agent.CLI.Session.Runner.Types
                     , Agent.CLI.Session.Selection
@@ -146,7 +137,6 @@ library
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
-                    , Agent.CLI.Auth
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
@@ -158,23 +148,17 @@ library
                     , Agent.CLI.Command
                     , Agent.CLI.ComputerUse
                     , Agent.CLI.Config
-                    , Agent.CLI.CredentialStore
                     , Agent.CLI.McpOAuthStore
                     , Agent.CLI.McpOAuth
                     , Agent.CLI.Database
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
                     , Agent.CLI.Desktop
-                    , Agent.CLI.Duration
                     , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
-                    , Agent.CLI.Environment
-                    , Agent.CLI.Error
                     , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
-                    , Agent.CLI.GatewayBridge
-                    , Agent.CLI.GatewayClient
                     , Agent.CLI.GitDiff
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
@@ -186,7 +170,6 @@ library
                     , Agent.CLI.Input.Picker
                     , Agent.CLI.Interrupt
                     , Agent.CLI.Login
-                    , Agent.CLI.ManagedTurn
                     , Agent.CLI.LearnedSkills
                     , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Lsp
@@ -195,8 +178,6 @@ library
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
                     , Agent.CLI.McpManager
-                    , Agent.CLI.ModelConfig
-                    , Agent.CLI.Models
                     , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
                     , Agent.CLI.Options
@@ -209,7 +190,6 @@ library
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
                     , Agent.CLI.Recap
-                    , Agent.CLI.Request
                     , Agent.CLI.Review
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
@@ -218,13 +198,10 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Resume
-                    , Agent.CLI.Session
                     , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
-                    , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
-                    , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
                     , Agent.CLI.Secret
                     , Agent.CLI.Skills
@@ -254,7 +231,23 @@ library
                     , Agent.CLI.WebFetch
                     , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
-    build-depends:    agent-core >= 0.1 && < 0.2
+    reexported-modules:
+                      agent-cli-runtime:Agent.CLI.Auth as Agent.CLI.Auth
+                    , agent-cli-runtime:Agent.CLI.CredentialStore as Agent.CLI.CredentialStore
+                    , agent-cli-runtime:Agent.CLI.Duration as Agent.CLI.Duration
+                    , agent-cli-runtime:Agent.CLI.Environment as Agent.CLI.Environment
+                    , agent-cli-runtime:Agent.CLI.Error as Agent.CLI.Error
+                    , agent-cli-runtime:Agent.CLI.GatewayBridge as Agent.CLI.GatewayBridge
+                    , agent-cli-runtime:Agent.CLI.GatewayClient as Agent.CLI.GatewayClient
+                    , agent-cli-runtime:Agent.CLI.ManagedTurn as Agent.CLI.ManagedTurn
+                    , agent-cli-runtime:Agent.CLI.ModelConfig as Agent.CLI.ModelConfig
+                    , agent-cli-runtime:Agent.CLI.Models as Agent.CLI.Models
+                    , agent-cli-runtime:Agent.CLI.Request as Agent.CLI.Request
+                    , agent-cli-runtime:Agent.CLI.Session as Agent.CLI.Session
+                    , agent-cli-runtime:Agent.CLI.Session.StoreCodec as Agent.CLI.Session.StoreCodec
+                    , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
+    build-depends:    agent-cli-runtime >= 0.1 && < 0.2
+                    , agent-core >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
@@ -325,6 +318,7 @@ executable eval-ghci-vs-bash
     main-is:          GhciVsBash.hs
     ghc-options:      -threaded -rtsopts
     build-depends:    agent-cli
+                    , agent-cli-runtime
                     , agent-responses
                     , agent-responses-types
                     , agent-store
@@ -413,7 +407,6 @@ test-suite agent-cli-test
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.AgentViewportRuntimeSpec
-                    , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
@@ -425,15 +418,11 @@ test-suite agent-cli-test
                     , Agent.CLI.ContextSpec
                     , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
-                    , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.DesktopSpec
-                    , Agent.CLI.ErrorSpec
                     , Agent.CLI.ExternalProgramSpec
                     , Agent.CLI.FileUriSpec
-                    , Agent.CLI.GatewayBridgeSpec
-                    , Agent.CLI.GatewayClientSpec
                     , Agent.CLI.GitDiffSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
@@ -445,10 +434,7 @@ test-suite agent-cli-test
                     , Agent.CLI.MetaConsoleSpec
                     , Agent.CLI.MetaConsoleRuntimeSpec
                     , Agent.CLI.ModelPickerSpec
-                    , Agent.CLI.ModelConfigSpec
-                    , Agent.CLI.ModelsSpec
                     , Agent.CLI.NativeAgentsSpec
-                    , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
@@ -475,7 +461,6 @@ test-suite agent-cli-test
                     , Agent.CLI.TranscriptSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.TranscriptExportSpec
-                    , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionHistorySpec
                     , Agent.CLI.SessionStateSpec
                     , Agent.CLI.SessionTitleSpec
@@ -494,6 +479,7 @@ test-suite agent-cli-test
                     , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
+                    , agent-cli-runtime
                     , agent-core
                     , agent-mcp
                     , agent-json

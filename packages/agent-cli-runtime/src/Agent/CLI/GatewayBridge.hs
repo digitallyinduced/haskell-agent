@@ -18,7 +18,7 @@ module Agent.CLI.GatewayBridge
     ) where
 
 import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
-import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Permission.Types (PermissionChoice(..))
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.Loop (LoopEvent(..))
 import Agent.OsPath (toText, unsafeToFilePath)

@@ -3,7 +3,7 @@ module Agent.Telegram.Voice
     ( transcribeWithXAI
     ) where
 
-import Agent.CLI.Dictation (transcribeAudio)
+import Agent.CLI.Transcription (transcribeAudio)
 import Data.Text (Text)
 
 transcribeWithXAI :: FilePath -> FilePath -> IO Text

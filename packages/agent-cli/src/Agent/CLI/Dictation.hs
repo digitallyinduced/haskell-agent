@@ -16,6 +16,7 @@ import Agent.CLI.Auth
     , loadAuth
     , loadOpenAiDictationAuth
     )
+import Agent.CLI.Transcription (transcribeAudio)
 import Agent.OpenAI.Transcription
     ( openAITranscriptionSampleRate
     , transcribePcmWithOpenAI
@@ -25,8 +26,7 @@ import Agent.Provider
     , providerSlug
     )
 import Agent.XAI.Transcription
-    ( transcribeAudioWithXAI
-    , transcribePcmWithXAI
+    ( transcribePcmWithXAI
     )
 import Control.Concurrent.Async
     ( wait
@@ -174,20 +174,6 @@ dictateWith provider control =
             pure (DictationFailed (Text.pack (show err)))
         Right transcript ->
             pure (DictationTranscript (Text.strip transcript))
-
--- | Transcribe an existing audio file using the configured Grok/xAI
--- subscription or API-key credential.
-transcribeAudio :: FilePath -> IO Text
-transcribeAudio path =
-    loadAuth (Just XAIProvider) >>= \case
-        Left err ->
-            fail (Text.unpack err)
-        Right loaded ->
-            transcribeAudioWithXAI loaded.loadedTokenProvider path >>= \case
-                Left err ->
-                    fail (show err)
-                Right transcript ->
-                    pure transcript
 
 requireExecutable :: String -> IO ()
 requireExecutable command =
