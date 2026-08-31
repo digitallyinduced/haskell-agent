@@ -367,6 +367,49 @@ spec = do
                 (findSnapshot "still-limited" snapshots)
                 `shouldSatisfy` maybe False isJust
 
+        it "does not revalidate a short server-directed cooldown" do
+            checks <- newIORef (0 :: Int)
+            let revalidate _ = do
+                    modifyIORef' checks (+ 1)
+                    pure (Right True)
+            pool <- newDiscoveringPoolWithRateLimitRevalidation
+                [mkFreshAuth "burst-limited"]
+                neverRefresh
+                noDiscovery
+                revalidate
+            reportRateLimit pool "burst-limited" (Just 60)
+
+            result <- getAccessToken pool
+
+            result `shouldSatisfy` isCredentialsExhausted
+            readIORef checks `shouldReturn` 0
+            [snapshot] <- snapshotAccounts pool
+            snapshot.snapshotCooldownUntil `shouldSatisfy` isJust
+
+        it "preserves short cooldowns while revalidating long windows" do
+            checks <- newIORef ([] :: [Text])
+            let revalidate auth = do
+                    modifyIORef' checks (auth.accountId :)
+                    pure (Right True)
+            pool <- newDiscoveringPoolWithRateLimitRevalidation
+                [ mkFreshAuth "window-reset"
+                , mkFreshAuth "burst-limited"
+                ]
+                neverRefresh
+                noDiscovery
+                revalidate
+            reportRateLimit pool "window-reset" (Just 500_000)
+            reportRateLimit pool "burst-limited" (Just 60)
+
+            result <- getAccessToken pool
+
+            accountIdOf result `shouldBe` "window-reset"
+            readIORef checks `shouldReturn` ["window-reset"]
+            snapshots <- snapshotAccounts pool
+            fmap (.snapshotCooldownUntil)
+                (findSnapshot "burst-limited" snapshots)
+                `shouldSatisfy` maybe False isJust
+
         it "revalidates an explicitly requested cooling account" do
             pool <- newDiscoveringPoolWithRateLimitRevalidation
                 [mkFreshAuth "requested-account"]

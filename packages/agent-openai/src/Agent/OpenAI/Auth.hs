@@ -182,6 +182,12 @@ rateLimitCooldownSeconds = 60
 rateLimitRevalidationSeconds :: Int
 rateLimitRevalidationSeconds = 300
 
+-- | Usage-window revalidation must not override ordinary burst throttling.
+-- Cooldowns of one hour or less expire naturally; only suspicious long-lived
+-- reset timestamps are checked against live subscription usage.
+rateLimitRevalidationMinimumCooldownSeconds :: Int
+rateLimitRevalidationMinimumCooldownSeconds = 3600
+
 -- | Retry window when an account returns an authentication rejection from
 -- Agent.OpenAI.
 -- Authentication recovery already forces an immediate refresh; if that still
@@ -474,11 +480,11 @@ revalidateRateLimitedAccounts pool =
                         entries <-
                             toList . (.stateEntries)
                                 <$> readIORef pool.poolState
-                        hasActiveCooldown <-
+                        hasRevalidatableCooldown <-
                             or <$> mapM
-                                (hasActiveRateLimitCooldown now)
+                                (hasRevalidatableRateLimitCooldown now)
                                 entries
-                        if not hasActiveCooldown
+                        if not hasRevalidatableCooldown
                             then hasAvailableAccount now pool
                             else do
                                 -- Record the attempt before starting network
@@ -519,14 +525,24 @@ revalidationDue now (Just previous) =
     in elapsed < 0
         || elapsed >= fromIntegral rateLimitRevalidationSeconds
 
-hasActiveRateLimitCooldown :: UTCTime -> AccountEntry -> IO Bool
-hasActiveRateLimitCooldown now entry =
+hasRevalidatableRateLimitCooldown :: UTCTime -> AccountEntry -> IO Bool
+hasRevalidatableRateLimitCooldown now entry =
     atomicModifyAccount entry \current ->
         let updated = expireCooldowns now current
-            active = case updated.accountCooldowns.cooldownRateLimit of
-                Just cooldown -> cooldown.cooldownUntil > now
+            revalidatable =
+                case updated.accountCooldowns.cooldownRateLimit of
+                Just cooldown ->
+                    rateLimitCooldownCanBeRevalidated now cooldown
                 Nothing -> False
-        in (updated, active)
+        in (updated, revalidatable)
+
+rateLimitCooldownCanBeRevalidated
+    :: UTCTime
+    -> AccountCooldown
+    -> Bool
+rateLimitCooldownCanBeRevalidated now cooldown =
+    diffUTCTime cooldown.cooldownUntil now
+        > fromIntegral rateLimitRevalidationMinimumCooldownSeconds
 
 revalidateRateLimitedAccount
     :: Pool
@@ -545,8 +561,10 @@ revalidateRateLimitedAccount pool revalidate entry =
             in (updated, updated)
         case state.accountCooldowns.cooldownRateLimit of
             Nothing -> pure False
-            Just _
+            Just cooldown
                 | Just _ <- state.accountCooldowns.cooldownAuthBroken ->
+                    pure False
+                | not (rateLimitCooldownCanBeRevalidated now cooldown) ->
                     pure False
                 | otherwise -> do
                     authResult <-
