@@ -388,14 +388,24 @@
                                     src = agentStoreSource;
                                 })
                             [ pkgs.postgresql_18 ]);
-                        agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
-                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
-                                src = agentCliSource;
-                            })
-                            [
-                                pkgs.git
-                                pkgs.postgresql_18
-                            ]);
+                        agent-cli = localPackage (
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
+                                    src = agentCliSource;
+                                })
+                                [
+                                    pkgs.git
+                                    pkgs.postgresql_18
+                                ]).overrideAttrs
+                                (old: {
+                                    # Darwin's strip can silently replace this
+                                    # large GHC foreign library with a corrupt
+                                    # file. Preserve the loadable Mach-O while
+                                    # still stripping the other package outputs.
+                                    stripExclude =
+                                        (old.stripExclude or [ ])
+                                        ++ [ "libhaskell-agent-bridge.dylib" ];
+                                }));
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src = agentTelegramSource;
@@ -476,7 +486,11 @@
                         });
                 agentNativeBridgePackage = pkgs.runCommand
                     "haskell-agent-native-bridge-0.1.0"
-                    { }
+                    {
+                        # The bridge was already excluded from the parent
+                        # package's strip pass; do not strip it after copying.
+                        dontStrip = true;
+                    }
                     ''
                         bridge="$(${pkgs.findutils}/bin/find \
                             ${agentCliPackage}/lib \
@@ -491,6 +505,16 @@
                         mkdir -p "$out/lib" "$out/include"
                         cp "$bridge" "$out/lib/libhaskell-agent-bridge.dylib"
                         cp "$header" "$out/include/HaskellAgentBridge.h"
+                        bridgeType="$(${pkgs.file}/bin/file -b \
+                            "$out/lib/libhaskell-agent-bridge.dylib")"
+                        case "$bridgeType" in
+                            Mach-O\ 64-bit*dynamically\ linked\ shared\ library*)
+                                ;;
+                            *)
+                                echo "Expected a Mach-O shared library, got: $bridgeType" >&2
+                                exit 1
+                                ;;
+                        esac
                     '';
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
                 functionalTestCredentialHome =
