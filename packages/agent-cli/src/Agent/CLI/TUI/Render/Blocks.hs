@@ -142,7 +142,8 @@ import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( lines,
+    ( isPrefixOf,
+      lines,
       null,
       strip,
       unlines,
@@ -270,7 +271,7 @@ drawBlock state target ui block =
                     (visibleShellBody block)
                     (toolImageSections state target block)
             BlockEdit ->
-                accentBlock
+                accentBlockWithSections
                     state
                     target
                     ui
@@ -280,7 +281,7 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
-                    (visibleBody block)
+                    (editBodyWidgets (visibleBody block))
             BlockSystem ->
                 withAttr Theme.mutedAttr
                     (terminalTxtWrap block.blockBody)
@@ -510,24 +511,25 @@ blockStateGlyph state target block = case block.blockState of
                 state.appMotionElapsedMillis
                 <> " "
 
-accentBlock
-    :: AppState
-    -> AgentTarget
-    -> UiState
-    -> UiBlock
-    -> Maybe Int
-    -> AttrName
-    -> Text
-    -> Text
-    -> Widget Name
-accentBlock state target ui block waveElapsed accent title body =
-    accentBlockWithSections state target ui block waveElapsed accent title
-        (bodySections body)
-
 bodySections :: Text -> [Widget Name]
 bodySections body
     | Text.null (Text.strip body) = []
     | otherwise = [terminalTxtWrap body]
+
+editBodyWidgets :: Text -> [Widget Name]
+editBodyWidgets body
+    | Text.null (Text.strip body) = []
+    | otherwise = [vBox (map editLineWidget (Text.lines body))]
+  where
+    editLineWidget line
+        | "  -" `Text.isPrefixOf` line =
+            withAttr Theme.errorAttr (terminalTxtWrap line)
+        | "  +" `Text.isPrefixOf` line =
+            withAttr Theme.successAttr (terminalTxtWrap line)
+        | "  …" `Text.isPrefixOf` line
+            || "… +" `Text.isPrefixOf` line =
+                withAttr Theme.mutedAttr (terminalTxtWrap line)
+        | otherwise = terminalTxtWrap line
 
 accentMarkdownBlock
     :: AppState

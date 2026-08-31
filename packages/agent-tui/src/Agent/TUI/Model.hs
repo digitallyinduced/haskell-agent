@@ -667,16 +667,22 @@ timestampNewMessageBlocks firstNewIndex timestamp state
                     state.uiBlocks
             }
 
-completeTool :: Int -> ToolCallResult -> UiState -> UiState
-completeTool blockIndex result state =
-    state
+completeTool :: Int -> ToolCall -> ToolCallResult -> UiState -> UiState
+completeTool blockIndex call result state =
+    let resultState = toolResultState result.output
+        diff = formatToolDiffRelative state.uiWorkspaceRoot call
+        body
+            | resultState == BlockComplete
+            , not (Text.null (Text.strip diff)) = diff
+            | otherwise = result.output
+    in state
         { uiBlocks =
             Seq.adjust
                 (\block ->
                     if block.blockCallId == Just result.callId
                         then block
-                            { blockBody = result.output
-                            , blockState = toolResultState result.output
+                            { blockBody = body
+                            , blockState = resultState
                             }
                         else block)
                 blockIndex
@@ -730,7 +736,7 @@ finishVisibleTool result state =
                 reconcileVisibleShellContinuation
                     call
                     result
-                    (completeTool blockIndex displayed next)
+                    (completeTool blockIndex call displayed next)
             | blockIndex < Seq.length state.uiBlocks
             , isShellProcessTool call.name
             , Just (sessionId, output) <-
@@ -738,7 +744,7 @@ finishVisibleTool result state =
             , Map.notMember sessionId next.uiShellProcesses ->
                 retainRunningShell blockIndex sessionId output next
             | blockIndex < Seq.length state.uiBlocks ->
-                completeTool blockIndex displayed next
+                completeTool blockIndex call displayed next
         Just _ -> next
 
 trackedShellOwner :: ToolCall -> UiState -> Maybe BlockId
