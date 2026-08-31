@@ -22,7 +22,11 @@ data SessionRunnerContinuation = SessionRunnerContinuation
         :: PendingTurnPresentation -> SessionEnv -> PendingTurn -> IO RunResult
     , runnerFinishTurn :: SessionEnv -> Bool -> TurnResult -> IO RunResult
     , runnerPreparePromptSkillInputs
-        :: SessionEnv -> Text -> [TurnInput] -> IO (Either Text [TurnInput])
+        :: SessionEnv
+        -> Bool
+        -> Text
+        -> [TurnInput]
+        -> IO (Either Text [TurnInput])
     , runnerRunSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
     , runnerRunSessionTurnSummary :: SessionEnv -> IO ()
     }

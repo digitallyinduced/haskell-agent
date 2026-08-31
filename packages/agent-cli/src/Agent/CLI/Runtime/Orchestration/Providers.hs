@@ -76,7 +76,7 @@ import Agent.CLI.Runtime.Recap
     ( runSessionRecap, runSessionTurnSummary )
 import Agent.CLI.Runtime.Repl
     ( finishTurn,
-      preparePromptSkillInputs,
+      preparePromptSkillInputsWithPaste,
       repl,
       replWithDraft,
       runPendingTurn )
@@ -1120,7 +1120,7 @@ sessionRunnerContinuation =
         , runnerRunPendingTurn = runPendingTurn
         , runnerFinishTurn = finishTurn
         , runnerFinishStartup = finishStartup
-        , runnerPreparePromptSkillInputs = preparePromptSkillInputs
+        , runnerPreparePromptSkillInputs = preparePromptSkillInputsWithPaste
         , runnerRunSessionRecap = runSessionRecap
         , runnerRunSessionTurnSummary = runSessionTurnSummary
         }
