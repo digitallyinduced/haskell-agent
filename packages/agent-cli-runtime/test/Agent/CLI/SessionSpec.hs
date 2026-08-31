@@ -28,8 +28,11 @@ import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (renderStoreError)
-import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar)
-import Control.Concurrent.Async (concurrently, mapConcurrently)
+import Control.Concurrent
+    ( newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay )
+import Control.Concurrent.Async
+    ( cancelWith, concurrently, mapConcurrently, withAsync )
+import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (bracket)
 import Control.Monad (replicateM)
 import qualified Data.Aeson as Aeson
@@ -1523,6 +1526,42 @@ spec = describe "Agent.CLI.Session" do
                 handle.sessionTempDir `shouldBe` tempDir
                 loadSession pool root reservedId
                     `shouldReturn` Right (handle.sessionMeta, [])
+
+        it "cleans an interrupted pending materialization" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                persist@(PersistenceEnabled slot) <-
+                    newPendingPersistence (testCreate pool root)
+                PersistencePending _ reservedId tempDir <- readIORef slot
+                let
+                    sessionDir =
+                        root </> unsafeEncodeUtf (Text.unpack reservedId)
+                    waitForSessionDir 0 =
+                        expectationFailure
+                            "session materialization did not create its directory"
+                    waitForSessionDir attempts =
+                        doesDirectoryExist sessionDir >>= \case
+                            True -> pure ()
+                            False -> do
+                                threadDelay 1000
+                                waitForSessionDir (attempts - 1)
+                withAsync (ensurePersistenceSessionId persist) \worker -> do
+                    waitForSessionDir (5000 :: Int)
+                    cancelWith worker UserInterrupt
+                readIORef slot >>= \case
+                    PersistencePending _ actualId actualTempDir -> do
+                        actualId `shouldBe` reservedId
+                        actualTempDir `shouldBe` tempDir
+                    PersistenceActive handle ->
+                        expectationFailure
+                            ("interrupted session became active: "
+                                <> Text.unpack handle.sessionMeta.metaId)
+                doesDirectoryExist sessionDir `shouldReturn` False
+                doesDirectoryExist tempDir `shouldReturn` True
+                Store.loadSessionMetadata pool reservedId
+                    `shouldReturn` Right Nothing
+                cleanupPendingPersistence persist
+                doesDirectoryExist tempDir `shouldReturn` False
 
         it "creates and advances immutable prompt epochs before first use" $
             withTempStore \store root -> do

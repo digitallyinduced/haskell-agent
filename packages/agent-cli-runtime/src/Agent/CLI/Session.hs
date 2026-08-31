@@ -536,7 +536,7 @@ forkSessionAt root source turns requestedTitle targetCwd
                             cleanupFiles =
                                 cleanupForkFiles root sessionId (Just dir)
                             cleanupOwned = do
-                                cleanupForkDatabaseIfOwned
+                                cleanupSessionDatabaseIfOwned
                                     source.sessionPool
                                     storedMeta
                                 cleanupFiles
@@ -690,11 +690,11 @@ symbolicLinkStatusMaybe path =
             | otherwise -> ioError err
         Right status -> pure (Just status)
 
-cleanupForkDatabaseIfOwned
+cleanupSessionDatabaseIfOwned
     :: StorePool
     -> Store.SessionMetadata
     -> IO ()
-cleanupForkDatabaseIfOwned pool expected = do
+cleanupSessionDatabaseIfOwned pool expected = do
     loaded <- Store.loadSessionMetadata pool expected.sessionMetadataKey
     case loaded of
         Right (Just actual)
@@ -720,74 +720,113 @@ createReservedSession
     -> OsPath
     -> Maybe SessionPromptSnapshot
     -> IO SessionHandle
-createReservedSession spec sessionId tempDir promptSnapshot = do
-    let pool = spec.createPool
-    ensurePrivateDir spec.createRoot
-    dir <- either (fail . Text.unpack) pure
-        (sessionDirForId spec.createRoot sessionId)
-    createDirectory dir
-    setFileMode (unsafeToFilePath dir) 0o700
-    now <- normalizePostgresTimestamp <$> getCurrentTime
-    let title = case spec.createTitleHint of
-            Just hint | not (Text.null hint) -> hint
-            _ -> "untitled"
-        meta = SessionMeta
-            { metaVersion = sessionSchemaVersion
-            , metaId = sessionId
-            , metaCreatedAt = now
-            , metaUpdatedAt = now
-            , metaProvider = spec.createTarget.targetProvider
-            , metaConnection = spec.createTarget.targetConnectionId
-            , metaModel = spec.createTarget.targetModelId
-            , metaTransportModel = Just spec.createTarget.targetWireModelId
-            , metaDialect = spec.createTarget.targetDialect
-            , metaLegacySubagentTarget = Just LegacySubagentTarget
-                { legacyTargetProvider = spec.createTarget.targetProvider
-                , legacyTargetConnection = spec.createTarget.targetConnectionId
-                , legacyTargetEffectiveModel =
-                    spec.createTarget.targetWireModelId
-                , legacyTargetDialect = spec.createTarget.targetDialect
+createReservedSession spec sessionId tempDir promptSnapshot =
+    createReservedSessionWithHandoff
+        spec
+        sessionId
+        tempDir
+        promptSnapshot
+        (const (pure ()))
+
+-- | Create a durable session and run its ownership handoff while async
+-- exceptions remain masked. The PostgreSQL write is interruptible, but any
+-- ambiguous partial commit is removed before the exception is rethrown.
+createReservedSessionWithHandoff
+    :: SessionCreate
+    -> Text
+    -> OsPath
+    -> Maybe SessionPromptSnapshot
+    -> (SessionHandle -> IO ())
+    -> IO SessionHandle
+createReservedSessionWithHandoff
+        spec
+        sessionId
+        tempDir
+        promptSnapshot
+        handoff =
+    mask \restore -> do
+        let pool = spec.createPool
+        ensurePrivateDir spec.createRoot
+        dir <- either (fail . Text.unpack) pure
+            (sessionDirForId spec.createRoot sessionId)
+        now <- normalizePostgresTimestamp <$> getCurrentTime
+        let title = case spec.createTitleHint of
+                Just hint | not (Text.null hint) -> hint
+                _ -> "untitled"
+            meta = SessionMeta
+                { metaVersion = sessionSchemaVersion
+                , metaId = sessionId
+                , metaCreatedAt = now
+                , metaUpdatedAt = now
+                , metaProvider = spec.createTarget.targetProvider
+                , metaConnection = spec.createTarget.targetConnectionId
+                , metaModel = spec.createTarget.targetModelId
+                , metaTransportModel = Just spec.createTarget.targetWireModelId
+                , metaDialect = spec.createTarget.targetDialect
+                , metaLegacySubagentTarget = Just LegacySubagentTarget
+                    { legacyTargetProvider = spec.createTarget.targetProvider
+                    , legacyTargetConnection = spec.createTarget.targetConnectionId
+                    , legacyTargetEffectiveModel =
+                        spec.createTarget.targetWireModelId
+                    , legacyTargetDialect = spec.createTarget.targetDialect
+                    }
+                , metaCwd = spec.createCwd
+                , metaEffort = spec.createEffort
+                , metaTitle = title
+                , metaTitleIsManual = spec.createTitleIsManual
+                , metaTitleRefreshIndex = 0
+                , metaTitleUserTurns = 0
+                , metaLastResponseId = Nothing
+                , metaInputTokens = 0
+                , metaOutputTokens = 0
+                , metaCachedTokens = 0
+                , metaLastRecap = Nothing
+                , metaLastTurnSummary = Nothing
+                , metaLastRecapMainTurns = 0
+                , metaPromptSnapshot = promptSnapshot
                 }
-            , metaCwd = spec.createCwd
-            , metaEffort = spec.createEffort
-            , metaTitle = title
-            , metaTitleIsManual = spec.createTitleIsManual
-            , metaTitleRefreshIndex = 0
-            , metaTitleUserTurns = 0
-            , metaLastResponseId = Nothing
-            , metaInputTokens = 0
-            , metaOutputTokens = 0
-            , metaCachedTokens = 0
-            , metaLastRecap = Nothing
-            , metaLastTurnSummary = Nothing
-            , metaLastRecapMainTurns = 0
-            , metaPromptSnapshot = promptSnapshot
-            }
-        handle = SessionHandle
-            { sessionPool = pool
-            , sessionDir = dir
-            , sessionTempDir = tempDir
-            , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
-            , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
-            , sessionMeta = meta
-            }
-    let createStored = case promptSnapshot of
-            Nothing -> Store.createSession pool (toStoredMetadata meta)
-            Just snapshot ->
-                Store.createSessionWithInitialPromptEpoch
-                    pool
-                    (toStoredMetadata meta)
-                    (toStoredPromptSnapshot snapshot)
-    createStored >>= \case
-        Left err -> do
-            _ <- tryIO (removePathForcibly dir)
-            fail
-                ("could not create PostgreSQL session: "
-                    <> Text.unpack (renderStoreError err))
-        Right False -> do
-            _ <- tryIO (removePathForcibly dir)
-            fail "could not allocate a unique PostgreSQL session id"
-        Right True -> pure handle
+            handle = SessionHandle
+                { sessionPool = pool
+                , sessionDir = dir
+                , sessionTempDir = tempDir
+                , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
+                , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
+                , sessionMeta = meta
+                }
+        let createStored = case promptSnapshot of
+                Nothing -> Store.createSession pool (toStoredMetadata meta)
+                Just snapshot ->
+                    Store.createSessionWithInitialPromptEpoch
+                        pool
+                        (toStoredMetadata meta)
+                        (toStoredPromptSnapshot snapshot)
+            cleanupCreated =
+                cleanupSessionDatabaseIfOwned pool (toStoredMetadata meta)
+                    `finally` cleanupDirectory
+            cleanupDirectory = do
+                _ <- tryIO (removePathForcibly dir)
+                pure ()
+        -- Directory creation acquires ownership while masked. Every subsequent
+        -- interruptible operation is covered by cleanupCreated.
+        createDirectory dir
+        created <-
+            restore
+                (setFileMode (unsafeToFilePath dir) 0o700 >> createStored)
+                `onException` cleanupCreated
+        handle' <- case created of
+            Left err -> do
+                cleanupCreated
+                fail
+                    ("could not create PostgreSQL session: "
+                        <> Text.unpack (renderStoreError err))
+            Right False -> do
+                -- The conflicting database row is not ours.
+                cleanupDirectory
+                fail "could not allocate a unique PostgreSQL session id"
+            Right True -> pure handle
+        -- The pending-to-active handoff remains masked after durable creation.
+        handoff handle'
+        pure handle'
 
 -- | Create the session directory on first use when persistence is still pending.
 ensureSession :: IORef PersistenceState -> IO SessionHandle
@@ -795,10 +834,13 @@ ensureSession slotRef = do
     slot <- readIORef slotRef
     case slot of
         PersistenceActive handle -> pure handle
-        PersistencePending spec sessionId tempDir -> do
-            handle <- createReservedSession spec sessionId tempDir Nothing
-            writeIORef slotRef (PersistenceActive handle)
-            pure handle
+        PersistencePending spec sessionId tempDir ->
+            createReservedSessionWithHandoff
+                spec
+                sessionId
+                tempDir
+                Nothing
+                (writeIORef slotRef . PersistenceActive)
 
 -- | Return a durable, resumable session ID, materializing pending persistence.
 ensurePersistenceSessionId :: Persistence -> IO (Maybe Text)
@@ -818,14 +860,13 @@ ensureSessionWithPromptSnapshot
 ensureSessionWithPromptSnapshot slotRef candidate = do
     slot <- readIORef slotRef
     case slot of
-        PersistencePending spec sessionId tempDir -> do
-            handle <- createReservedSession
+        PersistencePending spec sessionId tempDir ->
+            createReservedSessionWithHandoff
                 spec
                 sessionId
                 tempDir
                 (Just candidate)
-            writeIORef slotRef (PersistenceActive handle)
-            pure handle
+                (writeIORef slotRef . PersistenceActive)
         PersistenceActive handle -> do
             let snapshot =
                     maybe candidate
