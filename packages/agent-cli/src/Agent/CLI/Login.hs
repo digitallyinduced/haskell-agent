@@ -81,7 +81,7 @@ import Agent.CLI.GatewayClient
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
     , connectGateway
-    , connectGatewayBrowser
+    , connectGatewayBrowserWithCancel
     , defaultGatewayBaseUrl
     , loadGatewayCredential
     , pollGatewayAuthorization
@@ -131,13 +131,22 @@ import qualified Agent.XAI.Auth as XAIAuth
 import qualified Agent.XAI.Usage as XAI
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async
-    ( mapConcurrently
+    ( Async
+    , mapConcurrently
     , mapConcurrently_
+    , poll
     , race
+    , wait
     , withAsync
     )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
-import Control.Exception.Safe (bracket, bracket_, tryAny)
+import Control.Concurrent.MVar
+    ( MVar
+    , newEmptyMVar
+    , putMVar
+    , takeMVar
+    )
+import Control.Exception.Safe (bracket, bracket_, onException, tryAny)
 import Control.Monad (join, unless, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -512,45 +521,117 @@ connectFullscreenGatewayBrowser
 connectFullscreenGatewayBrowser runtime = do
     result <-
         withLoginProgress runtime "Waiting for platform gateway login…" $
-            connectGatewayBrowser
-                defaultGatewayBaseUrl
-                "Haskell Agent CLI"
-                (presentGatewayBrowserLoginFullscreen runtime)
+            runFullscreenGatewayBrowser runtime
     pure $
-        Just $
-            case result of
-                Left err ->
-                    LoginNotice False
-                        ("Gateway connection failed: " <> err)
-                Right () ->
+        case result of
+            Left err
+                | gatewayBrowserAuthorizationCancelled err ->
+                    Nothing
+                | otherwise ->
+                    Just $
+                        LoginNotice False
+                            ("Gateway connection failed: " <> err)
+            Right () ->
+                Just $
                     LoginNotice True
                         "Platform gateway connected. Restart the agent to apply the new route immediately."
 
-presentGatewayBrowserLoginFullscreen
+runFullscreenGatewayBrowser
     :: FullscreenRuntime
+    -> IO (Either Text ())
+runFullscreenGatewayBrowser runtime = do
+    presentation <- newEmptyMVar
+    cancellation <- newEmptyMVar
+    withAsync
+        (connectGatewayBrowserWithCancel
+            defaultGatewayBaseUrl
+            "Haskell Agent CLI"
+            (presentGatewayBrowserLogin presentation)
+            (takeMVar cancellation))
+        \authorization ->
+            race
+                (takeMVar presentation)
+                (waitGatewayBrowserAuthorization authorization)
+                >>= \case
+                    Left details ->
+                        awaitFullscreenGatewayBrowser
+                            runtime
+                            authorization
+                            cancellation
+                            details
+                    Right result -> pure result
+
+presentGatewayBrowserLogin
+    :: MVar (Text, Bool)
     -> Text
     -> IO Bool
-presentGatewayBrowserLoginFullscreen runtime authorizationUrl = do
+presentGatewayBrowserLogin presentation authorizationUrl = do
     opened <- openBrowser authorizationUrl
-    if opened
-        then pure True
-        else do
-            choice <-
-                requestFullscreenChoiceWithBody
-                    runtime
-                    "Log in to platform gateway"
-                    ( "The browser could not be opened automatically. "
-                        <> "[Open the platform login page]("
-                        <> authorizationUrl
-                        <> "), then return here."
-                    )
-                    0
-                    [ ( "Wait for browser login"
-                      , "Continue waiting for the secure local callback"
-                      )
-                    , ("Cancel", "Stop without changing the saved gateway")
-                    ]
-            pure (choice == Just 0)
+    putMVar presentation (authorizationUrl, opened)
+    pure True
+
+awaitFullscreenGatewayBrowser
+    :: FullscreenRuntime
+    -> Async (Either Text ())
+    -> MVar ()
+    -> (Text, Bool)
+    -> IO (Either Text ())
+awaitFullscreenGatewayBrowser
+    runtime authorization cancellation (authorizationUrl, opened) =
+        pollGatewayBrowserAuthorization authorization >>= \case
+            Just result -> pure result
+            Nothing -> do
+                choice <-
+                    requestFullscreenChoiceWithBody
+                        runtime
+                        "Log in to platform gateway"
+                        (Text.intercalate "\n\n"
+                            [ if opened
+                                then
+                                    "A browser window was opened automatically. Approve access there, then return here."
+                                else
+                                    "The browser could not be opened automatically. [Open the platform login page]("
+                                        <> authorizationUrl
+                                        <> "), then return here."
+                            , "Select Check connection after approving. Cancel or Esc stops waiting for the local callback."
+                            ])
+                        0
+                        [ ( "Check connection"
+                          , "See whether browser authorization completed"
+                          )
+                        , ( "Cancel"
+                          , "Stop without changing the saved gateway"
+                          )
+                        ]
+                case choice of
+                    Just 0 ->
+                        awaitFullscreenGatewayBrowser
+                            runtime
+                            authorization
+                            cancellation
+                            (authorizationUrl, opened)
+                    _ -> do
+                        putMVar cancellation ()
+                        waitGatewayBrowserAuthorization authorization
+
+pollGatewayBrowserAuthorization
+    :: Async (Either Text ())
+    -> IO (Maybe (Either Text ()))
+pollGatewayBrowserAuthorization authorization =
+    poll authorization >>= \case
+        Nothing -> pure Nothing
+        Just (Left _) ->
+            pure $
+                Just $
+                    Left
+                        "Gateway browser authorization failed unexpectedly."
+        Just (Right result) -> pure (Just result)
+
+waitGatewayBrowserAuthorization
+    :: Async (Either Text ())
+    -> IO (Either Text ())
+waitGatewayBrowserAuthorization authorization =
+    wait authorization
 
 connectFullscreenGatewayDevice
     :: FullscreenRuntime
@@ -1268,10 +1349,10 @@ connectTerminalGateway color = do
     currentGatewayLoginFlow >>= \case
         GatewayBrowserOAuth -> do
             result <-
-                connectGatewayBrowser
+                connectGatewayBrowserWithCancel
                     defaultGatewayBaseUrl
                     "Haskell Agent CLI"
-                    \authorizationUrl -> do
+                    (\authorizationUrl -> do
                         Text.hPutStrLn stderr $
                             roleMuted color "Open "
                                 <> rolePrompt color authorizationUrl
@@ -1286,12 +1367,20 @@ connectTerminalGateway color = do
                         hFlush stderr
                         -- Printing the complete link is a valid presentation
                         -- fallback even when automatic browser launch fails.
-                        pure True
-            printLoginResult color $
-                fmap
-                    (const
-                        "Platform gateway connected. Restart the agent to apply the new route immediately.")
-                    result
+                        pure True)
+                    (waitForTerminalGatewayBrowserCancellation color)
+            case result of
+                Left err
+                    | gatewayBrowserAuthorizationCancelled err ->
+                        Text.hPutStrLn stderr $
+                            roleMuted color
+                                "Gateway authorization cancelled."
+                _ ->
+                    printLoginResult color $
+                        fmap
+                            (const
+                                "Platform gateway connected. Restart the agent to apply the new route immediately.")
+                            result
         GatewayDeviceFlow ->
             tryAny (connectGateway defaultGatewayBaseUrl) >>= \case
                 Left exception ->
@@ -1300,6 +1389,25 @@ connectTerminalGateway color = do
                             <> formatException exception)
                 Right () ->
                     pure ()
+
+waitForTerminalGatewayBrowserCancellation :: Bool -> IO ()
+waitForTerminalGatewayBrowserCancellation color =
+    loop `onException` Text.hPutStrLn stderr ""
+  where
+    loop =
+        readApprovalLine
+            (roleMuted color
+                "Press Esc or q to cancel gateway authorization. ")
+            >>= \case
+                Nothing -> pure ()
+                Just answer
+                    | Text.toLower answer `elem` ["q", "\ESC"] ->
+                        pure ()
+                    | otherwise -> loop
+
+gatewayBrowserAuthorizationCancelled :: Text -> Bool
+gatewayBrowserAuthorizationCancelled =
+    (== "Gateway browser authorization was cancelled.")
 
 connectAccount :: Bool -> IO (Maybe (Provider, Text))
 connectAccount color =

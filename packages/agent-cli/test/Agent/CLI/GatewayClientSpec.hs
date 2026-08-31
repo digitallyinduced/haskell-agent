@@ -73,6 +73,15 @@ spec = describe "gateway device authorization" do
             `shouldBe`
                 "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
+    it "allows an interactive caller to cancel the callback wait" do
+        connectGatewayBrowserWithCancel
+            defaultGatewayBaseUrl
+            "Haskell Agent CLI"
+            (const (pure True))
+            (pure ())
+            `shouldReturn`
+                Left "Gateway browser authorization was cancelled."
+
     it "accepts only the exact IPv4 loopback redirect contract" do
         let authorize redirect =
                 gatewayAuthorizationUrl

@@ -6,6 +6,7 @@ module Agent.CLI.GatewayClient
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
     , connectGatewayBrowser
+    , connectGatewayBrowserWithCancel
     , defaultGatewayBaseUrl
     , gatewayAuthorizationCodeDecoder
     , gatewayAuthorizationUrl
@@ -38,6 +39,8 @@ import Agent.Json.Decode qualified as Hermes
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (race)
+import Control.Concurrent.STM (atomically, retry)
 import Control.Exception.Safe (bracket, bracketOnError, tryAny)
 import Control.Monad (when)
 import Crypto.Hash (Digest, SHA256, hash)
@@ -374,6 +377,23 @@ connectGatewayBrowser
     -> (Text -> IO Bool)
     -> IO (Either Text ())
 connectGatewayBrowser rawBaseUrl rawClientName present =
+    connectGatewayBrowserWithCancel
+        rawBaseUrl
+        rawClientName
+        present
+        (atomically retry)
+
+-- | Browser authorization with an explicit cancellation signal. Callers that
+-- own an interactive prompt can complete the supplied action to stop waiting
+-- for the loopback callback without waiting for the five-minute timeout.
+connectGatewayBrowserWithCancel
+    :: Text
+    -> Text
+    -> (Text -> IO Bool)
+    -> IO ()
+    -> IO (Either Text ())
+connectGatewayBrowserWithCancel
+    rawBaseUrl rawClientName present waitForCancellation =
     case validateBaseUrl rawBaseUrl of
         Left err -> pure (Left err)
         Right baseUrl -> do
@@ -410,15 +430,21 @@ connectGatewayBrowser rawBaseUrl rawClientName present =
                         callback <-
                             timeout
                                 gatewayBrowserTimeoutMicroseconds
-                                (receiveGatewayAuthorizationCallback
-                                    listener state)
+                                (race
+                                    waitForCancellation
+                                    (receiveGatewayAuthorizationCallback
+                                        listener state))
                         case callback of
                             Nothing ->
                                 pure
                                     (Left
                                         "Gateway browser authorization timed out.")
-                            Just (Left err) -> pure (Left err)
-                            Just (Right authorizationCode) ->
+                            Just (Left ()) ->
+                                pure
+                                    (Left
+                                        "Gateway browser authorization was cancelled.")
+                            Just (Right (Left err)) -> pure (Left err)
+                            Just (Right (Right authorizationCode)) ->
                                 exchangeGatewayAuthorizationCode
                                     baseUrl
                                     redirectUri
