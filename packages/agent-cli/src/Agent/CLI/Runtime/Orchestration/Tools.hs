@@ -9,7 +9,8 @@ import Agent.CLI.AgentSessions
       sessionThreadStatus,
       AgentSessionToolsEnv(toolsSessionStatus, AgentSessionToolsEnv,
                            toolsPool, toolsRoot, toolsProvider, toolsConnection, toolsModel,
-                           toolsTransportModel, toolsDialect, toolsCwd, toolsEffort,
+                           toolsTransportModel, toolsDialect, toolsAllowedModels,
+                           toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn) )
 import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
@@ -39,6 +40,10 @@ import Agent.CLI.Dialects
       filterBashTools,
       filterGhciTools )
 import Agent.CLI.Error ( formatException )
+import Agent.CLI.GatewayClient
+    ( GatewayModelAccess
+    , cachedGatewayModels
+    )
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt (InterruptState)
@@ -61,8 +66,10 @@ import Agent.CLI.ModelConfig
     (ModelCatalog, ResponsesConnection(..), builtinConnectionId)
 import Agent.CLI.Models
     ( defaultModelFor,
+      gatewayModelOptions,
       rawModelOption,
       resolveConfiguredModel,
+      resolveModelOptionById,
       resolvePersistedDialect,
       ModelOption(modelTarget),
       ModelTarget(targetProvider, targetConnectionId, targetModelId, targetDialect,
@@ -325,6 +332,7 @@ runAgentTools
     -> IORef Text
     -> ToolEnv
     -> ModelCatalog
+    -> IORef (Maybe GatewayModelAccess)
     -> Bool
     -> Maybe ModelTarget
     -> Maybe (Text, ResponsesConnection)
@@ -371,6 +379,7 @@ runAgentTools
     activeSelectionRef
     baseToolEnv
     catalog
+    gatewayModelsRef
     checkStartupUsageInBackground
     configuredOptionTarget
     customResponses
@@ -413,6 +422,77 @@ runAgentTools
         loadHarnessConfig home >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right config -> pure config
+    (gatewaySelection, gatewayAllowedChildModels) <-
+        if not (isGatewayLoadedAuth loaded)
+            then pure (Nothing, Nothing)
+            else do
+                access <-
+                    readIORef gatewayModelsRef >>= \case
+                        Nothing ->
+                            startupDie startup
+                                "The organization gateway model catalog is unavailable."
+                        Just value -> pure value
+                cachedGatewayModels access >>= \case
+                    Nothing ->
+                        startupDie startup
+                            "The organization gateway model catalog is unavailable."
+                    Just modelIds ->
+                        case
+                            gatewayModelOptions
+                                catalog
+                                (builtinConnectionId OpenAIProvider)
+                                OpenAIProvider
+                                modelIds
+                            of
+                            [] ->
+                                startupDie startup
+                                    "The organization gateway does not offer any models."
+                            firstAvailable : remainingAvailable -> do
+                                let available =
+                                        firstAvailable : remainingAvailable
+                                    resolveTarget target =
+                                        resolveModelOptionById
+                                            available
+                                            target.targetModelId
+                                selected <- case options.optModel of
+                                    Just requested ->
+                                        case
+                                            resolveModelOptionById
+                                                available
+                                                requested
+                                            of
+                                            Nothing ->
+                                                startupDie startup $
+                                                    "Model '"
+                                                        <> Text.unpack requested
+                                                        <> "' is not available through your organization gateway."
+                                            Just selected ->
+                                                pure selected
+                                    Nothing ->
+                                        pure $
+                                            fromMaybe firstAvailable $
+                                                ( transitionTarget
+                                                    >>= resolveTarget
+                                                )
+                                                    <|> ( configuredOptionTarget
+                                                            >>= resolveTarget
+                                                        )
+                                                    <|> ( resumedTarget
+                                                            >>= resolveTarget
+                                                        )
+                                                    <|> ( projectTarget
+                                                            >>= resolveTarget
+                                                        )
+                                                    <|> ( targetHint
+                                                            >>= resolveTarget
+                                                        )
+                                pure
+                                    ( Just selected
+                                    , Just
+                                        (map
+                                            (.modelTarget.targetModelId)
+                                            available)
+                                    )
     let basePlanHooks
             | startup.startupBackground =
                 PlanModeHooks
@@ -451,18 +531,28 @@ runAgentTools
             fromMaybe
                 (error "validated default model is missing")
                 (defaultModelFor catalog provider)
-        model = fromMaybe
-            (maybe fallbackModel (.targetModelId) targetHint)
-            options.optModel
+        unrestrictedModel =
+            fromMaybe
+                (maybe fallbackModel (.targetModelId) targetHint)
+                options.optModel
+        model =
+            maybe
+                unrestrictedModel
+                (.modelTarget.targetModelId)
+                gatewaySelection
         rawTarget = (rawModelOption provider model).modelTarget
         inferredTarget0 =
-            fromMaybe rawTarget $
-                transitionTarget
-                    <|> configuredOptionTarget
-                    <|> resumedTarget
-                    <|> if isNothing options.optModel
-                        then projectTarget
-                        else Nothing
+            maybe
+                ( fromMaybe rawTarget $
+                    transitionTarget
+                        <|> configuredOptionTarget
+                        <|> resumedTarget
+                        <|> if isNothing options.optModel
+                            then projectTarget
+                            else Nothing
+                )
+                (.modelTarget)
+                gatewaySelection
         transportModel = case customResponses of
             Just _ ->
                 \name ->
@@ -521,17 +611,19 @@ runAgentTools
                 <$> persistedTarget
         mappedTargetChanged =
             maybe False snd resolvedPersistedTarget
-        dialectId = case transitionTarget of
-            Just target -> target.targetDialect
-            Nothing -> case options.optModel of
-                Just _ -> inferredTarget.targetDialect
-                Nothing
-                    | mappedTargetChanged -> inferredTarget.targetDialect
-                    | otherwise ->
-                        maybe
-                            inferredTarget.targetDialect
-                            fst
-                            resolvedPersistedTarget
+        dialectId = case gatewaySelection of
+            Just selected -> selected.modelTarget.targetDialect
+            Nothing -> case transitionTarget of
+                Just target -> target.targetDialect
+                Nothing -> case options.optModel of
+                    Just _ -> inferredTarget.targetDialect
+                    Nothing
+                        | mappedTargetChanged -> inferredTarget.targetDialect
+                        | otherwise ->
+                            maybe
+                                inferredTarget.targetDialect
+                                fst
+                                resolvedPersistedTarget
         dialect = dialectForId dialectId
         resumeTargetChanged = case fst <$> resumed of
             Just meta ->
@@ -601,11 +693,14 @@ runAgentTools
                         pure (Just openaiLoaded.loadedTokenProvider)
         _ ->
             pure Nothing
-    let grokAllowedChildModels = case provider of
-            XAIProvider ->
-                Just (grokRootChildModels (isJust openaiChild))
-            _ ->
-                Nothing
+    let allowedChildModels =
+            case gatewayAllowedChildModels of
+                Just modelIds -> Just modelIds
+                Nothing -> case provider of
+                    XAIProvider ->
+                        Just (grokRootChildModels (isJust openaiChild))
+                    _ ->
+                        Nothing
         sendToRoot message = do
             enqueuePendingInput pendingNotices (AgentMessage message) >>= \case
                 Left err -> pure (Left err)
@@ -653,10 +748,13 @@ runAgentTools
                     subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             , multiSpawnModelGuidance =
-                subscriptionSubagentModelGuidance
-                    provider
-                    (tokenProviderBillingMode tokenProvider)
-            , multiAllowedChildModels = grokAllowedChildModels
+                if isJust gatewayAllowedChildModels
+                    then Nothing
+                    else
+                        subscriptionSubagentModelGuidance
+                            provider
+                            (tokenProviderBillingMode tokenProvider)
+            , multiAllowedChildModels = allowedChildModels
             }
     promptRequest <- loadPrompt options
     let promptText = fmap (\request -> request.managedTurnText) promptRequest
@@ -959,6 +1057,7 @@ runAgentTools
             , toolsModel = model
             , toolsTransportModel = inferredTarget.targetWireModelId
             , toolsDialect = dialectId
+            , toolsAllowedModels = gatewayAllowedChildModels
             , toolsCwd = cwd
             , toolsEffort = effortText
             , toolsCurrentSessionId =
@@ -1100,6 +1199,7 @@ runAgentTools
         (clearImageGenerationHistory imageGenerationHistory)
         bashEnabledRef
         catalog
+        gatewayModelsRef
         checkStartupUsageInBackground
         claimCurrentSession
         claudeBypassEnabled
@@ -1118,7 +1218,7 @@ runAgentTools
         fullscreen
         gatewayTools
         ghciEnabledRef
-        grokAllowedChildModels
+        allowedChildModels
         home
         inferredTarget
         interrupt

@@ -11,7 +11,7 @@ import Agent.CLI.AgentSessions ()
 import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
-import Agent.CLI.Auth.Types (LoadedAuth(..))
+import Agent.CLI.Auth.Types (LoadedAuth(..), isGatewayLoadedAuth)
 import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
 import Agent.CLI.Command ()
@@ -359,10 +359,12 @@ runAgentProviders
                                 httpFallbackActive <- newIORef startsOnHttp
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
-                                let selectAccount = case loaded.loadedOpenAiPool of
-                                        Nothing -> Nothing
-                                        Just pool ->
-                                            Just \selectedAccountId -> do
+                                let selectAccount
+                                        | isGatewayLoadedAuth loaded = Nothing
+                                        | otherwise = case loaded.loadedOpenAiPool of
+                                            Nothing -> Nothing
+                                            Just pool ->
+                                                Just \selectedAccountId -> do
                                                     _ <- OpenAI.discoverAccounts pool
                                                     OpenAI.getAccessTokenForAccount
                                                         pool
@@ -648,6 +650,7 @@ runAgentProviders
                                                 pure (RunProviderStartFailed err)
                                         _
                                             | shouldProbeAtStartup
+                                            , not (isGatewayLoadedAuth loaded)
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
                                                     catalog

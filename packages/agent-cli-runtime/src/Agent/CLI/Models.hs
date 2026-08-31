@@ -12,11 +12,14 @@ module Agent.CLI.Models
     , defaultModelFor
     , defaultModelOptionFor
     , resolveConfiguredModel
+    , resolveModelOptionById
     , rawModelOption
+    , gatewayModelOptions
     , ensureCurrentInList
     , initialPickerState
     , initialPickerStateResolved
     , initialPickerStateResolvedWith
+    , initialPickerStateForOptions
     , visibleOptions
     , selectedOption
     , applyPickerEvent
@@ -43,7 +46,7 @@ import qualified Agent.OpenRouter.Options as OpenRouter
 import qualified Agent.OpenRouter.Request as OpenRouter
 import Agent.Provider (Provider(..))
 import Data.Char (isPrint)
-import Data.List (findIndex, nubBy)
+import Data.List (find, findIndex, nub, nubBy)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -74,6 +77,7 @@ data PickerState = PickerState
     , pickerProvider :: !Provider
     , pickerCurrent :: !Text
     , pickerCurrentDialect :: !DialectId
+    , pickerScopeLabel :: !Text
     , pickerAll :: ![ModelOption]
     , pickerFilter :: !Text
     , pickerIndex :: !Int
@@ -139,6 +143,10 @@ resolveConfiguredModel :: ModelCatalog -> Text -> Maybe ModelOption
 resolveConfiguredModel catalog modelId =
     catalogModelById catalog modelId >>= modelOptionFromCatalog catalog
 
+resolveModelOptionById :: [ModelOption] -> Text -> Maybe ModelOption
+resolveModelOptionById options modelId =
+    find ((== modelId) . (.modelTarget.targetModelId)) options
+
 rawModelOption :: Provider -> Text -> ModelOption
 rawModelOption provider model =
     ModelOption
@@ -153,6 +161,50 @@ rawModelOption provider model =
         , modelLabel = Nothing
         , modelFallbackPriority = Nothing
         }
+
+-- | Convert the exact aliases advertised by an organization gateway into
+-- model options.  Catalog entries may contribute presentation metadata and
+-- dialect identity, but never transport identity: every option remains pinned
+-- to the active gateway connection and sends the advertised alias verbatim.
+gatewayModelOptions
+    :: ModelCatalog
+    -> Text
+    -> Provider
+    -> [Text]
+    -> [ModelOption]
+gatewayModelOptions catalog connectionId provider =
+    map gatewayOption
+        . nub
+        . filter (not . Text.null)
+        . map Text.strip
+  where
+    gatewayOption modelId =
+        let configured =
+                resolveConfiguredModel catalog modelId >>= \option ->
+                    let target = option.modelTarget
+                    in if target.targetProvider == provider
+                        && target.targetConnectionId == connectionId
+                        then Just option
+                        else Nothing
+            configuredTarget = (.modelTarget) <$> configured
+        in ModelOption
+            { modelTarget = ModelTarget
+                { targetProvider = provider
+                , targetConnectionId = connectionId
+                , targetModelId = modelId
+                , targetWireModelId = modelId
+                , targetDialect =
+                    maybe
+                        (dialectIdForModel provider modelId)
+                        (.targetDialect)
+                        configuredTarget
+                }
+            , modelContextWindow =
+                configured >>= (.modelContextWindow)
+            , modelLabel = configured >>= (.modelLabel)
+            , modelFallbackPriority =
+                configured >>= (.modelFallbackPriority)
+            }
 
 -- | Prepend @current@ when it is missing so the active model stays visible.
 ensureCurrentInList
@@ -189,6 +241,8 @@ initialPickerState
     -> PickerState
 initialPickerState catalog connectionId provider current currentDialect =
     pickerStateFromOptions
+        True
+        "all providers"
         connectionId
         provider
         current
@@ -235,7 +289,32 @@ initialPickerStateResolvedWith
     resolved <- resolveModelOptionsDialects options
     pure $
         pickerStateFromOptions
+            True
+            "all providers"
             connectionId provider current currentDialect resolved
+
+-- | Build a picker from an authoritative option list.  Unlike the general
+-- catalog picker, this never re-inserts an unlisted current model.
+initialPickerStateForOptions
+    :: Text
+    -> [ModelOption]
+    -> Text
+    -> Provider
+    -> Text
+    -> DialectId
+    -> IO PickerState
+initialPickerStateForOptions
+        scopeLabel options connectionId provider current currentDialect = do
+    resolved <- resolveModelOptionsDialects (deduplicateOptions options)
+    pure $
+        pickerStateFromOptions
+            False
+            scopeLabel
+            connectionId
+            provider
+            current
+            currentDialect
+            resolved
 
 deduplicateOptions :: [ModelOption] -> [ModelOption]
 deduplicateOptions = nubBy sameIdentity
@@ -252,17 +331,23 @@ prioritizeCurrentConnection current options =
         <> filter ((/= current) . (.modelTarget.targetConnectionId)) options
 
 pickerStateFromOptions
-    :: Text
+    :: Bool
+    -> Text
+    -> Text
     -> Provider
     -> Text
     -> DialectId
     -> [ModelOption]
     -> PickerState
 pickerStateFromOptions
+        includeCurrent scopeLabel
         connectionId provider current currentDialect options =
     let allOpts =
-            ensureCurrentInList
-                connectionId provider current currentDialect options
+            if includeCurrent
+                then
+                    ensureCurrentInList
+                        connectionId provider current currentDialect options
+                else options
         idx = fromMaybe 0 $
             findIndex
                 (isCurrent connectionId current currentDialect)
@@ -272,6 +357,7 @@ pickerStateFromOptions
         , pickerProvider = provider
         , pickerCurrent = current
         , pickerCurrentDialect = currentDialect
+        , pickerScopeLabel = scopeLabel
         , pickerAll = allOpts
         , pickerFilter = ""
         , pickerIndex = idx

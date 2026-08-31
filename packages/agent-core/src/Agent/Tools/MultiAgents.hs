@@ -197,7 +197,8 @@ spawnAgentParameters ctx encryptMessage =
             [ "Model override for the new agent. Omit unless an explicit override is needed."
             , "Model or reasoning-effort overrides require `fork_turns` to be `none` or a positive integer."
             ]
-                <> maybe [] pure ctx.multiSpawnModelGuidance)
+                <> maybe [] pure ctx.multiSpawnModelGuidance
+                <> allowedModelGuidance ctx.multiAllowedChildModels)
     , PropertySchema "reasoning_effort" PropertyString False $ Just
         "Reasoning effort override for the new agent. Omit to inherit the parent effort. Overrides require `fork_turns` to be `none` or a positive integer."
     , PropertySchema "fork_turns" PropertyString False $ Just
@@ -237,6 +238,10 @@ runSpawn ctx workspace call args
             "full-history forks inherit the parent model and reasoning effort; \
             \set fork_turns to none or a positive integer when overriding \
             \model or reasoning_effort")
+    | not (allowedModelOverride ctx.multiAllowedChildModels args.model) =
+        pure
+            (Left
+                "The requested child model is not allowed by this organization.")
     | otherwise = mask \restore ->
         resolveSpawnWorkspace ctx workspace >>= \case
             Left err -> pure (Left err)
@@ -392,6 +397,31 @@ sanitizeOverride :: Maybe Text -> Maybe Text
 sanitizeOverride value = value >>= \raw ->
     let stripped = Text.strip raw
     in if Text.null stripped then Nothing else Just stripped
+
+allowedModelOverride :: Maybe [Text] -> Maybe Text -> Bool
+allowedModelOverride allowed override =
+    case sanitizeOverride override of
+        Nothing -> True
+        Just requested ->
+            maybe
+                True
+                (elem requested . map Text.strip)
+                allowed
+
+allowedModelGuidance :: Maybe [Text] -> [Text]
+allowedModelGuidance = \case
+    Nothing -> []
+    Just rawAllowed ->
+        let allowed = filter (not . Text.null) (map Text.strip rawAllowed)
+            rendered =
+                if null allowed
+                    then "(none)"
+                    else Text.intercalate ", " allowed
+        in
+            [ "Allowed child model IDs: "
+                <> rendered
+                <> ". Omit to inherit the parent model."
+            ]
 
 normalizeForkTurns :: Maybe Text -> Maybe Text
 normalizeForkTurns value =

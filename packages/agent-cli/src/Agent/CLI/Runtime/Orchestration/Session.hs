@@ -8,7 +8,9 @@ import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
-    ( LoadedAuth(loadedTokenProvider) )
+    ( LoadedAuth(loadedTokenProvider)
+    , isGatewayLoadedAuth
+    )
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Claude (newClaudeSessionRuntimeSlot)
 import Agent.CLI.CodeModeRuntime
@@ -26,6 +28,7 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))
 import Agent.CLI.Error ()
+import Agent.CLI.GatewayClient (GatewayModelAccess)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
@@ -109,7 +112,8 @@ import Agent.CLI.Session.History
       replaceLiveConversation )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
+    ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
+                     gatewayModelsRef, modelInfo,
                      connectionId, options, provider, dialect, policyRef, allTools,
                      claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
@@ -183,7 +187,8 @@ import Agent.OpenRouter.LoopBackend ()
 import Agent.OpenRouter.Options (ClientOptions)
 import Agent.OsPath ()
 import Agent.Provider
-    (Credential, Provider, TokenProvider, tokenProviderBillingMode)
+    (Credential, Provider(OpenAIProvider), TokenProvider,
+     tokenProviderBillingMode)
 import Agent.ReasoningEffort ()
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient (GenericClientOptions)
@@ -225,7 +230,7 @@ import Data.IORef
       writeIORef )
 import Data.List ()
 import Data.Map.Strict (Map)
-import Data.Maybe ( isNothing, fromMaybe )
+import Data.Maybe ( isJust, isNothing, fromMaybe )
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time.Clock ( getCurrentTime, utctDay )
@@ -269,6 +274,7 @@ runAgentSession
     -> IO ()
     -> IORef Bool
     -> ModelCatalog
+    -> IORef (Maybe GatewayModelAccess)
     -> Bool
     -> (SessionHandle -> IO ())
     -> Bool
@@ -351,6 +357,7 @@ runAgentSession
     clearImageGenerationHistory
     bashEnabledRef
     catalog
+    gatewayModelsRef
     checkStartupUsageInBackground
     claimCurrentSession
     claudeBypassEnabled
@@ -369,7 +376,7 @@ runAgentSession
     fullscreen
     gatewayTools
     ghciEnabledRef
-    grokAllowedChildModels
+    allowedChildModels
     home
     inferredTarget
     interrupt
@@ -447,7 +454,9 @@ runAgentSession
                 stateDirectory
                 provider
                 dialect
-                (Just loaded.loadedTokenProvider)
+                (if isGatewayLoadedAuth loaded
+                    then Nothing
+                    else Just loaded.loadedTokenProvider)
                 model
         let initializeCodeMode =
                 if options.optCodeMode
@@ -619,10 +628,14 @@ runAgentSession
                 , subagentCreateWorktree = Just createSubagentWorktree
                 , subagentSessionTmp = toolEnv.toolSessionTmp
                 , subagentSpawnModelGuidance =
-                    subscriptionSubagentModelGuidance
-                        provider
-                        (tokenProviderBillingMode tokenProvider)
-                , subagentAllowedChildModels = grokAllowedChildModels
+                    if provider == OpenAIProvider
+                        && isJust allowedChildModels
+                        then Nothing
+                        else
+                            subscriptionSubagentModelGuidance
+                                provider
+                                (tokenProviderBillingMode tokenProvider)
+                , subagentAllowedChildModels = allowedChildModels
                 , subagentOpenAiChild = openaiChild
                 }
         let conversationRef = startup.startupSessionState.sessionConversation
@@ -723,6 +736,7 @@ runAgentSession
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
+                                , gatewayModelsRef
                                 , claudeRuntimeSlot
                                 , claudeBridgeTools
                                 , modelInfo = codexModelInfo
@@ -803,7 +817,8 @@ runAgentSession
                                 , codexCatalogSession = catalogSession
                                 }
                     withStartupAvailability action
-                        | shouldProbeAtStartup =
+                        | shouldProbeAtStartup
+                        , not (isGatewayLoadedAuth loaded) =
                             withAsync
                                 (probeLoadedAvailability
                                     loaded

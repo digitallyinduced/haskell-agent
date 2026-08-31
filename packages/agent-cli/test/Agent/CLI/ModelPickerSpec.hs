@@ -137,6 +137,20 @@ spec = do
             frame `shouldNotSatisfy` Text.isInfixOf "\BEL"
             length (Text.lines frame) `shouldBe` 21
 
+        it "does not display a stale current model outside an authoritative scope" do
+            state <-
+                initialPickerStateForOptions
+                    "organization gateway"
+                    [rawModelOption OpenAIProvider "company-model"]
+                    "openai"
+                    OpenAIProvider
+                    "revoked-model"
+                    CodexDialect
+            let frame = renderPickerFrame False state
+            frame `shouldSatisfy` Text.isInfixOf "organization gateway"
+            frame `shouldSatisfy` Text.isInfixOf "company-model"
+            frame `shouldNotSatisfy` Text.isInfixOf "revoked-model"
+
     describe "formatCatalogListing" do
         it "lists the current model and entries from every provider" do
             listing <-

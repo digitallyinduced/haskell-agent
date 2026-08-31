@@ -113,6 +113,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.MVar
     (modifyMVar, modifyMVar_, newMVar)
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally, throwIO)
 import Control.Monad (unless)
 import Data.IORef
@@ -457,9 +458,12 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                     childModel
                     childEffort
         sessionTmp <- readIORef runtime.subagentSessionTmp
-        case activeSubagentTargetError
-                OpenAIProvider runtime.subagentConnection
-                model prepared.preparedSession of
+        case allowedChildModelError
+                runtime.subagentAllowedChildModels
+                model
+                <|> activeSubagentTargetError
+                    OpenAIProvider runtime.subagentConnection
+                    model prepared.preparedSession of
             Just err -> pure (Left (LoopUnexpected err))
             Nothing -> do
                 coding <-
@@ -869,6 +873,13 @@ inheritsFullHistory = \case
     Nothing -> True
     Just turns ->
         Text.toLower (Text.strip turns) `elem` ["", "all"]
+
+allowedChildModelError :: Maybe [Text] -> Text -> Maybe Text
+allowedChildModelError Nothing _ = Nothing
+allowedChildModelError (Just allowed) model
+    | model `elem` map Text.strip allowed = Nothing
+    | otherwise =
+        Just "The child model is not allowed by this organization."
 
 runPreparedChild
     :: SubagentRuntime

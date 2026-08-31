@@ -108,6 +108,7 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsModel :: !Text
     , toolsTransportModel :: !Text
     , toolsDialect :: !DialectId
+    , toolsAllowedModels :: !(Maybe [Text])
     , toolsCwd :: !OsPath
     , toolsEffort :: !Text
     , toolsCurrentSessionId :: !(IO (Maybe Text))
@@ -305,8 +306,8 @@ createAgentSessionTool env = jsonTool
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
         "Optional session title. Defaults to a title derived from the message."
-    , PropertySchema "model" PropertyString False $ Just
-        "Optional model override. Defaults to the current session model."
+    , PropertySchema "model" modelPropertyType False $ Just
+        modelPropertyDescription
     , PropertySchema "reasoning_effort" PropertyString False $ Just
         "Optional reasoning-effort override. Defaults to the current session effort."
     ]
@@ -314,6 +315,18 @@ createAgentSessionTool env = jsonTool
     TurnSequential
     (typedTool "create_agent_session" createAgentSessionArgsDecoder
         (runCreateAgentSession env))
+  where
+    modelPropertyType =
+        maybe
+            PropertyString
+            (PropertyEnum . normalizedAllowedModels)
+            env.toolsAllowedModels
+    modelPropertyDescription =
+        case env.toolsAllowedModels of
+            Nothing ->
+                "Optional model override. Defaults to the current session model."
+            Just _ ->
+                "Optional organization-approved model override. Defaults to the current session model."
 
 runCreateAgentSession
     :: AgentSessionToolsEnv
@@ -324,9 +337,13 @@ runCreateAgentSession env args
         pure (Left "create_agent_session requires a non-empty message")
     | maybe False ((> 100) . Text.length . Text.strip) args.title =
         pure (Left "create_agent_session title must be at most 100 characters")
+    | not (allowedModelOverride env.toolsAllowedModels normalizedOverride) =
+        pure
+            (Left
+                "The requested session model is not allowed by this organization.")
     | otherwise = do
-        let model = fromMaybe env.toolsModel args.model
-        target <- case args.model of
+        let model = fromMaybe env.toolsModel normalizedOverride
+        target <- case normalizedOverride of
             Nothing ->
                 pure ModelOption
                     { modelTarget = ModelTarget
@@ -373,6 +390,25 @@ runCreateAgentSession env args
                 "created session " <> handle.sessionMeta.metaId
                     <> " but failed to start it: " <> err
             Right result -> pure (Right result)
+  where
+    normalizedOverride = normalizeModelOverride args.model
+    allowedModelOverride allowed requested =
+        case requested of
+            Nothing -> True
+            Just requestedModel ->
+                maybe
+                    True
+                    (elem requestedModel . normalizedAllowedModels)
+                    allowed
+
+normalizeModelOverride :: Maybe Text -> Maybe Text
+normalizeModelOverride requested = do
+    stripped <- Text.strip <$> requested
+    if Text.null stripped then Nothing else Just stripped
+
+normalizedAllowedModels :: [Text] -> [Text]
+normalizedAllowedModels =
+    filter (not . Text.null) . map Text.strip
 
 data ReadAgentSessionArgs = ReadAgentSessionArgs
     { sessionId :: Text

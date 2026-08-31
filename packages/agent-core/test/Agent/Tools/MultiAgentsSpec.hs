@@ -189,6 +189,136 @@ spec = describe "Agent.Tools.MultiAgents" do
             any (Text.isInfixOf "Prefer `gpt-5.6-luna` for small tasks.")
         closeSubagentRegistry registry
 
+    it "advertises and enforces the allowed child-model list" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiAllowedChildModels = Just ["gpt-allowed"]
+                , multiPrepareSpawn = Just
+                    (\_ options -> atomically (putTMVar prepared options))
+                }
+            tools = multiAgentTools context
+            descriptions =
+                [ description
+                | tool <- tools
+                , tool.appToolName == "spawn_agent"
+                , property <- fromMaybe [] (jsonToolParameters tool)
+                , property.propertyName == "model"
+                , description <- maybe [] pure property.description
+                ]
+            denied = ToolCall
+                { callId = "denied-model"
+                , name = "spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"model\":\"gpt-denied\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        descriptions `shouldSatisfy`
+            any (Text.isInfixOf "Allowed child model IDs: gpt-allowed.")
+        result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools) denied
+        result.output
+            `shouldBe`
+                "Error: The requested child model is not allowed by this organization."
+        atomically (isEmptyTMVar prepared) `shouldReturn` True
+        closeSubagentRegistry registry
+
+    it "allows a listed child-model override under an allowlist" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiAllowedChildModels = Just ["gpt-allowed"]
+                , multiPrepareSpawn = Just
+                    (\_ options -> atomically (putTMVar prepared options))
+                }
+            call = ToolCall
+                { callId = "listed-model"
+                , name = "host-tool"
+                , arguments = "{}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <-
+            spawnSharedSubagent
+                context
+                call
+                "worker"
+                "task"
+                (Just " gpt-allowed ")
+                Nothing
+                Nothing
+        result `shouldSatisfy` isRightResult
+        options <- atomically (takeTMVar prepared)
+        options.collaborationModel `shouldBe` Just "gpt-allowed"
+        closeSubagentRegistry registry
+
+    it "allows an inherited child model under an allowlist" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiAllowedChildModels = Just ["gpt-allowed"]
+                , multiPrepareSpawn = Just
+                    (\_ options -> atomically (putTMVar prepared options))
+                }
+            call = ToolCall
+                { callId = "inherit-allowed"
+                , name = "host-tool"
+                , arguments = "{}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <-
+            spawnSharedSubagent
+                context
+                call
+                "worker"
+                "task"
+                Nothing
+                Nothing
+                Nothing
+        result `shouldSatisfy` isRightResult
+        options <- atomically (takeTMVar prepared)
+        options.collaborationModel `shouldBe` Nothing
+        closeSubagentRegistry registry
+
+    it "treats a blank child-model override as inheritance under an allowlist" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiAllowedChildModels = Just ["gpt-allowed"]
+                , multiPrepareSpawn = Just
+                    (\_ options -> atomically (putTMVar prepared options))
+                }
+            call = ToolCall
+                { callId = "blank-inherit"
+                , name = "host-tool"
+                , arguments = "{}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <-
+            spawnSharedSubagent
+                context
+                call
+                "worker"
+                "task"
+                (Just "   ")
+                Nothing
+                Nothing
+        result `shouldSatisfy` isRightResult
+        options <- atomically (takeTMVar prepared)
+        options.collaborationModel `shouldBe` Nothing
+        closeSubagentRegistry registry
+
     it "keeps isolation off spawn_agent and exposes a dedicated worktree tool" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)

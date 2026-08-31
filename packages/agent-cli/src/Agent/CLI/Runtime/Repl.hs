@@ -29,8 +29,12 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
+import Agent.CLI.GatewayClient ( cachedGatewayModels )
 import Agent.CLI.GatewayBridge ()
-import Agent.CLI.Input ( readReplLineWithCatalogForProvider )
+import Agent.CLI.Input
+    ( readReplLineWithCatalog
+    , readReplLineWithCatalogForProvider
+    )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -173,7 +177,7 @@ import Control.Exception.Safe ()
 import Control.Monad ( when, forM_ )
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ()
-import Data.Maybe ( fromMaybe, isJust )
+import Data.Maybe ( fromMaybe, isJust, isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ()
 import System.Console.ANSI ( getTerminalSize )
@@ -233,6 +237,7 @@ replWithDraft env@SessionEnv
     , sessionConversation = conversationRef
     , sessionProvider = provider
     , sessionModelCatalog = catalog
+    , sessionGatewayModels = gatewayModelsRef
     , sessionDialect = dialect
     , sessionStartupUnavailable = startupUnavailableRef
     , sessionParams = paramsRef
@@ -259,6 +264,10 @@ replWithDraft env@SessionEnv
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
     activeToolNames <- readActiveToolNames
     params <- readIORef paramsRef
+    gatewayAccess <- readIORef gatewayModelsRef
+    modelIds <- case gatewayAccess of
+        Nothing -> pure (catalogModelIds catalog)
+        Just access -> fromMaybe [] <$> cachedGatewayModels access
     let slashCatalog =
             mkSlashCatalog
                 (maybe False (\info ->
@@ -267,7 +276,7 @@ replWithDraft env@SessionEnv
                             == Just "priority")
                     env.sessionModelInfo)
                 (dialectId dialect) activeToolNames skillCommands
-                (catalogModelIds catalog)
+                modelIds
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -307,7 +316,9 @@ replWithDraft env@SessionEnv
                                 promptState
                                 draft
                                 unavailable
-            withAsync (refreshAccountLimit runtime) \_ ->
+            withAsync
+                (refreshAccountLimit (isNothing gatewayAccess) runtime)
+                \_ ->
                 readPrompt
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
@@ -360,10 +371,16 @@ replWithDraft env@SessionEnv
                         <> if stdoutColor
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
-            result <- readReplLineWithCatalogForProvider
-                provider
-                slashCatalog
-                interrupt chromePrompt draft
+            result <- case gatewayAccess of
+                Just _ ->
+                    readReplLineWithCatalog
+                        slashCatalog
+                        interrupt chromePrompt draft
+                Nothing ->
+                    readReplLineWithCatalogForProvider
+                        provider
+                        slashCatalog
+                        interrupt chromePrompt draft
             when terminal.terminalSemanticPrompts $
                 emitTerminalSequence terminal stdout osc133PromptEnd
             Text.putStr (endBackground stdoutColor)
@@ -397,7 +414,7 @@ replWithDraft env@SessionEnv
                 policy
                 mline
   where
-    refreshAccountLimit runtime =
+    refreshAccountLimit allowOpenAi runtime =
         case (provider, tokenProvider) of
             (XAIProvider, Just tokens)
                 | tokenProviderBillingMode tokens == SubscriptionBilled ->
@@ -406,7 +423,8 @@ replWithDraft env@SessionEnv
                         XAIUsage.fetchGrokUsage
                         formatGrokLimitStatus
             (OpenAIProvider, Just tokens)
-                | tokenProviderBillingMode tokens == SubscriptionBilled ->
+                | allowOpenAi
+                , tokenProviderBillingMode tokens == SubscriptionBilled ->
                     getNextToken tokens Nothing >>= \case
                         Left _ -> pure ()
                         Right credential

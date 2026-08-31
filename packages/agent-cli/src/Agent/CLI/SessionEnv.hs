@@ -5,6 +5,7 @@ module Agent.CLI.SessionEnv
 
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
+import Agent.CLI.GatewayClient (GatewayModelAccess)
 import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Recap (RecapRequest)
@@ -51,6 +52,7 @@ data SessionEnv = SessionEnv
     , sessionProvider :: !Provider
     , sessionConnection :: !Text
     , sessionModelCatalog :: !ModelCatalog
+    , sessionGatewayModels :: !(IORef (Maybe GatewayModelAccess))
     , sessionDialect :: !Dialect
     , sessionRecordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , sessionUnavailableProviders :: !(IORef (Set Provider))

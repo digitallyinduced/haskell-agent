@@ -161,14 +161,18 @@ dictateWith provider control =
             loadAuth (Just XAIProvider) >>= \case
                 Left err ->
                     pure (DictationFailed err)
-                Right loaded ->
-                    finish =<<
-                        transcribePcmWithXAI
-                            loaded.loadedTokenProvider
-                            (streamMicrophone
-                                16_000
-                                control.dictationWaitForStop)
-                            control.dictationOnTranscript
+                Right loaded
+                    | loaded.loadedProvider /= XAIProvider ->
+                        pure $ DictationFailed
+                            "xAI dictation requires direct xAI credentials"
+                    | otherwise ->
+                        finish =<<
+                            transcribePcmWithXAI
+                                loaded.loadedTokenProvider
+                                (streamMicrophone
+                                    16_000
+                                    control.dictationWaitForStop)
+                                control.dictationOnTranscript
     finish = \case
         Left err ->
             pure (DictationFailed (Text.pack (show err)))

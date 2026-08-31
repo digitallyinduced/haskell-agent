@@ -25,6 +25,7 @@ import Agent.CLI.Compaction
     , OccupancySnapshot
     )
 import Agent.CLI.Database.Store (DatabaseScopes)
+import Agent.CLI.GatewayClient (GatewayModelAccess)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.ModelConfig (ModelCatalog)
@@ -102,6 +103,7 @@ data SessionBackend = SessionBackend
 
 data SessionRequest = SessionRequest
     { catalog :: !ModelCatalog
+    , gatewayModelsRef :: !(IORef (Maybe GatewayModelAccess))
     , claudeRuntimeSlot :: !ClaudeSessionRuntimeSlot
     , claudeBridgeTools :: ![AppTool]
     , modelInfo :: !(Maybe ModelInfo)

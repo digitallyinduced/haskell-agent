@@ -4,7 +4,8 @@ module Agent.CLI.ModelsSpec (spec) where
 
 import Agent.CLI.Models
 import Agent.CLI.ModelConfig
-    ( ModelCatalog
+    ( CatalogModel(..)
+    , ModelCatalog(..)
     , decodeModelConfig
     , packagedModelCatalogPath
     )
@@ -16,6 +17,7 @@ import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (find, nub)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -143,6 +145,115 @@ spec = do
                             "default · frontier · free · coding · 1M context")
             fmap (.modelLabel) (listToMaybe (matching "qwen/example-new"))
                 `shouldBe` Just (Just "OpenRouter live")
+
+    describe "gatewayModelOptions" do
+        it "uses only advertised aliases and pins them to the gateway" do
+            let options =
+                    gatewayModelOptions
+                        catalog
+                        "openai"
+                        OpenAIProvider
+                        [ " gpt-5.6-sol "
+                        , "company-private"
+                        , "gpt-5.6-sol"
+                        , ""
+                        ]
+            map (.modelTarget.targetModelId) options
+                `shouldBe` ["gpt-5.6-sol", "company-private"]
+            all
+                (\option ->
+                    let target = option.modelTarget
+                    in target.targetProvider == OpenAIProvider
+                        && target.targetConnectionId == "openai"
+                        && target.targetWireModelId == target.targetModelId)
+                options
+                `shouldBe` True
+
+        it "pins mapped aliases to the gateway while retaining safe metadata" do
+            let known =
+                    CatalogModel
+                        { catalogModelId = "company-known"
+                        , catalogModelConnectionId = "openai"
+                        , catalogModelWireId = "upstream-mapped-known"
+                        , catalogModelDialect = GenericResponsesDialect
+                        , catalogModelContextWindow = Nothing
+                        , catalogModelLabel = Just "company label"
+                        , catalogModelDefault = False
+                        , catalogModelFallbackPriority = Just 9
+                        }
+                conflicting =
+                    known
+                        { catalogModelId = "company-foreign"
+                        , catalogModelConnectionId = "xai"
+                        , catalogModelWireId = "upstream-mapped-foreign"
+                        , catalogModelDialect = GrokBuildDialect
+                        , catalogModelLabel = Just "foreign label"
+                        }
+                mappedCatalog =
+                    catalog
+                        { catalogModels =
+                            known : conflicting : catalog.catalogModels
+                        , catalogModelsById =
+                            Map.insert
+                                known.catalogModelId
+                                known
+                                (Map.insert
+                                    conflicting.catalogModelId
+                                    conflicting
+                                    catalog.catalogModelsById)
+                        }
+            case
+                gatewayModelOptions
+                    mappedCatalog
+                    "openai"
+                    OpenAIProvider
+                    ["company-known", "company-foreign"]
+                of
+                [active, foreignOption] -> do
+                    active.modelTarget
+                        `shouldBe`
+                            ModelTarget
+                                OpenAIProvider
+                                "openai"
+                                "company-known"
+                                "company-known"
+                                GenericResponsesDialect
+                    active.modelLabel `shouldBe` Just "company label"
+                    active.modelFallbackPriority `shouldBe` Just 9
+                    foreignOption.modelTarget
+                        `shouldBe`
+                            ModelTarget
+                                OpenAIProvider
+                                "openai"
+                                "company-foreign"
+                                "company-foreign"
+                                (dialectIdForModel
+                                    OpenAIProvider
+                                    "company-foreign")
+                    foreignOption.modelLabel `shouldBe` Nothing
+                    foreignOption.modelFallbackPriority `shouldBe` Nothing
+                other ->
+                    expectationFailure $
+                        "expected two gateway options, got " <> show other
+
+        it "does not reinsert a stale current model into an authoritative picker" do
+            let options =
+                    gatewayModelOptions
+                        catalog
+                        "openai"
+                        OpenAIProvider
+                        ["gpt-5.6-terra"]
+            state <-
+                initialPickerStateForOptions
+                    "organization gateway"
+                    options
+                    "openai"
+                    OpenAIProvider
+                    "revoked-model"
+                    CodexDialect
+            state.pickerScopeLabel `shouldBe` "organization gateway"
+            map (.modelTarget.targetModelId) state.pickerAll
+                `shouldBe` ["gpt-5.6-terra"]
 
     describe "modelTargetRequiresRebuild" do
         let sameDialect =

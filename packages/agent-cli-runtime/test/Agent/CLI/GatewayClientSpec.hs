@@ -2,10 +2,11 @@ module Agent.CLI.GatewayClientSpec (spec) where
 
 import Agent.CLI.GatewayClient
 import Agent.Json.Decode qualified as Hermes
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, throwString)
 import Data.Bits ((.&.))
 import Data.ByteString.Lazy qualified as LBS
 import Data.Either (isLeft)
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Text qualified as Text
 import System.Directory
     ( createDirectory
@@ -22,6 +23,55 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "gateway device authorization" do
+    it "decodes, trims, and deduplicates gateway model ids" do
+        Hermes.decodeEither
+            gatewayModelsDecoder
+            "{\"object\":\"list\",\"data\":[{\"id\":\" gpt-5.6-sol \"},{\"id\":\"\"},{\"id\":\"gpt-5.6-sol\"},{\"id\":\"gpt-5.6-terra\"},\"gpt-5.6-terra\",\"bad id\",\"bad\\nid\",\"\\u001b[31m\",\"  \"]}"
+            `shouldBe` Right ["gpt-5.6-sol", "gpt-5.6-terra"]
+
+    it "clears cached gateway models when refresh fails" do
+        results <- newIORef
+            [ Right [" gpt-5.6-sol ", "", "gpt-5.6-sol", "gpt-5.6-terra"]
+            , Left "gateway unavailable"
+            ]
+        access <-
+            newGatewayModelAccessWith $
+                atomicModifyIORef' results \case
+                    result : remaining -> (remaining, result)
+                    [] -> ([], Left "unexpected refresh")
+        refreshGatewayModels access
+            `shouldReturn` Right ["gpt-5.6-sol", "gpt-5.6-terra"]
+        cachedGatewayModels access
+            `shouldReturn` Just ["gpt-5.6-sol", "gpt-5.6-terra"]
+        refreshGatewayModels access
+            `shouldReturn` Left "gateway unavailable"
+        cachedGatewayModels access `shouldReturn` Nothing
+
+    it "clears cached gateway models when a fetch throws" do
+        calls <- newIORef (0 :: Int)
+        access <-
+            newGatewayModelAccessWith do
+                call <- atomicModifyIORef' calls \count ->
+                    (count + 1, count)
+                if call == 0
+                    then pure (Right ["company-model"])
+                    else throwString "transport details"
+        refreshGatewayModels access
+            `shouldReturn` Right ["company-model"]
+        refreshGatewayModels access
+            `shouldReturn`
+                Left "Could not refresh organization gateway models."
+        cachedGatewayModels access `shouldReturn` Nothing
+
+    it "does not expose a gateway bearer in model-list validation errors" do
+        let credential =
+                GatewayCredential
+                    "not a gateway URL"
+                    "wss://gateway/v1/responses"
+                    "gateway-bearer-secret"
+        fetchGatewayModels credential
+            `shouldReturn` Left "Gateway credential is invalid."
+
     it "decodes the device response contract" do
         let payload =
                 "{\"device_code\":\"had_secret\",\"user_code\":\"ABCD-1234\",\
@@ -268,6 +318,15 @@ spec = describe "gateway device authorization" do
                     "secret")
                 `shouldReturn`
                     Left "gateway WebSocket URL must use wss"
+            saveGatewayCredentialAt
+                home
+                (GatewayCredential
+                    "https://gateway"
+                    "wss://other.example/v1/responses"
+                    "secret")
+                `shouldReturn`
+                    Left
+                        "Gateway base and WebSocket URLs must use the same origin."
             saveGatewayCredentialAt
                 home
                 (GatewayCredential
