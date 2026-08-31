@@ -379,6 +379,23 @@ spec = do
                 `shouldSatisfy` Text.isInfixOf "delete src/Old.hs"
 
     describe "formatToolBody" do
+        it "renders compact multi-file apply_patch diffs" do
+            let patch =
+                    "*** Begin Patch\n\
+                    \*** Update File: src/A.hs\n\
+                    \@@\n\
+                    \-old\n\
+                    \+new\n\
+                    \*** Add File: src/B.hs\n\
+                    \+created\n\
+                    \*** End Patch"
+            formatToolBody False (customToolCall "patch" "apply_patch" patch)
+                `shouldBe`
+                    "  -old\n\
+                    \  +new\n\
+                    \  create src/B.hs\n\
+                    \  +created"
+
         it "does not dump todo_write arguments into linear chrome" do
             formatToolBody False
                 (functionToolCall

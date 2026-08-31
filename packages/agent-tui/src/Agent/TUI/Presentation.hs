@@ -12,6 +12,7 @@ module Agent.TUI.Presentation
     , formatToolOutput
     , formatToolOutputRelative
     , liveTodoPanelLines
+    , parseApplyPatchDiffs
     , parseSearchReplaceDiff
     , parseWriteFileDiff
     , parseTodoList
@@ -29,6 +30,7 @@ module Agent.TUI.Presentation
     , toolCallTitle
     , toolCallTitleRelative
     , toolCallDiff
+    , toolCallDiffs
     , toolDetail
     , toolPathArgument
     , toolVerb
@@ -127,6 +129,10 @@ data SearchReplaceAction
     | SearchReplaceDelete
     -- | Whole-file write where the previous contents are unknown.
     | SearchReplaceWrite
+    -- | One file in a potentially multi-file patch was updated.
+    | SearchReplaceUpdate
+    -- | A patch moved a file to the given destination.
+    | SearchReplaceMove !Text
     deriving (Eq, Show)
 
 data SearchReplaceLine
@@ -178,12 +184,95 @@ parseWriteFileDiff arguments =
         , diffHiddenLines = length raw - length shown
         }
 
--- | Diff preview carried by a tool call's arguments, when the tool has one.
+-- | Compact previews parsed from Codex's freeform @apply_patch@ language.
+-- The execution parser lives in the Codex dialect package, which depends on
+-- this presentation package, so this deliberately permissive parser only
+-- extracts file boundaries and changed lines for display.
+parseApplyPatchDiffs :: Text -> [SearchReplaceDiff]
+parseApplyPatchDiffs patch =
+    case Text.lines (Text.strip patch) of
+        first : rest
+            | Text.strip first == "*** Begin Patch" ->
+                suppressFirstUpdateHeader (parseHunks (dropEnvironment rest))
+        _ -> []
+  where
+    dropEnvironment (line : rest)
+        | "*** Environment ID:" `Text.isPrefixOf` Text.strip line = rest
+    dropEnvironment lines_ = lines_
+
+    parseHunks [] = []
+    parseHunks (line : rest)
+        | Just path <- patchPath "*** Add File: " line =
+            let (body, remaining) = span (not . patchBoundary) rest
+            in makeDiff path (Just SearchReplaceCreate)
+                    (mapMaybe addedLine body)
+                : parseHunks remaining
+        | Just path <- patchPath "*** Delete File: " line =
+            makeDiff path (Just SearchReplaceDelete) []
+                : parseHunks rest
+        | Just path <- patchPath "*** Update File: " line =
+            let (body, remaining) = span (not . patchBoundary) rest
+                (action, changes) = case body of
+                    moveLine : more
+                        | Just destination <-
+                            patchPath "*** Move to: " moveLine ->
+                                (Just (SearchReplaceMove destination), more)
+                    _ -> (Just SearchReplaceUpdate, body)
+            in makeDiff path action (mapMaybe changedLine changes)
+                : parseHunks remaining
+        | otherwise = parseHunks rest
+
+    suppressFirstUpdateHeader = \case
+        diff : rest
+            | diff.diffAction == Just SearchReplaceUpdate ->
+                diff { diffAction = Nothing } : rest
+        diffs -> diffs
+
+    makeDiff path action raw =
+        let shown = take 20 raw
+        in SearchReplaceDiff
+            { diffPath = path
+            , diffAction = action
+            , diffLines = shown
+            , diffHiddenLines = length raw - length shown
+            }
+
+    patchBoundary line =
+        any (`Text.isPrefixOf` line)
+            [ "*** Add File: "
+            , "*** Delete File: "
+            , "*** Update File: "
+            , "*** End Patch"
+            ]
+
+    patchPath prefix line =
+        nonEmptyText =<< Text.stripPrefix prefix line
+
+    addedLine line = case Text.uncons line of
+        Just ('+', text) -> Just (SearchReplaceAdded text)
+        _ -> Nothing
+
+    changedLine line = case Text.uncons line of
+        Just ('-', text) -> Just (SearchReplaceRemoved text)
+        Just ('+', text) -> Just (SearchReplaceAdded text)
+        _ -> Nothing
+
+    nonEmptyText text =
+        let stripped = Text.strip text
+        in if Text.null stripped then Nothing else Just stripped
+
+-- | Diff previews carried by a tool call's arguments.
+toolCallDiffs :: ToolCall -> [SearchReplaceDiff]
+toolCallDiffs call = case canonicalToolName call.name of
+    "search_replace" -> [parseSearchReplaceDiff call.arguments]
+    "apply_patch" -> parseApplyPatchDiffs call.arguments
+    "Write" -> [parseWriteFileDiff call.arguments]
+    _ -> []
+
+-- | First diff preview carried by a tool call, retained for callers that only
+-- need to identify whether a preview exists.
 toolCallDiff :: ToolCall -> Maybe SearchReplaceDiff
-toolCallDiff call = case canonicalToolName call.name of
-    "search_replace" -> Just (parseSearchReplaceDiff call.arguments)
-    "Write" -> Just (parseWriteFileDiff call.arguments)
-    _ -> Nothing
+toolCallDiff = listToMaybe . toolCallDiffs
 
 formatSearchReplaceDiff :: Text -> Text
 formatSearchReplaceDiff = formatSearchReplaceDiffRelative ""
@@ -195,7 +284,8 @@ formatSearchReplaceDiffRelative workspace arguments =
 -- | Diff body for a tool block; empty when the tool carries no diff.
 formatToolDiffRelative :: Text -> ToolCall -> Text
 formatToolDiffRelative workspace call =
-    maybe "" (formatDiffRelative workspace) (toolCallDiff call)
+    Text.intercalate "\n" $
+        map (formatDiffRelative workspace) (toolCallDiffs call)
 
 formatDiffRelative :: Text -> SearchReplaceDiff -> Text
 formatDiffRelative workspace diff =
@@ -206,6 +296,12 @@ formatDiffRelative workspace diff =
             Just SearchReplaceCreate -> "  create " <> displayedPath
             Just SearchReplaceDelete -> "  delete " <> displayedPath
             Just SearchReplaceWrite -> "  write " <> displayedPath
+            Just SearchReplaceUpdate -> "  update " <> displayedPath
+            Just (SearchReplaceMove destination) ->
+                "  move "
+                    <> displayedPath
+                    <> " → "
+                    <> workspaceRelativeDisplayPath workspace destination
             Nothing -> ""
         shown = map formatLine diffLines
         more

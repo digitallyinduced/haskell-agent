@@ -121,7 +121,7 @@ import Agent.TUI.Presentation
     , parseSearchReplaceDiff
     , summarizeToolCall
     , summarizeToolCallRelative
-    , toolCallDiff
+    , toolCallDiffs
     , toolDetail
     , toolVerb
     , workspaceRelativeDisplayPath
@@ -866,7 +866,9 @@ formatToolBody color = formatToolBodyRelative color ""
 formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
 formatToolBodyRelative color workspace call = case canonicalToolName call.name of
     "exec" -> roleToolCommand color call.arguments
-    _ -> maybe "" (paintDiffRelative color workspace) (toolCallDiff call)
+    _ ->
+        Text.intercalate "\n" $
+            map (paintDiffRelative color workspace) (toolCallDiffs call)
 
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text
@@ -890,6 +892,14 @@ paintDiffRelative color workspace diff =
             Just SearchReplaceWrite ->
                 roleMuted color "  write "
                     <> renderToolPath color workspace diffPath
+            Just SearchReplaceUpdate ->
+                roleMuted color "  update "
+                    <> renderToolPath color workspace diffPath
+            Just (SearchReplaceMove destination) ->
+                roleMuted color "  move "
+                    <> renderToolPath color workspace diffPath
+                    <> roleMuted color " → "
+                    <> renderToolPath color workspace destination
             Nothing -> ""
         shown = map paintLine diffLines
         more =

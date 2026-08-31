@@ -1273,7 +1273,7 @@ spec = describe "fullscreen UI reducer" do
         finished.uiRetryCountdown `shouldBe` Nothing
         uiNeedsTick finished `shouldBe` False
 
-    it "shows worktree-relative paths for edits" do
+    it "keeps worktree-relative diffs after successful edits" do
         let workspace =
                 "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
             path = workspace <> "/nix/modules/telegram.nix"
@@ -1309,31 +1309,73 @@ spec = describe "fullscreen UI reducer" do
                     `shouldBe` "Edited nix/modules/telegram.nix"
             _ -> expectationFailure "expected one running edit block"
         case Foldable.toList finished.uiBlocks of
-            [block] ->
+            [block] -> do
                 block.blockBody
-                    `shouldBe`
-                        "The file nix/modules/telegram.nix has been updated successfully."
+                    `shouldBe` "  -old\n  +new"
+                block.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected one completed edit block"
 
-    it "shows a search-replace diff while the tool is running" do
+    it "shows an apply_patch diff while running and after completion" do
         let call =
-                functionToolCall
-                    "edit-1"
-                    "search_replace"
-                    "{\"file_path\":\"A.hs\",\"old_string\":\"old\",\"new_string\":\"new\"}"
-            blocks =
-                Foldable.toList $
-                    (.uiBlocks) $
-                        apply
-                            [ UiLoop TurnStarted
-                            , UiLoop (ToolStarted call)
-                            ]
-        case blocks of
+                customToolCall
+                    "patch-1"
+                    "apply_patch"
+                    "*** Begin Patch\n\
+                    \*** Update File: A.hs\n\
+                    \@@\n\
+                    \-old\n\
+                    \+new\n\
+                    \*** End Patch"
+            started =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            finished =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "patch-1"
+                                , output = "Updated A.hs"
+                                , callKind = CustomCallKind
+                                }))
+                    started
+        case Foldable.toList started.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockEdit
                 block.blockBody `shouldSatisfy` Text.isInfixOf "-old"
                 block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
             _ -> expectationFailure "expected one running edit block"
+        case Foldable.toList finished.uiBlocks of
+            [block] -> do
+                block.blockBody `shouldBe` "  -old\n  +new"
+                block.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected one completed edit block"
+
+    it "replaces a preview with the error when an edit fails" do
+        let call =
+                functionToolCall
+                    "edit-failed"
+                    "search_replace"
+                    "{\"file_path\":\"A.hs\",\"old_string\":\"old\",\"new_string\":\"new\"}"
+            failed =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "edit-failed"
+                                , output = "Error: stale edit"
+                                , callKind = FunctionCallKind
+                                })
+                    ]
+        case Foldable.toList failed.uiBlocks of
+            [block] -> do
+                block.blockBody `shouldBe` "Error: stale edit"
+                block.blockState `shouldBe` BlockFailed
+            _ -> expectationFailure "expected one failed edit block"
 
     it "keeps todo_write in a live panel instead of scrollback" do
         let call =
