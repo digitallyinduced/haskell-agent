@@ -1315,6 +1315,30 @@ spec = describe "fullscreen UI reducer" do
                 block.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected one completed edit block"
 
+    it "retains inspection tools as a distinct completed block kind" do
+        let call =
+                functionToolCall
+                    "read-1"
+                    "Read"
+                    "{\"file_path\":\"src/Main.hs\"}"
+            result =
+                ToolCallResult
+                    { callId = "read-1"
+                    , output = "module Main where"
+                    , callKind = FunctionCallKind
+                    }
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockInspect
+                block.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected one completed inspection block"
+
     it "shows an apply_patch diff while running and after completion" do
         let call =
                 customToolCall

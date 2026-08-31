@@ -156,6 +156,7 @@ blockHeading = \case
     BlockAssistant -> "Assistant"
     BlockThinking -> "Thinking"
     BlockTool -> "Tool"
+    BlockInspect -> "Inspect"
     BlockTodo -> "Todo"
     BlockShell -> "Shell"
     BlockEdit -> "Edit"

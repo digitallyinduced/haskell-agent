@@ -30,6 +30,7 @@ data BlockKind
     | BlockAssistant
     | BlockThinking
     | BlockTool
+    | BlockInspect
     | BlockTodo
     | BlockShell
     | BlockEdit

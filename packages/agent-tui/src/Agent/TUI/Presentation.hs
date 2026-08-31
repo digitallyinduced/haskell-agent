@@ -11,6 +11,7 @@ module Agent.TUI.Presentation
     , formatTodoList
     , formatToolOutput
     , formatToolOutputRelative
+    , isInspectionTool
     , liveTodoPanelLines
     , parseApplyPatchDiffs
     , parseSearchReplaceDiff
@@ -611,6 +612,37 @@ firstPlanStepFromArguments arguments =
             Hermes.VObject ->
                 Hermes.object (Hermes.atKeyOptional "step" Hermes.text)
             _ -> pure Nothing
+
+-- | Read-only discovery and inspection tools use an outline marker in the
+-- activity chrome. Keep this list explicit: an unknown or generic MCP call
+-- may mutate external state and therefore remains an action.
+isInspectionTool :: Text -> Bool
+isInspectionTool rawName =
+    canonicalToolName rawName
+        `elem`
+            [ "read_file"
+            , "list_dir"
+            , "grep"
+            , "get_task_output"
+            , "read_tool_output"
+            , "search_tool_output"
+            , "view_image"
+            , "mcp_search"
+            , "mcp_list_resources"
+            , "mcp_read_resource"
+            , "database_schema"
+            , "database_query"
+            , "conversation_search"
+            , "skill_search"
+            , "view_skill"
+            , "read_agent_session"
+            , "list_agents"
+            , "Glob"
+            , "WebFetch"
+            , "WebSearch"
+            , "ToolSearch"
+            , "ListAgents"
+            ]
 
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of

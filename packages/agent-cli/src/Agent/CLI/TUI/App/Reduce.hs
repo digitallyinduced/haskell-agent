@@ -687,7 +687,7 @@ toolImageBlockId callId ui =
             | (active, _) <- Map.toList ui.uiToolCalls
             , Just block <- [blockForCall active]
             , block.blockState == BlockRunning
-            , block.blockKind `elem` [BlockTool, BlockShell]
+            , block.blockKind `elem` [BlockTool, BlockInspect, BlockShell]
             ]
         of
             [] -> Nothing

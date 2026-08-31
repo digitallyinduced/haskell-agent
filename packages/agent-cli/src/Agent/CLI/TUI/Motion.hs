@@ -196,7 +196,14 @@ completionFlashTransitions previous next =
     , blockWasLive oldBlock.blockState
     , block.blockState == BlockComplete
     , block.blockKind
-        `elem` [BlockThinking, BlockTool, BlockTodo, BlockShell, BlockEdit]
+        `elem`
+            [ BlockThinking
+            , BlockTool
+            , BlockInspect
+            , BlockTodo
+            , BlockShell
+            , BlockEdit
+            ]
     ]
   where
     previousById =
