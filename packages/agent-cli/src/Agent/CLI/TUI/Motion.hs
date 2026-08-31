@@ -229,6 +229,7 @@ uiEventRestartsMotionSchedule event previous next newFlashes =
         || not (Map.null newFlashes)
   where
     explicitReset = case event of
+        UiLoop (ToolArgumentEvent _) -> False
         UiLoop TurnStarted -> True
         UiLoop (WarningRaised _) -> True
         UiLoop (ResponseRestarted _) -> True

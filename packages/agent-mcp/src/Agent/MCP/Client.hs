@@ -847,6 +847,7 @@ appToolFor client tool = AppTool
     , appToolExecution =
         if tool.discoveredReadOnly then ParallelSafe else TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
   where
     qualifiedName = qualifiedMcpToolName

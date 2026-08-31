@@ -1,6 +1,9 @@
 module Agent.Codex.DialectSpec (spec) where
 
-import Agent.Codex.Dialect.ApplyPatch (applyPatch)
+import Agent.Codex.Dialect.ApplyPatch
+    ( applyPatch
+    , streamingPatchReadTarget
+    )
 import Agent.Codex.Dialect.ProjectInstructions (formatCodexAgentsMd)
 import Agent.Codex.Dialect.Prompt
     ( codexSystemPrompt
@@ -21,11 +24,22 @@ import Agent.Codex.Dialect.Shell
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.ToolDispatch
-    ( ToolCallResult(..)
+    ( ToolArgumentStreamEvent(..)
+    , ToolCallStreamRef(..)
+    , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , customToolCall
     , dispatchToolCall
     , functionToolCall
+    )
+import Agent.Tools.FileSystem.FilePrefetch (PathProgress(..))
+import Agent.Tools.Speculation
+    ( closeToolSpeculationRuntime
+    , newToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , retainToolSpeculation
+    , takeToolSpeculation
+    , waitForToolSpeculation
     )
 import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Types
@@ -388,6 +402,48 @@ spec = describe "Codex dialect" do
                 Right _ -> True
                 Left _ -> False
             Text.readFile path `shouldReturn` "after\n"
+
+    it "extracts a streamed update path from a partial apply_patch body" do
+        streamingPatchReadTarget
+            "*** Begin Patch\n*** Update File: src/alpha.hs\n@@\n"
+            `shouldBe` Just (PathComplete "src/alpha.hs")
+        streamingPatchReadTarget
+            "*** Begin Patch\n*** Update File: src/uni"
+            `shouldBe` Just (PathPrefix "src/uni")
+
+    it "prefetches the updated file while the rest of the patch streams" do
+        withTempDir \dir -> do
+            Text.writeFile (dir </> "alpha.txt") "old\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            coding <- newCodexCodingTools env Nothing Nothing
+            let tools = coding.codexAppTools
+                callId = "call-patch"
+                prefix =
+                    "*** Begin Patch\n*** Update File: alpha.txt\n"
+                patch =
+                    prefix
+                        <> "@@\n-old\n+new\n*** End Patch"
+            bracket
+                (newToolSpeculationRuntime tools)
+                closeToolSpeculationRuntime
+                \runtime -> do
+                    observeToolArgumentEvent runtime $
+                        ToolArgumentsStarted
+                            { argumentStreamRefs =
+                                [ToolCallStreamItem "item-patch"]
+                            , argumentStreamCallId = callId
+                            , argumentStreamName = Just "apply_patch"
+                            , argumentStreamArguments = prefix
+                            }
+                    waitForToolSpeculation runtime
+                    retainToolSpeculation runtime
+                        [customToolCall callId "apply_patch" patch]
+                    takeToolSpeculation runtime
+                        (customToolCall callId "apply_patch" patch)
+                        `shouldReturn` Just
+                            (Right "Success. Updated the following files:\nM alpha.txt\n")
+                    Text.readFile (dir </> "alpha.txt") `shouldReturn` "new\n"
+            coding.codexClose
 
     it "waits instead of hot-polling an empty write_stdin call" do
         withTempDir \dir -> do

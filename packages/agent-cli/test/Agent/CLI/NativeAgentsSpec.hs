@@ -248,6 +248,24 @@ spec = describe "provider-native agent tracking" do
         retained `shouldSatisfy`
             Text.isInfixOf "[older native-agent output omitted]"
 
+    it "keeps repeated selected-agent output within its per-agent budget" do
+        let identifier = "selected-stream"
+            oneMiB = Text.replicate (1024 * 1024 `div` 4) "x"
+            tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    (setNativeAgentSelection
+                        (Just identifier)
+                        emptyNativeAgentStore)
+                    (replicate 10 (NativeAgentOutput identifier oneMiB))
+            retained =
+                Text.concat $
+                    nativeAgentTranscript (lookupView identifier tracked)
+        nativeAgentStoreBytes tracked
+            `shouldSatisfy` (<= 8 * 1024 * 1024)
+        retained `shouldSatisfy`
+            Text.isInfixOf "[older native-agent output omitted]"
+
     it "materializes conversation state only for the selected native row" do
         let tracked =
                 foldl

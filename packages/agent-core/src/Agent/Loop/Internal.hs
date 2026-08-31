@@ -18,9 +18,12 @@ import Agent.Loop.EventPump
 import Agent.Responses.Types (ResponseItem)
 import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolArgumentStreamEvent
+    , ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , finishToolException
+    , finishToolResult
     )
 import Agent.Tools.Scheduling
     ( ToolSchedulingPlan(..)
@@ -29,7 +32,19 @@ import Agent.Tools.Scheduling
 import Agent.Tools.Types
     ( ToolRegistry
     , dispatchRegisteredToolCall
+    , toolRegistryTools
     , toolSchedulingPlanFor
+    )
+import Agent.Tools.Speculation
+    ( ToolSpeculationRuntime
+    , closeToolSpeculationRuntime
+    , discardToolSpeculation
+    , discardToolSpeculationByCallId
+    , newToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , resetToolSpeculationRuntime
+    , retainToolSpeculation
+    , takeToolSpeculationEmitting
     )
 import Control.Concurrent.Async
     ( mapConcurrently
@@ -41,6 +56,7 @@ import qualified Control.Exception as Exception
 import Control.Exception.Safe
     ( SomeException
     , displayException
+    , finally
     , mask
     , tryAny
     )
@@ -367,6 +383,9 @@ data LoopEvent
     | ResponseRestarted Text
     | TurnStarted
     | TurnFinished TurnOutput
+    -- | Streamed tool-argument fragments. The loop feeds these into
+    -- interpreters; they are not rendered as user-visible events.
+    | ToolArgumentEvent ToolArgumentStreamEvent
     | ToolStarted ToolCall
     -- | Replace the metadata for an already-visible in-flight tool call.
     -- Providers may learn canonical arguments after an early live start.
@@ -559,11 +578,13 @@ runLoopInputsUnsafe
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
+    runtime <- newToolSpeculationRuntime (toolRegistryTools config0.loopTools)
     uncommittedTextRef <- newIORef ([], [])
     providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
-    withAsync (runEventPump eventPump) \eventWorker -> do
+    flip finally (closeToolSpeculationRuntime runtime) $
+        withAsync (runEventPump eventPump) \eventWorker -> do
         let recordVisible event =
                 modifyIORef' uncommittedTextRef \(finished, current) ->
                     case event of
@@ -587,6 +608,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 -> Either LoopError LoopResult
                 -> IO LoopExecution
             finish state progress result = do
+                resetToolSpeculationRuntime runtime
                 writeIORef progressRef (state, progress)
                 pending <- readIORef pendingRef
                 (finishedChunks, currentChunks) <- readIORef uncommittedTextRef
@@ -648,71 +670,96 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                 outputSeen <- newIORef False
                                 let onBackendEvent event = do
                                         case event of
+                                            ToolArgumentEvent argumentEvent ->
+                                                observeToolArgumentEvent
+                                                    runtime
+                                                    argumentEvent
                                             TextDelta _ -> writeIORef outputSeen True
                                             ReasoningDelta _ -> writeIORef outputSeen True
                                             -- The backend rolled that attempt back,
                                             -- so a later failure no longer interrupts
                                             -- visible output.
-                                            ResponseAttemptDiscarded ->
+                                            ResponseAttemptDiscarded -> do
                                                 writeIORef outputSeen False
+                                                resetToolSpeculationRuntime runtime
+                                            -- Provider-managed retries can reuse
+                                            -- item and call identifiers. Arguments
+                                            -- from the interrupted attempt must not
+                                            -- be aliased into the replacement.
+                                            ResponseRestarted _ ->
+                                                resetToolSpeculationRuntime runtime
+                                            ToolRetracted callId ->
+                                                discardToolSpeculationByCallId
+                                                    runtime
+                                                    callId
                                             _ -> pure ()
-                                        config.loopOnEvent event
+                                        case event of
+                                            ToolArgumentEvent _ -> pure ()
+                                            _ -> config.loopOnEvent event
                                 -- Race the model call against cancel so Ctrl-C / Esc
                                 -- can stop reasoning mid-stream, not only between tools.
+                                resetToolSpeculationRuntime runtime
                                 raced <- mask \restore ->
-                                  withAsync
-                                    (restore $
-                                        config.loopBackend.submitTurn
+                                    withAsync
+                                        (restore $
+                                            config.loopBackend.submitTurn
                                             cursor.cursorState
                                             cursor.cursorPreviousResponseId
                                             cursor.cursorInputs
                                             onBackendEvent)
-                                    \submission -> do
-                                    result <- restore $ race
-                                        (waitCancel config.loopCancel)
-                                        (waitCatch submission)
-                                    normalized <- case result of
-                                        Left () -> do
-                                            -- Give structured providers a
-                                            -- chance to preserve their
-                                            -- subprocess/session invariants
-                                            -- before withAsync force-cancels
-                                            -- an unresponsive submission.
-                                            _ <- restore $
-                                                timeout 2000000
-                                                    (tryAny
-                                                        config.loopInterrupt)
-                                            _ <- restore $
-                                                timeout 2000000
-                                                    (waitCatch submission)
-                                            pure (Left ())
-                                        Right (Left exception) ->
-                                            -- Preserve the provider thread's
-                                            -- asynchronous-exception identity.
-                                            -- Safe.throwIO deliberately marks
-                                            -- manually thrown exceptions as
-                                            -- synchronous, which would turn a
-                                            -- ThreadKilled into LoopUnexpected.
-                                            Exception.throwIO exception
-                                        Right (Right completed) ->
-                                            pure (Right completed)
-                                    case normalized of
-                                        Right (Right backendResult@BackendResult{..})
-                                            | not
-                                                (Text.null
-                                                    backendOutput.responseId) -> do
-                                                committed <-
-                                                    config.loopBackendState.commitBackendState
-                                                        backendState
-                                                writeIORef progressRef
-                                                    (committed, ResponseCommitted)
-                                                pure
+                                        \submission -> do
+                                            result <- restore $ race
+                                                (waitCancel config.loopCancel)
+                                                (waitCatch submission)
+                                            normalized <- case result of
+                                                Left () -> do
+                                                    -- Give structured providers a
+                                                    -- chance to preserve their
+                                                    -- subprocess/session invariants
+                                                    -- before withAsync force-cancels
+                                                    -- an unresponsive submission.
+                                                    _ <- restore $
+                                                        timeout 2000000
+                                                            (tryAny
+                                                                config.loopInterrupt)
+                                                    _ <- restore $
+                                                        timeout 2000000
+                                                            (waitCatch submission)
+                                                    pure (Left ())
+                                                Right (Left exception) ->
+                                                    -- Preserve the provider thread's
+                                                    -- asynchronous-exception identity.
+                                                    -- Safe.throwIO deliberately marks
+                                                    -- manually thrown exceptions as
+                                                    -- synchronous, which would turn a
+                                                    -- ThreadKilled into LoopUnexpected.
+                                                    Exception.throwIO exception
+                                                Right (Right completed) ->
+                                                    pure (Right completed)
+                                            case normalized of
+                                                Right
                                                     (Right
-                                                        (Right backendResult
-                                                            { backendState =
-                                                                committed
-                                                            }))
-                                        _ -> pure normalized
+                                                        backendResult@BackendResult{..})
+                                                    | not
+                                                        (Text.null
+                                                            backendOutput.responseId) -> do
+                                                        committed <-
+                                                            config.loopBackendState.commitBackendState
+                                                                backendState
+                                                        writeIORef progressRef
+                                                            ( committed
+                                                            , ResponseCommitted
+                                                            )
+                                                        retainToolSpeculation
+                                                            runtime
+                                                            backendOutput.toolCalls
+                                                        pure
+                                                            (Right
+                                                                (Right backendResult
+                                                                    { backendState =
+                                                                        committed
+                                                                    }))
+                                                _ -> pure normalized
                                 case raced of
                                     Left () ->
                                         finishCursor cursor
@@ -771,7 +818,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                     results <-
                                         if null turn.toolCalls
                                             then pure []
-                                            else runToolCalls config turn.toolCalls
+                                            else runToolCalls config runtime turn.toolCalls
                                     writeIORef pendingRef (map CompletedTool results)
                                     cancelledAfter <-
                                         isCancelled config.loopCancel
@@ -894,8 +941,8 @@ handleLoopEventFailure unexpected state progress = \case
 -- | Preserve model order between conflicting calls while allowing independent
 -- calls from the same model turn to overlap. Results are returned in model
 -- order regardless of completion order.
-runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
-runToolCalls config calls = do
+runToolCalls :: LoopConfig -> ToolSpeculationRuntime -> [ToolCall] -> IO [ToolCallResult]
+runToolCalls config runtime calls = do
     prepared <- prepareIndexedToolCalls config (zip [0..] calls)
     scheduled <- traverse schedule prepared
     go scheduled IntMap.empty
@@ -930,7 +977,7 @@ runToolCalls config calls = do
             (mapConcurrently
                 (\scheduled -> do
                     result <-
-                        runPreparedToolCall config scheduled.prepared
+                        runPreparedToolCall config runtime scheduled.prepared
                     pure (fmap (\value -> (scheduled.index, value)) result))
                 ready)
         case raced of
@@ -1039,36 +1086,62 @@ prepareToolCall config call = do
 
 runPreparedToolCall
     :: LoopConfig
+    -> ToolSpeculationRuntime
     -> PreparedToolCall
     -> IO (Maybe ToolCallResult)
-runPreparedToolCall config (PreparedToolCall call approval) = do
+runPreparedToolCall config runtime (PreparedToolCall call approval) = do
     cancelled <- isCancelled config.loopCancel
     if cancelled
-        then pure Nothing
+        then do
+            discardToolSpeculation runtime call
+            pure Nothing
         else do
             config.loopOnEvent (ToolStarted call)
             result <- case approval of
-                ToolApprovalDenied denial ->
+                ToolApprovalDenied denial -> do
+                    discardToolSpeculation runtime call
                     pure ToolCallResult
                         { callId = call.callId
                         , output = denial
                         , callKind = call.callKind
                         }
-                ToolApprovalRejected ->
+                ToolApprovalRejected -> do
+                    discardToolSpeculation runtime call
                     pure ToolCallResult
                         { callId = call.callId
                         , output = "Tool call rejected by user."
                         , callKind = call.callKind
                         }
                 ToolApprovalGranted ->
-                    dispatchRegisteredToolCall
-                        config.loopDispatch
-                            { toolDispatchOnOutput = \progressCall output ->
-                                config.loopDispatch.toolDispatchOnOutput progressCall output
-                                    >> config.loopOnEvent
-                                        (ToolOutputUpdated progressCall.callId output)
-                            }
-                        config.loopTools
-                        call
+                    tryAny
+                        (takeToolSpeculationEmitting runtime call \output ->
+                            config.loopDispatch.toolDispatchOnOutput call output
+                                >> config.loopOnEvent
+                                    (ToolOutputUpdated call.callId output)) >>= \case
+                        Left exception ->
+                            finishToolException
+                                config.loopDispatch
+                                call
+                                exception
+                        Right (Just toolResult) ->
+                            finishToolResult
+                                config.loopDispatch
+                                call
+                                toolResult
+                        Right Nothing ->
+                            dispatchRegisteredToolCall
+                                config.loopDispatch
+                                    { toolDispatchOnOutput =
+                                        \progressCall output ->
+                                            config.loopDispatch.toolDispatchOnOutput
+                                                progressCall
+                                                output
+                                                >> config.loopOnEvent
+                                                    (ToolOutputUpdated
+                                                        progressCall.callId
+                                                        output)
+                                    }
+                                config.loopTools
+                                call
             config.loopOnEvent (ToolFinished result)
             pure (Just result)

@@ -447,6 +447,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     now <- getCurrentTime
                     modifyIORef' renderStateRef \state ->
                         case event of
+                            ToolArgumentEvent _ -> state
                             TurnStarted -> beginRenderTurn now state
                             TextDelta delta ->
                                 countGenerationChars delta

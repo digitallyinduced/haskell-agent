@@ -502,16 +502,18 @@ appendOutput :: Int -> Text -> NativeOutput -> NativeOutput
 appendOutput budget chunk output
     | Text.null chunk = output
     | otherwise =
-        let appended = trimOutputTo budget output
-                { outputChunks =
-                    if Text.null retainedChunk
-                        then output.outputChunks
-                        else output.outputChunks :|> retainedChunk
-                , outputBytes =
-                    saturatingNativeAdd
-                        output.outputBytes
-                        (textBytes retainedChunk)
-                }
+        let appended =
+                trimOutputTo budget
+                    (output
+                        { outputChunks =
+                            if Text.null retainedChunk
+                                then output.outputChunks
+                                else output.outputChunks :|> retainedChunk
+                        , outputBytes =
+                            saturatingNativeAdd
+                                output.outputBytes
+                                (textBytes retainedChunk)
+                        })
         in if chunkTruncated
             then appended { outputOmitted = True }
             else appended

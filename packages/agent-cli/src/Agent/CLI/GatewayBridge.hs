@@ -495,6 +495,8 @@ updateManagedActivity event state =
                 { accumulatorKind = "tool"
                 , accumulatorMessage = "Running " <> name <> "…"
                 }
+        ToolArgumentEvent _ ->
+            state
         ToolFinished _ ->
             state
                 { accumulatorKind = "thinking"

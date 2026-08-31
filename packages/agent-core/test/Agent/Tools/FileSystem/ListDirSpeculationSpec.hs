@@ -1,0 +1,315 @@
+module Agent.Tools.FileSystem.ListDirSpeculationSpec (spec) where
+
+import Agent.ToolDispatch
+    ( ToolArgumentStreamEvent(..)
+    , ToolCallStreamRef(..)
+    , functionToolCall
+    )
+import Agent.Tools.FileSystem.ListDir
+    ( ListDirSpeculation
+    , closeListDirSpeculation
+    , listDirToolWithSpeculation
+    , newListDirSpeculation
+    , waitForListDirSpeculation
+    )
+import Agent.Tools.Speculation
+    ( ToolSpeculationRuntime
+    , closeToolSpeculationRuntime
+    , newToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , retainToolSpeculation
+    , takeToolSpeculation
+    , waitForToolSpeculation
+    )
+import Agent.Tools.Types
+    ( defaultToolEnv
+    , setToolRootAccessRequest
+    )
+import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import System.Directory
+    ( createDirectoryIfMissing
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    )
+import System.Exit (ExitCode(..))
+import System.FilePath ((</>))
+import System.OsPath (unsafeEncodeUtf)
+import System.Posix.Temp (mkdtemp)
+import System.Process (readProcessWithExitCode)
+import Test.Hspec
+
+spec :: Spec
+spec = describe "list_dir speculation" do
+    it "prefetches a complete directory from argument deltas" do
+        withListSpeculation \dir _cache runtime -> do
+            createDirectoryIfMissing True (dir </> "alpha")
+            Text.writeFile (dir </> "alpha" </> "note.txt") "hi"
+            let callId = "call-list"
+                arguments = listArguments "alpha"
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation _cache
+            retainList runtime callId arguments
+            takeList runtime callId arguments
+                `shouldReturn` Just
+                    (Right "Directory listing for alpha:\n- note.txt\n")
+
+    it "renders an absolute workspace target with its workspace-relative name" do
+        withListSpeculation \dir cache runtime -> do
+            createDirectoryIfMissing True (dir </> "absolute")
+            Text.writeFile (dir </> "absolute" </> "note.txt") "hi"
+            let callId = "call-absolute"
+                arguments = listArguments (Text.pack (dir </> "absolute"))
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation cache
+            retainList runtime callId arguments
+            takeList runtime callId arguments
+                `shouldReturn` Just
+                    (Right "Directory listing for absolute:\n- note.txt\n")
+
+    it "keeps speculative listings within the ordinary 200-node limit" do
+        withListSpeculation \dir cache runtime -> do
+            let target = dir </> "wide"
+            createDirectoryIfMissing True target
+            forM_ [1 .. 205 :: Int] \index -> do
+                let suffix = Text.unpack $
+                        Text.justifyRight 3 '0' (Text.pack (show index))
+                createDirectoryIfMissing True (target </> ("dir-" <> suffix))
+            let callId = "call-bounded"
+                arguments = listArguments "wide"
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation cache
+            retainList runtime callId arguments
+            takeList runtime callId arguments >>= \case
+                Just (Right output) -> do
+                    length
+                        (filter
+                            (Text.isPrefixOf "- dir-")
+                            (Text.lines output))
+                        `shouldBe` 200
+                    output `shouldSatisfy`
+                        Text.isInfixOf
+                            "Large directory summarized; some nested entries were omitted."
+                    output `shouldSatisfy` Text.isInfixOf "- dir-200/"
+                    output `shouldNotSatisfy` Text.isInfixOf "- dir-201/"
+                result ->
+                    expectationFailure $
+                        "expected successful bounded listing, got " <> show result
+
+    it "predicts a unique workspace directory from a streamed prefix" do
+        withPreparedList
+            (\dir -> do
+                createDirectoryIfMissing True (dir </> "src" </> "unique-listing")
+                createDirectoryIfMissing True (dir </> "src" </> "other-listing")
+                Text.writeFile
+                    (dir </> "src" </> "unique-listing" </> "a.txt")
+                    "a"
+                Text.writeFile
+                    (dir </> "src" </> "other-listing" </> "b.txt")
+                    "b"
+                initializeGitRepository dir)
+            \_dir cache runtime -> do
+                let callId = "call-prefix"
+                    prefix = "{\"target_directory\":\"src/uni"
+                    arguments = listArguments "src/unique-listing"
+                observeToolArgumentEvent runtime $
+                    ToolArgumentsStarted
+                        { argumentStreamRefs = [ToolCallStreamItem "item-prefix"]
+                        , argumentStreamCallId = callId
+                        , argumentStreamName = Just "list_dir"
+                        , argumentStreamArguments = prefix
+                        }
+                waitForToolSpeculation runtime
+                waitForListDirSpeculation cache
+                retainList runtime callId arguments
+                result <- takeList runtime callId arguments
+                result `shouldSatisfy` \case
+                    Just (Right output) ->
+                        "unique-listing" `Text.isInfixOf` output
+                            && "a.txt" `Text.isInfixOf` output
+                    _ -> False
+
+    it "falls back when the directory changes after prefetch" do
+        withListSpeculation \dir cache runtime -> do
+            createDirectoryIfMissing True (dir </> "stale")
+            Text.writeFile (dir </> "stale" </> "old.txt") "old"
+            let callId = "call-stale"
+                arguments = listArguments "stale"
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation cache
+            Text.writeFile (dir </> "stale" </> "new.txt") "new"
+            retainList runtime callId arguments
+            result <- takeList runtime callId arguments
+            result `shouldSatisfy` \case
+                Just (Right output) -> "new.txt" `Text.isInfixOf` output
+                _ -> False
+
+    it "does not request external-root access during speculation" do
+        withTempDir \workspace ->
+            withTempDir \external -> do
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                requests <- newIORef (0 :: Int)
+                setToolRootAccessRequest env $ Just \_ -> do
+                    modifyIORef' requests (+ 1)
+                    pure False
+                bracket
+                    (newListDirSpeculation env)
+                    closeListDirSpeculation
+                    \cache -> do
+                        let tool = listDirToolWithSpeculation env (Just cache)
+                        bracket
+                            (newToolSpeculationRuntime [tool])
+                            closeToolSpeculationRuntime
+                            \runtime -> do
+                                createDirectoryIfMissing True (external </> "nested")
+                                let callId = "call-external"
+                                    arguments =
+                                        listArguments (Text.pack external)
+                                streamList runtime callId arguments
+                                waitForToolSpeculation runtime
+                                waitForListDirSpeculation cache
+                                readIORef requests `shouldReturn` 0
+
+    it "falls back when a nested directory changes after prefetch" do
+        withListSpeculation \dir cache runtime -> do
+            createDirectoryIfMissing True (dir </> "root" </> "nested")
+            Text.writeFile (dir </> "root" </> "nested" </> "old.txt") "old"
+            let callId = "call-nested-stale"
+                arguments = listArguments "root"
+            streamList runtime callId arguments
+            waitForToolSpeculation runtime
+            waitForListDirSpeculation cache
+            Text.writeFile (dir </> "root" </> "nested" </> "new.txt") "new"
+            retainList runtime callId arguments
+            result <- takeList runtime callId arguments
+            result `shouldSatisfy` \case
+                Just (Right output) ->
+                    "new.txt" `Text.isInfixOf` output
+                _ -> False
+
+    it "falls back when repository excludes begin hiding a listed entry" do
+        withPreparedList
+            (\dir -> do
+                createDirectoryIfMissing True (dir </> "root")
+                Text.writeFile (dir </> "root" </> "visible.tmp") "visible"
+                initializeGitRepository dir)
+            \dir cache runtime -> do
+                let callId = "call-exclude-added"
+                    arguments = listArguments "root"
+                streamList runtime callId arguments
+                waitForToolSpeculation runtime
+                waitForListDirSpeculation cache
+                Text.writeFile
+                    (dir </> ".git" </> "info" </> "exclude")
+                    "/root/visible.tmp\n"
+                retainList runtime callId arguments
+                takeList runtime callId arguments
+                    `shouldReturn` Just
+                        (Right "Directory listing for root:\n")
+
+    it "falls back when repository excludes stop hiding an entry" do
+        withPreparedList
+            (\dir -> do
+                createDirectoryIfMissing True (dir </> "root")
+                Text.writeFile (dir </> "root" </> "hidden.tmp") "hidden"
+                initializeGitRepository dir
+                Text.writeFile
+                    (dir </> ".git" </> "info" </> "exclude")
+                    "/root/hidden.tmp\n")
+            \dir cache runtime -> do
+                let callId = "call-exclude-removed"
+                    arguments = listArguments "root"
+                streamList runtime callId arguments
+                waitForToolSpeculation runtime
+                waitForListDirSpeculation cache
+                Text.writeFile
+                    (dir </> ".git" </> "info" </> "exclude")
+                    ""
+                retainList runtime callId arguments
+                takeList runtime callId arguments
+                    `shouldReturn` Just
+                        (Right "Directory listing for root:\n- hidden.tmp\n")
+
+withListSpeculation
+    :: (FilePath -> ListDirSpeculation -> ToolSpeculationRuntime -> IO a)
+    -> IO a
+withListSpeculation = withPreparedList (const (pure ()))
+
+withPreparedList
+    :: (FilePath -> IO ())
+    -> (FilePath -> ListDirSpeculation -> ToolSpeculationRuntime -> IO a)
+    -> IO a
+withPreparedList prepare action =
+    withTempDir \dir -> do
+        prepare dir
+        env <- defaultToolEnv (unsafeEncodeUtf dir)
+        bracket
+            (newListDirSpeculation env)
+            closeListDirSpeculation
+            \cache -> do
+                let tool = listDirToolWithSpeculation env (Just cache)
+                bracket
+                    (newToolSpeculationRuntime [tool])
+                    closeToolSpeculationRuntime
+                    (action dir cache)
+
+withTempDir :: (FilePath -> IO a) -> IO a
+withTempDir action = do
+    tmp <- getTemporaryDirectory
+    bracket
+        (mkdtemp (tmp </> "agent-list-speculation-XXXXXX"))
+        removeDirectoryRecursive
+        action
+
+initializeGitRepository :: FilePath -> IO ()
+initializeGitRepository dir = do
+    (exitCode, _, stderrText) <-
+        readProcessWithExitCode "git" ["-C", dir, "init", "-q"] ""
+    case exitCode of
+        ExitSuccess -> pure ()
+        ExitFailure code ->
+            expectationFailure $
+                "git init failed with exit "
+                    <> show code
+                    <> ": "
+                    <> stderrText
+
+streamList :: ToolSpeculationRuntime -> Text -> Text -> IO ()
+streamList runtime callId arguments = do
+    observeToolArgumentEvent runtime $
+        ToolArgumentsStarted
+            { argumentStreamRefs = [ToolCallStreamItem "item-list"]
+            , argumentStreamCallId = callId
+            , argumentStreamName = Just "list_dir"
+            , argumentStreamArguments = ""
+            }
+    observeToolArgumentEvent runtime $
+        ToolArgumentsDelta
+            { argumentStreamRefs = [ToolCallStreamItem "item-list"]
+            , argumentStreamDelta = arguments
+            }
+
+retainList :: ToolSpeculationRuntime -> Text -> Text -> IO ()
+retainList runtime callId arguments =
+    retainToolSpeculation runtime
+        [functionToolCall callId "list_dir" arguments]
+
+takeList
+    :: ToolSpeculationRuntime
+    -> Text
+    -> Text
+    -> IO (Maybe (Either Text Text))
+takeList runtime callId arguments =
+    takeToolSpeculation runtime (functionToolCall callId "list_dir" arguments)
+
+listArguments :: Text -> Text
+listArguments target =
+    "{\"target_directory\":\"" <> target <> "\"}"

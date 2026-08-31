@@ -26,13 +26,17 @@ import qualified Agent.Tools.CodeMode.ProtocolSpec as CodeModeProtocolSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.FileSystem.ListDirSpec as ListDirSpec
+import qualified Agent.Tools.FileSystem.ListDirSpeculationSpec as ListDirSpeculationSpec
 import qualified Agent.Tools.FileSystem.ReadFileSpec as ReadFileSpec
+import qualified Agent.Tools.FileSystem.ReadFileSpeculationSpec as ReadFileSpeculationSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
+import qualified Agent.Tools.InterpreterSpec as InterpreterSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
 import qualified Agent.Tools.OutputArtifactSpec as OutputArtifactSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
 import qualified Agent.Tools.SecretSpec as SecretSpec
+import qualified Agent.Tools.SpeculationSpec as SpeculationSpec
 import qualified Agent.Tools.ShowImageSpec as ShowImageSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import Test.Hspec (hspec)
@@ -62,13 +66,17 @@ main = hspec do
     ToolDSLSpec.spec
     GrepSpec.spec
     ListDirSpec.spec
+    ListDirSpeculationSpec.spec
     ReadFileSpec.spec
+    ReadFileSpeculationSpec.spec
     GhciSpec.spec
+    InterpreterSpec.spec
     IOSpec.spec
     MultiAgentsSpec.spec
     OutputArtifactSpec.spec
     PlanModeSpec.spec
     SecretSpec.spec
+    SpeculationSpec.spec
     ShowImageSpec.spec
     CodeModeHostSpec.spec
     CodeModeProtocolSpec.spec

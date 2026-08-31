@@ -19,6 +19,10 @@ module Agent.Tools.Types
     , freeformApplyPatchAppToolWithExecution
     , freeformGrammarAppToolWithExecution
     , withToolResourceClaims
+    , withTypedResourceClaims
+    , withToolArgumentInterpreter
+    , withDefaultArgumentInterpreter
+    , interpreterForTool
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -39,10 +43,15 @@ import Agent.ToolDispatch
     , ToolDispatchOutcome
     , ToolDispatchConfig
     , ToolHandler
+    , StreamedToolFactory
+    , canonicalToolArguments
     , canonicalToolName
+    , decodeToolArguments
     , dispatchToolHandler
     , dispatchToolHandlerDetailed
     , handlerName
+    , streamedToolFactoryForHandler
+    , toolArgumentsValue
     )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
@@ -52,6 +61,7 @@ import Agent.Tools.Scheduling
     )
 import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
+import Agent.Json.Decode (Decoder)
 import Data.Aeson (Value)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
 import qualified Data.Map.Strict as Map
@@ -105,6 +115,8 @@ data AppTool = AppTool
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
+    , appToolArgumentInterpreter
+        :: !(Maybe StreamedToolFactory)
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -225,6 +237,7 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -257,6 +270,7 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
     }
 
 withToolResourceClaims
@@ -265,6 +279,40 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
+
+-- | Resource claims that consume already-shaped arguments. The wrapper
+-- decodes JSON once; claim functions must not re-parse 'ToolCall' text.
+withTypedResourceClaims
+    :: Decoder args
+    -> (args -> IO (Either Text [ToolResourceClaim]))
+    -> AppTool
+    -> AppTool
+withTypedResourceClaims decoder resolve =
+    withToolResourceClaims \call ->
+        case decodeToolArguments decoder call.arguments of
+            Left err -> pure (Left err)
+            Right args -> resolve args
+
+-- | Attach an opt-in streamed-argument interpreter to a tool. Any prepared
+-- result is consumed only after normal approval and scheduling.
+withToolArgumentInterpreter
+    :: StreamedToolFactory
+    -> AppTool
+    -> AppTool
+withToolArgumentInterpreter interpreter tool =
+    tool { appToolArgumentInterpreter = Just interpreter }
+
+-- | Give a raw 'AppTool' record the same streamed interpreter 'jsonTool' uses.
+withDefaultArgumentInterpreter :: AppTool -> AppTool
+withDefaultArgumentInterpreter tool =
+    withToolArgumentInterpreter (streamedToolFactoryForHandler tool.appToolHandler) tool
+
+-- | Interpreter used at runtime: an explicit factory, or the handler fold.
+interpreterForTool :: AppTool -> StreamedToolFactory
+interpreterForTool tool =
+    case tool.appToolArgumentInterpreter of
+        Just factory -> factory
+        Nothing -> streamedToolFactoryForHandler tool.appToolHandler
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -293,6 +341,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
     }
 
 -- | Construct a freeform tool that advertises an explicit grammar.
@@ -314,6 +363,7 @@ freeformGrammarAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry

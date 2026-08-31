@@ -96,6 +96,18 @@ spec = describe "formatReadFile" do
                 streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
                     `shouldReturn` Left "Cannot read binary file"
 
+        it "preserves NUL bytes after the binary-detection prefix" do
+            withBytes
+                (BS.replicate 9000 97 <> BS.pack [0] <> "suffix\n")
+                \path ->
+                    streamReadFile
+                        (unsafeEncodeUtf path)
+                        (readArgs Nothing Nothing)
+                        >>= (`shouldSatisfy`
+                            either
+                                (const False)
+                                (Text.isInfixOf "\0suffix"))
+
         it "skips giant unselected lines without retaining them" do
             withBytes (BS.replicate 300000 120 <> "\nsmall\n") \path ->
                 streamReadFile (unsafeEncodeUtf path) (readArgs (Just 2) (Just 1))

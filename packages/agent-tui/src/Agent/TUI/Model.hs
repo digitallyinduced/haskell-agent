@@ -357,6 +357,8 @@ snapshotGenerationRate usage state =
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
+    ToolArgumentEvent _ ->
+        state
     TurnStarted ->
         resetGeneration
             state

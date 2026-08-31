@@ -7,7 +7,9 @@ module Agent.Tools.FileSystem
     , readTextFile
     , renameTextFile
     , resolveForRead
+    , resolveForReadWithoutAccessRequest
     , resolveUnderCwd
+    , resolveUnderCwdWithoutAccessRequest
     , writeTextFile
     ) where
 
@@ -63,6 +65,13 @@ resolveUnderCwd :: ToolEnv -> OsPath -> IO (Either Text OsPath)
 resolveUnderCwd env requested =
     resolveWithRoots env requested []
 
+-- | Resolve a speculative path without invoking the interactive filesystem
+-- access callback. Speculative reads happen before tool approval, so an
+-- abandoned model call must not be able to trigger an access request.
+resolveUnderCwdWithoutAccessRequest :: ToolEnv -> OsPath -> IO (Either Text OsPath)
+resolveUnderCwdWithoutAccessRequest env requested =
+    resolveWithoutAccessRequest env requested []
+
 -- | Resolve a read-only tool path, additionally allowing resources belonging
 -- to the current skill catalog. Mutating tools deliberately continue to use
 -- 'resolveUnderCwd', so discovering a user skill does not make it editable.
@@ -70,6 +79,25 @@ resolveForRead :: ToolEnv -> OsPath -> IO (Either Text OsPath)
 resolveForRead env requested = do
     skillRoots <- readIORef env.toolSkillRoots
     resolveWithRoots env requested skillRoots
+
+-- | Read-only counterpart to 'resolveForRead' for pre-approval speculation.
+resolveForReadWithoutAccessRequest
+    :: ToolEnv -> OsPath -> IO (Either Text OsPath)
+resolveForReadWithoutAccessRequest env requested = do
+    skillRoots <- readIORef env.toolSkillRoots
+    resolveWithoutAccessRequest env requested skillRoots
+
+resolveWithoutAccessRequest
+    :: ToolEnv
+    -> OsPath
+    -> [OsPath]
+    -> IO (Either Text OsPath)
+resolveWithoutAccessRequest env requested extraRoots =
+    resolveWithRootsAttempt env requested extraRoots >>= \case
+        Right resolved -> pure (Right resolved)
+        Left (OutsideAllowedRoots _) ->
+            pure (Left (outsideRootsMessage requested))
+        Left (ResolverFailure err) -> pure (Left err)
 
 resolveWithRoots
     :: ToolEnv

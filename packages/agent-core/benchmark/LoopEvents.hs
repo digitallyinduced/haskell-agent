@@ -324,6 +324,7 @@ eventWeight = \case
         Text.length text + if warning then 1 else 0
     WarningRaised text -> Text.length text
     ResponseRestarted text -> Text.length text
+    ToolArgumentEvent _ -> 0
     TurnStarted -> 1
     TurnFinished _ -> 1
     ToolStarted call -> Text.length call.callId

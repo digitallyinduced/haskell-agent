@@ -340,6 +340,25 @@ executable eval-ghci-vs-bash
                     , time
                     , unix
 
+benchmark speculative-tools-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          SpeculativeTools.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-codex-dialect
+                    , agent-grok-build-dialect
+                    , base >= 4.17 && < 5
+                    , containers
+                    , directory
+                    , filepath
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , text >= 2.0 && < 2.2
+                    , unix
+
 benchmark subagent-retention-bench
     import:           common-options
     type:             exitcode-stdio-1.0

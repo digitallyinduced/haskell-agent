@@ -7,10 +7,13 @@ module Agent.Codex.Dialect.ApplyPatch
     , UpdateChunk(..)
     , parsePatch
     , applyPatch
+    , applyPatchWithContents
+    , streamingPatchReadTarget
     , applyPatchGrammar
     ) where
 
 import Agent.OsPath (fromText, relativeDisplayPath)
+import Agent.Tools.FileSystem.FilePrefetch (PathProgress(..))
 import Agent.Tools.IO
     ( deleteTextFile
     , readTextFile
@@ -193,17 +196,30 @@ stripPrefix :: Text -> Text -> Maybe Text
 stripPrefix prefix line = Text.stripPrefix prefix (Text.stripStart line)
 
 applyPatch :: ToolEnv -> Text -> IO (Either Text Text)
-applyPatch env raw =
+applyPatch env = applyPatchWithContents env Map.empty
+
+-- | Apply a patch, using already-read file contents when present. Callers
+-- must have verified those snapshots are still current.
+applyPatchWithContents
+    :: ToolEnv
+    -> Map.Map OsPath Text
+    -> Text
+    -> IO (Either Text Text)
+applyPatchWithContents env overlay raw =
     runExceptT do
         hunks <- except (parsePatch raw)
         if null hunks
             then throwE "No files were modified."
-            else applyHunks env hunks
+            else applyHunks env overlay hunks
 
-applyHunks :: ToolEnv -> [Hunk] -> ExceptT Text IO Text
-applyHunks env hunks = do
+applyHunks
+    :: ToolEnv
+    -> Map.Map OsPath Text
+    -> [Hunk]
+    -> ExceptT Text IO Text
+applyHunks env overlay hunks = do
     (actions, resultSummary) <-
-        prepareHunks env hunks `catchE` \err ->
+        prepareHunks env overlay hunks `catchE` \err ->
             throwE $
                 "Patch validation failed; no files were changed.\n" <> err
     mapM_ applyPreparedAction actions `catchE` \err ->
@@ -224,9 +240,11 @@ data PreparedAction
 -- earlier files modified even though the overall tool call reports failure.
 prepareHunks
     :: ToolEnv
+    -> Map.Map OsPath Text
     -> [Hunk]
     -> ExceptT Text IO ([PreparedAction], Text)
-prepareHunks env hunks = go hunks Map.empty [] [] [] []
+prepareHunks env overlay hunks =
+    go hunks (Map.map VirtualContents overlay) [] [] [] []
   where
     go [] _ actions added modified deleted =
         pure
@@ -395,3 +413,45 @@ summary workspace added modified deleted =
   where
     display path =
         relativeDisplayPath workspace (fromText (Text.pack path))
+
+-- | First update/delete path visible in a possibly incomplete patch. Used to
+-- start a read while later hunks are still streaming.
+streamingPatchReadTarget :: Text -> Maybe PathProgress
+streamingPatchReadTarget raw =
+    case complete of
+        path : _ -> Just (PathComplete path)
+        [] -> prefix
+  where
+    endsWithNewline = Text.null raw || Text.isSuffixOf "\n" raw
+    ls = Text.splitOn "\n" raw
+    (finished, lastLine)
+        | endsWithNewline = (ls, Nothing)
+        | null ls = ([], Nothing)
+        | otherwise = (init ls, Just (last ls))
+    complete = [path | line <- finished, Just path <- [completeReadPath line]]
+    prefix = lastLine >>= incompleteReadPath
+
+completeReadPath :: Text -> Maybe Text
+completeReadPath line
+    | Just path <- stripPrefix "*** Update File: " line
+    , not (Text.null (Text.strip path)) =
+        Just (Text.strip path)
+    | Just path <- stripPrefix "*** Delete File: " line
+    , not (Text.null (Text.strip path)) =
+        Just (Text.strip path)
+    | otherwise = Nothing
+
+incompleteReadPath :: Text -> Maybe PathProgress
+incompleteReadPath line
+    | Just path <- stripPrefix "*** Update File: " line
+    , not (Text.null path) =
+        Just (PathPrefix path)
+    | Just path <- stripPrefix "*** Delete File: " line
+    , not (Text.null path) =
+        Just (PathPrefix path)
+    | "*** Update File:" `Text.isPrefixOf` stripped
+    || "*** Delete File:" `Text.isPrefixOf` stripped =
+        Nothing
+    | otherwise = Nothing
+  where
+    stripped = Text.stripStart line

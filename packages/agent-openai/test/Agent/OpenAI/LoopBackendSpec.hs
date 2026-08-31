@@ -22,7 +22,22 @@ import Agent.Responses.LoopBackend
 import Agent.Responses.Request (stripReplayedItemStatus)
 import Agent.Responses.Types
 import Agent.ToolDispatch
-import Agent.Tools.Types (ToolRegistry, mkToolRegistry)
+import Agent.Tools.FileSystem.ReadFile (readFileToolWithSpeculation)
+import Agent.Tools.FileSystem.ReadFileSpeculation
+    ( newReadFileSpeculation
+    , waitForReadFileSpeculation
+    )
+import Agent.Tools.Speculation
+    ( ToolSpeculationRuntime
+    , closeToolSpeculationRuntime
+    , newToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , retainToolSpeculation
+    , takeToolSpeculation
+    , waitForToolSpeculation
+    )
+import Agent.Tools.Types (ToolRegistry, defaultToolEnv, mkToolRegistry)
+import Control.Exception (bracket)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -31,6 +46,10 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
@@ -638,6 +657,146 @@ spec = do
             collect True `shouldReturn`
                 [ReasoningDelta "raw", ReasoningDelta "summary"]
 
+        it "retains read_file work started from streamed argument deltas" do
+            withSystemTempDirectory "openai-read-speculation" \dir -> do
+                Text.writeFile (dir </> "streamed.txt") "streamed"
+                env <- defaultToolEnv (unsafeEncodeUtf dir)
+                cache <- newReadFileSpeculation env
+                bracket
+                    (newToolSpeculationRuntime
+                        [readFileToolWithSpeculation env (Just cache)])
+                    closeToolSpeculationRuntime
+                    \runtime -> do
+                        transcript <- newIORef []
+                        let callId = "call-streamed"
+                            arguments =
+                                "{\"target_file\":\"streamed.txt\"}"
+                            addedCall =
+                                FunctionCallItem FunctionCall
+                                    { itemId = Nothing
+                                    , callId
+                                    , name = "read_file"
+                                    , namespace = Nothing
+                                    , arguments = ""
+                                    , encryptedFunctionArgs = Nothing
+                                    , status = Nothing
+                                    , provider = Nothing
+                                    }
+                            finalCall =
+                                functionCallItem
+                                    callId
+                                    "read_file"
+                                    arguments
+                            send _request _previous onEvent = do
+                                onEvent ResponseOutputItemAddedEvent
+                                    { item = addedCall
+                                    , outputIndex = Just 0
+                                    , sequenceNumber = Nothing
+                                    }
+                                onEvent ResponseFunctionCallArgumentsDeltaEvent
+                                    { delta = Just arguments
+                                    , streamItemId = Nothing
+                                    , streamOutputIndex = Just 0
+                                    , sequenceNumber = Nothing
+                                    }
+                                waitForToolSpeculation runtime
+                                waitForReadFileSpeculation cache
+                                pure $ Right $
+                                    testResponse "resp-streamed" [finalCall]
+                            backend =
+                                openAiBackendWith
+                                    send
+                                    (pure baseParams)
+                        result <- submitWithState
+                            transcript
+                            backend
+                            Nothing
+                            [UserMessage "read it"]
+                            (observeArguments runtime)
+                        result `shouldBe`
+                            Right
+                                (emptyTurnOutput
+                                    "resp-streamed"
+                                    [ functionToolCall
+                                        callId
+                                        "read_file"
+                                        arguments
+                                    ]
+                                    Nothing)
+                        retainToolSpeculation runtime
+                            [ functionToolCall callId "read_file" arguments ]
+                        takeToolSpeculation
+                            runtime
+                            (functionToolCall
+                                callId
+                                "read_file"
+                                arguments)
+                            `shouldReturn` Just (Right "1→streamed")
+
+        it "binds arguments.done speculation from the final response item" do
+            withSystemTempDirectory "openai-read-done-speculation" \dir -> do
+                Text.writeFile (dir </> "done.txt") "done"
+                env <- defaultToolEnv (unsafeEncodeUtf dir)
+                cache <- newReadFileSpeculation env
+                bracket
+                    (newToolSpeculationRuntime
+                        [readFileToolWithSpeculation env (Just cache)])
+                    closeToolSpeculationRuntime
+                    \runtime -> do
+                        transcript <- newIORef []
+                        let itemId = "item-done"
+                            callId = "call-done"
+                            arguments =
+                                "{\"target_file\":\"done.txt\"}"
+                            finalCall =
+                                FunctionCallItem FunctionCall
+                                    { itemId = Just itemId
+                                    , callId
+                                    , name = "read_file"
+                                    , namespace = Nothing
+                                    , arguments
+                                    , encryptedFunctionArgs = Nothing
+                                    , status = Just ItemCompleted
+                                    , provider = Nothing
+                                    }
+                            send _request _previous onEvent = do
+                                onEvent ResponseFunctionCallArgumentsDoneEvent
+                                    { arguments = Just arguments
+                                    , functionName = Just "read_file"
+                                    , streamItemId = Just itemId
+                                    , streamOutputIndex = Nothing
+                                    , sequenceNumber = Nothing
+                                    }
+                                waitForToolSpeculation runtime
+                                waitForReadFileSpeculation cache
+                                pure $ Right $
+                                    testResponse "resp-done" [finalCall]
+                            backend =
+                                openAiBackendWith
+                                    send
+                                    (pure baseParams)
+                            call =
+                                functionToolCall
+                                    callId
+                                    "read_file"
+                                    arguments
+                        result <- submitWithState
+                            transcript
+                            backend
+                            Nothing
+                            [UserMessage "read it"]
+                            (observeArguments runtime)
+                        result `shouldBe`
+                            Right
+                                (emptyTurnOutput
+                                    "resp-done"
+                                    [call]
+                                    Nothing)
+                        retainToolSpeculation runtime [call]
+                        takeToolSpeculation runtime call
+                            `shouldReturn` Just (Right "1→done")
+
+
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []
             events <- newIORef []
@@ -900,7 +1059,9 @@ spec = do
             [() | ToolStarted started <- recorded, started.callId == "fc-1"]
                 `shouldBe` [()]
             filter (not . isToolStartedEvent) recorded `shouldBe`
-                [ActivityUpdated "Writing shell call…"]
+                [ shellArgumentsStarted
+                , ActivityUpdated "Writing shell call…"
+                ]
 
         it "resubmits after a mid-response socket drop behind a restart boundary" do
             attempts <- newIORef (0 :: Int)
@@ -973,7 +1134,8 @@ spec = do
             [() | ToolStarted started <- recorded, started.callId == "fc-1"]
                 `shouldBe` [()]
             filter (not . isToolStartedEvent) recorded `shouldBe`
-                [ ActivityUpdated "Writing shell call…"
+                [ shellArgumentsStarted
+                , ActivityUpdated "Writing shell call…"
                 , ActivityUpdated
                     "Connection lost mid-response (Codex connection limit reached); reconnecting in 0s (attempt 1)…"
                 , ResponseAttemptDiscarded
@@ -1755,10 +1917,24 @@ spec = do
 -- Fixtures
 --------------------------------------------------------------------------------
 
+observeArguments :: ToolSpeculationRuntime -> LoopEvent -> IO ()
+observeArguments runtime = \case
+    ToolArgumentEvent event -> observeToolArgumentEvent runtime event
+    _ -> pure ()
+
 isToolStartedEvent :: LoopEvent -> Bool
 isToolStartedEvent = \case
     ToolStarted _ -> True
     _ -> False
+
+shellArgumentsStarted :: LoopEvent
+shellArgumentsStarted =
+    ToolArgumentEvent ToolArgumentsStarted
+        { argumentStreamRefs = [ToolCallStreamOutput 0]
+        , argumentStreamCallId = "fc-1"
+        , argumentStreamName = Just "shell"
+        , argumentStreamArguments = "{}"
+        }
 
 submitWithState
     :: IORef [ResponseItem]

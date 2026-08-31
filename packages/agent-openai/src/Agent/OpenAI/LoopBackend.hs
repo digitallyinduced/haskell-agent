@@ -49,6 +49,11 @@ import Agent.Loop
     , advanceBackendSnapshot
     , backendContinuationToken
     )
+import Agent.ToolDispatch
+    ( ToolArgumentStreamEvent(..)
+    , functionToolCall
+    , ToolCallStreamRef(..)
+    )
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
@@ -83,7 +88,7 @@ import qualified Agent.Transport.WebSocket as WebSocket
 import Control.Concurrent (threadDelay)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (onException)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Control.Retry
     ( RetryPolicyM
     , applyPolicy
@@ -94,7 +99,7 @@ import Control.Retry
     , rsPreviousDelay
     )
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -735,7 +740,14 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
             Right response -> pure (Right response)
         case recovered of
             Left err -> pure (Left err)
-            Right response ->
+            Right response -> do
+                -- Some transports (notably the HTTP fallback) do not emit
+                -- the streamed completion event.  The completed response is
+                -- authoritative, so always close any tool argument streams
+                -- that are present in the final output.
+                mapM_
+                    (onLoopEvent . ToolArgumentEvent)
+                    (responseToolCallCompletions response.output)
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
                     , backendState =
@@ -763,6 +775,8 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                 if streamOutputObserved event
                     then writeIORef emittedRawOutput True
                     else pure ()
+                forM_ (responseEventToToolArgumentEvent event) $
+                    onLoopEvent . ToolArgumentEvent
                 projectEvent event
                     >>= mapM_ \loopEvent -> do
                         when (isVisibleModelOutput loopEvent) $
@@ -840,6 +854,88 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
 transientStreamingResultPolicy :: RetryPolicyM IO
 transientStreamingResultPolicy =
     exponentialBackoff 5_000_000 <> limitRetries 3
+
+responseEventToToolArgumentEvent
+    :: ResponseStreamEvent
+    -> Maybe ToolArgumentStreamEvent
+responseEventToToolArgumentEvent = \case
+    ResponseOutputItemAddedEvent
+        { item = FunctionCallItem call
+        , outputIndex
+        } ->
+            Just $
+                ToolArgumentsStarted
+                    { argumentStreamRefs =
+                        responseCallRefs call.itemId outputIndex
+                    , argumentStreamCallId = call.callId
+                    , argumentStreamName = Just call.name
+                    , argumentStreamArguments = call.arguments
+                    }
+    ResponseFunctionCallArgumentsDeltaEvent
+        { streamItemId
+        , streamOutputIndex
+        , delta = Just value
+        } ->
+            Just $
+                ToolArgumentsDelta
+                    { argumentStreamRefs =
+                        responseCallRefs streamItemId streamOutputIndex
+                    , argumentStreamDelta = value
+                    }
+    ResponseFunctionCallArgumentsDoneEvent
+        { streamItemId
+        , streamOutputIndex
+        , functionName
+        , arguments = Just value
+        } ->
+            Just $
+                ToolArgumentsDone
+                    { argumentStreamRefs =
+                        responseCallRefs streamItemId streamOutputIndex
+                    , argumentStreamName = functionName
+                    , argumentStreamArguments = value
+                    }
+    ResponseOutputItemDoneEvent
+        { item = FunctionCallItem call
+        , outputIndex
+        } ->
+            Just $
+                ToolCallStreamCompleted
+                    { argumentStreamRefs =
+                        responseCallRefs call.itemId outputIndex
+                    , argumentStreamCall =
+                        functionToolCall
+                            call.callId
+                            call.name
+                            call.arguments
+                    }
+    _ -> Nothing
+
+responseToolCallCompletions
+    :: [ResponseItem]
+    -> [ToolArgumentStreamEvent]
+responseToolCallCompletions =
+    mapMaybe \case
+        FunctionCallItem call ->
+            Just $
+                ToolCallStreamCompleted
+                    { argumentStreamRefs =
+                        responseCallRefs call.itemId Nothing
+                    , argumentStreamCall =
+                        functionToolCall
+                            call.callId
+                            call.name
+                            call.arguments
+                    }
+        _ -> Nothing
+
+responseCallRefs
+    :: Maybe Text
+    -> Maybe Int
+    -> [ToolCallStreamRef]
+responseCallRefs itemId outputIndex =
+    maybe [] (pure . ToolCallStreamItem) itemId
+        <> maybe [] (pure . ToolCallStreamOutput) outputIndex
 
 -- | Reconnect attempts after a socket died mid-response: 200ms, 400ms, 800ms,
 -- 1.6s and 3.2s, matching Codex's @stream_max_retries@ default of five with

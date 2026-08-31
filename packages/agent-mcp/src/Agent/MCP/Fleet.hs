@@ -16,6 +16,7 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
+    , withDefaultArgumentInterpreter
     )
 import Agent.ToolDispatch (ToolCall(..), typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
@@ -637,7 +638,7 @@ mcpFleetResourceTools fleet =
     ]
 
 mcpSearchTool :: McpFleet -> AppTool
-mcpSearchTool fleet = AppTool
+mcpSearchTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "mcp_search"
     , appToolDescription =
         "Search currently available MCP tools. Servers may still be connecting."
@@ -694,10 +695,11 @@ mcpSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 grokSearchTool :: McpFleet -> AppTool
-grokSearchTool fleet = AppTool
+grokSearchTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "search_tool"
     , appToolDescription =
         "Search for MCP tools by keyword and retrieve their input schemas.\n\n\
@@ -815,6 +817,7 @@ grokSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 callCatalogEntryWithReconnect
@@ -940,7 +943,7 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                             Just replacement -> pure (Right replacement)
 
 mcpCallTool :: McpFleet -> AppTool
-mcpCallTool fleet = AppTool
+mcpCallTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "mcp_call"
     , appToolDescription =
         "Call a currently available MCP tool by its qualified server__tool name. Mutating tools require user approval."
@@ -960,10 +963,11 @@ mcpCallTool fleet = AppTool
         ClassifyReadOnly (catalogCallIsReadOnly fleet callArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 grokUseTool :: McpFleet -> AppTool
-grokUseTool fleet = AppTool
+grokUseTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "use_tool"
     , appToolDescription =
         "Call an MCP integration tool.\n\n\
@@ -989,6 +993,7 @@ grokUseTool fleet = AppTool
         ClassifyReadOnly (catalogCallIsReadOnly fleet grokCallArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 mcpListResourcesTool :: McpFleet -> AppTool
@@ -1028,6 +1033,7 @@ mcpListResourcesTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
   where
     resourceJson :: McpResource -> Value
@@ -1073,6 +1079,7 @@ mcpReadResourceTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
   where
     readArgumentsDecoder = Json.object do

@@ -8,7 +8,8 @@ import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Json (rawJsonBytes)
 import Agent.ToolDispatch
-    ( ToolCallResult(..)
+    ( ToolArgumentStreamEvent(..)
+    , ToolCallResult(..)
     , dispatchToolCall
     , functionToolCall
     )
@@ -108,17 +109,31 @@ spec = describe "Agent.CLI.GatewayBridge" do
             publish (ReasoningDelta "the files")
             publish (TextDelta "Found ")
             publish (TextDelta "the issue.")
-            bytes <- LBS.readFile
-                (unsafeToFilePath (managedBridgeActivityPath request))
-            activity <- case Hermes.decodeEither managedActivityDecoder
-                    (LBS.toStrict bytes)
-                of
-                Left err -> expectationFailure (show err) >> fail (show err)
-                Right value -> pure value
+            activity <- readManagedActivity request
             activity.managedActivityKind `shouldBe` "writing"
             activity.managedActivityMessage `shouldBe` "Writing reply…"
             activity.managedActivityReasoning `shouldBe` "Checking the files"
             activity.managedActivityResponse `shouldBe` "Found the issue."
+
+    it "preserves accumulated reasoning across streamed tool arguments" $
+        withBridgeRequest \request -> do
+            publish <- newManagedLoopEventPublisher request
+            publish (ReasoningDelta "Checking files")
+            publish
+                (ToolArgumentEvent
+                    (ToolArgumentsDelta [] "{\"path\":"))
+            activity <- readManagedActivity request
+            activity.managedActivityKind `shouldBe` "thinking"
+            activity.managedActivityMessage `shouldBe` "Thinking…"
+            activity.managedActivityReasoning `shouldBe` "Checking files"
+
+readManagedActivity :: ManagedTurnRequest -> IO ManagedActivity
+readManagedActivity request = do
+    bytes <- LBS.readFile
+        (unsafeToFilePath (managedBridgeActivityPath request))
+    case Hermes.decodeEither managedActivityDecoder (LBS.toStrict bytes) of
+        Left err -> expectationFailure (show err) >> fail (show err)
+        Right value -> pure value
 
 withBridgeRequest :: (ManagedTurnRequest -> IO a) -> IO a
 withBridgeRequest action =

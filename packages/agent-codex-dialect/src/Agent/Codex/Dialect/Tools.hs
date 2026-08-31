@@ -6,6 +6,7 @@
 -- Multi-agent v1 tools are optional and registered when a registry is supplied.
 module Agent.Codex.Dialect.Tools
     ( codexTools
+    , applyPatchTool
     , shellCommandIsReadOnly
     ) where
 
@@ -17,8 +18,11 @@ import Agent.ToolDSL
     , parametersObjectLoose
     )
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( StreamedTool(..)
+    , StreamedToolFactory
+    , ToolCall(..)
     , ToolCallKind(..)
+    , ToolInput(..)
     , decodeToolArguments
     , textTool
     , typedStreamingTool
@@ -26,8 +30,20 @@ import Agent.ToolDispatch
     )
 import Agent.Codex.Dialect.ApplyPatch
     ( Hunk(..)
-    , applyPatch
+    , applyPatchWithContents
     , parsePatch
+    , streamingPatchReadTarget
+    )
+import Agent.Tools.FileSystem.FilePrefetch
+    ( FileCallState
+    , FilePrefetch
+    , PathProgress(..)
+    , closeFileCall
+    , closeFilePrefetch
+    , consumePrefetchedFile
+    , emptyFileCallState
+    , newFilePrefetch
+    , refreshFileCall
     )
 import Agent.Codex.Dialect.Shell
     ( CodexShellResult(..)
@@ -69,9 +85,12 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     , jsonTool
     , rawJsonAppToolWithExecution
+    , withToolArgumentInterpreter
     , withToolResourceClaims
     )
+import Data.Acquire (mkAcquire)
 import Data.Maybe (fromMaybe)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as Text
@@ -337,10 +356,58 @@ applyPatchArgsDecoder = Json.withType \case
 
 applyPatchTool :: ToolEnv -> AppTool
 applyPatchTool env =
+    withToolArgumentInterpreter (applyPatchInterpreter env) $
     withToolResourceClaims (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
-        (textTool "apply_patch" (applyPatch env))
+        (textTool "apply_patch" (applyPatchWithContents env Map.empty))
+
+applyPatchInterpreter :: ToolEnv -> StreamedToolFactory
+applyPatchInterpreter env =
+    streamedApplyPatch env
+        <$> mkAcquire (newFilePrefetch env) closeFilePrefetch
+
+streamedApplyPatch :: ToolEnv -> FilePrefetch -> StreamedTool
+streamedApplyPatch env prefetch =
+    StreamedTool
+        { streamedStart = pure emptyFileCallState
+        , streamedInterpret = interpretApplyPatch prefetch
+        , streamedConsume = \_call _emit patch state ->
+            consumeApplyPatch env prefetch patch state
+        , streamedClose = closeFileCall prefetch
+        }
+
+interpretApplyPatch
+    :: FilePrefetch
+    -> FileCallState
+    -> ToolInput
+    -> IO (Either (Text, FileCallState) FileCallState)
+interpretApplyPatch prefetch state = \case
+    ToolPrefix text ->
+        Right <$> refreshFileCall prefetch state text (streamingPatchReadTarget text)
+    ToolDone text -> do
+        next <- refreshFileCall prefetch state text (streamingPatchReadTarget text)
+        pure (Left (text, next))
+
+consumeApplyPatch
+    :: ToolEnv
+    -> FilePrefetch
+    -> Text
+    -> FileCallState
+    -> IO (Either Text Text)
+consumeApplyPatch env prefetch patch state = do
+    overlay <-
+        case streamingPatchReadTarget patch of
+            Just (PathComplete target) ->
+                consumePrefetchedFile prefetch target state >>= \case
+                    Just (path, contents) ->
+                        pure (Map.singleton path contents)
+                    Nothing ->
+                        pure Map.empty
+            _ -> do
+                closeFileCall prefetch state
+                pure Map.empty
+    applyPatchWithContents env overlay patch
 
 applyPatchResourceClaims
     :: ToolEnv
@@ -396,7 +463,7 @@ decodeApplyPatchArguments :: ToolCall -> Either Text Text
 decodeApplyPatchArguments call = case call.callKind of
     CustomCallKind -> Right call.arguments
     FunctionCallKind -> decodeToolArguments applyPatchArgsDecoder call.arguments
-    ComputerCallKind -> Left "computer calls are not apply_patch calls"
+    ComputerCallKind -> Left "apply_patch does not accept computer calls"
 
 --------------------------------------------------------------------------------
 -- update_plan

@@ -19,6 +19,14 @@ module Agent.ToolDispatch
     , streamingTextTool
     , streamingRichTextTool
     , noArgsTool
+    , ToolCallStreamRef(..)
+    , ToolArgumentStreamEvent(..)
+    , ToolInput(..)
+    , ToolResult
+    , StreamedTool(..)
+    , StreamedToolFactory
+    , streamedToolForHandler
+    , streamedToolFactoryForHandler
     , functionToolCall
     , customToolCall
     , canonicalToolName
@@ -27,6 +35,8 @@ module Agent.ToolDispatch
     , dispatchToolCallDetailed
     , dispatchToolHandler
     , dispatchToolHandlerDetailed
+    , finishToolException
+    , finishToolResult
     , handlerName
     , toolArgumentsValue
     , decodeToolArguments
@@ -39,6 +49,7 @@ import Agent.Dialect
 import Agent.Json.Decode (Decoder)
 import qualified Agent.Json.Decode as Json
 import Control.Applicative ((<|>))
+import Data.Acquire (Acquire, mkAcquire)
 import Control.Exception.Safe (SomeException, tryAny)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -164,6 +175,132 @@ customToolCall callId name arguments = ToolCall
     , argumentsEncrypted = False
     }
 
+type ToolResult = Either Text Text
+
+data ToolCallStreamRef
+    = ToolCallStreamItem !Text
+    | ToolCallStreamOutput !Int
+    | ToolCallStreamCall !Text
+    deriving (Eq, Ord, Show)
+
+data ToolArgumentStreamEvent
+    = ToolArgumentsStarted
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamCallId :: !Text
+        , argumentStreamName :: !(Maybe Text)
+        , argumentStreamArguments :: !Text
+        }
+    | ToolArgumentsDelta
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamDelta :: !Text
+        }
+    | ToolArgumentsDone
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamName :: !(Maybe Text)
+        , argumentStreamArguments :: !Text
+        }
+    | ToolCallStreamCompleted
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamCall :: !ToolCall
+        }
+    deriving (Eq, Show)
+
+data ToolInput
+    = ToolPrefix !Text
+    | ToolDone !Text
+    deriving (Eq, Show)
+
+type ToolInterpreter s args =
+    s -> ToolInput -> IO (Either (args, s) s)
+
+data StreamedTool = forall s args. StreamedTool
+    { streamedStart :: IO s
+    , streamedInterpret :: ToolInterpreter s args
+    , streamedConsume :: ToolCall -> (Text -> IO ()) -> args -> s -> IO ToolResult
+    , streamedClose :: s -> IO ()
+    }
+
+type StreamedToolFactory = Acquire StreamedTool
+
+streamedToolForHandler :: ToolHandler -> StreamedTool
+streamedToolForHandler = \case
+    TypedTool _ decoder run ->
+        jsonArgsTool decoder \_call _emit args () -> run args
+    TypedToolWithCall _ decoder run ->
+        jsonArgsTool decoder \call _emit args () -> run call args
+    -- Rich handlers must use ordinary dispatch until streamed results can
+    -- retain their image payloads. Treating them as text-only here would
+    -- silently discard 'ToolResultImage' values.
+    TypedRichToolWithCall{} ->
+        deferredRichTool
+    TypedStreamingTool _ decoder run ->
+        jsonArgsTool decoder \_call emit args () -> run emit args
+    TypedStreamingRichTool{} ->
+        deferredRichTool
+    TextTool _ run ->
+        StreamedTool
+            { streamedStart = pure ()
+            , streamedInterpret = \() -> \case
+                ToolPrefix _ -> pure (Right ())
+                ToolDone text -> pure (Left (text, ()))
+            , streamedConsume = \_call _emit text () -> run text
+            , streamedClose = \_ -> pure ()
+            }
+    StreamingTextTool _ run ->
+        StreamedTool
+            { streamedStart = pure ()
+            , streamedInterpret = \() -> \case
+                ToolPrefix _ -> pure (Right ())
+                ToolDone text -> pure (Left (text, ()))
+            , streamedConsume = \_call emit text () -> run emit text
+            , streamedClose = \_ -> pure ()
+            }
+    StreamingRichTextTool{} ->
+        deferredRichTool
+    NoArgsTool _ run ->
+        StreamedTool
+            { streamedStart = pure ()
+            , streamedInterpret = \() -> \case
+                ToolPrefix _ -> pure (Right ())
+                ToolDone _ -> pure (Left ((), ()))
+            , streamedConsume = \_call _emit () () -> run
+            , streamedClose = \_ -> pure ()
+            }
+
+-- | Deliberately report a streamed miss without invoking a rich handler.
+-- Ordinary dispatch then preserves images and any streaming snapshots.
+deferredRichTool :: StreamedTool
+deferredRichTool =
+    StreamedTool
+        { streamedStart = pure ()
+        , streamedInterpret = \() _ -> pure (Right ())
+        , streamedConsume = \_call _emit () () ->
+            pure (Left "deferred rich tool was unexpectedly consumed")
+        , streamedClose = \() -> pure ()
+        }
+
+streamedToolFactoryForHandler :: ToolHandler -> StreamedToolFactory
+streamedToolFactoryForHandler handler =
+    mkAcquire (pure (streamedToolForHandler handler)) (\_ -> pure ())
+
+jsonArgsTool
+    :: Decoder args
+    -> (ToolCall -> (Text -> IO ()) -> args -> () -> IO ToolResult)
+    -> StreamedTool
+jsonArgsTool decoder consume =
+    StreamedTool
+        { streamedStart = pure ()
+        , streamedInterpret = \() -> \case
+            ToolPrefix _ ->
+                pure (Right ())
+            ToolDone text ->
+                case decodeToolArguments decoder text of
+                    Left _ -> pure (Right ())
+                    Right args -> pure (Left (args, ()))
+        , streamedConsume = consume
+        , streamedClose = \_ -> pure ()
+        }
+
 data ToolDispatchConfig = ToolDispatchConfig
     { toolDispatchUnknownTool :: Text -> Text
     , toolDispatchFormatResult :: Either Text Text -> Text
@@ -280,26 +417,92 @@ dispatchToolHandlerDetailed config maybeHandler call = do
                     input
                     handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
-    result <- tryAny runTool
-    (resultOutput, resultImages) <- case result of
-        Right (Right toolResult) ->
-            pure
-                ( config.toolDispatchFormatResult (Right toolResult.resultText)
-                , toolResult.resultImages
-                )
-        Right (Left err) ->
-            pure (config.toolDispatchFormatResult (Left err), [])
-        Left exception -> do
-            -- Diagnostics must not replace the original tool failure with a
-            -- second exception. 'tryAny' still lets asynchronous cancellation
-            -- propagate.
-            _ <- tryAny (config.toolDispatchOnException callName exception)
-            pure (config.toolDispatchFormatException callName exception, [])
+    tryAny runTool >>= \case
+        Right result ->
+            finishToolHandlerOutcome config call result
+        Left exception ->
+            finishToolExceptionOutcome config call exception
+
+-- | Apply the same formatting and output-finalization path used by ordinary
+-- dispatch to a text-only result produced by a streamed interpreter.
+finishToolResult
+    :: ToolDispatchConfig
+    -> ToolCall
+    -> ToolResult
+    -> IO ToolCallResult
+finishToolResult config call result =
+    (.toolDispatchResult) <$>
+        finishToolHandlerOutcome
+            config
+            call
+            (fmap (\output -> ToolHandlerResult output []) result)
+
+-- | Format and finalize a synchronous handler failure without rerunning the
+-- handler. This is used after a streamed consume phase has already begun.
+finishToolException
+    :: ToolDispatchConfig
+    -> ToolCall
+    -> SomeException
+    -> IO ToolCallResult
+finishToolException config call exception =
+    (.toolDispatchResult) <$>
+        finishToolExceptionOutcome config call exception
+
+finishToolExceptionOutcome
+    :: ToolDispatchConfig
+    -> ToolCall
+    -> SomeException
+    -> IO ToolDispatchOutcome
+finishToolExceptionOutcome config call exception = do
+    -- Diagnostics must not replace the original tool failure with a second
+    -- exception. 'tryAny' still lets asynchronous cancellation propagate.
+    _ <- tryAny (config.toolDispatchOnException call.name exception)
+    finishFormattedToolOutcome
+        config
+        call
+        False
+        (config.toolDispatchFormatException call.name exception)
+        []
+
+finishToolHandlerOutcome
+    :: ToolDispatchConfig
+    -> ToolCall
+    -> Either Text ToolHandlerResult
+    -> IO ToolDispatchOutcome
+finishToolHandlerOutcome config call = \case
+    Right toolResult ->
+        finishFormattedToolOutcome
+            config
+            call
+            True
+            (config.toolDispatchFormatResult (Right toolResult.resultText))
+            toolResult.resultImages
+    Left err ->
+        finishFormattedToolOutcome
+            config
+            call
+            False
+            (config.toolDispatchFormatResult (Left err))
+            []
+
+finishFormattedToolOutcome
+    :: ToolDispatchConfig
+    -> ToolCall
+    -> Bool
+    -> Text
+    -> [ToolResultImage]
+    -> IO ToolDispatchOutcome
+finishFormattedToolOutcome
+    config
+    call
+    succeeded
+    resultOutput
+    resultImages = do
     finalizedOutput <-
         tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
             Right output -> pure output
             Left exception -> do
-                _ <- tryAny (config.toolDispatchOnException callName exception)
+                _ <- tryAny (config.toolDispatchOnException call.name exception)
                 pure resultOutput
     let dispatchedResult
             | null resultImages =
@@ -313,10 +516,6 @@ dispatchToolHandlerDetailed config maybeHandler call = do
                     finalizedOutput
                     call.callKind
                     resultImages
-        succeeded = case result of
-            Right (Right _) -> True
-            Right (Left _) -> False
-            Left _ -> False
     pure ToolDispatchOutcome
         { toolDispatchResult = dispatchedResult
         , toolDispatchSucceeded = succeeded

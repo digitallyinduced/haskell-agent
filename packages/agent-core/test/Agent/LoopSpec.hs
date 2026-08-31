@@ -23,18 +23,21 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     , mkToolRegistry
     , toolExecutionPolicyFor
+    , withToolArgumentInterpreter
     , withToolResourceClaims
     )
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
-    ( newEmptyMVar
+    ( MVar
+    , newEmptyMVar
     , putMVar
     , readMVar
     , takeMVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
+import Data.Acquire (mkAcquire)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -1061,6 +1064,169 @@ spec = describe "runLoop" do
         result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
+    it "resets streamed tool speculation when a response restarts" do
+        assertSpeculationResetAfter (ResponseRestarted "retrying")
+
+    it "resets streamed tool speculation when an attempt is discarded" do
+        assertSpeculationResetAfter ResponseAttemptDiscarded
+
+    it "discards streamed tool speculation when a call is retracted" do
+        assertSpeculationResetAfter (ToolRetracted "retry-call")
+
+    it "applies output finalization to a tool speculation hit" do
+        finalized <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config0 <- testConfig backend
+        let dispatch = config0.loopDispatch
+                { toolDispatchFinalizeOutput = \call output -> do
+                    modifyIORef' finalized (<> [(call.callId, output)])
+                    pure ("finalized:" <> output)
+                }
+            config = config0 { loopDispatch = dispatch }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef finalized `shouldReturn` [("c1", "echo:hi")]
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "hello"])
+            , ( Just "resp-1"
+              , [CompletedTool (functionResult "c1" "finalized:echo:hi")]
+              )
+            ]
+
+    it "keeps speculative output when its finalizer fails" do
+        exceptions <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config0 <- testConfig backend
+        let dispatch = config0.loopDispatch
+                { toolDispatchOnException = \name _ ->
+                    modifyIORef' exceptions (<> [name])
+                , toolDispatchFinalizeOutput = \_ _ ->
+                    Exception.throwIO (userError "finalizer failed")
+                }
+            config = config0 { loopDispatch = dispatch }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef exceptions `shouldReturn` ["echo"]
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "hello"])
+            , ( Just "resp-1"
+              , [CompletedTool (functionResult "c1" "echo:hi")]
+              )
+            ]
+
+    it "finalizes exceptions raised while consuming tool speculation" do
+        calls <- newIORef (0 :: Int)
+        exceptions <- newIORef []
+        finalized <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "explode" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        let handler =
+                typedTool "explode" echoArgsDecoder \(EchoArgs _) -> do
+                    modifyIORef' calls (+ 1)
+                    Exception.throwIO (userError "boom")
+        config0 <- testConfig backend
+        let dispatch = config0.loopDispatch
+                { toolDispatchOnException = \name _ ->
+                    modifyIORef' exceptions (<> [name])
+                , toolDispatchFinalizeOutput = \call output -> do
+                    modifyIORef' finalized (<> [(call.callId, output)])
+                    pure ("finalized:" <> output)
+                }
+            config = config0
+                { loopTools = registryFromHandlers [handler]
+                , loopDispatch = dispatch
+                }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef calls `shouldReturn` 1
+        readIORef exceptions `shouldReturn` ["explode"]
+        outputs <- readIORef finalized
+        outputs `shouldSatisfy` \case
+            [("c1", output)] -> "boom" `Text.isInfixOf` output
+            _ -> False
+        seen <- readIORef submissions
+        case seen of
+            [_, (Just "resp-1", [CompletedTool result])] ->
+                result.output `shouldSatisfy`
+                    Text.isPrefixOf "finalized:"
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "defers rich tool speculation so image results are preserved" do
+        calls <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "image" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        let image = ToolResultImage
+                { imageUrl = "data:image/png;base64,AA=="
+                , imageDetail = Just "high"
+                }
+            handler =
+                typedRichToolWithCall "image" echoArgsDecoder $
+                    \_call EchoArgs{message} -> do
+                        modifyIORef' calls (+ 1)
+                        pure $ Right ToolHandlerResult
+                            { resultText = "image:" <> message
+                            , resultImages = [image]
+                            }
+            expected = ToolCallResultWithImages
+                { callId = "c1"
+                , output = "image:hi"
+                , callKind = FunctionCallKind
+                , toolResultImages = [image]
+                }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromHandlers [handler]
+                }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef calls `shouldReturn` 1
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "hello"])
+            , (Just "resp-1", [CompletedTool expected])
+            ]
+
     it "returns explicit backend state and progress after success" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -1434,6 +1600,38 @@ spec = describe "runLoop" do
             , ToolOutputUpdated "c1" "partial:hi"
             , ToolFinished (functionResult "c1" "complete:hi")
             ]
+
+    it "does not rerun a streamed handler after its consume phase throws" do
+        calls <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "explode" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        let tool =
+                jsonAppToolWithExecution
+                    "explode"
+                    ""
+                    []
+                    AlwaysReadOnly
+                    ParallelSafe
+                    (typedTool "explode" echoArgsDecoder \(EchoArgs _) -> do
+                        modifyIORef' calls (+ 1)
+                        Exception.throwIO (userError "boom"))
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef calls `shouldReturn` 1
 
 
     it "cancels an in-flight tool when the cancel flag is set" do
@@ -1853,6 +2051,81 @@ spec = describe "runLoop" do
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
+
+assertSpeculationResetAfter :: LoopEvent -> Expectation
+assertSpeculationResetAfter boundary = do
+    starts <- newIORef (0 :: Int)
+    firstStarted <- newEmptyMVar
+    secondStarted <- newEmptyMVar
+    let streamedEvent =
+            ToolArgumentEvent $
+                ToolArgumentsStarted
+                    { argumentStreamRefs =
+                        [ToolCallStreamItem "retry-item"]
+                    , argumentStreamCallId = "retry-call"
+                    , argumentStreamName = Just "retry_probe"
+                    , argumentStreamArguments = ""
+                    }
+        requireStart label started =
+            timeout 1000000 (takeMVar started) >>= \case
+                Just () -> pure ()
+                Nothing ->
+                    Exception.throwIO $
+                        userError ("timed out waiting for " <> label)
+        backend = Backend \state _previous _inputs onEvent -> do
+            onEvent streamedEvent
+            requireStart "first speculative start" firstStarted
+            onEvent boundary
+            onEvent streamedEvent
+            requireStart "replacement speculative start" secondStarted
+            pure $ Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "retry-response" [] (Just "done")
+                , backendState = state
+                }
+        tool = retryProbeTool starts firstStarted secondStarted
+    config0 <- testConfig backend
+    result <- runLoop
+        config0 { loopTools = registryFromTools [tool] }
+        Nothing
+        "go"
+    result `shouldBe` Right LoopResult
+        { finalResponseId = "retry-response"
+        , finalText = Just "done"
+        , turnsUsed = 1
+        , tokenUsage = emptyTokenUsage
+        }
+    readIORef starts `shouldReturn` 2
+
+retryProbeTool :: IORef Int -> MVar () -> MVar () -> AppTool
+retryProbeTool starts firstStarted secondStarted =
+    withToolArgumentInterpreter
+        (mkAcquire (pure streamed) (\_ -> pure ())) $
+        jsonAppToolWithExecution
+            "retry_probe"
+            ""
+            []
+            AlwaysReadOnly
+            ParallelSafe
+            (noArgsTool "retry_probe" (pure (Right "ordinary")))
+  where
+    streamed = StreamedTool
+        { streamedStart = do
+            started <- atomicModifyIORef' starts \count ->
+                let next = count + 1
+                in (next, next)
+            case started of
+                1 -> putMVar firstStarted ()
+                2 -> putMVar secondStarted ()
+                _ -> pure ()
+            pure ()
+        , streamedInterpret = \() -> \case
+            ToolPrefix _ -> pure (Right ())
+            ToolDone arguments -> pure (Left (arguments, ()))
+        , streamedConsume = \_call _emit arguments () ->
+            pure (Right arguments)
+        , streamedClose = \() -> pure ()
+        }
 
 testConfig :: Backend -> IO LoopConfig
 testConfig backend = do
