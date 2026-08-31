@@ -1,6 +1,7 @@
 module Agent.Tools.MultiAgentsSpec (spec) where
 
 import Agent.InterAgentMessage
+import Agent.Dialect (DialectId(..))
 import Agent.Loop
     ( LoopError(..)
     , LoopResult(..)
@@ -10,6 +11,7 @@ import Agent.Loop
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Subagents
 import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot, taskPathText)
+import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -108,6 +110,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             `shouldBe` Just "/root/artifact_analysis"
         options `shouldBe` CollaborationSpawnOptions
             { collaborationModel = Just "gpt-5.6-luna"
+            , collaborationResolvedModel = Nothing
             , collaborationReasoningEffort = Just "high"
             , collaborationForkTurns = Just "none"
             }
@@ -141,6 +144,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         options <- atomically (takeTMVar prepared)
         options `shouldBe` CollaborationSpawnOptions
             { collaborationModel = Nothing
+            , collaborationResolvedModel = Nothing
             , collaborationReasoningEffort = Nothing
             , collaborationForkTurns = Just "none"
             }
@@ -259,14 +263,20 @@ spec = describe "Agent.Tools.MultiAgents" do
 
     it "enforces refreshed child-model policy without rebuilding tools" do
         prepared <- newEmptyTMVarIO
-        currentModels <- newIORef ["company-a"]
+        resolverCalls <- newIORef (0 :: Int)
+        currentModels <- newIORef
+            [ ("company-a", CollaborationModelTarget
+                OpenAIProvider "openai" "company-a" CodexDialect)
+            ]
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
             (\_ _ -> pure ())
         let context = (rootContext registry Nothing)
                 { multiAllowedChildModels = Just ["company-a"]
-                , multiChildModelAllowed = Just
-                    (\model -> elem model <$> readIORef currentModels)
+                , multiResolveChildModel = Just
+                    (\model -> do
+                        modifyIORef' resolverCalls (+ 1)
+                        lookup model <$> readIORef currentModels)
                 , multiPrepareSpawn = Just
                     (\_ options -> atomically (putTMVar prepared options))
                 }
@@ -285,7 +295,12 @@ spec = describe "Agent.Tools.MultiAgents" do
             `shouldBe`
                 Left
                     "The requested child model is not allowed by this organization."
-        writeIORef currentModels ["company-b"]
+        let companyB = CollaborationModelTarget
+                OpenAIProvider
+                "openai"
+                "company-b"
+                GenericResponsesDialect
+        writeIORef currentModels [("company-b", companyB)]
         accepted <-
             spawnSharedSubagent
                 context call "worker" "task"
@@ -293,6 +308,8 @@ spec = describe "Agent.Tools.MultiAgents" do
         accepted `shouldSatisfy` isRightResult
         options <- atomically (takeTMVar prepared)
         options.collaborationModel `shouldBe` Just "company-b"
+        options.collaborationResolvedModel `shouldBe` Just companyB
+        readIORef resolverCalls `shouldReturn` 2
         closeSubagentRegistry registry
 
     it "allows an inherited child model under an allowlist" do
@@ -424,6 +441,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         options <- atomically (takeTMVar prepared)
         options `shouldBe` CollaborationSpawnOptions
             { collaborationModel = Just "gpt-test"
+            , collaborationResolvedModel = Nothing
             , collaborationReasoningEffort = Just "high"
             , collaborationForkTurns = Just "3"
             }
@@ -673,6 +691,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiSendToRoot = Just deliverRoot
                 , multiSpawnModelGuidance = Nothing
                 , multiAllowedChildModels = Nothing
+                , multiResolveChildModel = Nothing
                 , multiChildModelAllowed = Nothing
                 }
         result <- dispatchToolCall defaultLoopDispatch
@@ -712,6 +731,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiSendToRoot = sendToRoot
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
+    , multiResolveChildModel = Nothing
     , multiChildModelAllowed = Nothing
     }
 

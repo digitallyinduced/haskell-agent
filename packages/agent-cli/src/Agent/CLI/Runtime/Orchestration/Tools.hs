@@ -250,7 +250,10 @@ import Agent.Subagents.TaskPath ( taskPathRoot )
 import Agent.TUI.Model ( UiEvent(UiSetNotice) )
 import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents
-    ( MultiAgentContext(..), SubagentWorktree(..) )
+    ( CollaborationModelTarget(..)
+    , MultiAgentContext(..)
+    , SubagentWorktree(..)
+    )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planSessionDir),
       activatePlanMode,
@@ -706,6 +709,20 @@ runAgentTools
             | Just resolve <- gatewayChildModelOption =
                 Just \modelId -> isJust <$> resolve modelId
             | otherwise = Nothing
+        resolveCollaborationChildModel
+            | Just resolve <- gatewayChildModelOption =
+                Just \modelId ->
+                    fmap toCollaborationTarget <$> resolve modelId
+            | otherwise = Nothing
+        toCollaborationTarget option =
+            let target = option.modelTarget
+            in CollaborationModelTarget
+                { collaborationTargetProvider = target.targetProvider
+                , collaborationTargetConnection = target.targetConnectionId
+                , collaborationTargetEffectiveModel =
+                    target.targetWireModelId
+                , collaborationTargetDialect = target.targetDialect
+                }
         gatewayChildModelOption
             | isNothing gatewayAllowedChildModels = Nothing
             | otherwise =
@@ -757,6 +774,7 @@ runAgentTools
                     subagentStoreRoot
                     registry
                     subagentSessions
+                    resolveCollaborationChildModel
                     agentTypesRef)
             , multiCreateWorktree = Just createSubagentWorktree
             , multiPrepareSpawn = Just
@@ -779,6 +797,7 @@ runAgentTools
                             provider
                             (tokenProviderBillingMode tokenProvider)
             , multiAllowedChildModels = allowedChildModels
+            , multiResolveChildModel = resolveCollaborationChildModel
             , multiChildModelAllowed = childModelAllowed
             }
     promptRequest <- loadPrompt options
@@ -1245,6 +1264,7 @@ runAgentTools
         gatewayTools
         ghciEnabledRef
         allowedChildModels
+        resolveCollaborationChildModel
         childModelAllowed
         home
         inferredTarget

@@ -38,7 +38,8 @@ import Agent.Subagents
     , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (parseTaskPath)
-import Agent.Tools.MultiAgents (CollaborationSpawnOptions(..))
+import Agent.Tools.MultiAgents
+    (CollaborationModelTarget(..), CollaborationSpawnOptions(..))
 import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
@@ -86,6 +87,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 agentId
                 CollaborationSpawnOptions
                     { collaborationModel = Nothing
+                    , collaborationResolvedModel = Nothing
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Nothing
                     }
@@ -123,6 +125,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 agentId
                 CollaborationSpawnOptions
                     { collaborationModel = Nothing
+                    , collaborationResolvedModel = Nothing
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Just "3"
                     }
@@ -137,6 +140,45 @@ spec = describe "Agent.CLI.SubagentStore" do
                 Nothing
                 Nothing
                 `shouldBe` ("gpt-5.6-luna", "high")
+
+        it "uses an authoritative resolved target for collaboration overrides" do
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef Nothing
+            typesRef <- newIORef Map.empty
+            forkSourceRef <- newIORef Nothing
+            let agentId = SubagentId "agent-gateway-target"
+            prepareCollaborationSpawn
+                OpenAIProvider
+                "openai"
+                (const "incorrect-wire-model")
+                "parent-model"
+                "medium"
+                CodexDialect
+                Nothing
+                sessionsRef
+                storeRootRef
+                typesRef
+                forkSourceRef
+                agentId
+                CollaborationSpawnOptions
+                    { collaborationModel = Just "company-model"
+                    , collaborationResolvedModel =
+                        Just CollaborationModelTarget
+                            { collaborationTargetProvider = OpenAIProvider
+                            , collaborationTargetConnection = "openai"
+                            , collaborationTargetEffectiveModel =
+                                "company-model"
+                            , collaborationTargetDialect =
+                                GenericResponsesDialect
+                            }
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Just "none"
+                    }
+            Just session <- Map.lookup agentId <$> readIORef sessionsRef
+            session.subSessionProvider `shouldBe` OpenAIProvider
+            session.subSessionConnection `shouldBe` "openai"
+            session.subSessionEffectiveModel `shouldBe` "company-model"
+            session.subSessionDialect `shouldBe` GenericResponsesDialect
 
         it "keeps an explicit child model override" do
             let rootParams =
@@ -277,6 +319,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                             storeRootRef
                             registry
                             sessionsRef
+                            Nothing
                             typesRef
                             agentId
                             `shouldReturn` Right ()
@@ -287,6 +330,60 @@ spec = describe "Agent.CLI.SubagentStore" do
                         session.subSessionEffectiveModel
                             `shouldBe` "gpt-5.6-luna"
                         session.subSessionDialect `shouldBe` CodexDialect
+
+        it "restores gateway child metadata through the live resolver" do
+            withTempDir \dir -> do
+                let agentId = SubagentId "agent-gateway-restored"
+                    resolved = CollaborationModelTarget
+                        { collaborationTargetProvider = OpenAIProvider
+                        , collaborationTargetConnection = "openai"
+                        , collaborationTargetEffectiveModel = "company-model"
+                        , collaborationTargetDialect =
+                            GenericResponsesDialect
+                        }
+                    snapshot =
+                        (testSnapshot
+                            [messageItem RoleUser "gateway"]
+                            (Completed (Just "OK"))
+                            OpenAIProvider
+                            "openai"
+                            "company-model"
+                            GenericResponsesDialect)
+                            { snapshotAgentModel = Just "company-model" }
+                saveSubagentState dir agentId snapshot `shouldReturn` Right ()
+                sessionsRef <- newIORef Map.empty
+                storeRootRef <- newIORef (Just dir)
+                typesRef <- newIORef Map.empty
+                bracket
+                    (newSubagentRegistry defaultSubagentConfig dir
+                        (\_ _ _ _ -> fail "unexpected subagent runner invocation")
+                        (\_ _ -> pure ()))
+                    closeSubagentRegistry
+                    \registry -> do
+                        restoreAgentFromDisk
+                            OpenAIProvider
+                            "openai"
+                            id
+                            "parent-model"
+                            CodexDialect
+                            Nothing
+                            storeRootRef
+                            registry
+                            sessionsRef
+                            (Just \model ->
+                                pure
+                                    (if model == "company-model"
+                                        then Just resolved
+                                        else Nothing))
+                            typesRef
+                            agentId
+                            `shouldReturn` Right ()
+                        Just session <-
+                            Map.lookup agentId <$> readIORef sessionsRef
+                        session.subSessionEffectiveModel
+                            `shouldBe` "company-model"
+                        session.subSessionDialect
+                            `shouldBe` GenericResponsesDialect
 
     it "round-trips transcript items and meta" do
         withTempDir \dir -> do
@@ -778,6 +875,7 @@ restoreTestAgent storeRootRef registry sessionsRef typesRef agentId =
         storeRootRef
         registry
         sessionsRef
+        Nothing
         typesRef
         agentId
 

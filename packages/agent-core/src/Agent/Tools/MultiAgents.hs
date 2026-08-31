@@ -4,6 +4,7 @@
 -- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2).
 module Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
+    , CollaborationModelTarget(..)
     , CollaborationSpawnOptions(..)
     , SubagentWorktree(..)
     , multiAgentTools
@@ -44,6 +45,8 @@ import Agent.InterAgentMessage
     , plainInterAgentContent
     )
 import Agent.OsPath (toText)
+import Agent.Dialect (DialectId)
+import Agent.Provider (Provider)
 import System.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
@@ -85,8 +88,16 @@ data SubagentWorktree = SubagentWorktree
     , subagentWorktreeCleanup :: !(IO (Either Text ()))
     }
 
+data CollaborationModelTarget = CollaborationModelTarget
+    { collaborationTargetProvider :: !Provider
+    , collaborationTargetConnection :: !Text
+    , collaborationTargetEffectiveModel :: !Text
+    , collaborationTargetDialect :: !DialectId
+    } deriving (Eq, Show)
+
 data CollaborationSpawnOptions = CollaborationSpawnOptions
     { collaborationModel :: !(Maybe Text)
+    , collaborationResolvedModel :: !(Maybe CollaborationModelTarget)
     , collaborationReasoningEffort :: !(Maybe Text)
     , collaborationForkTurns :: !(Maybe Text)
     } deriving (Eq, Show)
@@ -114,6 +125,11 @@ data MultiAgentContext = MultiAgentContext
     , multiSpawnModelGuidance :: !(Maybe Text)
       -- | When set, spawn_subagent may only use these model slugs (or inherit).
     , multiAllowedChildModels :: !(Maybe [Text])
+      -- | Optional live resolver for organization-scoped model aliases.
+      -- Unknown explicit aliases are denied and resolved transport metadata is
+      -- carried atomically into spawn preparation.
+    , multiResolveChildModel
+        :: !(Maybe (Text -> IO (Maybe CollaborationModelTarget)))
       -- | Optional live policy used instead of the advertised snapshot above.
       -- This lets hosts enforce organization catalog refreshes without
       -- rebuilding every tool definition in an active session.
@@ -243,17 +259,15 @@ runSpawn ctx workspace call args
             \set fork_turns to none or a positive integer when overriding \
             \model or reasoning_effort")
     | otherwise = do
-        modelAllowed <- childModelOverrideAllowed ctx args.model
-        if not modelAllowed
-            then
-                pure
-                    (Left
-                        "The requested child model is not allowed by this organization.")
-            else mask \restore ->
+        resolveChildModelOverride ctx args.model >>= \case
+            Left err -> pure (Left err)
+            Right resolvedModel -> mask \restore ->
                 resolveSpawnWorkspace ctx workspace >>= \case
                     Left err -> pure (Left err)
                     Right (childCwd, worktree) ->
-                        restore (spawnInWorkspace ctx call args childCwd worktree)
+                        restore
+                            (spawnInWorkspace
+                                ctx call args resolvedModel childCwd worktree)
 
 -- | Spawn a tracked child in the caller's shared workspace.
 --
@@ -293,14 +307,16 @@ spawnInWorkspace
     :: MultiAgentContext
     -> ToolCall
     -> SpawnAgentArgs
+    -> Maybe CollaborationModelTarget
     -> OsPath
     -> Maybe SubagentWorktree
     -> IO (Either Text Text)
-spawnInWorkspace ctx call args childCwd worktree = mask \restore -> do
+spawnInWorkspace ctx call args resolvedModel childCwd worktree = mask \restore -> do
     ownedWorktree <- traverse makeIdempotentWorktree worktree
     rootTurnId <- ctx.multiRootTurnId
     let spawnOptions = CollaborationSpawnOptions
             { collaborationModel = sanitizeOverride args.model
+            , collaborationResolvedModel = resolvedModel
             , collaborationReasoningEffort =
                 sanitizeOverride args.reasoningEffort
             , collaborationForkTurns = normalizeForkTurns args.forkTurns
@@ -415,21 +431,34 @@ allowedModelOverride allowed override =
                 (elem requested . map Text.strip)
                 allowed
 
-childModelOverrideAllowed
+resolveChildModelOverride
     :: MultiAgentContext
     -> Maybe Text
-    -> IO Bool
-childModelOverrideAllowed ctx override =
+    -> IO (Either Text (Maybe CollaborationModelTarget))
+resolveChildModelOverride ctx override =
     case sanitizeOverride override of
-        Nothing -> pure True
+        Nothing -> pure (Right Nothing)
         Just requested ->
-            case ctx.multiChildModelAllowed of
-                Just isAllowed -> isAllowed requested
-                Nothing ->
+            case ctx.multiResolveChildModel of
+                Just resolve ->
+                    resolve requested >>= \case
+                        Nothing -> pure (Left notAllowed)
+                        Just target -> pure (Right (Just target))
+                Nothing -> do
+                    allowed <- case ctx.multiChildModelAllowed of
+                        Just isAllowed -> isAllowed requested
+                        Nothing ->
+                            pure
+                                (allowedModelOverride
+                                    ctx.multiAllowedChildModels
+                                    (Just requested))
                     pure
-                        (allowedModelOverride
-                            ctx.multiAllowedChildModels
-                            (Just requested))
+                        (if allowed
+                            then Right Nothing
+                            else Left notAllowed)
+  where
+    notAllowed =
+        "The requested child model is not allowed by this organization."
 
 allowedModelGuidance :: Maybe [Text] -> [Text]
 allowedModelGuidance = \case

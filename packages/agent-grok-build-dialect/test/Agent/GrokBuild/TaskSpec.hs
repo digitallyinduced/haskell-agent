@@ -43,6 +43,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
                 Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
             parameters = fromMaybe [] (jsonToolParameters tool)
         let isolationTypes =
@@ -110,6 +111,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                     (pure Nothing) Nothing Nothing Nothing Nothing Nothing
                     (Just (grokRootChildModels True))
                     Nothing
+                    Nothing
                 tool = taskTool cwd ctx typesRef
             tool.appToolDescription `shouldSatisfy`
                 Text.isInfixOf "gpt-5.6-luna"
@@ -139,6 +141,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
                 (Just (grokRootChildModels True))
                 Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -163,6 +166,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
                     (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
                     Nothing
+                    Nothing
                 tool = taskTool cwd ctx typesRef
             result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
                 (functionToolCall "c1" "task"
@@ -183,6 +187,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                 (\_ _ -> pure ())
             let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
                     (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                    Nothing
                     Nothing
                 tool = taskTool cwd ctx typesRef
             _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
@@ -214,6 +219,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                 pure (Left "persisted subagent dialect is incompatible")
             ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) (Just restore) Nothing Nothing Nothing Nothing Nothing
+                Nothing
                 Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
@@ -251,6 +257,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             ctx = MultiAgentContext registry (fromFilePath "/tmp") (Just childId) 1 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
                 Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         expectAlwaysReadOnly tool.appToolApproval
         closeSubagentRegistry registry
@@ -264,6 +271,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         let createIsolated = cleanupLease cleaned
             ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot (pure Nothing)
                 Nothing (Just createIsolated) Nothing Nothing Nothing Nothing Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -285,6 +293,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing Nothing Nothing
+                Nothing
                 Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]

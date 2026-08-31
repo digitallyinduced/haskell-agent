@@ -156,7 +156,7 @@ import Agent.CLI.Subagents.Runtime
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
                       subagentSpawnModelGuidance, subagentAllowedChildModels,
-                      subagentChildModelAllowed) )
+                      subagentResolveChildModel, subagentChildModelAllowed) )
 import Agent.CLI.Subagents.Runtime.Types
     (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
@@ -204,7 +204,7 @@ import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model ()
 import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents
-    (MultiAgentContext, SubagentWorktree)
+    (CollaborationModelTarget, MultiAgentContext, SubagentWorktree)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
 import Agent.Tools.Secret ()
 import Agent.ToolDispatch (canonicalToolName)
@@ -295,6 +295,7 @@ runAgentSession
     -> [AppTool]
     -> IORef Bool
     -> Maybe [Text]
+    -> Maybe (Text -> IO (Maybe CollaborationModelTarget))
     -> Maybe (Text -> IO Bool)
     -> OsPath
     -> ModelTarget
@@ -379,6 +380,7 @@ runAgentSession
     gatewayTools
     ghciEnabledRef
     allowedChildModels
+    resolveChildModel
     childModelAllowed
     home
     inferredTarget
@@ -639,6 +641,7 @@ runAgentSession
                                 provider
                                 (tokenProviderBillingMode tokenProvider)
                 , subagentAllowedChildModels = allowedChildModels
+                , subagentResolveChildModel = resolveChildModel
                 , subagentChildModelAllowed = childModelAllowed
                 , subagentOpenAiChild = openaiChild
                 }

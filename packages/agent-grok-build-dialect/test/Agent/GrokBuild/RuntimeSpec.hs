@@ -514,6 +514,7 @@ rootContext registry = MultiAgentContext
     , multiSendToRoot = Nothing
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
+    , multiResolveChildModel = Nothing
     , multiChildModelAllowed = Nothing
     }
 
@@ -530,6 +531,7 @@ childContext registry = MultiAgentContext
     , multiSendToRoot = Nothing
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
+    , multiResolveChildModel = Nothing
     , multiChildModelAllowed = Nothing
     }
 

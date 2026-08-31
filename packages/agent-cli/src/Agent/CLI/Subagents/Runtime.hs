@@ -103,7 +103,10 @@ import Agent.GrokBuild.Dialect.Task
     , recordAgentSpec
     )
 import Agent.Tools.MultiAgents
-    (CollaborationSpawnOptions(..), MultiAgentContext(..))
+    ( CollaborationModelTarget(..)
+    , CollaborationSpawnOptions(..)
+    , MultiAgentContext(..)
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
@@ -160,20 +163,37 @@ prepareCollaborationSpawn
                     Just currentEffort
                 | otherwise -> Nothing
         }
-    let effectiveModel =
-            maybe currentEffectiveModel mapModel spawnOptions.collaborationModel
-        childDialect =
-            maybe
-                currentDialect
-                (dialectIdForModel provider . mapModel)
-                spawnOptions.collaborationModel
+    let ( childProvider
+            , childConnection
+            , effectiveModel
+            , childDialect
+            ) =
+            case spawnOptions.collaborationResolvedModel of
+                Just target ->
+                    ( target.collaborationTargetProvider
+                    , target.collaborationTargetConnection
+                    , target.collaborationTargetEffectiveModel
+                    , target.collaborationTargetDialect
+                    )
+                Nothing ->
+                    ( provider
+                    , connection
+                    , maybe
+                        currentEffectiveModel
+                        mapModel
+                        spawnOptions.collaborationModel
+                    , maybe
+                        currentDialect
+                        (dialectIdForModel provider . mapModel)
+                        spawnOptions.collaborationModel
+                    )
     session <-
         lookupOrCreateSubagentSession
             sessionsRef
             storeRootRef
             typesRef
-            provider
-            connection
+            childProvider
+            childConnection
             legacyTarget
             effectiveModel
             childDialect
@@ -197,12 +217,13 @@ restoreAgentFromDisk
     -> SubagentStoreRoot
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
+    -> Maybe (Text -> IO (Maybe CollaborationModelTarget))
     -> GrokSubagentSpecs
     -> SubagentId
     -> IO (Either Text ())
 restoreAgentFromDisk
         provider connection mapModel parentEffectiveModel parentDialect legacyTarget
-        storeRootRef registry sessionsRef typesRef agentId = do
+        storeRootRef registry sessionsRef resolveChildModel typesRef agentId = do
     status <- getStatus registry agentId
     case status of
         NotFound -> restore
@@ -231,75 +252,109 @@ restoreAgentFromDisk
                             reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
                         let fields = subagentDiskFields meta
-                            derivedIdentity =
-                                grokSpawnedChildIdentity
-                                    provider
-                                    connection
-                                    mapModel
-                                    parentEffectiveModel
-                                    parentDialect
-                                    fields.diskAgentModel
-                            ( expectedProvider
-                                , expectedConnection
-                                , expectedEffectiveModel
-                                , expectedDialect
-                                ) =
-                                    if provider == XAIProvider
-                                        then case meta of
-                                            CurrentSubagentDiskMeta _ stored
-                                                | stored.targetProvider
-                                                    == OpenAIProvider ->
-                                                    ( stored.targetProvider
-                                                    , stored.targetConnection
-                                                    , stored.targetEffectiveModel
-                                                    , stored.targetDialect
-                                                    )
-                                            _ ->
-                                                derivedIdentity
-                                        else
-                                            ( provider
-                                            , connection
-                                            , maybe
-                                                parentEffectiveModel
-                                                mapModel
-                                                fields.diskAgentModel
-                                            , maybe
-                                                parentDialect
-                                                (dialectIdForModel provider
-                                                    . mapModel)
-                                                fields.diskAgentModel
-                                            )
-                        case validatePersistedSubagentTarget
-                                expectedProvider
-                                expectedConnection
-                                expectedEffectiveModel
-                                expectedDialect
-                                legacyTarget
-                                meta of
+                            persistedAlias =
+                                fields.diskAgentModel
+                                    <|> case meta of
+                                        CurrentSubagentDiskMeta _ stored ->
+                                            Just stored.targetEffectiveModel
+                                        LegacySubagentDiskMeta{} ->
+                                            (.legacyTargetEffectiveModel)
+                                                <$> legacyTarget
+                        resolvedChildTarget <-
+                            case resolveChildModel of
+                                Just resolve -> case persistedAlias of
+                                    Nothing ->
+                                        pure $
+                                            Left
+                                                "Cannot restore the child because its organization model alias is missing."
+                                    Just requested ->
+                                        resolve requested >>= \case
+                                            Nothing ->
+                                                pure $
+                                                    Left
+                                                        "The child model is not allowed by this organization."
+                                            Just target ->
+                                                pure (Right (Just target))
+                                Nothing -> pure (Right Nothing)
+                        case resolvedChildTarget of
                             Left err -> pure (Left err)
-                            Right storedTarget
-                                | not
-                                    (providerSupportsDialect
-                                        storedTarget.targetProvider
-                                        storedTarget.targetDialect) ->
-                                    pure $ Left $
-                                        unsupportedDialectMessage
-                                            storedTarget.targetProvider
-                                            agentId
-                                            storedTarget.targetDialect
-                            Right storedTarget -> do
-                                session <-
-                                    getOrInstallSubagentSession
-                                        sessionsRef
-                                        storedTarget.targetProvider
-                                        storedTarget.targetConnection
-                                        storedTarget.targetEffectiveModel
-                                        storedTarget.targetDialect
-                                        agentId
-                                restoreSession session (Just (items, fields)) \_ ->
-                                    reopenPersisted fields >>= \case
-                                        Left err -> pure (Left err)
-                                        Right () -> pure (Right ())
+                            Right resolvedTarget ->
+                                restoreResolved fields resolvedTarget items meta
+    restoreResolved fields resolvedTarget items meta = do
+        let derivedIdentity =
+                grokSpawnedChildIdentity
+                    provider
+                    connection
+                    mapModel
+                    parentEffectiveModel
+                    parentDialect
+                    fields.diskAgentModel
+            ( expectedProvider
+                , expectedConnection
+                , expectedEffectiveModel
+                , expectedDialect
+                ) = case resolvedTarget of
+                    Just target ->
+                        ( target.collaborationTargetProvider
+                        , target.collaborationTargetConnection
+                        , target.collaborationTargetEffectiveModel
+                        , target.collaborationTargetDialect
+                        )
+                    Nothing | provider == XAIProvider ->
+                        case meta of
+                            CurrentSubagentDiskMeta _ stored
+                                | stored.targetProvider == OpenAIProvider ->
+                                    ( stored.targetProvider
+                                    , stored.targetConnection
+                                    , stored.targetEffectiveModel
+                                    , stored.targetDialect
+                                    )
+                            _ ->
+                                derivedIdentity
+                    Nothing ->
+                        ( provider
+                        , connection
+                        , maybe
+                            parentEffectiveModel
+                            mapModel
+                            fields.diskAgentModel
+                        , maybe
+                            parentDialect
+                            (dialectIdForModel provider . mapModel)
+                            fields.diskAgentModel
+                        )
+        case validatePersistedSubagentTarget
+                expectedProvider
+                expectedConnection
+                expectedEffectiveModel
+                expectedDialect
+                legacyTarget
+                meta of
+            Left err -> pure (Left err)
+            Right storedTarget
+                | Nothing <- resolvedTarget
+                , not
+                    (providerSupportsDialect
+                        storedTarget.targetProvider
+                        storedTarget.targetDialect) ->
+                    pure $ Left $
+                        unsupportedDialectMessage
+                            storedTarget.targetProvider
+                            agentId
+                            storedTarget.targetDialect
+            Right storedTarget -> do
+                session <-
+                    getOrInstallSubagentSession
+                        sessionsRef
+                        storedTarget.targetProvider
+                        storedTarget.targetConnection
+                        storedTarget.targetEffectiveModel
+                        storedTarget.targetDialect
+                        agentId
+                restoreSession session (Just (items, fields)) \_ ->
+                    reopenPersisted fields >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> pure (Right ())
     restoreSession session loaded reopen =
         modifyMVar session.subSessionResidency \residency -> do
             currentStatus <- getStatus registry agentId
@@ -465,9 +520,12 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                     model prepared.preparedSession of
             Just err -> pure (Left (LoopUnexpected err))
             Nothing -> do
+                let childDialect =
+                        dialectForId
+                            prepared.preparedSession.subSessionDialect
                 coding <-
                     codingToolsFor
-                        codexDialect
+                        childDialect
                         prepared.preparedToolEnv
                         (Just runtime.subagentPlanHooks)
                         Nothing
@@ -478,32 +536,78 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                     coding.codingPlanMode
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
+                    shellPath <-
+                        Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
                     ghciEnabled <- readIORef runtime.subagentGhciEnabled
                     bashEnabled <- readIORef runtime.subagentBashEnabled
-                    let codingTools =
+                    let childTools = case
+                                dialectChildAgentProtocol childDialect of
+                            CodexCollaborationProtocol -> coding.codingAppTools
+                            GrokTaskProtocol ->
+                                filterChildGrokTools
+                                    agentType coding.codingAppTools
+                            GenericTaskProtocol ->
+                                filterChildGrokTools
+                                    agentType coding.codingAppTools
+                            NoHostChildAgentProtocol ->
+                                []
+                        codingTools =
                             filterGhciTools ghciEnabled $
-                                filterBashTools bashEnabled $
-                                    filterChildGrokTools
-                                        agentType coding.codingAppTools
+                                filterBashTools bashEnabled childTools
                         tools =
                             codingTools <> runtime.subagentMcpTools
                         generatedInstructions =
-                            systemPromptForTools
-                                codexDialect
-                                (map (.appToolName) tools)
-                                env.subCwd
-                                sessionTmp
-                                today
-                                True
+                            case dialectChildAgentProtocol childDialect of
+                                CodexCollaborationProtocol ->
+                                    systemPromptForTools
+                                        childDialect
+                                        (map (.appToolName) tools)
+                                        env.subCwd
+                                        sessionTmp
+                                        today
+                                        True
+                                GrokTaskProtocol ->
+                                    Text.intercalate "\n\n" $
+                                        filter (not . Text.null)
+                                            [ grokSubagentSystemPrompt
+                                                codingGrokPromptTools
+                                                (hostedSearchToolNames childDialect
+                                                    ++ map (.appToolName) tools)
+                                                env.subCwd
+                                                today
+                                                (Text.pack SystemInfo.os)
+                                                shellPath
+                                                agentType
+                                                env.subId.unSubagentId
+                                            , sessionTempGuidance sessionTmp
+                                            ]
+                                GenericTaskProtocol ->
+                                    systemPromptForTools
+                                        childDialect
+                                        (map (.appToolName) tools)
+                                        env.subCwd
+                                        sessionTmp
+                                        today
+                                        True
+                                NoHostChildAgentProtocol ->
+                                    systemPrompt
+                                        childDialect
+                                        env.subCwd
+                                        sessionTmp
+                                        today
+                                        True
                         inheritParentPrompt =
-                            case prepared.preparedParentParams.model of
-                                Just parentModel ->
-                                    not
-                                        ( "grok"
-                                            `Text.isPrefixOf`
-                                                Text.toLower parentModel
-                                        )
-                                Nothing -> True
+                            case dialectChildAgentProtocol childDialect of
+                                CodexCollaborationProtocol ->
+                                    case prepared.preparedParentParams.model of
+                                        Just parentModel ->
+                                            not
+                                                ( "grok"
+                                                    `Text.isPrefixOf`
+                                                        Text.toLower parentModel
+                                                )
+                                        Nothing -> True
+                                _ -> False
                         baseInstructions =
                             if inheritParentPrompt
                                 then
@@ -513,19 +617,19 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                 else generatedInstructions
                         instructions =
                             baseInstructions
-                                <> "\n\nYou are a Codex subagent. Complete the assigned task and "
-                                <> "report results clearly. Your agent id is "
-                                <> env.subId.unSubagentId
-                                <> "."
-                                <> case agentType of
-                                    "explore" ->
-                                        " Operate read-only: search and report, do not edit files."
-                                    "plan" ->
-                                        " Produce an implementation plan; do not edit implementation files."
-                                    _ ->
+                                <> "\n\n"
+                                <> case
+                                    dialectChildAgentProtocol childDialect of
+                                    CodexCollaborationProtocol ->
+                                        codexSubagentSuffix env.subId
+                                    GrokTaskProtocol ->
+                                        ""
+                                    GenericTaskProtocol ->
+                                        genericSubagentSuffix agentType env.subId
+                                    NoHostChildAgentProtocol ->
                                         ""
                         childParams = requestParams OpenAIProvider model instructions
-                            (schemasFromAppTools codexDialect tools) effort
+                            (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
                     httpFallbackActive <- newIORef False
                     turnState <- newCodexTurnState
@@ -584,7 +688,15 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                         prepared.preparedToolEnv toolRegistry
                         backend onEvent
                         (\config ->
-                            runLoopInputs config previous [AgentMessage prompt])
+                            case dialectChildAgentProtocol childDialect of
+                                CodexCollaborationProtocol ->
+                                    runLoopInputs
+                                        config previous [AgentMessage prompt]
+                                _ ->
+                                    runLoop
+                                        config
+                                        previous
+                                        (interAgentMessagePayload prompt))
 
 -- | Child xAI/OpenRouter/Gemini agent: HTTP backend, filtered tools by
 -- @subagent_type@.
@@ -833,6 +945,7 @@ prepareChild
                     NoHostChildAgentProtocol -> Nothing
             , multiSpawnModelGuidance = runtime.subagentSpawnModelGuidance
             , multiAllowedChildModels = runtime.subagentAllowedChildModels
+            , multiResolveChildModel = runtime.subagentResolveChildModel
             , multiChildModelAllowed = runtime.subagentChildModelAllowed
             }
     pure PreparedChild

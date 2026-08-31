@@ -407,7 +407,8 @@ runAgentInitializedWithLock
                     then projectTarget
                     else Nothing
         requestedProvider
-            | isJust connectedGateway = Just OpenAIProvider
+            | isJust connectedGateway =
+                options.optProvider <|> Just OpenAIProvider
             | otherwise =
                 (.targetProvider) <$> targetHint
                     <|> options.optProvider
