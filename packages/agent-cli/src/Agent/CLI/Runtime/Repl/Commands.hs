@@ -2,6 +2,7 @@
 module Agent.CLI.Runtime.Repl.Commands
     ( handleReplLine
     , preparePromptSkillInputs
+    , preparePromptSkillInputsWithPaste
     ) where
 
 import Agent.CLI.AccountPicker ()

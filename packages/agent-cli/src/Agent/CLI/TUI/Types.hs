@@ -242,7 +242,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMailbox :: !AppEventMailbox
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
-    , runtimeSteer :: !(Text -> IO (Either Text ()))
+    , runtimeSteer :: !(Bool -> Text -> IO (Either Text ()))
     , runtimeBtw :: !(Text -> IO ())
     , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
@@ -295,7 +295,7 @@ data DictationSession = DictationSession
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionProvider :: !(Maybe Provider)
     , sessionCancel :: !(IO ())
-    , sessionSteer :: !(Text -> IO (Either Text ()))
+    , sessionSteer :: !(Bool -> Text -> IO (Either Text ()))
     , sessionBtw :: !(Text -> IO ())
     , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())

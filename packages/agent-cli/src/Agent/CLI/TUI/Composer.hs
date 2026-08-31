@@ -34,6 +34,7 @@ module Agent.CLI.TUI.Composer
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
     , slashMenuWindowStart
+    , steeringPrompt
     , takeFullscreenInput
     , takeFullscreenInputOr
     , requestDictationStop
@@ -309,6 +310,15 @@ prepareBracketedPaste awaitingInput draft cursor pasted =
             )
         else (pastedDraft, pastedCursor, Nothing)
 
+steeringPrompt :: UiState -> Bool -> Text -> Maybe (Bool, Text)
+steeringPrompt ui pasted text
+    | not ui.uiRunning = Nothing
+    | otherwise =
+        case parseReplLine text of
+            ReplPrompt prompt -> Just (pasted, prompt)
+            ReplExpandedPrompt _ prompt -> Just (pasted, prompt)
+            _ -> Nothing
+
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
 -- page scrolling because those actions also affect non-composer UI state.
 handleComposerKey
@@ -546,10 +556,12 @@ handleComposerKey
                 _ <- liftIO (state.appRuntime.runtimeBtw question)
                 pure True
             Nothing ->
-                case steeringPrompt state.appUi text of
-                    Just prompt -> do
+                case steeringPrompt state.appUi pasted text of
+                    Just (steeringPasted, prompt) -> do
                         result <- liftIO
-                            (state.appRuntime.runtimeSteer prompt)
+                            (state.appRuntime.runtimeSteer
+                                steeringPasted
+                                prompt)
                         case result of
                             Left message -> do
                                 applyUiEvent
@@ -577,14 +589,6 @@ handleComposerKey
                     , appHistoryDraft = ""
                     }
             vScrollToEnd (viewportScroll ConversationViewport)
-
-    steeringPrompt ui text
-        | not ui.uiRunning = Nothing
-        | otherwise =
-            case parseReplLine text of
-                ReplPrompt prompt -> Just prompt
-                ReplExpandedPrompt _ prompt -> Just prompt
-                _ -> Nothing
 
     sendNow = do
         state <- get

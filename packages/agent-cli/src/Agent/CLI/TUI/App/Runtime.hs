@@ -266,7 +266,7 @@ newFullscreenRuntimeWithSyntaxLoader
         sessionActions <- newIORef FullscreenSessionActions
             { sessionProvider = Nothing
             , sessionCancel = cancelAction
-            , sessionSteer = const (pure (Right ()))
+            , sessionSteer = \_ _ -> pure (Right ())
             , sessionBtw = const (pure ())
             , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
@@ -280,9 +280,9 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeInput = inputBuffer
             , runtimeCancel =
                 readIORef sessionActions >>= (.sessionCancel)
-            , runtimeSteer = \text ->
+            , runtimeSteer = \pasted text ->
                 readIORef sessionActions >>= \actions ->
-                    actions.sessionSteer text
+                    actions.sessionSteer pasted text
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
@@ -332,7 +332,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> Maybe Provider
     -> IO ()
-    -> (Text -> IO (Either Text ()))
+    -> (Bool -> Text -> IO (Either Text ()))
     -> (Text -> IO ())
     -> IO ()
     -> (Text -> IO ())
