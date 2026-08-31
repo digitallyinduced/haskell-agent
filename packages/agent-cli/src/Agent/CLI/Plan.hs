@@ -115,6 +115,8 @@ applyPlanEnterKey key state@(PlanEnterState reason index) = case key of
     PickerKeyConfirm -> Left (enterChoiceFromIndex index)
     PickerKeyUp -> Right (PlanEnterState reason (movePlanIndex 2 (-1) index))
     PickerKeyDown -> Right (PlanEnterState reason (movePlanIndex 2 1 index))
+    PickerKeyLeft -> Right state
+    PickerKeyRight -> Right state
     PickerKeyChar c -> case planDecisionForKey c of
         Just PlanApprove -> Left PlanEnter
         Just PlanCancel -> Left PlanStayNormal
@@ -178,6 +180,8 @@ applyPlanExitKey key state@(PlanExitState index) = case key of
     PickerKeyConfirm -> Left (exitChoiceFromIndex index)
     PickerKeyUp -> Right (PlanExitState (movePlanIndex 3 (-1) index))
     PickerKeyDown -> Right (PlanExitState (movePlanIndex 3 1 index))
+    PickerKeyLeft -> Right state
+    PickerKeyRight -> Right state
     PickerKeyChar c ->
         maybe (Right state) Left (planDecisionForKey c)
     PickerKeyBackspace -> Right state

@@ -111,6 +111,8 @@ applyApprovalPolicyKey key state = case key of
                     (approvalPolicyChoices !! state.approvalPolicyIndex)))
     PickerKeyUp -> Right (move (-1) state)
     PickerKeyDown -> Right (move 1 state)
+    PickerKeyLeft -> Right state
+    PickerKeyRight -> Right state
     PickerKeyChar c -> case Text.toLower (Text.singleton c) of
         "p" -> Left (ApprovalPolicySelected PromptMutating)
         "r" -> Left (ApprovalPolicySelected DenyMutating)
@@ -167,6 +169,8 @@ applyPermissionKey key state = case key of
     PickerKeyConfirm -> Left (choiceFromIndex state.permIndex)
     PickerKeyUp -> Right state { permIndex = move (-1) state.permIndex }
     PickerKeyDown -> Right state { permIndex = move 1 state.permIndex }
+    PickerKeyLeft -> Right state
+    PickerKeyRight -> Right state
     PickerKeyChar 'A' -> Left PermissionAllowAll
     PickerKeyChar c ->
         case Text.toLower (Text.singleton c) of

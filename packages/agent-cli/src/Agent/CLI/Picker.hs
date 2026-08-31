@@ -59,6 +59,8 @@ import System.Posix.Terminal
 data PickerKey
     = PickerKeyUp
     | PickerKeyDown
+    | PickerKeyLeft
+    | PickerKeyRight
     | PickerKeyConfirm
     | PickerKeyCancel
     | PickerKeyBackspace
@@ -87,8 +89,14 @@ decodePickerKey = \case
     "J" -> Just PickerKeyDown
     "\ESC[A" -> Just PickerKeyUp
     "\ESC[B" -> Just PickerKeyDown
+    "\ESC[C" -> Just PickerKeyRight
+    "\ESC[D" -> Just PickerKeyLeft
+    "\ESCOC" -> Just PickerKeyRight
+    "\ESCOD" -> Just PickerKeyLeft
     "\ESC[OA" -> Just PickerKeyUp
     "\ESC[OB" -> Just PickerKeyDown
+    "\ESC[OC" -> Just PickerKeyRight
+    "\ESC[OD" -> Just PickerKeyLeft
     "\DEL" -> Just PickerKeyBackspace
     "\b" -> Just PickerKeyBackspace
     sequence_
@@ -100,6 +108,8 @@ decodePickerKey = \case
             case final of
                 'A' -> Just PickerKeyUp
                 'B' -> Just PickerKeyDown
+                'C' -> Just PickerKeyRight
+                'D' -> Just PickerKeyLeft
                 _ -> Nothing
     [c] -> Just (PickerKeyChar c)
     _ -> Nothing
