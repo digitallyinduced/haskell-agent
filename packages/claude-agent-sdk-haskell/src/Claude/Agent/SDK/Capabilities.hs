@@ -18,11 +18,12 @@ module Claude.Agent.SDK.Capabilities
     ) where
 
 import Agent.Process (terminateProcessGroup)
-import Control.Concurrent.Async (async, cancel, waitCatch)
+import Control.Concurrent.Async (withAsync, waitCatch)
 import Control.Exception.Safe
     ( SomeException
     , catchAny
     , mask
+    , onException
     , tryAny
     )
 import Control.Monad (when)
@@ -181,7 +182,12 @@ probeClaudeCapabilitiesIn executable cwd = do
     versionResult <- runProbe executable cwd ["--version"]
     case versionResult of
         Left err -> pure (Left err)
-        Right (exitCode, versionOutput, versionErr) ->
+        Right (exitCode, _, _)
+            | exitCode /= ExitSuccess ->
+                pure
+                    (Left
+                        "Claude Code --version probe exited unsuccessfully.")
+        Right (_, versionOutput, versionErr) ->
             case parseClaudeVersion (versionOutput <> "\n" <> versionErr) of
                 Nothing -> pure (Left "Unable to parse Claude Code version output.")
                 Just version -> do
@@ -191,31 +197,29 @@ probeClaudeCapabilitiesIn executable cwd = do
                         Just result -> pure (Right result)
                         Nothing -> do
                             helpResult <- runProbe executable cwd ["--help"]
-                            let result = case helpResult of
-                                    Left err -> ClaudeAgentCapabilities
-                                        { capabilityVersion = Just version
-                                        , supportedFlags = Set.empty
-                                        , permissionModes = Set.empty
-                                        , supportsStreaming = False
-                                        , supportsSafeMode = False
-                                        , warnings = [err]
-                                        }
-                                    Right (helpExit, helpOutput, helpErr) ->
-                                        let parsed = parseClaudeHelp helpOutput
-                                            failures =
-                                                [ "Claude Code --version exited unsuccessfully."
-                                                | exitCode /= ExitSuccess
-                                                ] <> [ "Claude Code --help exited unsuccessfully."
-                                                     | helpExit /= ExitSuccess
-                                                     ] <> [ "Claude Code probe stderr: " <> helpErr
-                                                           | not (Text.null (Text.strip helpErr))
-                                                           ]
-                                        in parsed
+                            case helpResult of
+                                Left err ->
+                                    pure
+                                        (Left
+                                            ("Claude Code --help probe failed: " <> err))
+                                Right (helpExit, _, _)
+                                    | helpExit /= ExitSuccess ->
+                                        pure
+                                            (Left
+                                                "Claude Code --help probe exited unsuccessfully.")
+                                Right (_, helpOutput, helpErr) -> do
+                                    let parsed = parseClaudeHelp helpOutput
+                                        failures =
+                                            [ "Claude Code probe stderr: " <> helpErr
+                                            | not (Text.null (Text.strip helpErr))
+                                            ]
+                                        result = parsed
                                             { capabilityVersion = Just version
                                             , warnings = failures <> parsed.warnings
                                             }
-                            atomicModifyIORef' capabilityCache \m -> (Map.insert key result m, ())
-                            pure (Right result)
+                                    atomicModifyIORef' capabilityCache
+                                        \m -> (Map.insert key result m, ())
+                                    pure (Right result)
 capabilityCache :: IORef (Map.Map String ClaudeAgentCapabilities)
 capabilityCache = unsafePerformIO (newIORef Map.empty)
 {-# NOINLINE capabilityCache #-}
@@ -226,6 +230,11 @@ runProbe executable cwd args =
         created <- tryAny $ createProcess
             (proc executable args)
                 { cwd = Just cwd
+                -- Claude Code inspects inherited terminals even for
+                -- non-interactive version/help commands.  Inheriting the
+                -- agent TUI's raw-mode stdin can make `claude --help` block
+                -- without producing output, so provide immediate EOF.
+                , std_in = CreatePipe
                 , std_out = CreatePipe
                 , std_err = CreatePipe
                 , close_fds = True
@@ -234,31 +243,74 @@ runProbe executable cwd args =
                 }
         case created of
             Left exception -> pure (Left (Text.pack (show (exception :: SomeException))))
-            Right (Nothing, Nothing, Nothing, _) ->
-                pure (Left "Claude Code probe did not provide output handles.")
-            Right (Nothing, Just output, Just error, processHandle) -> do
-                outputReader <- async (readBounded output)
-                errorReader <- async (readBounded error)
-                groupId <- getPid processHandle
-                outcome <- restore (timeout probeTimeoutMicros (waitForProcess processHandle))
-                    `catchAny` \_ -> pure Nothing
-                when (outcome == Nothing) do
-                    terminateProcessGroup groupId processHandle
-                outputText <- waitBounded outputReader
-                errorText <- waitBounded errorReader
-                case outcome of
-                    Nothing -> pure (Left "Claude Code capability probe timed out.")
-                    Just exitCode -> pure (Right (exitCode, outputText, errorText))
-            Right (_, _, _, processHandle) -> do
+            Right (Just input, Just output, Just error, processHandle) -> do
+                voidClose input
+                withAsync (readBounded output) \outputReader ->
+                    withAsync (readBounded error) \errorReader -> do
+                        groupId <- getPid processHandle
+                        outcome <-
+                            ( restore
+                                (timeout
+                                    probeTimeoutMicros
+                                    (waitForProcess processHandle))
+                                `catchAny` \_ -> pure Nothing
+                            ) `onException`
+                                terminateProcessGroup groupId processHandle
+                        when (outcome == Nothing) do
+                            terminateProcessGroup groupId processHandle
+                        outputResult <-
+                            waitBounded "stdout" outputReader
+                        errorResult <-
+                            waitBounded "stderr" errorReader
+                        case outcome of
+                            Nothing ->
+                                pure
+                                    (Left
+                                        "Claude Code capability probe timed out.")
+                            Just exitCode ->
+                                case (outputResult, errorResult) of
+                                    (Left message, _) -> do
+                                        terminateProcessGroup
+                                            groupId
+                                            processHandle
+                                        pure (Left message)
+                                    (_, Left message) -> do
+                                        terminateProcessGroup
+                                            groupId
+                                            processHandle
+                                        pure (Left message)
+                                    (Right outputText, Right errorText) ->
+                                        pure
+                                            (Right
+                                                ( exitCode
+                                                , outputText
+                                                , errorText
+                                                ))
+            Right (input, output, error, processHandle) -> do
+                mapM_
+                    (maybe (pure ()) voidClose)
+                    [input, output, error]
                 terminateProcessGroup Nothing processHandle
                 pure (Left "Claude Code probe returned incomplete output handles.")
   where
     probeTimeoutMicros = 3_000_000
-    waitBounded reader = do
+    waitBounded stream reader = do
         result <- timeout 1_000_000 (waitCatch reader)
         case result of
-            Just (Right text) -> pure text
-            _ -> cancel reader >> pure ""
+            Nothing ->
+                pure
+                    (Left
+                        ("Claude Code capability probe "
+                            <> stream
+                            <> " read timed out."))
+            Just (Left exception) ->
+                pure
+                    (Left
+                        ("Claude Code capability probe "
+                            <> stream
+                            <> " read failed: "
+                            <> Text.pack (show exception)))
+            Just (Right text) -> pure (Right text)
 
 readBounded :: Handle -> IO Text
 readBounded handle = do
