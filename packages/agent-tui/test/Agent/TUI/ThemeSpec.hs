@@ -13,7 +13,7 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "structural theme attributes" do
-        it "uses the terminal ANSI palette without fixing a background" do
+        it "uses terminal ANSI slots rather than fixed RGB colors" do
             map terminalForeground
                 [ Theme.borderActiveAttr
                 , Theme.controlLinkAttr
@@ -23,17 +23,21 @@ spec = do
                 , Theme.lambdaTrailAttr
                 , Theme.lambdaGlowAttr
                 , Theme.lambdaSparkAttr
+                , Theme.selectedAttr
+                , Theme.selectedMutedAttr
                 , Theme.todoPendingAttr
                 ]
                 `shouldBe`
-                    [ V.Default
+                    [ V.SetTo V.brightBlack
                     , V.SetTo V.brightBlack
                     , V.Default
-                    , V.Default
+                    , V.SetTo V.brightWhite
                     , V.SetTo V.brightBlack
                     , V.SetTo V.brightBlack
                     , V.Default
                     , V.SetTo V.brightWhite
+                    , V.SetTo V.brightWhite
+                    , V.SetTo V.white
                     , V.Default
                     ]
 
@@ -47,19 +51,35 @@ spec = do
                 allSyntaxClasses
                 `shouldBe` replicate (length allSyntaxClasses) V.Default
 
-        it "uses reverse video for selections on light and dark themes" do
-            V.attrStyle
-                (attrMapLookup Theme.selectedAttr Theme.terminalDefault)
-                `shouldBe` V.SetTo V.reverseVideo
+        it "uses a readable neutral panel for selections" do
+            let selected =
+                    attrMapLookup Theme.selectedAttr Theme.terminalDefault
+                selectedMuted =
+                    attrMapLookup Theme.selectedMutedAttr Theme.terminalDefault
+            V.attrForeColor selected `shouldBe` V.SetTo V.brightWhite
+            V.attrBackColor selected `shouldBe` V.SetTo V.brightBlack
+            V.attrStyle selected `shouldBe` V.SetTo V.bold
+            V.attrForeColor selectedMuted `shouldBe` V.SetTo V.white
+            V.attrBackColor selectedMuted `shouldBe` V.SetTo V.brightBlack
+
+        it "keeps idle chrome quieter than focused chrome" do
+            let border = attrMapLookup Theme.borderAttr Theme.terminalDefault
+                active =
+                    attrMapLookup Theme.borderActiveAttr Theme.terminalDefault
+            V.attrForeColor border `shouldBe` V.SetTo V.brightBlack
+            V.attrForeColor active `shouldBe` V.SetTo V.brightBlack
+            V.attrStyle border `shouldBe` V.SetTo V.dim
+            V.attrStyle active `shouldBe` V.Default
 
         it "gives user messages a palette gray panel distinct from assistant messages" do
             let user = attrMapLookup Theme.userAttr Theme.terminalDefault
                 userMuted = attrMapLookup Theme.userMutedAttr Theme.terminalDefault
                 assistant = attrMapLookup Theme.assistantAttr Theme.terminalDefault
+            V.attrForeColor user `shouldBe` V.SetTo V.brightWhite
             V.attrBackColor user `shouldBe` V.SetTo V.brightBlack
+            V.attrForeColor userMuted `shouldBe` V.SetTo V.white
             V.attrBackColor userMuted `shouldBe` V.SetTo V.brightBlack
             V.attrBackColor assistant `shouldBe` V.Default
-            V.attrForeColor userMuted `shouldBe` V.Default
 
         it "does not introduce colors in monochrome mode" do
             map
@@ -77,12 +97,17 @@ spec = do
                         (V.Default, V.Default)
 
         it "does not paint user message panels in monochrome mode" do
-            V.attrBackColor
-                (attrMapLookup Theme.userAttr Theme.monochrome)
-                `shouldBe` V.Default
-            V.attrBackColor
-                (attrMapLookup Theme.userMutedAttr Theme.monochrome)
-                `shouldBe` V.Default
+            map
+                ( \name ->
+                    let attr = attrMapLookup name Theme.monochrome
+                    in (V.attrForeColor attr, V.attrBackColor attr)
+                )
+                [ Theme.userAttr
+                , Theme.userMutedAttr
+                , Theme.selectedAttr
+                , Theme.selectedMutedAttr
+                ]
+                `shouldBe` replicate 4 (V.Default, V.Default)
 
     describe "live accent wave" do
         it "fades a named accent through distinct RGB values" do
