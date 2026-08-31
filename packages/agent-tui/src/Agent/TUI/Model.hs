@@ -142,6 +142,14 @@ reduceUi event state = case event of
             }
     UiSetPrompt prompt ->
         state { uiPrompt = prompt }
+    UiSetPromptTarget model account ->
+        state
+            { uiPrompt =
+                state.uiPrompt
+                    { promptModel = model
+                    , promptAccount = account
+                    }
+            }
     UiSetPromptEffort effort ->
         state
             { uiPrompt = state.uiPrompt { promptEffort = effort }

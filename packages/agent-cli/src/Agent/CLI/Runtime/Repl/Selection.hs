@@ -324,16 +324,19 @@ selectRequestedAccount env requestedProvider selector =
                     pure (Right Nothing)
         | otherwise = do
             params <- readIORef env.sessionParams
+            currentAccount <- readIORef env.sessionAccount
             requestAccountProviderSwitch
                 env.sessionModelCatalog
                 (Just runtime)
                 env.sessionProvider
                 env.sessionConnection
                 (currentModel params)
+                currentAccount
                 (dialectId env.sessionDialect)
                 selectedProvider
                 selectedSelectionId
                 selectedAccountId
+                selectedLabel
                 env.sessionPersist
                 >>= \case
                     Left err -> pure (Left err)
@@ -709,29 +712,32 @@ handleSelection
                                         env.sessionLastFailedTurn
                                         retryPendingTurn
                                         next
-                        | otherwise =
-                            readIORef paramsRef >>= \params ->
-                                requestAccountProviderSwitch
-                                    catalog fullscreen provider connectionId
-                                    (currentModel params) (dialectId dialect)
-                                    selectedProvider selectedSelectionId
-                                    selectedAccountId persist >>= \case
-                                        Left err -> do
-                                            displayError err (pure ())
-                                            next
-                                        Right result -> do
-                                            displayInfo
-                                                ("switching to "
-                                                    <> selectedLabel
-                                                    <> " ("
-                                                    <> providerSlug
-                                                        selectedProvider
-                                                    <> ")")
-                                                (pure ())
-                                            resumePendingTurnIfPresent
-                                                env.sessionLastFailedTurn
-                                                (pure . attachPendingTurn result)
-                                                (pure result)
+                        | otherwise = do
+                            params <- readIORef paramsRef
+                            currentAccount <- readIORef env.sessionAccount
+                            requestAccountProviderSwitch
+                                catalog fullscreen provider connectionId
+                                (currentModel params) currentAccount
+                                (dialectId dialect)
+                                selectedProvider selectedSelectionId
+                                selectedAccountId selectedLabel
+                                persist >>= \case
+                                    Left err -> do
+                                        displayError err (pure ())
+                                        next
+                                    Right result -> do
+                                        displayInfo
+                                            ("switching to "
+                                                <> selectedLabel
+                                                <> " ("
+                                                <> providerSlug
+                                                    selectedProvider
+                                                <> ")")
+                                            (pure ())
+                                        resumePendingTurnIfPresent
+                                            env.sessionLastFailedTurn
+                                            (pure . attachPendingTurn result)
+                                            (pure result)
             Nothing -> do
                 displayError
                     "Account switching is unavailable for this session."

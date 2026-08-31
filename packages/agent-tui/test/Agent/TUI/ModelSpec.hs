@@ -153,6 +153,31 @@ spec = describe "fullscreen UI reducer" do
         state.uiCursor `shouldBe` 20
         state.uiAwaitingInput `shouldBe` True
 
+    it "updates the prompt model and account together during a provider switch" do
+        let initialPrompt =
+                initialUiState.uiPrompt
+                    { promptModel = "fabel"
+                    , promptEffort = "high"
+                    , promptAccount = "Claude subscription"
+                    }
+            before =
+                apply
+                    [ UiSetPrompt initialPrompt
+                    , UiSetDraft "half typed prompt" 7
+                    ]
+            after =
+                reduceUi
+                    (UiSetPromptTarget "gpt-5.6-sol" "OpenAI account")
+                    before
+        after.uiPrompt
+            `shouldBe`
+                initialPrompt
+                    { promptModel = "gpt-5.6-sol"
+                    , promptAccount = "OpenAI account"
+                    }
+        after.uiDraft `shouldBe` "half typed prompt"
+        after.uiCursor `shouldBe` 7
+
     it "discards partial output and updates effort when restarting a turn" do
         let initialPrompt =
                 initialUiState.uiPrompt

@@ -8,6 +8,7 @@ module Agent.CLI.ProviderTransition
     , resumePendingTurnIfPresent
     , setPendingExitAfter
     , transitionCommitsImmediately
+    , withOptimisticPromptTarget
     ) where
 
 import Agent.CLI.Models (ModelTarget(..))
@@ -17,6 +18,7 @@ import Agent.Loop (TurnInput)
 import Agent.Provider (BillingMode, Provider)
 import Agent.Tools.PlanMode (PlanModeState)
 import Control.Applicative ((<|>))
+import Control.Exception.Safe (mask, onException)
 import Data.IORef (IORef, atomicModifyIORef')
 import Data.Set (Set)
 import Data.Text (Text)
@@ -97,3 +99,19 @@ resumePendingTurnIfPresent pendingTurnRef resume noPendingTurn =
 transitionCommitsImmediately :: ProviderTransition -> Bool
 transitionCommitsImmediately transition =
     transition.transitionCause == ManualTransition
+
+-- | Publish a provisional prompt target before a slow validation action,
+-- restoring the prior target if that action rejects, throws, or is cancelled.
+withOptimisticPromptTarget
+    :: IO ()
+    -> IO ()
+    -> IO (Either err value)
+    -> IO (Either err value)
+withOptimisticPromptTarget publish rollback action =
+    mask \restoreMask -> do
+        result <-
+            (publish >> restoreMask action)
+                `onException` rollback
+        case result of
+            Left err -> rollback >> pure (Left err)
+            Right value -> pure (Right value)

@@ -71,6 +71,7 @@ import Agent.CLI.ProviderTransition
     , ProviderTransition(..)
     , TransitionCause(..)
     , transitionCommitsImmediately
+    , withOptimisticPromptTarget
     )
 import Agent.CLI.Render
     ( RenderConfig(..)
@@ -315,8 +316,10 @@ requestAccountProviderSwitch
     -> Provider
     -> Text
     -> Text
+    -> Text
     -> DialectId
     -> Provider
+    -> Text
     -> Text
     -> Text
     -> Persistence
@@ -327,10 +330,12 @@ requestAccountProviderSwitch
     currentProvider
     currentConnection
     currentModelId
+    currentAccount
     currentDialect
     selectedProvider
     selectionId
     accountId
+    selectedAccount
     persist = do
         currentTransportModel <-
             persistenceTransportModel currentModelId persist
@@ -347,10 +352,18 @@ requestAccountProviderSwitch
             if currentProvider == selectedProvider
                 then pure rawChoice
                 else resolveModelOptionDialect rawChoice
-        validateSelectedAccountTarget
-            selectedProvider
-            selectionId
-            accountId >>= \case
+        let setPromptTarget modelId account =
+                forM_ fullscreen $ \runtime ->
+                    emitUiEvent runtime (UiSetPromptTarget modelId account)
+        withOptimisticPromptTarget
+            (setPromptTarget
+                choice.modelTarget.targetModelId
+                selectedAccount)
+            (setPromptTarget currentModelId currentAccount) $
+            validateSelectedAccountTarget
+                selectedProvider
+                selectionId
+                accountId >>= \case
                 Left err -> pure (Left err)
                 Right () -> do
                     sessionId <- ensureTransitionSessionId persist

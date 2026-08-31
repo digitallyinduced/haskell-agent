@@ -602,6 +602,8 @@ uiEventLogicalBytes = \case
     UiQueuedInputStarted -> 128
     UiSetDraft text _ -> logicalTextBytes text
     UiSetPrompt prompt -> promptStateLogicalBytes prompt
+    UiSetPromptTarget model account ->
+        logicalTextBytes model + logicalTextBytes account
     UiSetPromptEffort text -> logicalTextBytes text
     UiSetPromptLimitStatus status ->
         maybe 128 (logicalTextBytes . (.promptLimitText)) status
