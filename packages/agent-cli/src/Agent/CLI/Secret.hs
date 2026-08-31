@@ -7,7 +7,7 @@ module Agent.CLI.Secret
 
 import Agent.CLI.CancelWatch (withStdinPaused)
 import Agent.CLI.Notification
-    ( AttentionRequest(InputRequested)
+    ( AttentionRequest(SecretRequested)
     , notifyAttention
     )
 import Control.Exception.Safe (bracket_, finally, tryIO)
@@ -41,7 +41,7 @@ promptSecretLine escPaused prompt purpose =
         if not tty
             then pure Nothing
             else do
-                notifyAttention stderr InputRequested
+                notifyAttention stderr SecretRequested
                 Text.hPutStr stderr (secretPromptMessage prompt purpose)
                 hFlush stderr
                 result <-
