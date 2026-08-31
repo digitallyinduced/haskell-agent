@@ -50,7 +50,6 @@ import Agent.CLI.Error ( formatApiErrorAt, formatException )
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.GatewayModels
     ( catalogUsesGateway
-    , gatewayDefaultModelId
     , isGatewayConnectionId
     , isLegacyGatewayModelId
     , loadGatewayModelCatalogAt
@@ -76,6 +75,7 @@ import Agent.CLI.McpStatus
       summarizeMcpStatuses )
 import Agent.CLI.ModelConfig
     ( ConnectionKind(..),
+      ModelCatalog(..),
       ModelConnection(..),
       ResponsesConnection(..),
       builtinConnectionId,
@@ -83,6 +83,7 @@ import Agent.CLI.ModelConfig
       catalogContextWindowForTransport )
 import Agent.CLI.Models
     ( defaultModelFor,
+      modelOptionFromCatalog,
       rawModelOption,
       resolveConfiguredModel,
       resolvePersistedDialect,
@@ -390,7 +391,7 @@ import Data.IORef
       readIORef,
       writeIORef )
 import Data.List ()
-import Data.Maybe ( isNothing, fromMaybe, isJust )
+import Data.Maybe ( isNothing, fromMaybe, isJust, listToMaybe )
 import Data.Text ( Text )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -1086,7 +1087,8 @@ runAgentInitializedWithLock
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
         gatewayDefaultTarget =
             (.modelTarget)
-                <$> resolveConfiguredModel catalog gatewayDefaultModelId
+                <$> (listToMaybe catalog.catalogModels
+                    >>= modelOptionFromCatalog catalog)
         savedTarget provider connection model transport dialect =
             case resolveConfiguredModel catalog model of
                 Just option
@@ -1151,8 +1153,8 @@ runAgentInitializedWithLock
             && isNothing configuredOptionTarget
         ) $
         startupDie startup
-            "the connected gateway accepts gpt-5.6-sol, gpt-5.6-terra, or \
-            \gpt-5.6-luna"
+            ("the connected gateway does not provide model "
+                <> Text.unpack (fromMaybe "" options.optModel))
     when
         ( not gatewayMode
             && maybe False isLegacyGatewayModelId options.optModel
