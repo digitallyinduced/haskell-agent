@@ -96,7 +96,10 @@ import Agent.CLI.Terminal
     , osc133CommandStart
     , resolveColor
     )
-import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
+import Agent.CLI.Timestamp
+    ( stampTurnInputsSince
+    , stripBracketedTimestamps
+    )
 import Agent.CLI.TurnState
     ( ConversationOutcome(..)
     , ConversationPatch(..)
@@ -206,6 +209,22 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
                 includeTurnContext env beforeItems promptText inputs)
         `finally` writeIORef env.sessionAutomaticCompaction Nothing
 
+timestampConversationBounds
+    :: Persistence
+    -> IO (UTCTime, Maybe UTCTime)
+timestampConversationBounds persistence = do
+    now <- getCurrentTime
+    case persistence of
+        PersistenceDisabled -> pure (now, Nothing)
+        PersistenceEnabled slotRef -> do
+            state <- readIORef slotRef
+            pure $ case state of
+                PersistencePending{} -> (now, Nothing)
+                PersistenceActive handle ->
+                    ( handle.sessionMeta.metaCreatedAt
+                    , Just handle.sessionMeta.metaUpdatedAt
+                    )
+
 runOneTurnBusy
     :: Bool
     -> SessionEnv
@@ -275,7 +294,13 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     let
         turnInputs0 =
             turnInputsWithContext planReminder pendingStartup inputs
-    stampedInputs <- stampTurnInputs turnInputs0
+    (conversationStartedAt, previousActivityAt) <-
+        timestampConversationBounds persist
+    stampedInputs <-
+        stampTurnInputsSince
+            conversationStartedAt
+            previousActivityAt
+            turnInputs0
     sentStartupContext <- case pendingStartup of
         Nothing -> pure Nothing
         Just _ ->
