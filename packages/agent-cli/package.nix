@@ -8,7 +8,7 @@
 , http-client, http-client-tls, http-types, JuicyPixels, lib, mtl
 , network, network-uri, optparse-applicative, process, QuickCheck
 , retry, safe-exceptions, scientific, stm, tagsoup, text, time
-, transformers, unix, vector, vty, vty-crossplatform
+, transformers, unix, vector, vty, vty-crossplatform, wai, warp
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -27,7 +27,7 @@ mkDerivation {
     filelock filepath haskeline hasql-pool http-client http-client-tls
     http-types JuicyPixels mtl network network-uri optparse-applicative
     process retry safe-exceptions scientific stm tagsoup text time
-    transformers unix vector vty vty-crossplatform
+    transformers unix vector vty vty-crossplatform wai warp
   ];
   executableHaskellDepends = [
     aeson agent-responses agent-responses-types agent-store base
@@ -49,5 +49,5 @@ mkDerivation {
     text time vty
   ];
   description = "Command-line interface for the universal agent harness";
-  license = lib.meta.getLicenseFromSpdxId "MIT";
+  license = lib.licenses.mit;
 }

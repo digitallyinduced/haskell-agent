@@ -18,5 +18,5 @@ mkDerivation {
     text unix
   ];
   description = "Claude Code subscription adapter for Agent.Loop";
-  license = lib.meta.getLicenseFromSpdxId "MIT";
+  license = lib.licenses.mit;
 }
