@@ -35,24 +35,39 @@ jobs:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
       ATTIC_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#attic-client
+      GIT_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#git
     steps:
       - name: Check out the triggering revision
         shell: bash
         run: |
           set -euo pipefail
 
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to obtain the pinned Git client"
+            exit 1
+          fi
+          git_path=$(
+            "$nix_bin" build "$GIT_PACKAGE" \
+              --no-link \
+              --print-out-paths \
+              --option substituters https://cache.nixos.org/ \
+              --option extra-substituters ""
+          )
+          git_bin="$git_path/bin/git"
+
           source_dir="$RUNNER_TEMP/haskell-agent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           printf 'SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
 
-          git init "$source_dir"
-          git -C "$source_dir" remote add origin \
+          "$git_bin" init "$source_dir"
+          "$git_bin" -C "$source_dir" remote add origin \
             https://github.com/digitallyinduced/haskell-agent.git
-          git -C "$source_dir" fetch \
+          "$git_bin" -C "$source_dir" fetch \
             --depth=1 \
             --no-tags \
             origin \
             "$GITHUB_SHA"
-          git -C "$source_dir" checkout --detach FETCH_HEAD
+          "$git_bin" -C "$source_dir" checkout --detach FETCH_HEAD
 
       - name: Build install and run closures
         shell: bash
