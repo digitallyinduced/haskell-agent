@@ -705,9 +705,15 @@ handleEventInner' event = case event of
                     , choiceRows = rows
                     , choiceSearch = False
                     , choiceQuery = ""
+                    , choiceAdjustments = Nothing
+                    , choiceAdjustmentIndices = []
                     , choiceCloseOnTurnEnd = False
                     }
-                , appChoiceReply = Just (atomically . putTMVar reply)
+                , appChoiceReply =
+                    Just
+                        (atomically
+                            . putTMVar reply
+                            . fmap (.choiceSelectionIndex))
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
@@ -725,9 +731,58 @@ handleEventInner' event = case event of
                     , choiceRows = rows
                     , choiceSearch = True
                     , choiceQuery = ""
+                    , choiceAdjustments = Nothing
+                    , choiceAdjustmentIndices = []
                     , choiceCloseOnTurnEnd = False
                     }
-                , appChoiceReply = Just (atomically . putTMVar reply)
+                , appChoiceReply =
+                    Just
+                        (atomically
+                            . putTMVar reply
+                            . fmap (.choiceSelectionIndex))
+                , appAgentHover = Nothing
+                }
+        vScrollToBeginning (viewportScroll OverlayViewport)
+    AppEvent
+        (AppAskAdjustableFilterChoice title initial adjustableRows reply) -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
+        let rows =
+                [ (label, detail)
+                | (label, detail, _, _) <- adjustableRows
+                ]
+            adjustments =
+                [ values
+                | (_, _, values, _) <- adjustableRows
+                ]
+            adjustmentIndices =
+                [ max 0 (min (max 0 (length values - 1)) valueIndex)
+                | (_, _, values, valueIndex) <- adjustableRows
+                ]
+            replySelection = fmap \selection ->
+                ( selection.choiceSelectionIndex
+                , fromMaybe 0 selection.choiceSelectionAdjustment
+                )
+        modify' \current ->
+            current
+                { appChoice = Just ChoiceOverlay
+                    { choicePresentation = ChoiceDialog
+                    , choiceTitle = title
+                    , choiceBody = ""
+                    , choiceIndex =
+                        max 0 (min (max 0 (length rows - 1)) initial)
+                    , choiceRows = rows
+                    , choiceSearch = True
+                    , choiceQuery = ""
+                    , choiceAdjustments = Just adjustments
+                    , choiceAdjustmentIndices = adjustmentIndices
+                    , choiceCloseOnTurnEnd = False
+                    }
+                , appChoiceReply =
+                    Just
+                        (atomically
+                            . putTMVar reply
+                            . replySelection)
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)

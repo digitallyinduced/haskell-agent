@@ -195,8 +195,9 @@ handleEffortControlClick applyUiEvent = do
                     current = ui.uiPrompt.promptEffort
                     initial = fromMaybe 0 (elemIndex current efforts)
                     choose = \case
-                        Just index
-                            | index >= 0
+                        Just selection
+                            | let index = selection.choiceSelectionIndex
+                            , index >= 0
                             , index < length efforts -> do
                                 let level = efforts !! index
                                 when (level /= current) $
@@ -213,6 +214,8 @@ handleEffortControlClick applyUiEvent = do
                             , choiceRows = [(effort, "") | effort <- efforts]
                             , choiceSearch = False
                             , choiceQuery = ""
+                            , choiceAdjustments = Nothing
+                            , choiceAdjustmentIndices = []
                             , choiceCloseOnTurnEnd = True
                             }
                         , appChoiceReply = Just choose

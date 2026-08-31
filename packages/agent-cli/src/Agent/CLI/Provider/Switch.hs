@@ -119,6 +119,7 @@ import Agent.Provider
     , providerSlug
     , tokenProviderBillingMode
     )
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.TUI.Model (UiEvent(..))
 import Control.Monad
@@ -369,6 +370,7 @@ requestAccountProviderSwitch
                     sessionId <- ensureTransitionSessionId persist
                     let transition = ProviderTransition
                             { transitionTarget = choice.modelTarget
+                            , transitionEffort = Nothing
                             , transitionAccountSelectionId =
                                 Just selectionId
                             , transitionAccountId = Just accountId
@@ -630,6 +632,7 @@ chooseAutomaticProviderTransition
                             emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice.modelTarget
+                        , transitionEffort = Nothing
                         , transitionAccountSelectionId =
                             (.selectedSelectionId) <$> selected
                         , transitionAccountId =
@@ -705,6 +708,7 @@ chooseStartupProviderTransition
                         emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice.modelTarget
+                        , transitionEffort = Nothing
                         , transitionAccountSelectionId =
                             (.selectedSelectionId) <$> selected
                         , transitionAccountId =
@@ -731,6 +735,7 @@ prepareProviderTransition cause unavailable pending rawChoice persist = do
             sessionId <- ensureTransitionSessionId persist
             pure $ Right ProviderTransition
                 { transitionTarget = choice.modelTarget
+                , transitionEffort = Nothing
                 , transitionAccountSelectionId = Nothing
                 , transitionAccountId = Nothing
                 , transitionSessionId = sessionId
@@ -869,7 +874,13 @@ commitProviderTransition scope home projectRoot (Just transition) persist = do
                 PersistencePending pending sessionId tempDir ->
                     writeIORef slotRef $ PersistencePending
                         pending
-                            { createTarget = transition.transitionTarget }
+                            { createTarget = transition.transitionTarget
+                            , createEffort =
+                                maybe
+                                    pending.createEffort
+                                    reasoningEffortText
+                                    transition.transitionEffort
+                            }
                         sessionId
                         tempDir
                 PersistenceActive handle -> do
@@ -883,6 +894,11 @@ commitProviderTransition scope home projectRoot (Just transition) persist = do
                             , metaTransportModel =
                                 Just transition.transitionTarget.targetWireModelId
                             , metaDialect = transition.transitionTarget.targetDialect
+                            , metaEffort =
+                                maybe
+                                    previousMeta.metaEffort
+                                    reasoningEffortText
+                                    transition.transitionEffort
                             , metaLegacySubagentTarget =
                                 Just
                                     (sessionLegacySubagentTarget previousMeta)

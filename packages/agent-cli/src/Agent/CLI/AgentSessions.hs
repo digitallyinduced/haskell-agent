@@ -832,6 +832,7 @@ runCreateAgentSession env args
                         , targetWireModelId = env.toolsTransportModel
                         , targetDialect = env.toolsDialect
                         }
+                    , modelContextWindow = Nothing
                     , modelLabel = Nothing
                     , modelFallbackPriority = Nothing
                     }
@@ -845,6 +846,7 @@ runCreateAgentSession env args
                         , targetDialect =
                             dialectIdForModel env.toolsProvider model
                         }
+                    , modelContextWindow = Nothing
                     , modelLabel = Nothing
                     , modelFallbackPriority = Nothing
                     }

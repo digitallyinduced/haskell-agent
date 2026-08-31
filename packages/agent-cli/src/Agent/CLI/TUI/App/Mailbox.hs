@@ -654,6 +654,17 @@ appEventLogicalBytes = \case
             (saturatingAdd
                 (logicalTextBytes title)
                 (textRowsLogicalBytes rows))
+    AppAskAdjustableFilterChoice title _ rows _ ->
+        saturatingAdd 256 $
+            saturatingAdd
+                (logicalTextBytes title)
+                ( foldl'
+                    (\size (label, detail, values, _) ->
+                        saturatingAdd size
+                            (logicalTextsBytes (label : detail : values)))
+                    0
+                    rows
+                )
     AppAskText _ title body draft _ ->
         saturatingAdd 256 (logicalTextsBytes [title, body, draft])
     AppAskResume browser _ _ _ _ ->

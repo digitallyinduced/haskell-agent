@@ -384,6 +384,47 @@ resolveResume confirmed = do
             }
     resumeNativeProgressIfRunning
 
+-- | Move the selected source row's adjustable value without disturbing its
+-- search query or list selection. Values clamp at their endpoints.
+adjustChoiceValue :: Int -> ChoiceOverlay -> ChoiceOverlay
+adjustChoiceValue delta choice =
+    case choice.choiceAdjustments of
+        Nothing -> choice
+        Just adjustmentRows ->
+            case selectedChoiceIndex choice of
+                Nothing -> choice
+                Just sourceIndex ->
+                    case listAt sourceIndex adjustmentRows of
+                        Nothing -> choice
+                        Just values ->
+                            let current =
+                                    fromMaybe 0 $
+                                        listAt
+                                            sourceIndex
+                                            choice.choiceAdjustmentIndices
+                                next =
+                                    max 0 $
+                                        min
+                                            (max 0 (length values - 1))
+                                            (current + delta)
+                            in choice
+                                { choiceAdjustmentIndices =
+                                    replaceAt
+                                        sourceIndex
+                                        next
+                                        choice.choiceAdjustmentIndices
+                                }
+  where
+    listAt index values
+        | index < 0 = Nothing
+        | otherwise = case drop index values of
+            value : _ -> Just value
+            [] -> Nothing
+    replaceAt index value values =
+        case splitAt index values of
+            (before, _ : after) -> before <> (value : after)
+            _ -> values
+
 confirmResumeId :: Text -> EventM Name AppState ()
 confirmResumeId sessionId = do
     state <- get
@@ -456,6 +497,8 @@ handleFilterChoiceKey :: V.Event -> EventM Name AppState ()
 handleFilterChoiceKey event = case event of
     V.EvKey V.KUp [] -> moveFilteredChoice (-1)
     V.EvKey V.KDown [] -> moveFilteredChoice 1
+    V.EvKey V.KLeft [] -> adjustFilteredChoice (-1)
+    V.EvKey V.KRight [] -> adjustFilteredChoice 1
     V.EvKey V.KBackTab [] -> moveFilteredChoice (-1)
     V.EvKey (V.KChar '\t') [] -> moveFilteredChoice 1
     V.EvKey V.KPageUp [] ->
@@ -497,6 +540,13 @@ handleFilterChoiceKey event = case event of
                                             `mod` count
                             })
                         <$> state.appChoice
+                }
+
+    adjustFilteredChoice delta =
+        modify' \state ->
+            state
+                { appChoice =
+                    adjustChoiceValue delta <$> state.appChoice
                 }
 
     updateChoiceQuery update = do
@@ -726,7 +776,7 @@ resolveChoice confirmed = do
         Just reply ->
             liftIO $ reply $
                 if confirmed
-                    then state.appChoice >>= selectedChoiceIndex
+                    then state.appChoice >>= selectedChoice
                     else Nothing
     modify' \current ->
         current

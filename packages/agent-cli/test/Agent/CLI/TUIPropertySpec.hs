@@ -612,6 +612,8 @@ applyAction action harness =
                                 , choiceRows = rows
                                 , choiceSearch = False
                                 , choiceQuery = ""
+                                , choiceAdjustments = Nothing
+                                , choiceAdjustmentIndices = []
                                 , choiceCloseOnTurnEnd = False
                                 }
                         , appTextPrompt = Nothing

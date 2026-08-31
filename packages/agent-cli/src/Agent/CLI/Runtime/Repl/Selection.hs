@@ -85,7 +85,9 @@ import Agent.CLI.Secret ()
 import Agent.CLI.Session ()
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices
-    ( atMay, effortChoice, modelChoice )
+    ( atMay, effortChoice, modelChoiceWithEffort )
+import Agent.CLI.ModelPicker
+    ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
 import Agent.CLI.Session.History ()
 import Agent.CLI.Session.Interaction ( setSessionEffort )
 import Agent.CLI.Session.Lifecycle ()
@@ -445,7 +447,7 @@ handleSelection
         if modelTargetRequiresRebuild
                 connectionId provider (dialectId dialect) choice
             then
-                switchModelTarget color choice continue
+                switchModelTarget color choice Nothing continue
             else do
                 message <- applyModelChange
                     home projectRoot provider connectionId name
@@ -504,22 +506,27 @@ handleSelection
         color <- resolveColor stderr
         params <- readIORef paramsRef
         let current = currentModel params
-        modelChoice
+        modelChoiceWithEffort
             catalog fullscreen color connectionId provider current
-                (dialectId dialect) >>= \case
+                (dialectId dialect) (currentEffort params) >>= \case
             Nothing -> next
-            Just rawChoice -> do
+            Just selection -> do
+                let rawChoice = selection.modelPickerOption
+                    selectedEffort = selection.modelPickerEffort
                 choice <- resolveModelOptionDialect rawChoice
                 if choice.modelTarget.targetProvider == provider
                     && choice.modelTarget.targetConnectionId == connectionId
                     && choice.modelTarget.targetModelId == current
                     && choice.modelTarget.targetDialect == dialectId dialect
                   then do
+                    setSessionEffort env selectedEffort
                     let message =
                             "model: "
                                 <> connectionId
                                 <> "/"
                                 <> choice.modelTarget.targetModelId
+                                <> " · effort "
+                                <> reasoningEffortText selectedEffort
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
@@ -535,14 +542,15 @@ handleSelection
                         choice.modelTarget.targetWireModelId
                         choice.modelTarget.targetDialect
                         paramsRef render conversationRef persist
+                    setSessionEffort env selectedEffort
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
                                 (glyphOk <> message))
                     next
                   else
-                    switchModelTarget color choice next
-    switchModelTarget color choice next =
+                    switchModelTarget color choice (Just selectedEffort) next
+    switchModelTarget color choice selectedEffort next =
         requestModelTargetSwitch fullscreen choice persist >>= \case
             Left err
                 | choice.modelTarget.targetProvider == GeminiProvider
@@ -563,12 +571,22 @@ handleSelection
                                         Text.hPutStrLn stderr
                                             (roleError color retryErr)
                                     next
-                                Right result -> pure result
+                                Right result ->
+                                    pure
+                                        (applyTransitionEffort
+                                            selectedEffort
+                                            result)
             Left err -> do
                 displayError err $
                     Text.hPutStrLn stderr (roleError color err)
                 next
-            Right result -> pure result
+            Right result ->
+                pure (applyTransitionEffort selectedEffort result)
+    applyTransitionEffort selectedEffort = \case
+        RunSwitchProvider transition ->
+            RunSwitchProvider
+                transition { transitionEffort = selectedEffort }
+        result -> result
     attachPendingTurn result pending =
         case result of
             RunSwitchProvider transition ->
