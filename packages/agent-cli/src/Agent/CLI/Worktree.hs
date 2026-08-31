@@ -361,7 +361,18 @@ cleanupCandidate root candidate = do
         Right (Just lease) ->
             cleanupWithLease `finally` releaseWorktreeLease lease
   where
-    cleanupWithLease =
+    cleanupWithLease = do
+        hasGitMetadata <-
+            doesPathExist (candidate </> unsafeEncodeUtf ".git")
+        -- A generated-looking directory can survive an interrupted
+        -- @git worktree remove@ after its .git marker is gone. Without
+        -- that ownership marker, preserve it rather than warning on
+        -- @git rev-parse@ or recursively deleting arbitrary files.
+        if hasGitMetadata
+            then cleanupGitWorktree
+            else pure mempty
+
+    cleanupGitWorktree =
         inspectCleanupCandidate candidate >>= \case
             Left err ->
                 pure mempty

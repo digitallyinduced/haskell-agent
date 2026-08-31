@@ -202,6 +202,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                 , turnError = Nothing
                 , turnResponseId = Nothing
                 , turnItems = []
+                , turnDisplayItems = []
                 , turnUsage = Nothing
                 , turnEffect = TranscriptAppend
                 , turnProviderTelemetry = []

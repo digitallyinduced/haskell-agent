@@ -353,6 +353,38 @@ spec = do
                         [call | FunctionCallItem call <- history]
                             `shouldBe` []
 
+        it "keeps streamed work visible when EOF arrives after activity" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_EXIT_AFTER_ACTIVITY", Just "1")]
+                    do
+                        transcript <- newIORef []
+                        events <- newIORef []
+                        let backend =
+                                claudeCodeOneShotBackend
+                                    (defaultClaudeCodeOptions
+                                        fake.executable
+                                        fake.workingDirectory)
+                                    (pure defaultResponseCreateParams)
+                                    transcript
+                        result <- timeout 5_000_000 $
+                            submitBackend backend
+                                Nothing
+                                [UserMessage "exit after work"]
+                                (\event ->
+                                    modifyIORef' events (<> [event]))
+                        result `shouldSatisfy` \case
+                            Just (Left (ConnectionError message)) ->
+                                "before completing the turn"
+                                    `Text.isInfixOf` message
+                            _ -> False
+                        readIORef events `shouldReturn`
+                            [ ToolStarted expectedFakeToolCall
+                            , ToolFinished expectedFakeToolResult
+                            , TextDelta "fake response"
+                            ]
+                        readIORef transcript `shouldReturn` []
+
         it "streams interim text and thinking live and persists the whole reply" $
             withFakeClaude \fake ->
                 withEnvironmentVariables
@@ -918,13 +950,12 @@ spec = do
                                         && "was active"
                                             `Text.isInfixOf` message
                             _ -> False
-                        -- Text is exposed as it arrives; the failed turn
-                        -- discards the whole displayed attempt.
+                        -- Text and tools exposed before the terminal protocol
+                        -- failure remain visible for the failed turn.
                         readIORef events `shouldReturn`
                             [ ToolStarted expectedFakeToolCall
                             , ToolFinished expectedFakeToolResult
                             , TextDelta "fake response"
-                            , ResponseAttemptDiscarded
                             ]
 
         it "reports malformed structured output" $
@@ -1645,6 +1676,7 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
         , "  fi"
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  if [ \"$FAKE_CLAUDE_EXIT_AFTER_ACTIVITY\" = 1 ]; then exit 17; fi"
         , "  result_session_id=${FAKE_CLAUDE_RESULT_SESSION_ID:-$session_id}"
         , "  if [ -n \"$FAKE_CLAUDE_RESULT_MARKER\" ]; then : > \"$FAKE_CLAUDE_RESULT_MARKER\"; fi"
         , "  cumulative_input=$((turn * 2))"

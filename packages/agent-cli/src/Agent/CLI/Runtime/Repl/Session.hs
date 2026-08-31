@@ -94,7 +94,7 @@ import Agent.CLI.Session
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
-                  turnItems, turnProviderTelemetry) )
+                  turnItems, turnDisplayItems, turnProviderTelemetry) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ()
@@ -336,6 +336,7 @@ handleSessionAction
                                 , turnResponseId = Nothing
                                 , turnEffect = TranscriptReset
                                 , turnItems = []
+                                , turnDisplayItems = []
                                 , turnUsage = Nothing
                                 , turnProviderTelemetry = []
                                 }
@@ -434,6 +435,7 @@ handleSessionAction
                         , turnResponseId = Nothing
                         , turnEffect = TranscriptReset
                         , turnItems = []
+                        , turnDisplayItems = []
                         , turnUsage = Nothing
                         , turnProviderTelemetry = []
                         }

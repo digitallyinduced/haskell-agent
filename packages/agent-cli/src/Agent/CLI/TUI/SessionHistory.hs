@@ -13,7 +13,10 @@ import Agent.CLI.Session
     , SessionTurnPage(..)
     )
 import Agent.CLI.Session.Types (TranscriptEffect(..))
-import Agent.CLI.TurnState (isTurnAbortedNote)
+import Agent.CLI.TurnState
+    ( isDisplayAttemptBoundary
+    , isTurnAbortedNote
+    )
 import Agent.Json (RawJson, rawJsonBytes)
 import qualified Agent.Json.Decode as Hermes
 import Agent.CLI.TUI.History
@@ -34,6 +37,7 @@ import Agent.Responses.Types
     , CustomToolCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
+    , ItemStatus(..)
     , MessageContent(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
@@ -125,19 +129,29 @@ addRegularTurn items state turn =
         withItems =
             completeProjectedStreams
                 (foldl' projectItem withUser (dropWhile isUserMessage items))
+        -- The failed provider attempt is intentionally separate from
+        -- canonical context. Project it as live activity so the terminal turn
+        -- state can mark unfinished text/tools failed while keeping completed
+        -- tool results complete.
+        withDisplayItems =
+            foldl' projectDisplayItem withItems turn.turnDisplayItems
         -- A successful turn stores its final assistant text, which its items
         -- already project. An interrupted turn stores the text of the sample
         -- that never committed, which its retained items cannot contain; an
         -- incomplete response repeats its committed text instead, so skip
         -- text that an existing block already shows.
         withAssistant = case turn.turnAssistantText of
-            Nothing -> withItems
+            Nothing -> withDisplayItems
             Just text
-                | turn.turnError == Nothing && hasAssistantBlock withItems ->
-                    withItems
-                | hasAssistantBlockText text withItems -> withItems
+                | turn.turnError == Nothing
+                    && hasAssistantBlock withDisplayItems ->
+                    withDisplayItems
+                | hasDisplayAssistant turn.turnDisplayItems ->
+                    withDisplayItems
+                | hasAssistantBlockText text withDisplayItems ->
+                    withDisplayItems
                 | otherwise ->
-                    reduceUi (UiAssistantHistory text) withItems
+                    reduceUi (UiAssistantHistory text) withDisplayItems
         terminalState =
             if turn.turnError == Nothing
                 then BlockComplete
@@ -235,6 +249,32 @@ projectItem state = \case
             state
     _ -> state
 
+projectDisplayItem :: UiState -> ResponseItem -> UiState
+projectDisplayItem state item
+    | isDisplayAttemptBoundary item =
+        reduceUi
+            (UiLoop (ResponseRestarted "Retrying response…"))
+            state
+    | otherwise =
+        case item of
+            FunctionCallOutputItem output
+                | output.status == Just ItemIncomplete ->
+                    reduceUi
+                        (UiLoop
+                            (ToolOutputUpdated
+                                output.callId
+                                (renderJsonValue output.output)))
+                        state
+            CustomToolCallOutputItem output
+                | output.status == Just ItemIncomplete ->
+                    reduceUi
+                        (UiLoop
+                            (ToolOutputUpdated
+                                output.callId
+                                (renderJsonValue output.output)))
+                        state
+            _ -> projectItem state item
+
 isUserMessage :: ResponseItem -> Bool
 isUserMessage = \case
     MessageItem message -> message.role == RoleUser
@@ -258,6 +298,12 @@ hasAssistantBlock =
                 && not (Text.null (Text.strip block.blockBody)))
         . toList
         . (.uiBlocks)
+
+hasDisplayAssistant :: [ResponseItem] -> Bool
+hasDisplayAssistant =
+    any \case
+        MessageItem message -> message.role == RoleAssistant
+        _ -> False
 
 -- | Items are committed history: an assistant message projected through text
 -- deltas is complete whatever state the turn itself ended in, and must not be

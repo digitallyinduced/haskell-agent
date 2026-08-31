@@ -248,7 +248,11 @@ queryTurnContentWithMessageValidatorAndProgress
         Nothing ->
             Left <$> timeoutError
                 turn
-                "did not complete within the turn timeout"
+                ( "did not complete within the turn timeout; it may already "
+                    <> "have changed files or created remote side effects, so "
+                    <> "inspect the workspace, Git history, and pull requests "
+                    <> "before retrying"
+                )
         Just result ->
             pure result
 

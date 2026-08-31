@@ -453,6 +453,8 @@ reduceLoop event state = case event of
         retractToolCall callId state
     ResponseAttemptDiscarded ->
         discardResponseAttempt state
+    ResponseAttemptFailed ->
+        finalizeTurn BlockFailed state
     NativeAgentStarted{} ->
         state
     NativeAgentOutput{} ->

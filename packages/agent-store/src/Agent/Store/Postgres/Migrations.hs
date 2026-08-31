@@ -242,6 +242,15 @@ coreMigrations =
                 \ $ha$"
                ]
         }
+    , Migration
+        { migrationVersion = 107
+        , migrationName = "display-only failed response items"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.session_turns\
+              \ ADD COLUMN IF NOT EXISTS canonical_item_count bigint\
+              \ CHECK (canonical_item_count >= 0)"
+            ]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty

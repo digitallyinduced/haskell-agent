@@ -153,6 +153,19 @@ spec = do
             ]
             `shouldBe` first <> second
 
+      it "never folds failed display-only items into model context" do
+        let canonical = turnInputsToItems [UserMessage "retry this request"]
+            displayOnly =
+                turnInputsToItems
+                    [UserMessage "partial provider output must stay visual"]
+            failed =
+                (sessionTurn "retry this request" Nothing TranscriptAppend)
+                    { turnItems = canonical
+                    , turnDisplayItems = displayOnly
+                    , turnError = Just "timed out"
+                    }
+        foldSessionItems [failed] `shouldBe` canonical
+
 sessionTurn :: Text -> Maybe Text -> TranscriptEffect -> SessionTurn
 sessionTurn user assistant effect = SessionTurn
     { turnAt = UTCTime (fromGregorian 2026 8 25) 0
@@ -162,6 +175,7 @@ sessionTurn user assistant effect = SessionTurn
     , turnResponseId = Nothing
     , turnEffect = effect
     , turnItems = []
+    , turnDisplayItems = []
     , turnUsage = Nothing
     , turnProviderTelemetry = []
     }

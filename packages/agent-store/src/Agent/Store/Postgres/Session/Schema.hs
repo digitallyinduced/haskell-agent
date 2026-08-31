@@ -101,6 +101,7 @@ sessionSchemaStatements =
       \ usage_output_tokens bigint,\
       \ usage_cached_tokens bigint,\
       \ provider_telemetry_json text,\
+      \ canonical_item_count bigint CHECK (canonical_item_count >= 0),\
       \ search_vector tsvector GENERATED ALWAYS AS (\
       \   setweight(to_tsvector('english', coalesce(user_text, '')), 'A') ||\
       \   setweight(to_tsvector('english', coalesce(assistant_text, '')), 'B')\

@@ -374,6 +374,130 @@ spec = describe "bounded fullscreen history window" do
                 , (BlockError, "cancelled", BlockFailed)
                 ]
 
+    it "restores failed-attempt tools from display-only durable items" do
+        let call callId name arguments =
+                FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId
+                    , name
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , arguments
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemInProgress
+                    }
+            output callId body status =
+                FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing
+                    , callId
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , output =
+                        rawJsonFromEncoding
+                            (Aeson.toEncoding (body :: Text.Text))
+                    , status = Just status
+                    }
+            turnValue =
+                (sessionTurn TranscriptAppend "fix it" [userMessage "fix it"])
+                    { turnAssistantText = Just "Work completed before timeout."
+                    , turnDisplayItems =
+                        [ assistantMessage "Work completed before timeout."
+                        , call "done" "shell_command"
+                            "{\"command\":\"git status\"}"
+                        , output "done" "clean" ItemCompleted
+                        , call "waiting" "TaskOutput"
+                            "{\"task_id\":\"ci\"}"
+                        , output "waiting" "still queued" ItemIncomplete
+                        ]
+                    , turnError = Just "Claude Code timed out."
+                    }
+            blocks = toList $
+                (sessionHistoryTurn (22 :: Int) turnValue).historyTurnBlocks
+            assistantBlocks =
+                filter ((== BlockAssistant) . (.blockKind)) blocks
+            toolBlocks =
+                [ (block.blockCallId, block.blockState, block.blockBody)
+                | block <- blocks
+                , block.blockCallId /= Nothing
+                ]
+        map (\block -> (block.blockBody, block.blockState)) assistantBlocks
+            `shouldBe`
+                [("Work completed before timeout.", BlockFailed)]
+        map (\(callId, state, _) -> (callId, state)) toolBlocks
+            `shouldBe`
+                [ (Just "done", BlockComplete)
+                , (Just "waiting", BlockFailed)
+                ]
+        toolBlocks
+            `shouldSatisfy`
+                any (\(_, _, body) -> "still queued" `Text.isInfixOf` body)
+
+    it "keeps retry attempts separate when a provider reuses a tool id" do
+        let call arguments =
+                FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "same"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , arguments
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemInProgress
+                    }
+            output body status =
+                FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing
+                    , callId = "same"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , output =
+                        rawJsonFromEncoding
+                            (Aeson.toEncoding (body :: Text.Text))
+                    , status = Just status
+                    }
+            boundary =
+                UnknownResponseItem
+                    (TaggedObject "haskell_agent_display_attempt_boundary")
+            turnValue =
+                (sessionTurn TranscriptAppend "retry" [userMessage "retry"])
+                    { turnDisplayItems =
+                        [ assistantMessage "first attempt"
+                        , call "{\"command\":\"first\"}"
+                        , output "first output" ItemCompleted
+                        , boundary
+                        , assistantMessage "second attempt"
+                        , call "{\"command\":\"second\"}"
+                        , output "second output" ItemIncomplete
+                        ]
+                    , turnError = Just "provider failed"
+                    }
+            blocks = toList $
+                (sessionHistoryTurn (23 :: Int) turnValue).historyTurnBlocks
+            assistantBlocks =
+                [ (block.blockBody, block.blockState)
+                | block <- blocks
+                , block.blockKind == BlockAssistant
+                ]
+            toolBlocks =
+                [ (block.blockBody, block.blockState)
+                | block <- blocks
+                , block.blockCallId == Just "same"
+                ]
+        assistantBlocks
+            `shouldBe`
+                [ ("first attempt", BlockComplete)
+                , ("second attempt", BlockFailed)
+                ]
+        map snd toolBlocks
+            `shouldBe` [BlockComplete, BlockFailed]
+        map fst toolBlocks
+            `shouldSatisfy`
+                \bodies ->
+                    any (Text.isInfixOf "first output") bodies
+                        && any (Text.isInfixOf "second output") bodies
+
     it "shows the uncommitted partial text after the retained steps of a cancelled turn" do
         let turnValue =
                 (sessionTurn TranscriptAppend "stop here"
@@ -573,6 +697,7 @@ sessionTurn effect userText items =
         , turnResponseId = Nothing
         , turnEffect = effect
         , turnItems = items
+        , turnDisplayItems = []
         , turnUsage = Nothing
         , turnProviderTelemetry = []
         }
