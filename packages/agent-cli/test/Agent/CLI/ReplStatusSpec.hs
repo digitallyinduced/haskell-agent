@@ -35,6 +35,7 @@ import Agent.CLI.ModelConfig
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (ProjectSettings(..), loadProjectSettings)
+import Agent.CLI.ProviderTransition (withOptimisticPromptTarget)
 import Agent.CLI.ReplMode
     ( ReplMode(..)
     , cycleReplMode
@@ -58,10 +59,18 @@ import Agent.TUI.Model
     , reduceUi
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
-import Control.Exception.Safe (bracket, throwIO)
+import Control.Concurrent.Async (cancel, wait, waitCatch, withAsync)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception.Safe
+    ( bracket
+    , throwIO
+    , throwString
+    , tryAny
+    )
 import qualified Data.ByteString.Lazy as LBS
+import Data.Either (isLeft)
 import qualified Data.Text as Text
-import Data.IORef (newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.Directory
     ( getCurrentDirectory
     , getTemporaryDirectory
@@ -147,6 +156,71 @@ spec = do
             target.modelTarget.targetModelId `shouldBe` "openai/gpt-5.1"
             target.modelTarget.targetWireModelId `shouldBe` "openai/gpt-5.1"
             target.modelTarget.targetDialect `shouldBe` GrokBuildDialect
+
+    describe "withOptimisticPromptTarget" do
+        it "publishes the target before validation finishes" do
+            events <- newIORef ([] :: [Text.Text])
+            started <- newEmptyMVar
+            release <- newEmptyMVar
+            let record event = modifyIORef' events (<> [event])
+                validate = do
+                    putMVar started ()
+                    takeMVar release
+                    pure (Right () :: Either Text.Text ())
+            withAsync
+                (withOptimisticPromptTarget
+                    (record "target")
+                    (record "current")
+                    validate)
+                \running -> do
+                    takeMVar started
+                    readIORef events `shouldReturn` ["target"]
+                    putMVar release ()
+                    wait running `shouldReturn` Right ()
+                    readIORef events `shouldReturn` ["target"]
+
+        it "restores the current target when validation rejects the switch" do
+            events <- newIORef ([] :: [Text.Text])
+            let record event = modifyIORef' events (<> [event])
+            result <-
+                withOptimisticPromptTarget
+                    (record "target")
+                    (record "current")
+                    (pure (Left "unavailable" :: Either Text.Text ()))
+            result `shouldBe` Left "unavailable"
+            readIORef events `shouldReturn` ["target", "current"]
+
+        it "restores the current target when validation throws" do
+            events <- newIORef ([] :: [Text.Text])
+            let record event = modifyIORef' events (<> [event])
+            result <- tryAny $
+                withOptimisticPromptTarget
+                    (record "target")
+                    (record "current")
+                    (throwString "validation failed"
+                        :: IO (Either Text.Text ()))
+            result `shouldSatisfy` isLeft
+            readIORef events `shouldReturn` ["target", "current"]
+
+        it "restores the current target when validation is cancelled" do
+            events <- newIORef ([] :: [Text.Text])
+            started <- newEmptyMVar
+            blocked <- newEmptyMVar :: IO (MVar ())
+            let record event = modifyIORef' events (<> [event])
+                validate = do
+                    putMVar started ()
+                    _ <- takeMVar blocked
+                    pure (Right () :: Either Text.Text ())
+            withAsync
+                (withOptimisticPromptTarget
+                    (record "target")
+                    (record "current")
+                    validate)
+                \running -> do
+                    takeMVar started
+                    cancel running
+                    waitCatch running >>= (`shouldSatisfy` isLeft)
+            readIORef events `shouldReturn` ["target", "current"]
 
     describe "devArgs" do
         it "starts fresh REPL sessions on gpt-5.6-sol in yolo mode" do

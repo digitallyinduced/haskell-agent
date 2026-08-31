@@ -546,6 +546,7 @@ uiEventMayExposeSyntax = \case
     UiLoop (ToolOutputUpdated _ _) -> False
     UiSetDraft _ _ -> False
     UiSetPrompt _ -> False
+    UiSetPromptTarget _ _ -> False
     UiSetPromptEffort _ -> False
     UiSetPromptLimitStatus _ -> False
     UiSetAwaitingInput _ -> False

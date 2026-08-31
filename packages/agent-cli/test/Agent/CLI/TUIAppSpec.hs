@@ -526,7 +526,7 @@ spec = do
                 searchable { choiceQuery = "missing" }
                 `shouldBe` Nothing
 
-    describe "prompt model refresh" do
+    describe "prompt target refresh" do
         it "preserves the live draft and cursor across a provider restart" do
             let before =
                     reduceUi
@@ -534,14 +534,14 @@ spec = do
                         initialUiState
                 after =
                     reduceUi
-                        (UiSetPrompt
-                            before.uiPrompt
-                                { promptModel = "gpt-5.6-sol"
-                                })
+                        (UiSetPromptTarget
+                            "gpt-5.6-sol"
+                            "OpenAI account")
                         before
             after.uiDraft `shouldBe` "half typed prompt"
             after.uiCursor `shouldBe` 7
             after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
+            after.uiPrompt.promptAccount `shouldBe` "OpenAI account"
 
     describe "fullscreenVtyConfig" do
         it "maps the Kitty-encoded Esc key so its payload cannot leak" do
