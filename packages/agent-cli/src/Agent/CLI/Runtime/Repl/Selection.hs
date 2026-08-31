@@ -68,7 +68,11 @@ import Agent.CLI.Provider.Switch
       requestModelTargetSwitch )
 import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback ()
-import Agent.CLI.ProviderTransition ()
+import Agent.CLI.ProviderTransition
+    ( PendingTurn
+    , ProviderTransition(..)
+    , resumePendingTurnIfPresent
+    )
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( clearThinking, renderEvent )
 import Agent.CLI.ReplMode ()
@@ -76,7 +80,7 @@ import Agent.CLI.Request ()
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
-import Agent.CLI.Runtime.Types ( RunResult )
+import Agent.CLI.Runtime.Types ( RunResult(..) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session ()
 import Agent.CLI.Session.Attachments ()
@@ -127,7 +131,7 @@ import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ()
 import Agent.Provider
-    ( Provider(ClaudeCodeProvider, GeminiProvider, OpenAIProvider),
+    ( Provider(GeminiProvider, OpenAIProvider),
       providerSlug,
       tokenProviderBillingMode )
 import Agent.ReasoningEffort (reasoningEffortText)
@@ -182,18 +186,23 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
-import qualified Data.Text as Text ( null, stripPrefix )
+import qualified Data.Text as Text ( stripPrefix )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
 
-handleSelectionInput :: SessionEnv -> IO RunResult -> ReplLine -> IO RunResult
-handleSelectionInput env continue input =
-    handleSelection env continue (Left input)
+handleSelectionInput
+    :: SessionEnv
+    -> IO RunResult
+    -> (PendingTurn -> IO RunResult)
+    -> ReplLine
+    -> IO RunResult
+handleSelectionInput env continue retryPendingTurn input =
+    handleSelection env continue retryPendingTurn (Left input)
 
 handleSelectionAction :: SessionEnv -> IO RunResult -> ReplAction -> IO RunResult
 handleSelectionAction env continue action =
-    handleSelection env continue (Right action)
+    handleSelection env continue (\_ -> continue) (Right action)
 
 -- | Select an account requested by a trusted, typed Meta Console action.
 --
@@ -250,7 +259,7 @@ selectRequestedAccount env requestedProvider selector =
                                 pure (Left "Account selection was cancelled.")
                             Just index ->
                                 case atMay index options of
-                                    Just option@(AccountPickerAccount
+                                    Just (AccountPickerAccount
                                         selectedProvider
                                         selectedBilling
                                         selectedSelectionId
@@ -259,9 +268,6 @@ selectRequestedAccount env requestedProvider selector =
                                         _) ->
                                             applySelectedAccount
                                                 runtime
-                                                currentSelectionId
-                                                currentAccountId
-                                                option
                                                 selectedProvider
                                                 selectedBilling
                                                 selectedSelectionId
@@ -291,23 +297,11 @@ selectRequestedAccount env requestedProvider selector =
                 <> "'."
     applySelectedAccount
             runtime
-            currentSelectionId
-            currentAccountId
-            option
             selectedProvider
             selectedBilling
             selectedSelectionId
             selectedAccountId
             selectedLabel
-        | selectedProvider /= ClaudeCodeProvider
-        , accountPickerMatches
-            env.sessionProvider
-            currentSelectionId
-            currentAccountId
-            option = do
-                emitUiEvent runtime
-                    (UiSystemMessage ("account: " <> selectedLabel))
-                pure (Right Nothing)
         | selectedProvider == env.sessionProvider
         , Just selectedBilling
             == (tokenProviderBillingMode <$> env.sessionTokenProvider)
@@ -356,6 +350,7 @@ selectRequestedAccount env requestedProvider selector =
 handleSelection
     :: SessionEnv
     -> IO RunResult
+    -> (PendingTurn -> IO RunResult)
     -> Either ReplLine ReplAction
     -> IO RunResult
 handleSelection
@@ -377,7 +372,8 @@ handleSelection
             , sessionTokenProvider = tokenProvider
             , sessionFullscreen = fullscreen
             }
-        continue = \case
+        continue
+        retryPendingTurn = \case
     Left (ReplChooseModel keptDraft) -> do
         writeIORef draftRef keptDraft
         chooseModel continue
@@ -570,6 +566,12 @@ handleSelection
                     Text.hPutStrLn stderr (roleError color err)
                 next
             Right result -> pure result
+    attachPendingTurn result pending =
+        case result of
+            RunSwitchProvider transition ->
+                RunSwitchProvider transition
+                    { transitionPendingTurn = Just pending }
+            other -> other
     modelAuthErrorNeedsConnect targetProvider message =
         geminiAuthErrorNeedsReconnect message
             || maybe False geminiAuthErrorNeedsReconnect
@@ -616,33 +618,13 @@ handleSelection
                                         selectedSelectionId
                                         selectedAccountId
                                         selectedLabel
-                                        _
-                                            -- Claude exposes display metadata,
-                                            -- not a stable account identity.
-                                            -- Revalidate and restart even when
-                                            -- the synthetic id still matches.
-                                            | selectedProvider == provider
-                                            , selectedProvider
-                                                /= ClaudeCodeProvider
-                                            , ( not (Text.null currentSelectionId)
-                                                    && selectedSelectionId
-                                                        == currentSelectionId
-                                              )
-                                                || ( Text.null currentSelectionId
-                                                    && selectedAccountId
-                                                        == currentAccountId
-                                                   ) ->
-                                                displayInfo
-                                                    ("account: " <> selectedLabel)
-                                                    (pure ())
-                                                    >> next
-                                            | otherwise ->
-                                                chooseSelectedAccount
-                                                    selectedProvider
-                                                    selectedBilling
-                                                    selectedSelectionId
-                                                    selectedAccountId
-                                                    selectedLabel
+                                        _ ->
+                                            chooseSelectedAccount
+                                                selectedProvider
+                                                selectedBilling
+                                                selectedSelectionId
+                                                selectedAccountId
+                                                selectedLabel
                                     AccountPickerConnect selectedProvider -> do
                                         color <- resolveColor stderr
                                         connected <-
@@ -723,7 +705,10 @@ handleSelection
                                     displayInfo
                                         ("account switched to " <> label)
                                         (pure ())
-                                    next
+                                    resumePendingTurnIfPresent
+                                        env.sessionLastFailedTurn
+                                        retryPendingTurn
+                                        next
                         | otherwise =
                             readIORef paramsRef >>= \params ->
                                 requestAccountProviderSwitch
@@ -743,7 +728,10 @@ handleSelection
                                                         selectedProvider
                                                     <> ")")
                                                 (pure ())
-                                            pure result
+                                            resumePendingTurnIfPresent
+                                                env.sessionLastFailedTurn
+                                                (pure . attachPendingTurn result)
+                                                (pure result)
             Nothing -> do
                 displayError
                     "Account switching is unavailable for this session."

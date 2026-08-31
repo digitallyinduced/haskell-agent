@@ -124,6 +124,7 @@ import Agent.CLI.ProviderTransition
     ( PendingTurn
     , ProviderTransition
     , TurnResult(TurnProviderUnavailable)
+    , resumePendingTurnIfPresent
     )
 import Agent.CLI.Recap ( RecapKind(..), RecapRequest(..) )
 import Agent.CLI.Render
@@ -291,7 +292,7 @@ import Control.Exception.Safe
     ( displayException, finally, throwIO, tryAny, tryIO )
 import Control.Monad ( foldM, forM_, unless, when )
 import Data.Foldable ( toList )
-import Data.IORef ( atomicModifyIORef', newIORef, readIORef, writeIORef )
+import Data.IORef ( newIORef, readIORef, writeIORef )
 import Data.List ( elemIndex, findIndex )
 import Data.Maybe ( fromMaybe, isNothing )
 import Data.Text ( Text )
@@ -414,11 +415,23 @@ handleReplLine
     action@(ReplClipboardPasteOrText _ _ _) ->
         handleClipboardInput env continueWith stdoutColor action
     action@(ReplChooseModel keptDraft) ->
-        handleSelectionInput env (continueWith keptDraft) action
+        handleSelectionInput
+            env
+            (continueWith keptDraft)
+            retryPendingTurn
+            action
     action@(ReplChooseEffort keptDraft) ->
-        handleSelectionInput env (continueWith keptDraft) action
+        handleSelectionInput
+            env
+            (continueWith keptDraft)
+            retryPendingTurn
+            action
     action@(ReplChooseAccount keptDraft) ->
-        handleSelectionInput env (continueWith keptDraft) action
+        handleSelectionInput
+            env
+            (continueWith keptDraft)
+            retryPendingTurn
+            action
     ReplMeta request ->
         runMetaConsoleRequest request
     ReplRemovePendingImage keptDraft index ->
@@ -1105,16 +1118,14 @@ handleReplLine
                                 runSessionRecap True env RecapManual
                                 continue
                     ReplRetry ->
-                        atomicModifyIORef'
+                        resumePendingTurnIfPresent
                             env.sessionLastFailedTurn
-                            (\pending -> (Nothing, pending))
-                            >>= \case
-                                Just pending -> retryPendingTurn pending
-                                Nothing -> do
-                                    displayInfo
-                                        "No failed turn is available to retry."
-                                        (pure ())
-                                    continue
+                            retryPendingTurn
+                            (do
+                                displayInfo
+                                    "No failed turn is available to retry."
+                                    (pure ())
+                                continue)
                     action@ReplResume{} -> handleSessionAction env slashCatalog continue action
                     action@ReplSearch{} -> handleSessionAction env slashCatalog continue action
                     action@ReplHome -> handleSessionAction env slashCatalog continue action
