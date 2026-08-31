@@ -1,10 +1,11 @@
 module Agent.CLI.GatewayModelsSpec (spec) where
 
 import Agent.CLI.GatewayModels
+import Agent.CLI.GatewayClient (GatewayModelCatalog(..))
 import Agent.CLI.ModelConfig
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelsForProvider)
-import Agent.Dialect (DialectId (CodexDialect))
-import Agent.Provider (Provider (OpenAIProvider))
+import Agent.Dialect (DialectId (ClaudeCodeDialect, CodexDialect))
+import Agent.Provider (Provider (ClaudeCodeProvider, OpenAIProvider))
 import Data.Map.Strict qualified as Map
 import Test.Hspec
 
@@ -39,6 +40,32 @@ spec = describe "Agent.CLI.GatewayModels" do
         map (.catalogModelId) inactive.catalogModels
             `shouldBe` ["gpt-direct"]
         catalogUsesGateway inactive `shouldBe` False
+
+    it "uses the discovered Responses and Anthropic aliases exclusively" do
+        let active =
+                catalogForGatewayModels
+                    GatewayModelCatalog
+                        { gatewayResponsesModels =
+                            ["custom-gpt", "router-default"]
+                        , gatewayAnthropicModels =
+                            ["sonnet", "custom-gpt", "fable"]
+                        }
+                    directCatalog
+        map (.catalogModelId) active.catalogModels
+            `shouldBe` ["custom-gpt", "sonnet", "fable"]
+        map (.catalogModelConnectionId) active.catalogModels
+            `shouldBe`
+                [ gatewayConnectionId
+                , gatewayAnthropicConnectionId
+                , gatewayAnthropicConnectionId
+                ]
+        map (.catalogModelDialect) active.catalogModels
+            `shouldBe`
+                [ CodexDialect, ClaudeCodeDialect, ClaudeCodeDialect ]
+        map (.modelTarget.targetModelId)
+            (modelsForProvider active ClaudeCodeProvider)
+            `shouldBe` ["sonnet", "fable"]
+        catalogUsesGateway active `shouldBe` True
 
     it "does not mistake direct GPT-5.6 models for gateway mode" do
         let direct = directCatalog
