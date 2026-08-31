@@ -61,6 +61,7 @@ module Agent.Responses.Types
     , FunctionTool(..)
     , computerFunctionNamespace
     , computerFunctionName
+    , legacyComputerFunctionName
 
       -- * Response
     , Response(..)

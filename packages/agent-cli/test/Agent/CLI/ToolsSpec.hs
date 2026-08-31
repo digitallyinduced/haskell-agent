@@ -49,12 +49,24 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
-    it "advertises only the dedicated computer tool as a built-in" do
-        schemasFromAppTools codexDialect [computerUseTool]
-            `shouldBe`
-                [ webSearchTool
-                , knownResponseTool ToolComputer KeyMap.empty
-                ]
+    it "advertises computer use as an ordinary strict function" do
+        case schemasFromAppTools codexDialect [computerUseTool] of
+            [_, FunctionToolValue function] -> do
+                function.name `shouldBe` computerFunctionName
+                function.strict `shouldBe` Just True
+                function.parameters `shouldSatisfy` (/= Nothing)
+            other -> expectationFailure
+                ("expected ordinary computer function, got " <> show other)
+
+    it "reserves the model-facing computer_use function identity" do
+        let collision =
+                jsonAppTool computerFunctionName "Unrelated MCP function" []
+                    AlwaysPrompt
+                    (noArgsTool computerFunctionName (pure (Right "ok")))
+        schemasFromAppTools codexDialect [collision]
+            `shouldBe` [webSearchTool]
+        requireToolRegistry [computerUseTool, collision]
+            `shouldThrow` anyIOException
 
     it "keeps an unrelated function named computer as a function" do
         let computer = jsonAppTool "computer" "Unrelated MCP function" []
@@ -66,7 +78,7 @@ spec = describe "schemasFromAppTools" do
             other -> expectationFailure
                 ("expected ordinary computer function, got " <> show other)
 
-    it "advertises hosted computer only for the Codex dialect" do
+    it "advertises the local computer function only for the Codex dialect" do
         schemasFromAppTools grokBuildDialect [computerUseTool]
             `shouldBe` [webSearchTool, xSearchTool]
         schemasFromAppTools claudeCodeDialect [computerUseTool]

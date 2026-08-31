@@ -66,6 +66,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , computerFunctionName
     , computerFunctionNamespace
+    , legacyComputerFunctionName
     )
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
@@ -316,8 +317,12 @@ sessionToolEvents turn =
 sessionToolEvent :: ResponseItem -> Maybe Aeson.Value
 sessionToolEvent = \case
     item@(FunctionCallItem call)
-        | call.namespace == Just computerFunctionNamespace
-        , call.name == computerFunctionName ->
+        | ( call.name == computerFunctionName
+                && call.namespace `elem` [Nothing, Just "functions"]
+          )
+            || ( call.name == legacyComputerFunctionName
+                && call.namespace == Just computerFunctionNamespace
+               ) ->
             let summary = fromMaybe "Computer action"
                     (responseItemToToolCall item
                         >>= summarizeComputerToolCall)
