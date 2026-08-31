@@ -134,9 +134,9 @@ shellCommandTool env session =
             , PropertySchema "workdir" PropertyString False $ Just
                 "Working directory for the command. Defaults to the turn cwd."
             , PropertySchema "timeout_ms" PropertyInteger False $ Just
-                "Maximum foreground command runtime. Defaults to 10000 ms. Mutually exclusive with yield_time_ms."
+                "Maximum command runtime; commands that reach it are stopped. Mutually exclusive with yield_time_ms."
             , PropertySchema "yield_time_ms" PropertyInteger False $ Just
-                "Return a session_id if the command is still running after this many milliseconds. Mutually exclusive with timeout_ms."
+                "Wait before returning a session_id for a command that is still running. Defaults to 10000 ms when neither timing control is set. Mutually exclusive with timeout_ms."
             ])
         AlwaysPrompt
         TurnSequential
@@ -153,7 +153,7 @@ shellCommandResourceClaims env call =
     case decodeToolArguments shellCommandArgsDecoder call.arguments of
         Left err -> pure (Left err)
         Right args
-            | args.yieldTimeMs /= Nothing ->
+            | args.yieldTimeMs /= Nothing || args.timeoutMs == Nothing ->
                 pure (Left "yielding shell commands remain exclusive")
             | not (shellCommandIsReadOnly args.command) ->
                 pure (Left "shell command is not in the read-only allowlist")
@@ -172,7 +172,11 @@ shellDescription =
     "Runs a shell command and returns its output.\n\
     \- `workdir` is optional; omit it to use the turn cwd. Do not use `cd` unless absolutely necessary.\n\
     \- Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\
-    \- For a long-running command, set `yield_time_ms`; if it is still running, use `write_stdin` with the returned session_id to poll or send input."
+    \- By default, a command that is still running after 10000 ms is retained and returned with a session_id; use `write_stdin` to poll or send input.\n\
+    \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield-time_ms` to change the initial wait."
+
+defaultShellYieldMs :: Int
+defaultShellYieldMs = 10000
 
 runShell
     :: ToolEnv
@@ -193,34 +197,40 @@ runShell env session emitOutput args
                 blockedShellCommandReasonAt dir args.command >>= \case
                     Just reason -> pure (Left reason)
                     Nothing -> case args.yieldTimeMs of
-                        Just requestedYield -> do
-                            let yieldMs = clampMs requestedYield
-                            startCodexShellCommand
-                                session
-                                dir
-                                (Text.unpack args.command)
-                                yieldMs
-                                (\out err -> emitOutput (commandBody out err))
-                                >>= pure . fmap renderShellResult
-                        Nothing -> do
-                            let timeoutMs =
-                                    clampMs
-                                        (fromMaybe 10000 args.timeoutMs)
-                            result <- runShellCommandStreaming
-                                env
-                                dir
-                                (Text.unpack args.command)
-                                timeoutMs
-                                (\out err ->
-                                    emitOutput (commandBody out err))
-                            if result.commandCancelled
-                                then pure $ Left "Error: Command cancelled"
-                                else if result.commandTimedOut
-                                then pure $ Left $
-                                    "Error: Command timed out after "
-                                        <> Text.pack (show timeoutMs)
-                                        <> "ms"
-                                else pure $ Right $ renderFinished result
+                        Just requestedYield ->
+                            runWithYield dir requestedYield
+                        Nothing -> case args.timeoutMs of
+                            Nothing ->
+                                runWithYield dir defaultShellYieldMs
+                            Just requestedTimeout ->
+                                runWithTimeout dir requestedTimeout
+  where
+    runWithYield dir requestedYield = do
+        let yieldMs = clampMs requestedYield
+        startCodexShellCommand
+            session
+            dir
+            (Text.unpack args.command)
+            yieldMs
+            (\out err -> emitOutput (commandBody out err))
+            >>= pure . fmap renderShellResult
+
+    runWithTimeout dir requestedTimeout = do
+        let timeoutMs = clampMs requestedTimeout
+        result <- runShellCommandStreaming
+            env
+            dir
+            (Text.unpack args.command)
+            timeoutMs
+            (\out err -> emitOutput (commandBody out err))
+        if result.commandCancelled
+            then pure $ Left "Error: Command cancelled"
+            else if result.commandTimedOut
+            then pure $ Left $
+                "Error: Command timed out after "
+                    <> Text.pack (show timeoutMs)
+                    <> "ms"
+            else pure $ Right $ renderFinished result
 
 data WriteStdinArgs = WriteStdinArgs
     { sessionId :: Int
