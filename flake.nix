@@ -578,7 +578,17 @@
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
                                 '';
-                        });
+                        } // pkgs.lib.optionalAttrs
+                            pkgs.stdenv.hostPlatform.isDarwin {
+                                # Darwin retains GHC as a requisite of the
+                                # wrapped justStaticExecutables output. GHC is
+                                # deliberately not added to PATH, so code mode
+                                # still uses an independently installed
+                                # compiler when one is available.
+                                disallowedRequisites = pkgs.lib.remove
+                                    haskellPackages.ghc
+                                    (old.disallowedRequisites or [ ]);
+                            });
                 agentCliStaticExecutable =
                     if pkgs.stdenv.hostPlatform.isLinux then
                         wrapAgentCli
@@ -850,6 +860,9 @@
                 };
 
                 checks = {
+                    # The package check does not exercise the wrapped
+                    # justStaticExecutables output or its requisite assertions.
+                    agent-cli-executable = agentCliExecutable;
                     agent-cli = haskellPackages.agent-cli;
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;
