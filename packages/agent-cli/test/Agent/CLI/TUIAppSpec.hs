@@ -1133,6 +1133,10 @@ spec = do
             timeout 2_000_000 unfocusedStreamingRemainsThrottled
                 `shouldReturn` Just True
 
+        it "renders accumulated streaming output on the bounded refresh tick" do
+            timeout 2_000_000 unfocusedStreamingRefreshesOnMotionTick
+                `shouldReturn` Just True
+
     describe "motion demand" do
         it "distinguishes foreground, waiting, background, and static modes" do
             let idle =
@@ -1870,12 +1874,29 @@ unfocusedStreamingRemainsThrottled = do
         initialState =
             initialFullscreenAppState runtime [] AgentRoot [] 0
         script =
-            [ FullscreenScriptVty V.EvLostFocus
+            [ FullscreenScriptApp (AppUi (UiLoop TurnStarted))
+            , FullscreenScriptVty V.EvLostFocus
             , FullscreenScriptApp (AppUi (UiLoop (TextDelta marker)))
             , FullscreenScriptHalt
             ]
     rendered <- runFullscreenScript initialState script
     pure $ not (encoded marker `ByteString.isInfixOf` rendered)
+
+unfocusedStreamingRefreshesOnMotionTick :: IO Bool
+unfocusedStreamingRefreshesOnMotionTick = do
+    runtime <- newScriptRuntime initialUiState
+    let marker = "BOUNDED_STREAMING_REFRESH"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptApp (AppUi (UiLoop TurnStarted))
+            , FullscreenScriptVty V.EvLostFocus
+            , FullscreenScriptApp (AppUi (UiLoop (TextDelta marker)))
+            , FullscreenScriptApp AppMotionTick
+            , FullscreenScriptHalt
+            ]
+    rendered <- runFullscreenScript initialState script
+    pure $ encoded marker `ByteString.isInfixOf` rendered
 
 newScriptRuntime :: UiState -> IO FullscreenRuntime
 newScriptRuntime ui = do
