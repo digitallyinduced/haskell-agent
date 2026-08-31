@@ -87,10 +87,11 @@ spec = describe "Codex dialect" do
             map (`elem` names)
                 [ "shell_command"
                 , "apply_patch"
+                , "view_image"
                 , "update_plan"
                 , "write_plan"
                 ]
-                `shouldBe` replicate 4 True
+                `shouldBe` replicate 5 True
             names `shouldNotContain` ["run_terminal_cmd", "search_replace"]
             coding.codexClose
 
