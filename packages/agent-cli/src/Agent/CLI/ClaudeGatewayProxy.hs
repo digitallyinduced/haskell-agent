@@ -120,7 +120,7 @@ forward manager credential downstream body respond = do
                     (filter
                         (\(name, _) ->
                             name `notElem`
-                                [hConnection, hContentLength, hTransferEncoding])
+                                [hConnection, hContentLength, "transfer-encoding"])
                         upstream.responseHeaders)
                     \send flush -> streamBody upstream.responseBody send flush
 

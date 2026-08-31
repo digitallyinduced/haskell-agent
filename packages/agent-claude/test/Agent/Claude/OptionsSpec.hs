@@ -31,7 +31,7 @@ spec =
                     sdk <- toClaudeAgentOptions ClaudeCodeDefaultTools options
                     let environment = maybe [] id sdk.environment
                     lookup "ANTHROPIC_BASE_URL" environment
-                        `shouldBe` Just "https://gateway.example/anthropic"
+                        `shouldBe` Just "https://gateway.example"
                     lookup "ANTHROPIC_AUTH_TOKEN" environment
                         `shouldBe` Just "gateway-token"
                     lookup "ANTHROPIC_API_KEY" environment `shouldBe` Nothing
