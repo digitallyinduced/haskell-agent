@@ -161,50 +161,34 @@ normalizeInputItem =
 -- (@input[n].status@). Strip it from every input item at the wire boundary.
 stripItemStatus :: ResponseItem -> ResponseItem
 stripItemStatus = \case
-    MessageItem message ->
-        MessageItem message
-            { status = Nothing
-            }
-    FunctionCallItem call ->
-        FunctionCallItem call
-            { status = Nothing
-            }
-    FunctionCallOutputItem output ->
-        FunctionCallOutputItem output
-            { status = Nothing
-            }
-    CustomToolCallItem call ->
-        CustomToolCallItem call
-            { status = Nothing
-            }
-    CustomToolCallOutputItem output ->
-        CustomToolCallOutputItem output
-            { status = Nothing
-            }
-    ReasoningItemValue item ->
-        ReasoningItemValue item
-            { status = Nothing
-            }
-    LocalShellCallItem item ->
-        LocalShellCallItem item
-            { status = Nothing
-            }
-    ToolSearchCallItem item ->
-        ToolSearchCallItem item
-            { status = Nothing
-            }
-    ToolSearchOutputItem item ->
-        ToolSearchOutputItem item
-            { status = Nothing
-            }
-    WebSearchCallItem item ->
-        WebSearchCallItem item
-            { status = Nothing
-            }
-    ImageGenerationCallItem item ->
-        ImageGenerationCallItem item
-            { status = Nothing
-            }
+    MessageItem (ResponseMessage itemId content role _ phase passthrough) ->
+        MessageItem (ResponseMessage itemId content role Nothing phase passthrough)
+    FunctionCallItem (FunctionCall itemId callId name namespace provider arguments encryptedArgs _) ->
+        FunctionCallItem
+            (FunctionCall itemId callId name namespace provider arguments encryptedArgs Nothing)
+    FunctionCallOutputItem (FunctionCallOutput itemId callId name namespace provider output _) ->
+        FunctionCallOutputItem
+            (FunctionCallOutput itemId callId name namespace provider output Nothing)
+    CustomToolCallItem (CustomToolCall itemId callId name namespace input _) ->
+        CustomToolCallItem (CustomToolCall itemId callId name namespace input Nothing)
+    CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output _) ->
+        CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output Nothing)
+    ReasoningItemValue (ReasoningItem itemId summary content encryptedContent _) ->
+        ReasoningItemValue
+            (ReasoningItem itemId summary content encryptedContent Nothing)
+    LocalShellCallItem (LocalShellCall itemId callId _ action) ->
+        LocalShellCallItem (LocalShellCall itemId callId Nothing action)
+    ToolSearchCallItem (ToolSearchCall itemId callId _ execution arguments) ->
+        ToolSearchCallItem
+            (ToolSearchCall itemId callId Nothing execution arguments)
+    ToolSearchOutputItem (ToolSearchOutput itemId callId _ execution tools) ->
+        ToolSearchOutputItem
+            (ToolSearchOutput itemId callId Nothing execution tools)
+    WebSearchCallItem (WebSearchCall itemId _ action) ->
+        WebSearchCallItem (WebSearchCall itemId Nothing action)
+    ImageGenerationCallItem (ImageGenerationCall itemId _ revisedPrompt result) ->
+        ImageGenerationCallItem
+            (ImageGenerationCall itemId Nothing revisedPrompt result)
     item -> item
 
 agentMessageText :: ResponseAgentMessage -> Text

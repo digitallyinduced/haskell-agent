@@ -52,8 +52,7 @@ import Agent.CLI.ModelConfig
       loadModelCatalogAt,
       ConnectionKind(BuiltinConnection, CustomResponsesConnection),
       ModelConnection(connectionId, connectionKind),
-      ResponsesConnection(responsesRequestTimeoutSeconds,
-                          responsesApiKeyEnv, responsesApiKeyOptional, responsesBaseUrl) )
+      ResponsesConnection(responsesApiKeyEnv, responsesApiKeyOptional) )
 import Agent.CLI.Models
     ( resolveConfiguredModel,
       ModelOption(modelTarget),
@@ -71,8 +70,7 @@ import Agent.CLI.Project
       withInheritedLastModel,
       ProjectAccount(projectAccountId, projectAccountSelectionId),
       ProjectModel(projectModelTarget),
-      ProjectSettings(settingsMaxConcurrentAgents, settingsAutoApprove,
-                      settingsLastModel) )
+      ProjectSettings(settingsLastModel) )
 import Agent.CLI.Prompt ()
 import Agent.CLI.PromptHooks ()
 import Agent.CLI.Provider.OpenAI ()
@@ -100,8 +98,7 @@ import Agent.CLI.Runtime.Orchestration.Tools ( runAgentTools )
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(activeHttpGeneration, ActiveHttpAuth,
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
-      AgentProcessRuntime(processSessionThreads, processMcpSupervisor,
-                          processStartCleanup, processMcpElicitation),
+      AgentProcessRuntime(processMcpSupervisor),
       AgentRunMode )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()

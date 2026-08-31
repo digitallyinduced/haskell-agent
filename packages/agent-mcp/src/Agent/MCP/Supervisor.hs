@@ -1,8 +1,8 @@
 module Agent.MCP.Supervisor where
 
 
+import Agent.MCP.Client (exceptionSummary)
 import Agent.Concurrent (forConcurrentlyBounded_)
-import Agent.MCP.Client (closeMcpClient, exceptionSummary)
 import Agent.MCP.Fleet
     ( closeMcpFleet
     , mcpFleetStatuses

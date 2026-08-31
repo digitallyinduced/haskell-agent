@@ -3,16 +3,13 @@ module Agent.Subagents.Registry.Internal.Core where
 
 
 import Agent.Cancel
-    ( CancelFlag
-    , newCancelFlag
+    ( newCancelFlag
     , requestCancel
     , resetCancel
     , waitCancel
     )
 import Agent.Concurrent
-    ( forConcurrentlyBounded_
-    , mapConcurrentlyBounded
-    )
+    ( forConcurrentlyBounded_ )
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent
@@ -27,20 +24,15 @@ import Agent.Subagents.Types
     , RootTurnId(..)
     , SubagentConfig(..)
     , SubagentId(..)
-    , SubagentIdentity(..)
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
-    , maxWaitTimeoutMs
-    , minWaitTimeoutMs
     )
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, race, waitCatch)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe
     ( SomeException
     , catchAny
-    , finally
     , mask
     , onException
     , throwIO
@@ -49,25 +41,21 @@ import Control.Exception.Safe
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Resource (runResourceT)
-import Data.Acquire (Acquire, allocateAcquire, mkAcquire, withAcquire)
+import Data.Acquire (allocateAcquire, withAcquire)
 import Data.IORef
 import Data.List (groupBy, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Ord (Down(..))
-import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Read as TextRead
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Word (Word64)
 import Numeric (showHex)
 import Agent.Subagents.TaskPath
     ( TaskPath
     , joinTaskPath
-    , resolveTaskPath
     , taskPathRoot
     , taskPathText
     )

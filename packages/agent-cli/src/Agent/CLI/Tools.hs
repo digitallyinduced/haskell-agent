@@ -10,9 +10,15 @@ module Agent.CLI.Tools
     , xSearchTool
     ) where
 
-import Agent.Responses.Types
 import Agent.Responses.Types.Tools
-    ( ResponseTool(..), CustomTool(..), NamespaceTool(..) )
+    ( ResponseTool(..)
+    , ResponseToolType(..)
+    , FunctionTool(..)
+    , CustomTool(..)
+    , NamespaceTool(..)
+    , knownResponseTool
+    , responseToolTypeText
+    )
 import Agent.Json (rawJsonFromEncoding)
 import Agent.Dialect
     ( Dialect

@@ -1136,7 +1136,7 @@ headerParamValues tool arguments
     renderHeaderValue = \case
         String text -> Just text
         Bool flag -> Just (if flag then "true" else "false")
-        Number number -> case floatingOrInteger number of
+        Number number -> case (floatingOrInteger number :: Either Double Integer) of
             Right integer -> Just (Text.pack (show (integer :: Integer)))
             Left _ -> Nothing
         _ -> Nothing

@@ -54,14 +54,23 @@ stripContentItemKindsInput = \case
 
 stripContentItemKindsItem :: ResponseItem -> ResponseItem
 stripContentItemKindsItem = \case
-    MessageItem message ->
-        MessageItem message
-            { passthrough = stripItemPassthrough message.passthrough
-            }
-    AgentMessageItem message ->
-        AgentMessageItem message
-            { passthrough = stripItemPassthrough message.passthrough
-            }
+    MessageItem (ResponseMessage itemId content role status phase passthrough) ->
+        MessageItem
+            (ResponseMessage
+                itemId
+                content
+                role
+                status
+                phase
+                (stripItemPassthrough passthrough))
+    AgentMessageItem (ResponseAgentMessage itemId author recipient content passthrough) ->
+        AgentMessageItem
+            (ResponseAgentMessage
+                itemId
+                author
+                recipient
+                content
+                (stripItemPassthrough passthrough))
     other -> other
 
 stripItemPassthrough

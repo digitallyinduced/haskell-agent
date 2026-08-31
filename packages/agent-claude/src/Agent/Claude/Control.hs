@@ -125,13 +125,13 @@ configureClaudeCodeHostTools handlers options =
 toClaudeAgentHandlers :: ClaudeCodeHostHandlers -> ClaudeAgentHandlers
 toClaudeAgentHandlers handlers =
     defaultClaudeAgentHandlers
-        { canUseTool =
+        { SDKControl.canUseTool =
             fmap
                 (\callback request ->
                     toSdkPermissionResult
                         <$> callback (fromSdkPermissionRequest request))
                 handlers.canUseTool
-        , handleMcpMessage =
+        , SDKControl.handleMcpMessage =
             fmap
                 (\callback request ->
                     callback (fromSdkMcpRequest request))

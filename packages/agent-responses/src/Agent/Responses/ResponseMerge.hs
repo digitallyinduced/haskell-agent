@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Agent.Responses.ResponseMerge
     ( mergeCompletedResponseOutput
     , mergeDoneResponse
@@ -15,7 +17,11 @@ import Data.Text (Text)
 
 mergeCompletedResponseOutput :: [ResponseItem] -> Response -> Response
 mergeCompletedResponseOutput streamedItems response =
-    response { output = mergeOutputItems response.output streamedItems }
+    let Response {..} = response
+    in Response
+        { output = mergeOutputItems output streamedItems
+        , ..
+        }
 
 mergeDoneResponse
     :: Maybe Response
@@ -24,12 +30,15 @@ mergeDoneResponse
     -> Response
 mergeDoneResponse baseResponse streamedItems doneResponse =
     mergeCompletedResponseOutput streamedItems
-        merged
+        (let Response {..} = merged
+        in Response
             { status =
                 if doneResponse.status == ResponseInProgress
                     then ResponseCompleted
                     else doneResponse.status
+            , ..
             }
+        )
   where
     merged = maybe doneResponse
         (`mergeResponseFragment` doneResponse)
@@ -107,16 +116,20 @@ mergeResponseItem :: ResponseItem -> ResponseItem -> ResponseItem
 mergeResponseItem old new =
     case (old, new) of
         (FunctionCallItem previous, FunctionCallItem next) ->
-            FunctionCallItem next
-                { itemId = next.itemId <|> previous.itemId
-                , namespace = next.namespace <|> previous.namespace
-                , status = next.status <|> previous.status
+            let FunctionCall {..} = next
+            in FunctionCallItem FunctionCall
+                { itemId = itemId <|> previous.itemId
+                , namespace = namespace <|> previous.namespace
+                , status = status <|> previous.status
+                , ..
                 }
         (CustomToolCallItem previous, CustomToolCallItem next) ->
-            CustomToolCallItem next
-                { itemId = next.itemId <|> previous.itemId
-                , namespace = next.namespace <|> previous.namespace
-                , status = next.status <|> previous.status
+            let CustomToolCall {..} = next
+            in CustomToolCallItem CustomToolCall
+                { itemId = itemId <|> previous.itemId
+                , namespace = namespace <|> previous.namespace
+                , status = status <|> previous.status
+                , ..
                 }
         _ -> new
 

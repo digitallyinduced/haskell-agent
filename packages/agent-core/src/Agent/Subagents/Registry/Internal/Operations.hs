@@ -3,67 +3,40 @@ module Agent.Subagents.Registry.Internal.Operations where
 
 
 import Agent.Cancel
-    ( CancelFlag
-    , newCancelFlag
+    ( newCancelFlag
     , requestCancel
     , resetCancel
-    , waitCancel
     )
 import Agent.Concurrent
-    ( forConcurrentlyBounded_
-    , mapConcurrentlyBounded
-    )
+    ( mapConcurrentlyBounded )
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent
     , InterAgentMessageType(..)
     , plainInterAgentContent
     )
-import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
 import System.OsPath (OsPath)
-import Agent.Subagents.Format (formatCompletionNotice, isFinalStatus)
+import Agent.Subagents.Format (isFinalStatus)
 import Agent.Subagents.Types
-    ( RunSubagent
-    , RootTurnId(..)
-    , SubagentConfig(..)
+    ( RootTurnId(..)
     , SubagentId(..)
     , SubagentIdentity(..)
-    , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , maxWaitTimeoutMs
     , minWaitTimeoutMs
     )
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (Async, async, cancel, race, waitCatch)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.Async (race)
+import Control.Concurrent.MVar (withMVar)
 import Control.Concurrent.STM
-import Control.Exception.Safe
-    ( SomeException
-    , catchAny
-    , finally
-    , mask
-    , onException
-    , throwIO
-    , tryAny
-    )
+import Control.Exception.Safe (finally)
 import Control.Monad (void)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Trans.Resource (runResourceT)
-import Data.Acquire (Acquire, allocateAcquire, mkAcquire, withAcquire)
-import Data.IORef
-import Data.List (groupBy, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Ord (Down(..))
-import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
-import Data.Time.Clock (getCurrentTime)
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Word (Word64)
-import Numeric (showHex)
 import Agent.Subagents.TaskPath
     ( TaskPath
     , joinTaskPath

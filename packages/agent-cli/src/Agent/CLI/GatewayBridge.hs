@@ -128,21 +128,19 @@ instance ToJSON ManagedBridgeResponse where
         ]
 
 data DecodedBridgeResponse = DecodedBridgeResponse
-    { decodedResponseVersion :: !Int
-    , decodedResponseId :: !Text
-    , decodedResponseOk :: !Bool
+    { decodedResponseOk :: !Bool
     , decodedResponseResult :: !(Maybe RawJson)
     , decodedResponseError :: !(Maybe Text)
     }
 
 managedBridgeResponseDecoder :: Hermes.Decoder DecodedBridgeResponse
 managedBridgeResponseDecoder = Hermes.object $
-    DecodedBridgeResponse
-        <$> Hermes.defaultKey bridgeSchemaVersion "version" Hermes.int
-        <*> Hermes.atKey "id" Hermes.text
-        <*> Hermes.atKey "ok" Hermes.bool
+    Hermes.defaultKey bridgeSchemaVersion "version" Hermes.int
+        *> Hermes.atKey "id" Hermes.text
+        *> (DecodedBridgeResponse
+        <$> Hermes.atKey "ok" Hermes.bool
         <*> optionalKey "result" rawJsonDecoder
-        <*> optionalKey "error" Hermes.text
+        <*> optionalKey "error" Hermes.text)
 
 data ManagedActivity = ManagedActivity
     { managedActivityVersion :: !Int
