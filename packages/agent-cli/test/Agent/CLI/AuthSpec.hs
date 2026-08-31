@@ -23,10 +23,8 @@ import Agent.Provider
     , FailedCredential(..)
     , Provider(..)
     , getNextToken
-    , runWithTokenProvider
     , tokenProvider
     , tokenProviderBillingMode
-    , tokenProviderWithNextToken
     )
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Exception.Safe (bracket)
