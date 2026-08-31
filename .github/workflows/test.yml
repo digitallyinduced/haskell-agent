@@ -103,6 +103,8 @@ jobs:
 
           "$nix_bin" flake check \
             --impure \
+            --max-jobs 1 \
+            --cores 2 \
             --option sandbox relaxed \
             --no-write-lock-file \
             --print-build-logs
