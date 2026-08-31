@@ -242,7 +242,8 @@ releaseWorktreeLease (WorktreeLease lock) = do
 -- untracked changes, have no active lease, and have a HEAD reachable from
 -- another local branch, remote-tracking branch, or tag. Removal deliberately
 -- omits @--force@. The generated branch is then deleted with @-d@, leaving it
--- intact whenever Git's own merged-branch check is stricter than ours.
+-- intact without treating that data-safe fallback as a cleanup failure
+-- whenever Git's own merged-branch check is stricter than ours.
 -- Worktrees created on the current UTC day are never considered stale; this
 -- also closes the interval between checkout creation and lease acquisition.
 cleanupStaleWorktrees
@@ -377,7 +378,14 @@ cleanupCandidate root candidate = do
                                 { cleanupFailures = [(candidate, err)]
                                 }
                         Right _ -> do
-                            deleted <- git commonDir
+                            -- The worktree is the resource governed by the
+                            -- retention policy. Branch deletion is best
+                            -- effort: @-d@ can reject a branch that is known
+                            -- to be reachable from another ref but is not
+                            -- merged into the repository's current branch.
+                            -- Retaining it is safe and should not surface as
+                            -- a startup warning.
+                            _ <- git commonDir
                                 [ "branch"
                                 , "-d"
                                 , "--"
@@ -385,12 +393,7 @@ cleanupCandidate root candidate = do
                                 ]
                             pure WorktreeCleanupReport
                                 { cleanupRemoved = [candidate]
-                                , cleanupFailures = case deleted of
-                                    Left err ->
-                                        [(candidate,
-                                            "worktree removed but branch retained: "
-                                                <> err)]
-                                    Right _ -> []
+                                , cleanupFailures = []
                                 }
 
 inspectCleanupCandidate
