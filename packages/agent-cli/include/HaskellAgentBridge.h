@@ -344,6 +344,107 @@ int32_t ha_mcp_server_remove(
     ha_mcp_result_callback callback, void *context
 );
 
+enum {
+    HA_DATA_SCOPE_USER = 0,
+    HA_DATA_SCOPE_REPOSITORY = 1,
+    HA_DATA_SCOPE_CHECKOUT = 2
+};
+
+enum {
+    HA_DATA_CATALOG_OBJECT = 0,
+    HA_DATA_CATALOG_COLUMN = 1,
+    HA_DATA_CATALOG_COMPLETE = 2,
+    HA_DATA_CATALOG_ERROR = -1
+};
+
+enum {
+    HA_DATA_OBJECT_TABLE = 0,
+    HA_DATA_OBJECT_VIEW = 1
+};
+
+enum {
+    HA_DATA_ROWS_VALUE = 0,
+    HA_DATA_ROWS_COMPLETE = 1,
+    HA_DATA_ROWS_ERROR = -1
+};
+
+enum {
+    HA_DATA_VALUE_NULL = 0,
+    HA_DATA_VALUE_TEXT = 1,
+    HA_DATA_VALUE_NUMBER = 2,
+    HA_DATA_VALUE_BOOLEAN = 3,
+    HA_DATA_VALUE_JSON = 4
+};
+
+/*
+ * Read-only catalog callbacks first emit an object and then its columns.
+ * status is HA_DATA_CATALOG_COMPLETE exactly once on success or
+ * HA_DATA_CATALOG_ERROR exactly once on failure. Optional comments have zero
+ * length when absent. column_nullable is 0 or 1 for column items.
+ *
+ * All strings are UTF-8 and callback-scoped; copy them before returning.
+ * Callbacks run serially on a runtime worker, never the caller or AppKit main
+ * thread. The host owns callback/context and must keep them alive through the
+ * terminal callback.
+ */
+typedef void (*ha_data_catalog_callback)(
+    void *context,
+    int32_t status,
+    int32_t scope,
+    int32_t object_kind,
+    const uint8_t *object_name, size_t object_name_length,
+    const uint8_t *object_comment, size_t object_comment_length,
+    const uint8_t *column_name, size_t column_name_length,
+    const uint8_t *column_type, size_t column_type_length,
+    int32_t column_nullable,
+    const uint8_t *column_comment, size_t column_comment_length,
+    const uint8_t *error, size_t error_length
+);
+
+/*
+ * Value callbacks identify a zero-based row and column within one bounded
+ * preview. Text is unquoted UTF-8; numbers use JSON number syntax; booleans are
+ * "true" or "false"; JSON arrays/objects are encoded as UTF-8 JSON; null has
+ * no value bytes. The terminal success item supplies offset, row_count, and
+ * has_more. Failure supplies only error.
+ *
+ * Buffers, threading, ownership, and terminal-callback guarantees match the
+ * catalog callback above. The operation is strictly read-only and queries
+ * only an object resolved through the selected custom-scope catalog.
+ */
+typedef void (*ha_data_rows_callback)(
+    void *context,
+    int32_t status,
+    int64_t offset,
+    int64_t row_index,
+    int32_t column_index,
+    int32_t value_kind,
+    const uint8_t *value, size_t value_length,
+    int64_t row_count,
+    int32_t has_more,
+    const uint8_t *error, size_t error_length
+);
+
+/*
+ * Return 0 when accepted, 1 for a null callback, 2 for an invalid pointer/
+ * length pair, or 3 for invalid scope, object name, offset, or limit. An
+ * accepted request receives exactly one terminal callback. offset must be zero
+ * so every result comes from one statement snapshot; limit is 1...500.
+ */
+int32_t ha_data_catalog_list(
+    const uint8_t *cwd, size_t cwd_length,
+    ha_data_catalog_callback callback, void *context
+);
+
+int32_t ha_data_rows_load(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *object_name, size_t object_name_length,
+    int64_t offset,
+    int32_t limit,
+    ha_data_rows_callback callback, void *context
+);
+
 /*
  * Account list callbacks use status 0 for an item, 1 for end-of-list, and
  * -1 for an error. Item strings include disabled managed credentials and
