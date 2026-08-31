@@ -12,6 +12,7 @@ module Agent.CLI.Models
     , defaultModelFor
     , defaultModelOptionFor
     , resolveConfiguredModel
+    , resolveSavedModelTarget
     , resolveModelOptionById
     , rawModelOption
     , gatewayModelOptions
@@ -125,6 +126,41 @@ modelsForProvider catalog provider =
     filter
         ((== builtinConnectionId provider) . (.modelTarget.targetConnectionId))
         (modelCatalog catalog)
+
+resolveSavedModelTarget
+    :: ModelCatalog
+    -> Bool
+    -> Provider
+    -> Text
+    -> Text
+    -> Maybe Text
+    -> DialectId
+    -> Either Text ModelTarget
+resolveSavedModelTarget
+        catalog deferToGateway provider connection model transport dialect
+    | deferToGateway =
+        Right persistedTarget
+    | otherwise =
+        case resolveConfiguredModel catalog model of
+            Just option
+                | option.modelTarget.targetConnectionId == connection ->
+                    Right option.modelTarget
+            _
+                | connection == builtinConnectionId provider ->
+                    Right persistedTarget
+                | otherwise ->
+                    Left $
+                        "saved model "
+                            <> connection <> "/" <> model
+                            <> " is not present in ~/.haskell-agent/models.json"
+  where
+    persistedTarget = ModelTarget
+        { targetProvider = provider
+        , targetConnectionId = connection
+        , targetModelId = model
+        , targetWireModelId = fromMaybe model transport
+        , targetDialect = dialect
+        }
 
 catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =

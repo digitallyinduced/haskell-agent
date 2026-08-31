@@ -54,17 +54,17 @@ import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig
-    ( builtinConnectionId,
-      catalogConnection,
+    ( catalogConnection,
       loadModelCatalogAt,
       ConnectionKind(BuiltinConnection, CustomResponsesConnection),
       ModelConnection(connectionId, connectionKind),
       ResponsesConnection(responsesApiKeyEnv, responsesApiKeyOptional) )
 import Agent.CLI.Models
     ( resolveConfiguredModel,
+      resolveSavedModelTarget,
       ModelOption(modelTarget),
-      ModelTarget(targetWireModelId, ModelTarget, targetConnectionId,
-                  targetProvider, targetModelId, targetDialect) )
+      ModelTarget(targetWireModelId, targetConnectionId, targetProvider,
+                  targetModelId, targetDialect) )
 import Agent.CLI.Options ( CliOptions(optModel, optProvider, optYolo) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -362,32 +362,17 @@ runAgentInitializedWithLock
         configuredOptionTarget =
             (.modelTarget)
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
-        savedTarget provider connection model transport dialect =
-            case resolveConfiguredModel catalog model of
-                Just option
-                    | option.modelTarget.targetConnectionId == connection ->
-                        Right option.modelTarget
-                _
-                    | connection == builtinConnectionId provider ->
-                        Right ModelTarget
-                            { targetProvider = provider
-                            , targetConnectionId = connection
-                            , targetModelId = model
-                            , targetWireModelId = fromMaybe model transport
-                            , targetDialect = dialect
-                            }
-                    | otherwise ->
-                        Left $
-                            "saved model "
-                                <> connection <> "/" <> model
-                                <> " is not present in ~/.haskell-agent/models.json"
+        savedTarget =
+            resolveSavedModelTarget catalog False
         resumedTargetResult
             | isJust transitionTarget || isJust options.optModel =
                 Right Nothing
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
             Just meta ->
-                Just <$> savedTarget
+                Just <$> resolveSavedModelTarget
+                    catalog
+                    (isJust connectedGateway)
                     meta.metaProvider
                     meta.metaConnection
                     meta.metaModel

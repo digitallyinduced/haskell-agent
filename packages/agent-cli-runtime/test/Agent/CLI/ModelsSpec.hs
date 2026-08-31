@@ -147,6 +147,35 @@ spec = do
                 `shouldBe` Just (Just "OpenRouter live")
 
     describe "gatewayModelOptions" do
+        it "defers resumed custom connections to the gateway catalog" do
+            let expected = ModelTarget
+                    OpenRouterProvider
+                    "removed-custom"
+                    "company-private"
+                    "upstream-private"
+                    GenericResponsesDialect
+                resolve =
+                    resolveSavedModelTarget
+                        catalog
+                        True
+                        OpenRouterProvider
+                        "removed-custom"
+                        "company-private"
+                        (Just "upstream-private")
+                        GenericResponsesDialect
+            resolve `shouldBe` Right expected
+            resolveSavedModelTarget
+                catalog
+                False
+                OpenRouterProvider
+                "removed-custom"
+                "company-private"
+                (Just "upstream-private")
+                GenericResponsesDialect
+                `shouldBe`
+                    Left
+                        "saved model removed-custom/company-private is not present in ~/.haskell-agent/models.json"
+
         it "uses only advertised aliases and pins them to the gateway" do
             let options =
                     gatewayModelOptions
