@@ -553,14 +553,17 @@
                 agentStorePackage = productionHaskellPackages.agent-store;
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
-                agentCliStaticExecutable =
-                    if pkgs.stdenv.hostPlatform.isLinux then
-                        pkgs.haskell.lib.justStaticExecutables
-                            staticHaskellPackages.agent-cli
-                    else
-                        agentCliExecutable;
-                agentCliExecutable =
-                    (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
+                # Both installable CLI variants expose the same advertised
+                # runtime capabilities; only the harness linkage differs.
+                agentCliRuntimeTools = [
+                    pkgs.ffmpeg
+                    bun_1_4
+                    pkgs.postgresql_18
+                    pkgs.ripgrep
+                    haskellPackages.ghc
+                ];
+                wrapAgentCli = package:
+                    package.overrideAttrs
                         (old: {
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
@@ -574,16 +577,51 @@
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
+                                        --set-default AGENT_POSTGRES_BIN \
+                                            "${pkgs.postgresql_18}/bin" \
                                         --prefix PATH : \
-                                            "${pkgs.lib.makeBinPath [
-                                                pkgs.ffmpeg
-                                                bun_1_4
-                                                pkgs.postgresql_18
-                                                pkgs.ripgrep
-                                                haskellPackages.ghc
-                                            ]}"
+                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
                                 '';
                         });
+                agentCliStaticExecutable =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        wrapAgentCli
+                            (pkgs.haskell.lib.justStaticExecutables
+                                staticHaskellPackages.agent-cli)
+                    else
+                        agentCliExecutable;
+                agentCliExecutable =
+                    wrapAgentCli
+                        (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
+                agentCliStaticRuntimeCheck =
+                    pkgs.runCommand "agent-cli-static-runtime"
+                        { }
+                        ''
+                            home="$TMPDIR/home"
+                            mkdir -p "$home"
+
+                            run_agent() {
+                                env -i \
+                                    HOME="$home" \
+                                    PATH="${pkgs.coreutils}/bin" \
+                                    LC_ALL=C \
+                                    "${agentCliStaticExecutable}/bin/agent-cli" "$@"
+                            }
+
+                            cleanup() {
+                                run_agent storage stop || true
+                            }
+                            trap cleanup EXIT
+
+                            run_agent storage start
+                            test "$(
+                                cat "$home/.haskell-agent/postgres/data/PG_VERSION"
+                            )" = "18"
+                            run_agent storage doctor
+                            run_agent storage stop
+                            trap - EXIT
+                            touch "$out"
+                        '';
                 agentTelegramExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentTelegramPackage).overrideAttrs
                         (old: {
@@ -722,9 +760,9 @@
                 '';
             in
             {
-                # Linux users get fully static musl executables rather than
-                # the tool-bundled package's multi-gigabyte runtime closure.
-                # The native wrapped build remains available as `agent-cli`.
+                # Linux uses a statically linked musl harness, wrapped with the
+                # same runtime tools as the native build. The native build
+                # remains available as `agent-cli`.
                 packages.default = agentCliStaticExecutable;
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
@@ -837,6 +875,7 @@
                         haskellPackages.claude-agent-sdk-haskell;
                     agent-claude = haskellPackages.agent-claude;
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                    agent-cli-static-runtime = agentCliStaticRuntimeCheck;
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
                     };
