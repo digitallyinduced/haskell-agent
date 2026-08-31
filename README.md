@@ -118,6 +118,13 @@ persistent `run_ghci` tool when needed:
 agent-cli --ghci
 ```
 
+The GHCi tool is optional and uses a `ghci` executable from `PATH`. Run the
+agent with a Nix-provided GHC when enabling it:
+
+```console
+nix shell nixpkgs#ghc -c agent-cli --ghci
+```
+
 For GHCi-only operation, disable Bash explicitly:
 
 ```console

@@ -560,7 +560,6 @@
                     bun_1_4
                     pkgs.postgresql_18
                     pkgs.ripgrep
-                    haskellPackages.ghc
                 ];
                 wrapAgentCli = package:
                     package.overrideAttrs
@@ -568,9 +567,6 @@
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
                                 ++ [ pkgs.makeWrapper ];
-                            disallowedRequisites = pkgs.lib.remove
-                                haskellPackages.ghc
-                                (old.disallowedRequisites or [ ]);
                             postInstall =
                                 (old.postInstall or "")
                                 + ''
