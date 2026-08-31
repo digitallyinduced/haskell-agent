@@ -190,7 +190,7 @@ loadDatabaseRows store scopes selected objectName offset limit
                                     "the selected data table no longer exists")
                             Just object -> do
                                 let columns =
-                                        object.catalogObjectDefinition.definitionColumns
+                                        (object.catalogObjectDefinition).definitionColumns
                                     requested = fromIntegral limit + 1
                                     limits = defaultQueryLimits
                                         { queryMaxRows = requested
