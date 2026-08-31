@@ -17,3 +17,7 @@ spec =
         it "distinguishes plan-mode requests" do
             attentionNotificationSequence PlanModeRequested
                 `shouldBe` "\ESC]9;Haskell Agent: plan mode requested\ESC\\"
+
+        it "distinguishes secret requests" do
+            attentionNotificationSequence SecretRequested
+                `shouldBe` "\ESC]9;Haskell Agent: secret requested\ESC\\"
