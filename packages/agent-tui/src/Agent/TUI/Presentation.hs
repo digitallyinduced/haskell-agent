@@ -628,6 +628,7 @@ isInspectionTool rawName =
             , "search_tool_output"
             , "view_image"
             , "mcp_search"
+            , "search_tool"
             , "mcp_list_resources"
             , "mcp_read_resource"
             , "database_schema"

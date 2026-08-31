@@ -22,13 +22,14 @@ spec = describe "tool presentation" do
             , "ToolSearch"
             , "read_tool_output"
             , "mcp_search"
+            , "search_tool"
             , "database_query"
             , "conversation_search"
             , "view_skill"
             , "read_agent_session"
             , "list_agents"
             ]
-            `shouldBe` replicate 15 True
+            `shouldBe` replicate 16 True
         map isInspectionTool
             [ "run_terminal_cmd"
             , "search_replace"
