@@ -13,6 +13,7 @@ import Agent.CLI.TUI.App
     , applyMetaConsoleEdit
     , applyTextPromptEdit
     , advanceCompletionFlashes
+    , adjustChoiceValue
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
@@ -21,6 +22,7 @@ import Agent.CLI.TUI.App
     , completionRequiresRedraw
     , conversationScrollbarRenderer
     , choiceRowColumns
+    , filterChoiceRowLimit
     , choiceClosesOnUiTransition
     , elapsedMillisSince
     , externalUrlCommand
@@ -66,9 +68,11 @@ import Agent.CLI.TUI.Types
     , AppState(..)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , ChoiceSelection(..)
     , FullscreenInput(..)
     , choiceVisibleRows
     , selectedChoiceIndex
+    , selectedChoice
     , FullscreenRuntime(..)
     , HistoryCommit(..)
     , MetaConsoleOverlay(..)
@@ -526,6 +530,27 @@ spec = do
                 searchable { choiceQuery = "missing" }
                 `shouldBe` Nothing
 
+        it "adjusts the selected source row while filtered" do
+            let adjustable =
+                    searchable
+                        { choiceAdjustments =
+                            Just
+                                [ ["low", "medium", "high"]
+                                , ["none", "low", "medium", "high"]
+                                , ["low", "high"]
+                                ]
+                        , choiceAdjustmentIndices = [1, 2, 0]
+                        }
+                adjusted = adjustChoiceValue 1 adjustable
+            selectedChoice adjusted
+                `shouldBe`
+                    Just ChoiceSelection
+                        { choiceSelectionIndex = 1
+                        , choiceSelectionAdjustment = Just 3
+                        }
+            adjustChoiceValue 1 adjusted
+                `shouldBe` adjusted
+
     describe "prompt target refresh" do
         it "preserves the live draft and cursor across a provider restart" do
             let before =
@@ -883,6 +908,15 @@ spec = do
         it "preserves both columns when they already fit" do
             choiceRowColumns 40 "› model" "default"
                 `shouldBe` ("› model", "default")
+
+        it "keeps adjustable picker rows inside short terminal dialogs" do
+            filterChoiceRowLimit 24 True `shouldBe` 8
+            filterChoiceRowLimit 18 True `shouldBe` 4
+            filterChoiceRowLimit 80 True `shouldBe` 14
+
+        it "collapses chrome before sacrificing rows in tiny terminals" do
+            filterChoiceRowLimit 8 True `shouldBe` 7
+            filterChoiceRowLimit 1 True `shouldBe` 1
 
     describe "onboarding layout" do
         it "uses the complete 18-row surface when it fits" do
@@ -1971,6 +2005,8 @@ choiceOverlay closeOnTurnEnd = ChoiceOverlay
     , choiceRows = [("one", "")]
     , choiceSearch = False
     , choiceQuery = ""
+    , choiceAdjustments = Nothing
+    , choiceAdjustmentIndices = []
     , choiceCloseOnTurnEnd = closeOnTurnEnd
     }
 

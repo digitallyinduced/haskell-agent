@@ -15,7 +15,9 @@ module Agent.CLI.TUI.App
     , completionRequiresRedraw
     , conversationScrollbarRenderer
     , choiceRowColumns
+    , filterChoiceRowLimit
     , choiceClosesOnUiTransition
+    , adjustChoiceValue
     , drawApp
     , elapsedMillisSince
     , appEventLogicalBytes
@@ -59,6 +61,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
     , requestFullscreenFilterChoice
+    , requestFullscreenAdjustableFilterChoice
     , requestFullscreenOnboarding
     , requestFullscreenResume
     , requestFullscreenSecret

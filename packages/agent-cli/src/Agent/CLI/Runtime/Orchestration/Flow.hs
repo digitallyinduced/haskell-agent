@@ -39,7 +39,8 @@ import Agent.CLI.Models
       ModelTarget(targetDialect, targetConnectionId, targetProvider,
                   targetModelId) )
 import Agent.CLI.Options
-    ( isOneShot,
+    ( defaultEffortFor,
+      isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
                  optPromptFile, optResume, optCwd, optCodeMode),
@@ -60,7 +61,7 @@ import Agent.CLI.ProviderTransition
                          transitionUnavailableProviders, transitionPendingTurn,
                          transitionTarget, transitionAccountSelectionId,
                          transitionAccountId, transitionAutomaticBilling,
-                         transitionSessionId),
+                         transitionSessionId, transitionEffort),
       TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
@@ -97,7 +98,9 @@ import Agent.CLI.Session
       sessionsRoot,
       SessionMeta(metaId, metaCwd) )
 import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ( modelChoice )
+import Agent.CLI.ModelPicker
+    ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
+import Agent.CLI.Session.Choices ( modelChoiceWithEffort )
 import Agent.CLI.Session.History ()
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
@@ -203,7 +206,7 @@ import Data.Functor ()
 import Data.IORef
     ( IORef, atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
-import Data.Maybe ( isJust, isNothing )
+import Data.Maybe ( fromMaybe, isJust, isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
 import System.Console.ANSI ()
@@ -485,27 +488,38 @@ runAgent
                                             (Left
                                                 "No configured models are available.")
                                     Just current ->
-                                        modelChoice
+                                        modelChoiceWithEffort
                                             catalog
                                             (Just runtime)
                                             color
                                             current.targetConnectionId
                                             current.targetProvider
                                             current.targetModelId
-                                            current.targetDialect >>= \case
+                                            current.targetDialect
+                                            (fromMaybe
+                                                (defaultEffortFor
+                                                    current.targetProvider)
+                                                ( (nextTransition
+                                                        >>= (.transitionEffort))
+                                                    <|> nextOptions.optEffort
+                                                ))
+                                            >>= \case
                                                 Nothing ->
                                                     pure (Right Nothing)
-                                                Just choice ->
+                                                Just selection ->
                                                     pure $ Right $ Just $
                                                         recoveryModelTransition
                                                             nextOptions
                                                             nextTransition
-                                                            choice.modelTarget
-                    recoveryModelTransition nextOptions nextTransition target =
+                                                            selection.modelPickerOption.modelTarget
+                                                            selection.modelPickerEffort
+                    recoveryModelTransition
+                            nextOptions nextTransition target selectedEffort =
                         case nextTransition of
                             Just active ->
                                 active
                                     { transitionTarget = target
+                                    , transitionEffort = Just selectedEffort
                                     , transitionAccountSelectionId = Nothing
                                     , transitionAccountId = Nothing
                                     , transitionUnavailableProviders = Set.empty
@@ -515,6 +529,7 @@ runAgent
                             Nothing ->
                                 ProviderTransition
                                     { transitionTarget = target
+                                    , transitionEffort = Just selectedEffort
                                     , transitionAccountSelectionId = Nothing
                                     , transitionAccountId = Nothing
                                     , transitionSessionId = nextOptions.optResume

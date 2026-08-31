@@ -7,6 +7,7 @@ module Agent.CLI.TUI.Render.Internal
     , backgroundActivityText
     , conversationScrollbarRenderer
     , choiceRowColumns
+    , filterChoiceRowLimit
     , quickStartVisible
     , quickStartWideVisible
     , quickStartRows
@@ -186,6 +187,7 @@ import Agent.CLI.TUI.Render.Blocks (todoStatusAttr)
 import Agent.CLI.TUI.Render.Overlays
     ( drawNotice, drawFollowStatus, drawFooter, drawPermission, drawResume
     , drawChoice, drawTextPrompt, drawMetaConsole, choiceRowColumns
+    , filterChoiceRowLimit
     , onboardingVisibleRowIndices
     , normalizeTextOverlayInsertion, maskedSecretText, textOverlayDisplayText
     , resumeSearchCursorColumn )

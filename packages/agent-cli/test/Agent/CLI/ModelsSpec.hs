@@ -88,6 +88,13 @@ spec = do
                 (modelsForProvider catalog ClaudeCodeProvider)
                 `shouldSatisfy` all (== ClaudeCodeDialect)
 
+        it "keeps structured context metadata on picker options" do
+            let grok =
+                    find
+                        ((== "grok-4.6") . (.modelTarget.targetModelId))
+                        (modelsForProvider catalog XAIProvider)
+            fmap (.modelContextWindow) grok `shouldBe` Just (Just 500000)
+
         it "keeps every catalog dialect consistent with model inference" do
             all
                 (\option ->
@@ -335,9 +342,10 @@ spec = do
         it "confirms the selected model id" do
             applyPickerEvent PickerConfirm state0
                 `shouldBe` Left (Just
-                    (testOption XAIProvider "xai"
+                    ((testOption XAIProvider "xai"
                         "grok-4.6" "grok-4.6" GrokBuildDialect
-                        (Just "default") (Just 10)))
+                        (Just "default") (Just 10))
+                        { modelContextWindow = Just 500000 }))
 
         it "cancels without a selection" do
             applyPickerEvent PickerCancel state0 `shouldBe` Left Nothing
@@ -394,6 +402,7 @@ testOption provider connection model wireModel dialect label priority =
             , targetWireModelId = wireModel
             , targetDialect = dialect
             }
+        , modelContextWindow = Nothing
         , modelLabel = label
         , modelFallbackPriority = priority
         }

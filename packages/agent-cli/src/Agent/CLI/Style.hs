@@ -25,6 +25,7 @@ module Agent.CLI.Style
     , roleWarn
     , roleMuted
     , roleSuccess
+    , roleSelected
     , glyphTool
     , glyphToolOut
     , glyphToolAccent
@@ -207,6 +208,14 @@ roleSuccess :: Bool -> Text -> Text
 roleSuccess color =
     style color
         [ terminalGreen
+        ]
+
+-- | Theme-respecting selection wash for raw terminal overlays.
+roleSelected :: Bool -> Text -> Text
+roleSelected color =
+    style color
+        [ SetConsoleIntensity BoldIntensity
+        , SetSwapForegroundBackground True
         ]
 
 supportsUnicodeChrome :: Bool

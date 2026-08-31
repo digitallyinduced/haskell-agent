@@ -860,6 +860,21 @@ requestFullscreenPermission runtime workspace call = do
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
+-- | Open a searchable choice whose right-hand value can be adjusted with
+-- left/right. Both returned indices refer to the original unfiltered row and
+-- that row's adjustment list.
+requestFullscreenAdjustableFilterChoice
+    :: FullscreenRuntime
+    -> Text
+    -> Int
+    -> [(Text, Text, [Text], Int)]
+    -> IO (Maybe (Int, Int))
+requestFullscreenAdjustableFilterChoice runtime title initial rows = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskAdjustableFilterChoice title initial rows reply)
+    atomically (readTMVar reply)
+
 requestFullscreenChoice
     :: FullscreenRuntime
     -> Text

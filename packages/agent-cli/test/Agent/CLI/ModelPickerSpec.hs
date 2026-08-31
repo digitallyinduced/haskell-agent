@@ -9,6 +9,7 @@ import Agent.CLI.ModelConfig
     )
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
+import Agent.ReasoningEffort (ReasoningEffort(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
@@ -22,6 +23,8 @@ spec = do
         it "maps arrows while keeping printable keys available to search" do
             decodePickerKey "\ESC[A" `shouldBe` Just PickerUp
             decodePickerKey "\ESC[B" `shouldBe` Just PickerDown
+            decodePickerKey "\ESC[D" `shouldBe` Just PickerLeft
+            decodePickerKey "\ESC[C" `shouldBe` Just PickerRight
             decodePickerKey "k" `shouldBe` Just (PickerType 'k')
             decodePickerKey "j" `shouldBe` Just (PickerType 'j')
 
@@ -53,8 +56,9 @@ spec = do
             defaultModelFor catalog XAIProvider
                 `shouldSatisfy` maybe False (\model -> Text.isInfixOf model frame)
             frame `shouldSatisfy` Text.isInfixOf "grok-4.6"
-            frame `shouldSatisfy` Text.isInfixOf "enter"
-            frame `shouldSatisfy` Text.isInfixOf "filter"
+            frame `shouldSatisfy` Text.isInfixOf "confirm"
+            frame `shouldSatisfy` Text.isInfixOf "reasoning effort"
+            frame `shouldSatisfy` Text.isInfixOf "Type to search"
 
         it "keeps large live catalogs inside a scrolling viewport" do
             let options =
@@ -74,9 +78,64 @@ spec = do
                         , pickerIndex = 20
                         }
                 frame = renderPickerFrame False state
-            length (Text.lines frame) `shouldBe` 16
+            length (Text.lines frame) `shouldBe` 21
             frame `shouldSatisfy` Text.isInfixOf "vendor/model-20"
             frame `shouldNotSatisfy` Text.isInfixOf "vendor/model-0 "
+
+        it "adjusts effort for the selected model without changing models" do
+            let models =
+                    initialPickerState
+                        catalog
+                        "xai"
+                        XAIProvider
+                        "grok-4.6"
+                        GrokBuildDialect
+                state0 = initialModelPickerState EffortMedium models
+            state1 <- rightState (applyModelPickerEvent PickerRight state0)
+            case applyModelPickerEvent PickerConfirm state1 of
+                Left (Just selection) -> do
+                    selection.modelPickerOption.modelTarget.targetModelId
+                        `shouldBe` "grok-4.6"
+                    selection.modelPickerEffort `shouldBe` EffortHigh
+                other ->
+                    expectationFailure
+                        ("expected confirmed selection, got " <> show other)
+
+        it "renders effort gauges and selected model metadata" do
+            let models =
+                    initialPickerState
+                        catalog
+                        "xai"
+                        XAIProvider
+                        "grok-4.6"
+                        GrokBuildDialect
+                frame =
+                    renderModelPickerFrame False
+                        (initialModelPickerState EffortHigh models)
+            frame `shouldSatisfy` Text.isInfixOf "■■■□□ high"
+            frame `shouldSatisfy` Text.isInfixOf "←"
+            frame `shouldSatisfy` Text.isInfixOf "→"
+            frame `shouldSatisfy` Text.isInfixOf "context"
+
+        it "makes untrusted catalog control characters inert" do
+            let hostile =
+                    (rawModelOption
+                        OpenRouterProvider
+                        "vendor/evil\n\ESC]8;;https://example.test\BEL")
+                        { modelLabel = Just "label\r\ESC[2J" }
+                models =
+                    (initialPickerState
+                        catalog
+                        "openrouter"
+                        OpenRouterProvider
+                        hostile.modelTarget.targetModelId
+                        GenericResponsesDialect)
+                        { pickerAll = [hostile] }
+                frame =
+                    renderPickerFrame False models
+            frame `shouldNotSatisfy` Text.isInfixOf "\ESC"
+            frame `shouldNotSatisfy` Text.isInfixOf "\BEL"
+            length (Text.lines frame) `shouldBe` 21
 
     describe "formatCatalogListing" do
         it "lists the current model and entries from every provider" do
@@ -130,3 +189,10 @@ readPackagedCatalog = do
     case decodeModelConfig "models.default.json" bytes of
         Left err -> fail (Text.unpack err)
         Right catalog -> pure catalog
+
+rightState
+    :: Either result ModelPickerState
+    -> IO ModelPickerState
+rightState = \case
+    Right state -> pure state
+    Left _ -> expectationFailure "expected picker state" >> fail "unreachable"

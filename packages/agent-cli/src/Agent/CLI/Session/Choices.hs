@@ -4,6 +4,7 @@ module Agent.CLI.Session.Choices
     , atMay
     , effortChoice
     , modelChoice
+    , modelChoiceWithEffort
     , showAccountUsage
     ) where
 
@@ -12,7 +13,13 @@ import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
     )
-import Agent.CLI.ModelPicker (pickModelWithOptions)
+import Agent.CLI.ModelPicker
+    ( ModelPickerSelection(..)
+    , initialModelEffort
+    , modelEffortOptions
+    , pickModelWithEffort
+    , renderEffortIndicator
+    )
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
@@ -32,9 +39,10 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
+    , requestFullscreenAdjustableFilterChoice
     , requestFullscreenChoice
-    , requestFullscreenFilterChoice
     )
+import Agent.CLI.Options (defaultEffortFor)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatUsageReport
@@ -76,75 +84,142 @@ modelChoice
     -> IO (Maybe ModelOption)
 modelChoice
         catalog fullscreen color connectionId provider current currentDialect =
-    discoverModelOptions connectionId provider >>= \(title, discovered) ->
-        case fullscreen of
-            Nothing ->
-                pickModelWithOptions
-                    catalog discovered color connectionId provider current
-                    currentDialect
-            Just runtime -> do
-                picker <-
-                    initialPickerStateResolvedWith
-                        catalog
-                        discovered
-                        connectionId
-                        provider
-                        current
-                        currentDialect
-                let options = picker.pickerAll
-                    rows =
-                        [ ( option.modelTarget.targetConnectionId
-                                <> " · "
-                                <> option.modelTarget.targetModelId
-                                <> " · "
-                                <> dialectSlug option.modelTarget.targetDialect
-                          , fromMaybe "" option.modelLabel
-                          )
-                        | option <- options
-                        ]
-                requestFullscreenFilterChoice
-                    runtime
-                    title
-                    picker.pickerIndex
-                    rows
-                    >>= \case
-                        Just index
-                            | index >= 0
-                            , index < length options ->
-                                pure (Just (options !! index))
-                        _ -> pure Nothing
+    fmap (fmap (.modelPickerOption)) $
+        modelChoiceWithEffort
+            catalog
+            fullscreen
+            color
+            connectionId
+            provider
+            current
+            currentDialect
+            (defaultEffortFor provider)
 
-discoverModelOptions :: Text -> Provider -> IO (Text, [ModelOption])
+-- | Choose a model and its reasoning effort in one searchable surface.
+modelChoiceWithEffort
+    :: ModelCatalog
+    -> Maybe FullscreenRuntime
+    -> Bool
+    -> Text
+    -> Provider
+    -> Text
+    -> DialectId
+    -> ReasoningEffort
+    -> IO (Maybe ModelPickerSelection)
+modelChoiceWithEffort
+        catalog
+        fullscreen
+        color
+        connectionId
+        provider
+        current
+        currentDialect
+        currentEffort = do
+    discovered <- discoverModelOptions connectionId provider
+    case fullscreen of
+        Nothing ->
+            pickModelWithEffort
+                catalog
+                discovered
+                color
+                connectionId
+                provider
+                current
+                currentDialect
+                currentEffort
+        Just runtime -> do
+            picker <-
+                initialPickerStateResolvedWith
+                    catalog
+                    discovered
+                    connectionId
+                    provider
+                    current
+                    currentDialect
+            let options = picker.pickerAll
+                row option =
+                    let efforts = modelEffortOptions option
+                        initial =
+                            initialModelEffort picker currentEffort option
+                        initialIndex =
+                            fromMaybe 0 (elemIndex initial efforts)
+                    in ( modelRowLabel picker option
+                       , modelDetail option
+                       , map (renderEffortIndicator option) efforts
+                       , initialIndex
+                       )
+            requestFullscreenAdjustableFilterChoice
+                runtime
+                "Models"
+                picker.pickerIndex
+                (map row options)
+                >>= \case
+                    Just (modelIndex, effortIndex)
+                        | Just option <- atMay modelIndex options
+                        , Just effort <-
+                            atMay effortIndex (modelEffortOptions option) ->
+                                pure $ Just ModelPickerSelection
+                                    { modelPickerOption = option
+                                    , modelPickerEffort = effort
+                                    }
+                    _ -> pure Nothing
+
+discoverModelOptions :: Text -> Provider -> IO [ModelOption]
 discoverModelOptions connectionId provider
     | provider == OpenRouterProvider
     , connectionId == builtinConnectionId OpenRouterProvider =
         OpenRouterModels.fetchOpenRouterModels >>= \case
-            Left _ -> pure ("Model · configured only", [])
-            Right models ->
-                pure
-                    ( "Model · OpenRouter live"
-                    , map openRouterModelOption models
-                    )
-    | otherwise = pure ("Model", [])
+            Left _ -> pure []
+            Right models -> pure (map openRouterModelOption models)
+    | otherwise = pure []
 
 openRouterModelOption :: OpenRouterModels.OpenRouterModel -> ModelOption
 openRouterModelOption model =
     (rawModelOption OpenRouterProvider model.modelId)
-        { modelLabel = Just $
+        { modelContextWindow = model.modelContextLength
+        , modelLabel = Just $
             Text.intercalate
                 " · "
-                ( [model.modelDisplayName]
-                    <> maybe
-                        []
-                        (pure . formatContextLength)
-                        model.modelContextLength
-                    <> [ if model.modelSupportsTools
+                ( [ model.modelDisplayName
+                  , if model.modelSupportsTools
                             then "tools"
                             else "no tools"
-                       , "OpenRouter live"
-                       ]
+                  , "OpenRouter live"
+                  ]
                 )
         }
+
+modelRowLabel :: PickerState -> ModelOption -> Text
+modelRowLabel picker option =
+    option.modelTarget.targetConnectionId
+        <> "/"
+        <> option.modelTarget.targetModelId
+        <> if
+            option.modelTarget.targetConnectionId == picker.pickerConnectionId
+                && option.modelTarget.targetModelId == picker.pickerCurrent
+                && option.modelTarget.targetDialect
+                    == picker.pickerCurrentDialect
+            then " ✓"
+            else ""
+
+modelDetail :: ModelOption -> Text
+modelDetail option =
+    Text.intercalate
+        " · "
+        ( maybe [] pure option.modelLabel
+            <> [ option.modelTarget.targetConnectionId
+               , dialectSlug option.modelTarget.targetDialect
+               ]
+            <> if maybe False
+                    (Text.isInfixOf "context" . Text.toCaseFold)
+                    option.modelLabel
+                then []
+                else
+                    maybe
+                        []
+                        (pure . formatContextLength)
+                        option.modelContextWindow
+        )
 
 formatContextLength :: Int -> Text
 formatContextLength contextLength
