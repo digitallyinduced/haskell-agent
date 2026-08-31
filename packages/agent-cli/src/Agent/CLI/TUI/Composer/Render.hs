@@ -81,20 +81,31 @@ slashMenuWindowStart visible count selected
 
 drawSlashRow :: Int -> Int -> SlashSuggestion -> Widget Name
 drawSlashRow selected index suggestion =
-    let prefix = if selected == index then "❯ " else "  "
+    let isSelected = selected == index
+        prefix = if isSelected then "❯ " else "  "
+        rowAttr =
+            if isSelected
+                then Theme.selectedMutedAttr
+                else Theme.assistantAttr
+        commandAttr =
+            if isSelected
+                then Theme.selectedAttr
+                else Theme.assistantAttr
+        summaryAttr =
+            if isSelected
+                then Theme.selectedMutedAttr
+                else Theme.mutedAttr
         row =
-            hBox
-                [ terminalTxt
-                    (prefix <> suggestion.slashSuggestionDisplay)
-                , vLimit 1 (fill ' ')
-                , withAttr Theme.mutedAttr
-                    (terminalTxt suggestion.slashSuggestionSummary)
-                ]
-        styled =
-            if selected == index
-                then withAttr Theme.selectedAttr row
-                else row
-    in clickable (SlashRow index) styled
+            withAttr rowAttr $
+                hBox
+                    [ withAttr commandAttr $
+                        terminalTxt
+                            (prefix <> suggestion.slashSuggestionDisplay)
+                    , vLimit 1 (fill ' ')
+                    , withAttr summaryAttr
+                        (terminalTxt suggestion.slashSuggestionSummary)
+                    ]
+    in clickable (SlashRow index) row
 
 drawQueuedInputs :: UiState -> Widget Name
 drawQueuedInputs state =
@@ -160,7 +171,7 @@ drawComposer appState =
                         hBox
                             [ withAttr
                                 (if focused
-                                    then Theme.borderActiveAttr
+                                    then Theme.headerAttr
                                     else Theme.mutedAttr)
                                 (txt "❯ ")
                             , withAttr Theme.assistantAttr
