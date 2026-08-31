@@ -261,6 +261,44 @@ spec = describe "Agent.Tools.MultiAgents" do
             }
         closeSubagentRegistry registry
 
+    it "rejects model overrides on implicit full-history forks" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let call = ToolCall
+                { callId = "spawn-model-full-history"
+                , name = "collaboration.spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"model\":\"gpt-test\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing))) call
+        result.output `shouldSatisfy`
+            Text.isInfixOf "full-history forks inherit the parent model"
+        closeSubagentRegistry registry
+
+    it "rejects reasoning-effort overrides on explicit full-history forks" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let call = ToolCall
+                { callId = "spawn-effort-full-history"
+                , name = "collaboration.spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"reasoning_effort\":\"high\",\"fork_turns\":\"all\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing))) call
+        result.output `shouldSatisfy`
+            Text.isInfixOf "set fork_turns to none or a positive integer"
+        closeSubagentRegistry registry
+
     it "spawns an isolated child in a host-provided worktree" do
         childCwd <- newEmptyTMVarIO
         cleaned <- newIORef False
