@@ -10,6 +10,10 @@ module Agent.Claude.Options
 
 import Agent.Claude.Internal.Environment
     ( sanitizedClaudeEnvironment )
+import Agent.Claude.Transport
+    ( ClaudeCodeTransport(..)
+    , anthropicGatewayBaseUrl
+    )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
     , PermissionMode(..)
@@ -17,6 +21,7 @@ import Claude.Agent.SDK.Types
     )
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 -- | Claude's non-interactive permission policies. Neither policy can pause
 -- the hidden subprocess to ask the terminal user for confirmation.
@@ -37,6 +42,7 @@ data ClaudeCodeOptions = ClaudeCodeOptions
     , permission :: !ClaudeCodePermission
     , safeMode :: !Bool
     , promptWriteTimeoutMicros :: !Int
+    , transport :: !ClaudeCodeTransport
     } deriving (Eq, Show)
 
 defaultClaudeCodeOptions :: FilePath -> FilePath -> ClaudeCodeOptions
@@ -46,6 +52,7 @@ defaultClaudeCodeOptions executable cwd = ClaudeCodeOptions
     , permission = ClaudeCodeDontAsk
     , safeMode = True
     , promptWriteTimeoutMicros = 60 * 1_000_000
+    , transport = ClaudeCodeLocalSubscription
     }
 
 -- | Keep subscription/auth policy in the adapter. The reusable SDK supports
@@ -57,11 +64,21 @@ toClaudeAgentOptions
     -> IO ClaudeAgentOptions
 toClaudeAgentOptions toolMode options = do
     baseEnvironment <- sanitizedClaudeEnvironment
-    let environment =
+    let classifiedEnvironment =
             setEnvironmentVariable
                 "ENABLE_CLAUDEAI_MCP_SERVERS"
                 "0"
                 baseEnvironment
+        environment = case options.transport of
+            ClaudeCodeLocalSubscription -> classifiedEnvironment
+            ClaudeCodeGateway{gatewayBaseUrl, gatewayToken} ->
+                setEnvironmentVariable
+                    "ANTHROPIC_AUTH_TOKEN"
+                    (Text.unpack gatewayToken)
+                    $ setEnvironmentVariable
+                        "ANTHROPIC_BASE_URL"
+                        (Text.unpack (anthropicGatewayBaseUrl gatewayBaseUrl))
+                        classifiedEnvironment
     pure $
         (defaultClaudeAgentOptions options.executable options.cwd)
             { tools = case toolMode of

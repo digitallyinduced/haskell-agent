@@ -3,12 +3,14 @@
 module Agent.Claude.Auth
     ( ClaudeCodeAuth(..)
     , loadClaudeCodeAuth
+    , loadClaudeCodeGatewayAuth
     , parseClaudeCodeAuthStatus
     ) where
 
 import Agent.Claude.Internal.Environment
     ( sanitizedClaudeEnvironment
     )
+import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Control.Exception.Safe (displayException, tryAny)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -30,6 +32,7 @@ data ClaudeCodeAuth = ClaudeCodeAuth
     { executable :: FilePath
     , accountLabel :: Text
     , subscriptionType :: Maybe Text
+    , transport :: ClaudeCodeTransport
     } deriving (Eq, Show)
 
 -- | Verify that the installed Claude Code CLI is signed into a first-party
@@ -101,7 +104,25 @@ parseClaudeCodeAuthStatus executablePath bytes = do
         { executable = executablePath
         , accountLabel = label
         , subscriptionType = Just subscription
+        , transport = ClaudeCodeLocalSubscription
         }
+
+loadClaudeCodeGatewayAuth
+    :: ClaudeCodeTransport
+    -> IO (Either Text ClaudeCodeAuth)
+loadClaudeCodeGatewayAuth transport@ClaudeCodeGateway{} =
+    resolveClaudeExecutable >>= \case
+        Left err -> pure (Left err)
+        Right executablePath ->
+            pure $
+                Right ClaudeCodeAuth
+                    { executable = executablePath
+                    , accountLabel = "Claude via organization gateway"
+                    , subscriptionType = Nothing
+                    , transport
+                    }
+loadClaudeCodeGatewayAuth ClaudeCodeLocalSubscription =
+    pure (Left "Gateway Claude authentication requires a loopback transport.")
 
 resolveClaudeExecutable :: IO (Either Text FilePath)
 resolveClaudeExecutable = do

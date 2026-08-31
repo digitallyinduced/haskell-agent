@@ -3,6 +3,7 @@
 module Agent.Claude.Internal.Messages
     ( CompletedClaudeTurn(..)
     , interpretClaudeTurn
+    , interpretClaudeTurnWithCredentialValidation
     ) where
 
 import Agent.Loop (LoopEvent(..))
@@ -48,10 +49,19 @@ interpretClaudeTurn
     :: [Message]
     -> ResultMessage
     -> Either Text CompletedClaudeTurn
-interpretClaudeTurn messages result = do
+interpretClaudeTurn = interpretClaudeTurnWithCredentialValidation True
+
+interpretClaudeTurnWithCredentialValidation
+    :: Bool
+    -> [Message]
+    -> ResultMessage
+    -> Either Text CompletedClaudeTurn
+interpretClaudeTurnWithCredentialValidation validateCredential messages result = do
     let visibleMessages =
             filter (not . messageHasParentToolUseId) messages
-    validateSubscriptionSource visibleMessages
+    if validateCredential
+        then validateSubscriptionSource visibleMessages
+        else Right ()
     let
         bufferedAssistantText =
             Text.concat

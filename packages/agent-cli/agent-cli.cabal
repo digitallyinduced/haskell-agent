@@ -101,6 +101,7 @@ library
                     , Agent.CLI.Auth
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
+                    , Agent.CLI.ClaudeGatewayProxy
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Compaction
                     , Agent.CLI.Connectivity
@@ -228,6 +229,8 @@ library
                     , mtl
                     , network
                     , network-uri
+                    , wai
+                    , warp
                     , optparse-applicative >= 0.18 && < 0.19
                     , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10

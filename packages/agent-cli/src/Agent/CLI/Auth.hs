@@ -148,11 +148,21 @@ loadDetectedProvider =
         Right provider -> loadProvider provider
 
 loadProvider :: Provider -> IO (Either Text LoadedAuth)
+loadProvider ClaudeCodeProvider =
+    loadGatewayCredential >>= \case
+        Left err -> pure (Left ("cannot load gateway credential: " <> err))
+        Right (Just gateway) ->
+            pure $
+                Right $
+                    claudeLoadedAuth
+                        ("Claude via " <> gateway.gatewayBaseUrl)
+                        "gateway"
+        Right Nothing -> runExceptT loadClaudeCode
 loadProvider provider = runExceptT case provider of
     XAIProvider -> loadXai Nothing
     OpenAIProvider -> loadOpenAi
     OpenRouterProvider -> loadOpenRouter Nothing
-    ClaudeCodeProvider -> loadClaudeCode
+    ClaudeCodeProvider -> error "handled above"
 
 -- | Load local OpenAI credentials without consulting the gateway.
 --
@@ -172,7 +182,7 @@ gatewayLoadedAuth :: GatewayCredential -> Either Text LoadedAuth
 gatewayLoadedAuth gateway = do
     validateGatewayWebSocketUrl gateway.gatewayWebSocketUrl
     let credential = credentialForGateway gateway
-    pure LoadedAuth
+     in LoadedAuth
             { loadedProvider = OpenAIProvider
             , loadedTokenProvider =
                 staticCredentialProvider SubscriptionBilled credential
@@ -353,10 +363,13 @@ loadXai requestedSelectionId = do
 loadClaudeCode :: ExceptT Text IO LoadedAuth
 loadClaudeCode = do
     auth <- lift ClaudeCode.loadClaudeCodeAuth >>= either throwE pure
-    let label = auth.accountLabel
-        credential = Credential
+    pure (claudeLoadedAuth auth.accountLabel "claude-code")
+
+claudeLoadedAuth :: Text -> Text -> LoadedAuth
+claudeLoadedAuth label selectionId =
+    let credential = Credential
             { accessToken = ""
-            , accountId = "claude-code"
+            , accountId = selectionId
             , leaseId = Nothing
             , provider = ClaudeCodeProvider
             }
@@ -365,7 +378,7 @@ loadClaudeCode = do
         , loadedTokenProvider =
             staticCredentialProvider SubscriptionBilled credential
         , loadedAccountLabel = const (pure label)
-        , loadedSelectionId = Just "claude-code"
+        , loadedSelectionId = Just selectionId
         , loadedOpenAiPool = Nothing
         }
 

@@ -102,7 +102,18 @@ data ClaudeAgentOptions = ClaudeAgentOptions
     , turnTimeoutMicros :: !Int
     -- | Maximum size of one newline-delimited structured-output record.
     , maxBufferSizeBytes :: !Int
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+-- The exact child environment can contain provider credentials. Keep the
+-- useful process identity in diagnostics without rendering environment
+-- values (or the many prompt/session options that may contain user data).
+instance Show ClaudeAgentOptions where
+    show options =
+        "ClaudeAgentOptions { executable = "
+            <> show options.executable
+            <> ", cwd = "
+            <> show options.cwd
+            <> ", environment = <redacted>, ... }"
 
 defaultClaudeAgentOptions :: FilePath -> FilePath -> ClaudeAgentOptions
 defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions

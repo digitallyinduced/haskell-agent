@@ -48,6 +48,8 @@ import Agent.CLI.Dialects
       filterGhciTools )
 import Agent.CLI.Error ( formatApiErrorAt, formatException )
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
+import Agent.CLI.ClaudeGatewayProxy ( withClaudeGatewayProxy )
+import Agent.CLI.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.GatewayModels
     ( catalogUsesGateway
     , isGatewayConnectionId
@@ -273,6 +275,7 @@ import Agent.Claude
       ClaudeToolPermissionRequest(..),
       claudeCodeOneShotBackend,
       defaultClaudeCodeOptions,
+      loadClaudeCodeGatewayAuth,
       loadClaudeCodeAuth,
       withClaudeCodeBackendPermissions )
 import Agent.Dialect ( dialectForId, DialectId(GrokBuildDialect) )
@@ -2660,83 +2663,104 @@ runAgentInitializedWithLock
                                 , resetBackendState = pure ()
                                 }
                     ClaudeCodeProvider -> do
-                        claudeAuth <-
-                            loadClaudeCodeAuth
-                                >>= either (startupDie startup . Text.unpack) pure
-                        let permission =
+                        let runClaude claudeAuth = do
+                                let permission =
+                                        if claudeBypassEnabled
+                                            then ClaudeCodeBypass
+                                            else ClaudeCodeDontAsk
+                                    claudeOptions =
+                                        (defaultClaudeCodeOptions
+                                            claudeAuth.executable
+                                            (unsafeToFilePath cwd))
+                                            { permission
+                                            , safeMode = True
+                                            , transport = claudeAuth.transport
+                                            }
+                                    compactRunner _ =
+                                        pure $ Left
+                                            "Claude Code manages its own context; /compact is unavailable."
+                                    btwBackend privateParams =
+                                        Backend \state previous inputs onEvent -> do
+                                            privateTranscript <- newIORef state
+                                            let privateBackend =
+                                                    claudeCodeOneShotBackend
+                                                        claudeOptions
+                                                            { permission =
+                                                                ClaudeCodeDontAsk
+                                                            }
+                                                        (pure privateParams)
+                                                        privateTranscript
+                                            privateBackend.submitTurn
+                                                state
+                                                previous
+                                                inputs
+                                                onEvent
                                 if claudeBypassEnabled
-                                    then ClaudeCodeBypass
-                                    else ClaudeCodeDontAsk
-                            claudeOptions =
-                                (defaultClaudeCodeOptions
-                                    claudeAuth.executable
-                                    (unsafeToFilePath cwd))
-                                    { permission
-                                    , safeMode = True
-                                    }
-                            compactRunner _ =
-                                pure $ Left
-                                    "Claude Code manages its own context; /compact is unavailable."
-                            btwBackend privateParams =
-                                Backend \state previous inputs onEvent -> do
-                                    privateTranscript <- newIORef state
-                                    let privateBackend =
-                                            claudeCodeOneShotBackend
-                                                claudeOptions
-                                                    { permission =
-                                                        ClaudeCodeDontAsk
-                                                    }
-                                                (pure privateParams)
-                                                privateTranscript
-                                    privateBackend.submitTurn
-                                        state
-                                        previous
-                                        inputs
-                                        onEvent
-                        if claudeBypassEnabled
-                            then pure ()
-                            else
-                                case fullscreen of
-                                    Just runtime ->
-                                        emitUiEvent runtime
-                                            (UiSystemMessage
-                                                "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
-                                    Nothing -> do
-                                        color <- resolveColor stderrHandle
-                                        putTextLn stderrHandle $
-                                            roleWarn color $
-                                                glyphWarn
-                                                    <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
-                        writeIORef activeAccountRef claudeAuth.accountLabel
-                        claudeTranscriptRef <-
-                            newIORef =<< readLiveTranscript conversationRef
-                        withClaudeCodeBackendPermissions
-                            claudeOptions
-                            (nativeClaudePermissionHandler
-                                startup.startupNativeHooks)
-                            initialPrevious
-                            (readIORef paramsRef)
-                            claudeTranscriptRef
-                            \backend -> do
-                                activeBackend <-
-                                    prepareTransitionBackend
-                                        projectRoot transition persist backend
-                                result <- runSession
-                                    (sessionRequest
-                                        startupUnavailable
-                                        Nothing
-                                        Nothing
-                                        Nothing
-                                        compactRunner)
-                                    SessionBackend
-                                        { backend = activeBackend
-                                        , btwBackend
-                                        , resetBackendState =
-                                            writeIORef claudeTranscriptRef []
-                                        }
-                                writeLiveTranscript conversationRef
-                                    =<< readIORef claudeTranscriptRef
-                                pure result
+                                    then pure ()
+                                    else
+                                        case fullscreen of
+                                            Just runtime ->
+                                                emitUiEvent runtime
+                                                    (UiSystemMessage
+                                                        "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
+                                            Nothing -> do
+                                                color <- resolveColor stderrHandle
+                                                putTextLn stderrHandle $
+                                                    roleWarn color $
+                                                        glyphWarn
+                                                            <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
+                                writeIORef activeAccountRef claudeAuth.accountLabel
+                                claudeTranscriptRef <-
+                                    newIORef =<< readLiveTranscript conversationRef
+                                withClaudeCodeBackendPermissions
+                                    claudeOptions
+                                    (nativeClaudePermissionHandler
+                                        startup.startupNativeHooks)
+                                    initialPrevious
+                                    (readIORef paramsRef)
+                                    claudeTranscriptRef
+                                    \backend -> do
+                                        activeBackend <-
+                                            prepareTransitionBackend
+                                                projectRoot transition persist backend
+                                        result <- runSession
+                                            (sessionRequest
+                                                startupUnavailable
+                                                Nothing
+                                                Nothing
+                                                Nothing
+                                                compactRunner)
+                                            SessionBackend
+                                                { backend = activeBackend
+                                                , btwBackend
+                                                , resetBackendState =
+                                                    writeIORef claudeTranscriptRef []
+                                                }
+                                        writeLiveTranscript conversationRef
+                                            =<< readIORef claudeTranscriptRef
+                                        pure result
+                            requireAuth load =
+                                load >>= either
+                                    (startupDie startup . Text.unpack)
+                                    pure
+                        if gatewayMode
+                            then
+                                loadGatewayCredential >>= \case
+                                    Left err ->
+                                        startupDie startup (Text.unpack err)
+                                    Right Nothing ->
+                                        startupDie startup
+                                            "the connected gateway credential disappeared"
+                                    Right (Just gateway) ->
+                                        withClaudeGatewayProxy gateway
+                                            (\transport ->
+                                                requireAuth
+                                                    (loadClaudeCodeGatewayAuth transport)
+                                                    >>= runClaude)
+                                            >>= either
+                                                (startupDie startup . Text.unpack)
+                                                pure
+                            else requireAuth loadClaudeCodeAuth >>= runClaude
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of

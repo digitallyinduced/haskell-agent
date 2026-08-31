@@ -11,13 +11,14 @@ module Agent.Claude.LoopBackend
     ) where
 
 import Agent.Claude.Options
-    ( ClaudeCodeOptions
+    ( ClaudeCodeOptions(..)
     , ClaudeCodeToolMode(..)
     , toClaudeAgentOptions
     )
+import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Agent.Claude.Internal.Messages
     ( CompletedClaudeTurn(..)
-    , interpretClaudeTurn
+    , interpretClaudeTurnWithCredentialValidation
     )
 import Agent.Error
     ( ApiError(..)
@@ -175,6 +176,7 @@ withClaudeCodeBackendPermissions
         checkpoint <- newIORef Nothing
         callback
             (backendForSession
+                options.transport
                 session
                 checkpoint
                 getParams
@@ -195,6 +197,7 @@ claudeCodeOneShotBackend options getParams transcript =
             toClaudeAgentOptions ClaudeCodeNoTools options
         result <- withClaudeSDKClient sdkOptions \session ->
             submitClaudeCodeTurn
+                options.transport
                 session
                 checkpoint
                 previous
@@ -206,7 +209,8 @@ claudeCodeOneShotBackend options getParams transcript =
         attachBackendState transcript result
 
 backendForSession
-    :: ClaudeSDKClient
+    :: ClaudeCodeTransport
+    -> ClaudeSDKClient
     -> IORef (Maybe HostTranscriptCheckpoint)
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
@@ -215,9 +219,10 @@ backendForSession
             -> IO ClaudeToolPermissionDecision)
     -> Backend
 backendForSession
-    session checkpoint getParams transcript permissionHandler =
+    transport session checkpoint getParams transcript permissionHandler =
     Backend \_state previous inputs onEvent -> do
         result <- submitClaudeCodeTurn
+            transport
             session
             checkpoint
             previous
@@ -242,7 +247,8 @@ attachBackendState transcript (Right output) = do
         }
 
 submitClaudeCodeTurn
-    :: ClaudeSDKClient
+    :: ClaudeCodeTransport
+    -> ClaudeSDKClient
     -> IORef (Maybe HostTranscriptCheckpoint)
     -> Maybe Text
     -> IO ResponseCreateParams
@@ -254,6 +260,7 @@ submitClaudeCodeTurn
             -> IO ClaudeToolPermissionDecision)
     -> IO (Either ApiError TurnOutput)
 submitClaudeCodeTurn
+    transport
     session
     checkpoint
     previous
@@ -294,7 +301,7 @@ submitClaudeCodeTurn
                             queryTurnContentWithControlHandler
                                 turn
                                 content
-                                validateSubscriptionMessage
+                                (validateTransportMessage transport)
                                 (handleControlRequest
                                     turn
                                     permissionHandler)
@@ -305,7 +312,12 @@ submitClaudeCodeTurn
                                 pure (Left sdkError)
                             Right result -> do
                                 turnMessages <- reverse <$> readIORef messages
-                                case interpretClaudeTurn turnMessages result of
+                                case
+                                    interpretClaudeTurnWithCredentialValidation
+                                        (transport == ClaudeCodeLocalSubscription)
+                                        turnMessages
+                                        result
+                                  of
                                     Left message ->
                                         pure $
                                             Left ResultError
@@ -850,6 +862,15 @@ sdkUsageToTokenUsage usage =
         , outputTokens = usage.outputTokens
         , cachedTokens = usage.cachedTokens
         }
+
+validateTransportMessage
+    :: ClaudeCodeTransport
+    -> Message
+    -> IO (Either ClaudeSDKError ())
+validateTransportMessage ClaudeCodeGateway{} _ =
+    pure (Right ())
+validateTransportMessage ClaudeCodeLocalSubscription message =
+    validateSubscriptionMessage message
 
 validateSubscriptionMessage
     :: Message
