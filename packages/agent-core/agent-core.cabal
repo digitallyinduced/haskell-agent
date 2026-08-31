@@ -91,6 +91,7 @@ library
                     , Agent.Tools.ShowImage
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
+                    , Agent.Tools.ViewImage
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Loop.EventPump
                     , Agent.Loop.Internal
@@ -115,6 +116,7 @@ library
                     , crypton-connection
                     , directory
                     , filepath
+                    , JuicyPixels
                     , process
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
@@ -267,6 +269,7 @@ test-suite agent-core-test
                     , Agent.Tools.PlanModeSpec
                     , Agent.Tools.SecretSpec
                     , Agent.Tools.ShowImageSpec
+                    , Agent.Tools.ViewImageSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5

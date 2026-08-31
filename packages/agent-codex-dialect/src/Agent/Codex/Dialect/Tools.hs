@@ -16,6 +16,7 @@ import Agent.ToolDSL
     , PropertyType(..)
     , parametersObjectLoose
     )
+import Agent.Tools.ViewImage (viewImageTool)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -87,6 +88,7 @@ codexTools
 codexTools env shellSession ghci planMode multi =
     pure $
         [ runGhciTool ghci
+        , viewImageTool env
         , readFileTool env
         , grepTool env
         , listDirTool env
