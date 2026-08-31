@@ -228,6 +228,51 @@ spec = do
                 Text.isInfixOf "Inspect AppState before continuing."
             rendered `shouldNotSatisfy` Text.isInfixOf "`AppState`"
 
+        it "distinguishes completed inspection and action blocks" do
+            let inspectCall =
+                    functionToolCall
+                        "inspect-1"
+                        "read_file"
+                        "{\"target_file\":\"flake.nix\"}"
+                actionCall =
+                    functionToolCall
+                        "action-1"
+                        "shell_command"
+                        "{\"command\":\"pwd\"}"
+                finish callId output =
+                    ToolCallResult
+                        { callId
+                        , output
+                        , callKind = FunctionCallKind
+                        }
+                ui =
+                    foldl
+                        (flip reduceUi)
+                        baseState.appUi
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted inspectCall)
+                        , UiLoop (ToolFinished (finish "inspect-1" "contents"))
+                        , UiLoop (ToolStarted actionCall)
+                        , UiLoop (ToolFinished (finish "action-1" "checkout"))
+                        ]
+                app = baseState { appUi = ui }
+                size = (80, 24)
+                rendered =
+                    Text.unlines $
+                        pictureRows
+                            (renderWidget
+                                (Just Theme.monochrome)
+                                (drawApp app)
+                                size)
+                            size
+            case toList ui.uiBlocks of
+                [inspectBlock, actionBlock] -> do
+                    rendered `shouldSatisfy`
+                        Text.isInfixOf ("◇ " <> inspectBlock.blockTitle)
+                    rendered `shouldSatisfy`
+                        Text.isInfixOf ("◆ " <> actionBlock.blockTitle)
+                _ -> expectationFailure "expected inspection and action blocks"
+
         it "keeps live todos to one row each so the prompt stays visible" do
             let todoCall =
                     functionToolCall

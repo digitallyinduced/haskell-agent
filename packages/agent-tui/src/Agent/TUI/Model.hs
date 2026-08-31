@@ -44,6 +44,7 @@ module Agent.TUI.Model
 import Agent.TUI.Presentation
     ( formatToolDiffRelative
     , formatToolOutputRelative
+    , isInspectionTool
     , todoListFromToolArguments
     , todoListFromToolOutput
     , toolCallInput
@@ -1307,6 +1308,7 @@ toolBlockKind rawName
         BlockEdit
     | name `elem` ["todo_write", "update_plan"] =
         BlockTodo
+    | isInspectionTool rawName = BlockInspect
     | otherwise = BlockTool
   where
     name = canonicalToolName rawName

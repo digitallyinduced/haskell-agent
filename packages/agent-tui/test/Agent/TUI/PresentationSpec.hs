@@ -10,6 +10,36 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "distinguishes inspection tools from actions after canonicalization" do
+        map isInspectionTool
+            [ "read_file"
+            , "list_dir"
+            , "grep"
+            , "Read"
+            , "Grep"
+            , "Glob"
+            , "WebFetch"
+            , "ToolSearch"
+            , "read_tool_output"
+            , "mcp_search"
+            , "search_tool"
+            , "database_query"
+            , "conversation_search"
+            , "view_skill"
+            , "read_agent_session"
+            , "list_agents"
+            ]
+            `shouldBe` replicate 16 True
+        map isInspectionTool
+            [ "run_terminal_cmd"
+            , "search_replace"
+            , "apply_patch"
+            , "task"
+            , "mcp_call"
+            , "mcp__playwright__browser_click"
+            ]
+            `shouldBe` replicate 6 False
+
     it "shows filesystem paths relative to the workspace" do
         let workspace =
                 "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"

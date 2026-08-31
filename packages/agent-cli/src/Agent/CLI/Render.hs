@@ -83,6 +83,7 @@ import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
     , glyphErr
+    , glyphInspect
     , glyphTool
     , glyphToolAccent
     , glyphToolOut
@@ -118,6 +119,7 @@ import Agent.TUI.Presentation
     , SearchReplaceLine(..)
     , formatToolOutput
     , formatToolOutputRelative
+    , isInspectionTool
     , parseSearchReplaceDiff
     , summarizeToolCall
     , summarizeToolCallRelative
@@ -771,7 +773,10 @@ formatToolStarted color = formatToolStartedRelative color ""
 
 formatToolStartedRelative :: Bool -> Text -> ToolCall -> Text
 formatToolStartedRelative color workspace call =
-    let arrow = roleToolArrow color glyphTool
+    let marker
+            | isInspectionTool call.name = glyphInspect
+            | otherwise = glyphTool
+        arrow = roleToolArrow color marker
         detail = toolDetail call
     in case toolChrome call.name of
         ToolChromeShell ->

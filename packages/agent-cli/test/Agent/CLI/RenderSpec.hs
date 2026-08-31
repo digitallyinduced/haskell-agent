@@ -292,7 +292,7 @@ spec = do
     describe "formatToolStarted" do
         it "renders English verbs for known tools" do
             formatToolStarted False (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")
-                `shouldBe` "◆ Read src/A.hs"
+                `shouldBe` "◇ Read src/A.hs"
             formatToolStarted False (functionToolCall "c2" "run_terminal_cmd" "{\"command\":\"git status\"}")
                 `shouldBe` "◆ $ git status"
             formatToolStarted False (functionToolCall "c3" "search_replace" "{\"file_path\":\"src/A.hs\"}")
@@ -320,7 +320,7 @@ spec = do
             formatToolStarted False (functionToolCall "c10" "Bash" "{\"command\":\"git status\"}")
                 `shouldBe` "◆ $ git status"
             formatToolStarted False (functionToolCall "c11" "Read" "{\"file_path\":\"src/A.hs\"}")
-                `shouldBe` "◆ Read src/A.hs"
+                `shouldBe` "◇ Read src/A.hs"
             formatToolStarted False (functionToolCall "c12" "Edit" "{\"file_path\":\"src/A.hs\"}")
                 `shouldBe` "◆ Edited src/A.hs"
             formatToolStarted False
@@ -328,7 +328,7 @@ spec = do
                 `shouldBe` "◆ Wrote src/B.hs"
             formatToolStarted False
                 (functionToolCall "c14" "WebFetch" "{\"url\":\"https://example.com\"}")
-                `shouldBe` "◆ Fetched https://example.com"
+                `shouldBe` "◇ Fetched https://example.com"
             formatToolStarted False
                 (functionToolCall "c15" "mcp__playwright__browser_click" "{}")
                 `shouldBe` "◆ playwright: browser_click"
@@ -574,7 +574,7 @@ spec = do
                 let lines_ = filter (not . Text.null) (Text.lines body)
                 length lines_ `shouldBe` 80
                 lines_ `shouldMatchList`
-                    [ "◆ Listed packages/agent-" <> Text.pack (show i)
+                    [ "◇ Listed packages/agent-" <> Text.pack (show i)
                     | i <- [1 :: Int .. 80]
                     ]
 
@@ -591,7 +591,7 @@ spec = do
                 hClose handle
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "Thinking…")
-                body `shouldSatisfy` ("◆ Listed ." `Text.isInfixOf`)
+                body `shouldSatisfy` ("◇ Listed ." `Text.isInfixOf`)
 
         it "reuses the live spinner when a tool round starts another turn" do
             withRenderConfig True False \config _handle _path -> do

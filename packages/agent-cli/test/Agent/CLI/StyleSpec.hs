@@ -61,6 +61,7 @@ spec = do
     describe "chrome glyphs" do
         it "exposes the shared Unicode markers" do
             glyphTool `shouldSatisfy` (`elem` ["◆ ", "* "])
+            glyphInspect `shouldSatisfy` (`elem` ["◇ ", "o "])
             glyphToolAccent `shouldSatisfy` (`elem` ["❙ ", "| "])
             glyphOk `shouldSatisfy` (`elem` ["✓ ", "+ "])
             glyphErr `shouldSatisfy` (`elem` ["✗ ", "x "])

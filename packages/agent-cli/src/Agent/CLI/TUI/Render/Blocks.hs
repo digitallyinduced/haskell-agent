@@ -53,8 +53,8 @@ import Agent.TUI.Model
     ( blockCodeLanguage,
       BlockId,
       BlockKind(BlockUser, BlockAssistant, BlockThinking, BlockTool,
-                BlockTodo, BlockShell, BlockEdit, BlockSystem, BlockRecap,
-                BlockError),
+                BlockInspect, BlockTodo, BlockShell, BlockEdit, BlockSystem,
+                BlockRecap, BlockError),
       BlockState(BlockComplete, BlockFailed, BlockCancelled, BlockDenied,
                  BlockRunning, BlockStreaming),
       Focus(FocusScrollback),
@@ -235,6 +235,19 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
+                accentBlockWithSections
+                    state
+                    target
+                    ui
+                    block
+                    waveElapsed
+                    (statusAttr state target block)
+                    (blockStateGlyph state target block
+                        <> block.blockTitle
+                        <> detailSuffix block)
+                    (bodySections (visibleBody block)
+                        <> toolImageSections state target block)
+            BlockInspect ->
                 accentBlockWithSections
                     state
                     target
@@ -491,11 +504,22 @@ blockStateGlyph :: AppState -> AgentTarget -> UiBlock -> Text
 blockStateGlyph state target block = case block.blockState of
     BlockRunning -> liveGlyph
     BlockStreaming -> liveGlyph
-    BlockComplete -> "✓ "
+    BlockComplete -> completedGlyph
     BlockFailed -> "✗ "
     BlockDenied -> "⊘ "
     BlockCancelled -> "⊘ "
   where
+    completedGlyph
+        | block.blockKind == BlockInspect = "◇ "
+        | block.blockKind
+            `elem` [ BlockThinking
+                   , BlockTool
+                   , BlockTodo
+                   , BlockShell
+                   , BlockEdit
+                   ] =
+            "◆ "
+        | otherwise = "✓ "
     liveGlyph
         | target == AgentRoot
         , userActionPending state =
