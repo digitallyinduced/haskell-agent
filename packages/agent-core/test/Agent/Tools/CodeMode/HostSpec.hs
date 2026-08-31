@@ -242,7 +242,11 @@ spec = describe "code-mode Bun host" do
                 { cellId = "1"
                 , cellOutput = emptyContent
                 }
-        threadDelay 50000
+        -- Bun and the host monitor share a heavily loaded CI runner with the
+        -- rest of the flake checks. Wait well beyond the 20 ms JavaScript
+        -- timer so termination tests an already-observed result rather than
+        -- racing timer scheduling.
+        threadDelay 1000000
         terminated <- terminateCodeCell host "1"
         terminated `shouldBe`
             Right CodeModeFinished
