@@ -253,6 +253,28 @@ spec = describe "Agent.CLI.Worktree" do
                 git repo ["branch", "--list", "2026-08-20-00000001"]
                     `shouldReturn` ""
 
+        it "does not warn when Git conservatively retains the generated branch" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                    branch = "2026-08-20-00000001"
+                older <- addManagedWorktree repo root branch
+                _ <- addManagedWorktree repo root "2026-08-21-00000002"
+                writeFile
+                    (toFilePath (older </> fromFilePath "README"))
+                    "reachable elsewhere\n"
+                _ <- git older ["add", "README"]
+                _ <- git older ["commit", "-m", "reachable work"]
+                _ <- git older ["branch", "retained-copy"]
+
+                report <- cleanupStaleWorktrees root 1 []
+
+                report.cleanupRemoved `shouldBe` [older]
+                report.cleanupFailures `shouldBe` []
+                doesDirectoryExist older `shouldReturn` False
+                git repo ["branch", "--list", branch]
+                    `shouldReturn` branch
+
         it "preserves stale worktrees with uncommitted files" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
