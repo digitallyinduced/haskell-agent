@@ -1,56 +1,76 @@
 -- | Canonical model aliases exposed by the Digitally Induced LLM gateway.
 --
 -- Gateway credentials are process-wide, so the active catalog is deliberately
--- exclusive: direct provider models disappear while connected and gateway
--- aliases disappear while disconnected. This prevents a direct model id from
--- being sent to the gateway (or a router alias from reaching a provider).
+-- exclusive: direct provider models disappear while connected and the same
+-- model ids are attached to a dedicated gateway connection. Legacy router
+-- aliases are always removed from the visible catalog.
 module Agent.CLI.GatewayModels
     ( catalogForGatewayState
     , catalogUsesGateway
+    , gatewayConnectionId
     , gatewayDefaultModelId
     , gatewayModelIds
-    , isGatewayModelId
+    , isGatewayConnectionId
+    , isLegacyGatewayModelId
     , loadGatewayModelCatalogAt
     ) where
 
 import Agent.CLI.GatewayClient (loadGatewayCredentialAt)
 import Agent.CLI.ModelConfig
     ( CatalogModel(..)
+    , ConnectionKind(..)
     , ModelCatalog(..)
-    , builtinConnectionId
+    , ModelConnection(..)
     , loadModelCatalogAt
     )
 import Agent.Dialect (DialectId (CodexDialect))
 import Agent.Provider (Provider (OpenAIProvider))
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import System.OsPath (OsPath)
 
+gatewayConnectionId :: Text
+gatewayConnectionId = "gateway"
+
 gatewayDefaultModelId :: Text
-gatewayDefaultModelId = "router-default"
+gatewayDefaultModelId = "gpt-5.6-sol"
 
 gatewayModelIds :: [Text]
 gatewayModelIds =
     [ gatewayDefaultModelId
-    , "router-codex"
-    , "router-grok"
+    , "gpt-5.6-terra"
+    , "gpt-5.6-luna"
     ]
 
-isGatewayModelId :: Text -> Bool
-isGatewayModelId modelId = modelId `elem` gatewayModelIds
+isGatewayConnectionId :: Text -> Bool
+isGatewayConnectionId = (== gatewayConnectionId)
+
+isLegacyGatewayModelId :: Text -> Bool
+isLegacyGatewayModelId modelId =
+    modelId `elem` ["router-default", "router-codex", "router-grok"]
 
 catalogUsesGateway :: ModelCatalog -> Bool
 catalogUsesGateway catalog =
-    not (null catalog.catalogModels)
-        && all (isGatewayModelId . (.catalogModelId)) catalog.catalogModels
+    Map.lookup gatewayConnectionId catalog.catalogConnections
+        == Just gatewayConnection
+        && not (null catalog.catalogModels)
+        && all
+            (isGatewayConnectionId . (.catalogModelConnectionId))
+            catalog.catalogModels
 
 catalogForGatewayState :: Bool -> ModelCatalog -> ModelCatalog
 catalogForGatewayState connected catalog
-    | connected = catalog { catalogModels = canonicalGatewayModels }
+    | connected =
+        catalog
+            { catalogConnections =
+                Map.singleton gatewayConnectionId gatewayConnection
+            , catalogModels = canonicalGatewayModels
+            }
     | otherwise =
         catalog
             { catalogModels =
                 filter
-                    (not . isGatewayModelId . (.catalogModelId))
+                    (not . isLegacyGatewayModelId . (.catalogModelId))
                     catalog.catalogModels
             }
 
@@ -74,16 +94,23 @@ loadGatewayModelCatalogAt home cwd =
 
 canonicalGatewayModels :: [CatalogModel]
 canonicalGatewayModels =
-    [ gatewayModel gatewayDefaultModelId "Gateway · Default" True
-    , gatewayModel "router-codex" "Gateway · Codex" False
-    , gatewayModel "router-grok" "Gateway · Grok" False
+    [ gatewayModel gatewayDefaultModelId "Gateway · Frontier" True
+    , gatewayModel "gpt-5.6-terra" "Gateway · Balanced" False
+    , gatewayModel "gpt-5.6-luna" "Gateway · Fast · Low cost" False
     ]
+
+gatewayConnection :: ModelConnection
+gatewayConnection =
+    ModelConnection
+        { connectionId = gatewayConnectionId
+        , connectionKind = BuiltinConnection OpenAIProvider
+        }
 
 gatewayModel :: Text -> Text -> Bool -> CatalogModel
 gatewayModel modelId label isDefault =
     CatalogModel
         { catalogModelId = modelId
-        , catalogModelConnectionId = builtinConnectionId OpenAIProvider
+        , catalogModelConnectionId = gatewayConnectionId
         , catalogModelWireId = modelId
         , catalogModelDialect = CodexDialect
         , catalogModelContextWindow = Nothing

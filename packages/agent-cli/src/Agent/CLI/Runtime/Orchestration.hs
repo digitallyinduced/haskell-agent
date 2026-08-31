@@ -51,7 +51,8 @@ import Agent.CLI.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.GatewayModels
     ( catalogUsesGateway
     , gatewayDefaultModelId
-    , isGatewayModelId
+    , isGatewayConnectionId
+    , isLegacyGatewayModelId
     , loadGatewayModelCatalogAt
     )
 import Agent.CLI.Input ()
@@ -1113,7 +1114,9 @@ runAgentInitializedWithLock
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
             Just meta
-                | isGatewayModelId meta.metaModel -> Right Nothing
+                | isGatewayConnectionId meta.metaConnection
+                    || isLegacyGatewayModelId meta.metaModel ->
+                        Right Nothing
             Just meta ->
                 Just <$> savedTarget
                     meta.metaProvider
@@ -1132,7 +1135,8 @@ runAgentInitializedWithLock
             Nothing -> Right Nothing
             Just remembered ->
                 let target = remembered.projectModelTarget
-                in if isGatewayModelId target.targetModelId
+                in if isGatewayConnectionId target.targetConnectionId
+                    || isLegacyGatewayModelId target.targetModelId
                     then Right Nothing
                     else
                         Just <$> savedTarget
@@ -1147,19 +1151,21 @@ runAgentInitializedWithLock
             && isNothing configuredOptionTarget
         ) $
         startupDie startup
-            "the connected gateway accepts router-default, router-codex, or \
-            \router-grok; direct provider model ids are unavailable"
+            "the connected gateway accepts gpt-5.6-sol, gpt-5.6-terra, or \
+            \gpt-5.6-luna"
     when
         ( not gatewayMode
-            && maybe False isGatewayModelId options.optModel
+            && maybe False isLegacyGatewayModelId options.optModel
         ) $
         startupDie startup
-            "gateway router models require an active gateway connection"
+            "legacy gateway router aliases are no longer available"
     when
         ( not gatewayMode
             && maybe
                 False
-                (isGatewayModelId . (.targetModelId))
+                (\target ->
+                    isGatewayConnectionId target.targetConnectionId
+                        || isLegacyGatewayModelId target.targetModelId)
                 transitionTarget
         ) $
         startupDie startup
@@ -1170,7 +1176,7 @@ runAgentInitializedWithLock
         either (startupDie startup . Text.unpack) pure projectTargetResult
     let gatewayTarget candidate =
             candidate >>= \target ->
-                if isGatewayModelId target.targetModelId
+                if isGatewayConnectionId target.targetConnectionId
                     then Just target
                     else Nothing
         targetHint
