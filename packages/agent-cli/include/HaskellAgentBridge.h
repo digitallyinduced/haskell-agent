@@ -18,8 +18,11 @@ typedef void (*ha_event_callback)(
      * Kind 1 is reasoning text, 2 text, 3 status, 4 tool-start, and 5
      * tool-finish. Tool-start flags use bit 0 for encrypted arguments and
      * bit 1 for truncation; tool-finish uses bit 1 for truncation.
-     * The bytes are valid only for the duration of this callback; copy before
-     * returning.
+     * Turn IDs are stable task IDs for the lifetime of an engine. Events for
+     * one task are delivered in order, but callbacks for different tasks may
+     * run concurrently on runtime worker threads. The callback must be
+     * thread-safe and return promptly. The bytes are valid only for the
+     * duration of this callback; copy before returning.
      */
     const uint8_t *bytes,
     size_t length
@@ -656,6 +659,26 @@ typedef void (*ha_repository_result_callback)(
 );
 
 /*
+ * Active-task snapshots emit status 0 for each task, status 1 exactly once on
+ * completion, and status -1 for failure. state is 0 for queued or 1 for
+ * running. session_id is NULL/zero until a new task creates its session; all
+ * other item pointers are non-NULL. Error is populated only for status -1.
+ * Buffers are callback-scoped UTF-8 and must be copied before returning.
+ * Callbacks run serially on the engine command worker, not the caller thread.
+ */
+typedef void (*ha_task_snapshot_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *task_id,
+    size_t task_id_length,
+    const uint8_t *session_id,
+    size_t session_id_length,
+    int32_t state,
+    const uint8_t *error,
+    size_t error_length
+);
+
+/*
  * Delivery APIs never invoke a shell and never return credentials, command
  * output, or authenticated remote URLs. Preview confirmations are random,
  * one-shot, in-memory tokens bound to the canonical repository, exact
@@ -732,6 +755,48 @@ enum ha_repository_diff_kind {
     HA_REPOSITORY_DIFF_STAGED = 1
 };
 
+/*
+ * Session-page callbacks use status 0 for a turn, 1 for terminal success, and
+ * -1 for terminal failure. has_older/has_newer are meaningful only on terminal
+ * success. Missing optional strings have length zero. Usage values are all -1
+ * when a turn has no provider usage. response_items_json is the JSON array
+ * from version 1 of the full-fidelity session-transfer format; it remains JSON
+ * because provider response items are deliberately extensible. Every buffer is
+ * callback-scoped and must be copied before returning. Callbacks run serially
+ * on a background worker, never the caller or main thread.
+ */
+typedef void (*ha_session_turn_callback)(
+    void *context, int32_t status, int64_t turn_index,
+    const uint8_t *occurred_at, size_t occurred_at_length,
+    const uint8_t *user_text, size_t user_text_length,
+    const uint8_t *assistant_text, size_t assistant_text_length,
+    const uint8_t *turn_error, size_t turn_error_length,
+    const uint8_t *response_id, size_t response_id_length,
+    const uint8_t *transcript_effect, size_t transcript_effect_length,
+    const uint8_t *response_items_json, size_t response_items_json_length,
+    int64_t input_tokens, int64_t output_tokens, int64_t cached_tokens,
+    int32_t has_older, int32_t has_newer,
+    const uint8_t *error, size_t error_length
+);
+
+/* Session transfer results use status 0 for success and -1 for failure. */
+typedef void (*ha_session_transfer_result_callback)(
+    void *context, int32_t status,
+    const uint8_t *session_id, size_t session_id_length,
+    const uint8_t *error, size_t error_length
+);
+
+/*
+ * Export callbacks use status 0 for a document chunk, 1 for terminal success,
+ * and -1 for terminal failure. Chunks concatenate to one version 1
+ * haskell-agent.session-transfer JSON document. Buffers are callback-scoped.
+ */
+typedef void (*ha_session_export_callback)(
+    void *context, int32_t status,
+    const uint8_t *bytes, size_t length,
+    const uint8_t *error, size_t error_length
+);
+
 /* Runtime calls are process-global and reference counted. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
@@ -770,6 +835,35 @@ int32_t ha_engine_send_json(
     const uint8_t *bytes,
     size_t length
 );
+/*
+ * Queue cancellation for a copied, non-empty UTF-8 task ID. Return 0 means
+ * the command was accepted, not that the task necessarily still exists.
+ * Terminal task outcome continues through ha_event_callback. Returns 1 for a
+ * null engine, 2 for an invalid task ID, and 3 for an internal failure.
+ */
+int32_t ha_engine_cancel_task(
+    void *engine,
+    const uint8_t *task_id,
+    size_t task_id_length
+);
+/*
+ * List currently queued and running tasks. Returns 0 when accepted, 1 for a
+ * null engine, 2 for a null callback, and 3 for an internal failure. An
+ * accepted request receives exactly one terminal callback unless destruction
+ * has begun. Calls must be serialized with ha_engine_destroy.
+ */
+int32_t ha_engine_list_tasks(
+    void *engine,
+    ha_task_snapshot_callback callback,
+    void *context
+);
+/*
+ * Set the engine-wide cross-session concurrency limit for future scheduling.
+ * Existing tasks are not cancelled when lowering it. Valid limits are 1...32;
+ * the default is 3. Returns 0 when accepted, 1 for a null engine, 2 for an
+ * invalid limit, and 3 for an internal failure.
+ */
+int32_t ha_engine_set_task_limit(void *engine, size_t limit);
 /*
  * Search active and archived (but not deleted) conversations. The query is
  * copied before return and limit is clamped to 1...100. Returns 0 when
@@ -997,6 +1091,36 @@ int32_t ha_repository_check_start(
 
 void ha_repository_check_cancel(void *check);
 void ha_repository_check_destroy(void *check);
+
+/*
+ * Typed session operations copy all inputs before returning and invoke exactly
+ * one terminal callback after returning 0. A return of 2 rejects a null/empty
+ * required input, invalid UTF-8 session id, invalid index/radius, null
+ * callback, or import larger than 512 MiB; no callback follows a rejected
+ * call. Malformed import documents, including invalid UTF-8, report callback
+ * failure after acceptance. Radius is clamped to 500.
+ *
+ * Fork copies through the inclusive durable turn index into a fresh session;
+ * the source is immutable. Import always remaps the source id to a fresh id.
+ */
+int32_t ha_session_load_around(
+    const uint8_t *session_id, size_t session_id_length,
+    int64_t center_turn_index, int32_t radius,
+    ha_session_turn_callback callback, void *context
+);
+int32_t ha_session_fork(
+    const uint8_t *session_id, size_t session_id_length,
+    int64_t through_turn_index,
+    ha_session_transfer_result_callback callback, void *context
+);
+int32_t ha_session_export(
+    const uint8_t *session_id, size_t session_id_length,
+    ha_session_export_callback callback, void *context
+);
+int32_t ha_session_import(
+    const uint8_t *bytes, size_t length,
+    ha_session_transfer_result_callback callback, void *context
+);
 
 /*
  * Account operations use typed callbacks. Callback buffers are valid only

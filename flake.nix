@@ -48,6 +48,17 @@
                     ];
                 };
 
+                agentRuntimeDaemonSource = nix-filter.lib {
+                    root = ./packages/agent-runtime-daemon;
+                    include = [
+                        "app"
+                        "src"
+                        "test"
+                        "agent-runtime-daemon.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentResponsesTypesSource = nix-filter.lib {
                     root = ./packages/agent-responses-types;
                     include = [
@@ -320,6 +331,11 @@
                             {
                                 src = agentProcessSource;
                             });
+                        agent-runtime-daemon = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-runtime-daemon/package.nix { })
+                            {
+                                src = agentRuntimeDaemonSource;
+                            });
                         agent-responses-types = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
                             src = agentResponsesTypesSource;
                         });
@@ -402,6 +418,8 @@
                 productionHaskellPackages = mkHaskellPackages false;
                 agentCorePackage = productionHaskellPackages.agent-core;
                 agentProcessPackage = productionHaskellPackages.agent-process;
+                agentRuntimeDaemonPackage =
+                    productionHaskellPackages.agent-runtime-daemon;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = productionHaskellPackages.agent-grok-build-dialect;
                 agentSyntaxPackage = productionHaskellPackages.agent-syntax;
@@ -416,6 +434,8 @@
                 agentStorePackage = productionHaskellPackages.agent-store;
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
+                agentRuntimeDaemonExecutable =
+                    pkgs.haskell.lib.justStaticExecutables agentRuntimeDaemonPackage;
                 agentCliExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
                         (old: {
@@ -616,6 +636,7 @@
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-process = agentProcessPackage;
+                packages.agent-runtime-daemon = agentRuntimeDaemonExecutable;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
                 packages.agent-syntax = agentSyntaxPackage;
@@ -639,6 +660,10 @@
                     drv = self.packages.${system}.agent-telegram;
                     exePath = "/bin/agent-telegram";
                 };
+                apps.agent-runtime-daemon = flake-utils.lib.mkApp {
+                    drv = self.packages.${system}.agent-runtime-daemon;
+                    exePath = "/bin/agent-runtime-daemon";
+                };
                 apps.agent-openai-login = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-openai-login;
                     exePath = "/bin/agent-openai-login";
@@ -650,6 +675,7 @@
                         packages.agent-telegram
                         packages.agent-core
                         packages.agent-process
+                        packages.agent-runtime-daemon
                         packages.agent-codex-dialect
                         packages.agent-grok-build-dialect
                         packages.agent-syntax
@@ -691,6 +717,8 @@
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;
                     agent-process = haskellPackages.agent-process;
+                    agent-runtime-daemon =
+                        haskellPackages.agent-runtime-daemon;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;
                     agent-grok-build-dialect = haskellPackages.agent-grok-build-dialect;
                     agent-syntax = haskellPackages.agent-syntax;

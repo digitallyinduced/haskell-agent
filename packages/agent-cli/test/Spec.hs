@@ -37,6 +37,7 @@ import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
 import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
 import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
 import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
+import qualified Agent.CLI.MacOS.TaskSchedulerSpec as TaskSchedulerSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
@@ -124,6 +125,7 @@ main = hspec do
     BridgeFFISpec.spec
     BrowserBridgeFFISpec.spec
     BridgeSpec.spec
+    TaskSchedulerSpec.spec
     MarkdownSpec.spec
     McpAdminSpec.spec
     McpManagerSpec.spec

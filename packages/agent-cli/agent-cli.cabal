@@ -269,6 +269,7 @@ foreign-library haskell-agent-bridge
     install-includes: HaskellAgentBridge.h
     ghc-options:      -threaded
     build-depends:    agent-cli
+                    , agent-runtime-daemon
                     , agent-core >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
@@ -364,6 +365,7 @@ test-suite agent-cli-test
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.BridgeHeaderSpec
                     , Agent.CLI.MacOS.BridgeFFISpec
+                    , Agent.CLI.MacOS.TaskSchedulerSpec
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
@@ -443,6 +445,7 @@ test-suite agent-cli-test
                     , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
+                    , agent-runtime-daemon
                     , agent-core
                     , agent-codex-dialect
                     , agent-grok-build-dialect
@@ -479,6 +482,7 @@ test-suite agent-cli-test
     if os(darwin)
         c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
                     , test/cbits/HaskellAgentBridgeImageSmoke.c
+                    , test/cbits/HaskellAgentBridgeTaskSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
         other-modules: Agent.CLI.MacOS.Bridge
 

@@ -74,6 +74,10 @@ import Agent.CLI.MacOS.EngineMailbox
     , newEngineMailboxIO
     , readEngineCommand
     )
+import Agent.Runtime.Daemon.TaskScheduler
+    ( TaskIdentity(..)
+    , selectRunnableTasks
+    )
 import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.CLI.Login
     ( AccountBilling(..)
@@ -153,20 +157,28 @@ import qualified Agent.CLI.RepositoryReview as RepositoryReview
 import Agent.CLI.Options (parseEffort)
 import Agent.CLI.Session
     ( SessionMeta(..)
+    , SessionTurn(..)
+    , SessionTurnPage(..)
+    , SessionTransferEnvelope
+    , TranscriptEffect(..)
     , deleteSession
+    , forkSessionAtTurn
+    , importSessionTransferRemapped
     , listArchivedSessionIds
     , listSessions
+    , loadSessionHistoryTurnsAround
     , loadSessionMeta
     , renameSession
     , setSessionArchived
     , sessionsRoot
+    , streamSessionTransfer
     )
 import Agent.CLI.SessionAdmin
     ( loadSessionPageJSON
     , managedPostgresConfigForHome
     , sessionSummaryWithStatusJSON
     )
-import Agent.Loop (ImageAttachment(..), LoopEvent(..))
+import Agent.Loop (ImageAttachment(..), LoopEvent(..), TokenUsage(..))
 import Agent.Dialect (dialectSlug)
 import Agent.Provider (Provider(..), providerSlug, parseProvider, BillingMode(..))
 import Agent.Store.Postgres
@@ -176,6 +188,7 @@ import Agent.Store.Postgres
     , openStore
     , trustedPool
     )
+import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Custom
     ( CatalogColumn(..)
     , CatalogDefinition(..)
@@ -200,7 +213,6 @@ import Control.Concurrent.Async
     , cancel
     , mapConcurrently
     , waitCatch
-    , waitCatchSTM
     , withAsync
     )
 import Control.Concurrent.MVar
@@ -213,6 +225,7 @@ import Control.Concurrent.MVar
     , readMVar
     , withMVar
     , tryReadMVar
+    , takeMVar
     )
 import Control.Concurrent.STM
     ( TMVar
@@ -221,7 +234,6 @@ import Control.Concurrent.STM
     , modifyTVar'
     , newEmptyTMVarIO
     , newTVarIO
-    , orElse
     , readTVar
     , readTVarIO
     , takeTMVar
@@ -245,7 +257,9 @@ import Control.Exception.Safe
     , uninterruptibleMask_
     )
 import Control.Monad
-    ( forM_
+    ( foldM
+    , filterM
+    , forM_
     , void
     , when
     )
@@ -267,8 +281,12 @@ import Data.IORef
     )
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int64)
+import Data.Foldable (toList)
+import Data.List (partition)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
@@ -293,7 +311,6 @@ import Foreign
     , peek
     , poke
     , plusPtr
-    , poke
     , peekByteOff
     , sizeOf
     )
@@ -324,6 +341,11 @@ decodeInput pointer length
     | pointer == nullPtr || length == 0 = pure ""
     | otherwise = TextEncoding.decodeUtf8 <$> BS.packCStringLen
         (castPtr pointer, fromIntegral length)
+
+decodeUtf8Input :: Ptr Word8 -> Word64 -> IO (Either () Text)
+decodeUtf8Input pointer length =
+    first (const ()) . TextEncoding.decodeUtf8'
+        <$> BS.packCStringLen (castPtr pointer, fromIntegral length)
 
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
@@ -506,6 +528,40 @@ type RepositoryCheckOutputCallback =
 type RepositoryCheckExitCallback =
     Ptr () -> CInt -> CInt -> CString -> CSize -> IO ()
 
+-- Status is 0 for an active task, 1 for completion, and -1 for failure.
+-- State is 0 for queued and 1 for running. Every pointer is callback-scoped.
+type TaskSnapshotCallback =
+    Ptr () -> CInt
+    -> Ptr Word8 -> CSize -- task id
+    -> Ptr Word8 -> CSize -- session id, optional
+    -> CInt
+    -> Ptr Word8 -> CSize -- error
+    -> IO ()
+
+-- Session page status is 0 for a turn, 1 for completion, and -1 for failure.
+-- Text buffers are callback-scoped UTF-8.
+type SessionTurnCallback =
+    Ptr () -> CInt -> Int64
+    -> CString -> CSize -- occurred at
+    -> CString -> CSize -- user
+    -> CString -> CSize -- assistant
+    -> CString -> CSize -- turn error
+    -> CString -> CSize -- response id
+    -> CString -> CSize -- transcript effect
+    -> CString -> CSize -- provider-extensible response items JSON
+    -> CLLong -> CLLong -> CLLong -- usage; -1 means absent
+    -> CInt -> CInt -- has older/newer on completion
+    -> CString -> CSize -- error
+    -> IO ()
+
+-- Transfer result status is 0 for success and -1 for failure.
+type SessionTransferResultCallback =
+    Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
+
+-- Export status is 0 for a chunk, 1 for completion, and -1 for failure.
+type SessionExportCallback =
+    Ptr () -> CInt -> Ptr Word8 -> CSize -> CString -> CSize -> IO ()
+
 foreign import ccall "dynamic"
     invokeEventCallback :: FunPtr EventCallback -> EventCallback
 
@@ -522,8 +578,8 @@ foreign import ccall "dynamic"
         :: FunPtr AccountResultCallback -> AccountResultCallback
 
 foreign import ccall "dynamic"
-    invokeSessionResultCallback
-        :: FunPtr SessionResultCallback -> SessionResultCallback
+    invokeSessionTransferResultCallback
+        :: FunPtr SessionTransferResultCallback -> SessionTransferResultCallback
 
 foreign import ccall "dynamic"
     invokeAccountOAuthStartCallback
@@ -627,6 +683,22 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeRepositoryCheckExitCallback
         :: FunPtr RepositoryCheckExitCallback -> RepositoryCheckExitCallback
+
+foreign import ccall "dynamic"
+    invokeTaskSnapshotCallback
+        :: FunPtr TaskSnapshotCallback -> TaskSnapshotCallback
+
+foreign import ccall "dynamic"
+    invokeSessionTurnCallback
+        :: FunPtr SessionTurnCallback -> SessionTurnCallback
+
+foreign import ccall "dynamic"
+    invokeSessionResultCallback
+        :: FunPtr SessionResultCallback -> SessionResultCallback
+
+foreign import ccall "dynamic"
+    invokeSessionExportCallback
+        :: FunPtr SessionExportCallback -> SessionExportCallback
 
 data BridgeRequest = BridgeRequest
     { requestId :: !Text
@@ -768,6 +840,11 @@ data EngineCommand
     | EngineSessionMutation
         !SessionMutation !(FunPtr SessionResultCallback) !(Ptr ())
     | EngineMcpRestart !Word64 !Text !(FunPtr McpResultCallback) !(Ptr ())
+    | EngineCancelTask !Text
+    | EngineTaskSnapshot !(FunPtr TaskSnapshotCallback) !(Ptr ())
+    | EngineSetTaskLimit !Int
+    | EngineTaskSession !Text !Text
+    | EngineTaskFinished !Text !TaskResult
     | EngineStop
 
 data SessionMutation
@@ -793,6 +870,8 @@ newtype BrowserHost = BrowserHost
 
 data TurnControl = TurnControl
     { turnControlId :: !Text
+    , turnControlSessionId :: !(TVar (Maybe Text))
+    , turnControlCancelled :: !(TVar Bool)
     , turnControlCancel :: !(TVar (IO ()))
     , turnControlApprovals
         :: !(TVar (Map Text (TMVar PermissionChoice)))
@@ -806,9 +885,29 @@ data TurnOutcome = TurnOutcome
     , turnOutcomeError :: !(Maybe Text)
     }
 
-data ActiveExit
-    = ActiveContinue
-    | ActiveStop
+data TaskResult
+    = TaskOutcome !TurnOutcome
+    | TaskFailure !Text
+
+data PendingTurn = PendingTurn
+    { pendingTurnStart :: !TurnStart
+    , pendingTurnImages :: ![ImageAttachment]
+    }
+
+data RunningTurn = RunningTurn
+    { runningTurnControl :: !TurnControl
+    , runningTurnWorker :: !(Async ())
+    }
+
+data TaskSupervisor = TaskSupervisor
+    { supervisorLimit :: !Int
+    , supervisorPending :: !(Seq PendingTurn)
+    , supervisorRunning :: !(Map Text RunningTurn)
+    , supervisorKnownTaskIds :: !(Set.Set Text)
+    }
+
+defaultTaskLimit :: Int
+defaultTaskLimit = 3
 
 foreign export ccall ha_engine_create
     :: FunPtr EventCallback -> Ptr () -> IO (Ptr ())
@@ -821,6 +920,15 @@ foreign export ccall ha_engine_stage_turn_images
 
 foreign export ccall ha_engine_set_browser_callback
     :: Ptr () -> FunPtr BrowserCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_cancel_task
+    :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
+
+foreign export ccall ha_engine_list_tasks
+    :: Ptr () -> FunPtr TaskSnapshotCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_set_task_limit
+    :: Ptr () -> CSize -> IO CInt
 
 foreign export ccall ha_engine_destroy
     :: Ptr () -> IO ()
@@ -836,6 +944,22 @@ foreign export ccall ha_engine_session_delete
 foreign export ccall ha_engine_session_archive
     :: Ptr () -> Ptr Word8 -> CSize -> CInt
     -> FunPtr SessionResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_session_load_around
+    :: Ptr Word8 -> CSize -> Int64 -> CInt
+    -> FunPtr SessionTurnCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_session_fork
+    :: Ptr Word8 -> CSize -> Int64
+    -> FunPtr SessionTransferResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_session_export
+    :: Ptr Word8 -> CSize
+    -> FunPtr SessionExportCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_session_import
+    :: Ptr Word8 -> CSize
+    -> FunPtr SessionTransferResultCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_accounts_list
     :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
@@ -2438,6 +2562,230 @@ foreign export ccall ha_data_rows_load
     :: Ptr Word8 -> CSize -> CInt -> Ptr Word8 -> CSize
     -> Int64 -> CInt -> FunPtr DataRowsCallback -> Ptr () -> IO CInt
 
+ha_session_load_around
+    :: Ptr Word8 -> CSize -> Int64 -> CInt
+    -> FunPtr SessionTurnCallback -> Ptr () -> IO CInt
+ha_session_load_around sessionBytes (CSize sessionLength) center radius
+        callback context
+    | callback == nullFunPtr = pure 2
+    | sessionBytes == nullPtr || sessionLength == 0 = pure 2
+    | toInteger sessionLength > toInteger (maxBound :: Int) = pure 2
+    | center < 0 || radius < 0 = pure 2
+    | otherwise = do
+        decoded <- tryAny (decodeUtf8Input sessionBytes sessionLength)
+        case decoded of
+            Left _ -> pure 3
+            Right (Left ()) -> pure 2
+            Right (Right sessionId) -> do
+                _ <- forkIO do
+                    result <- tryAny $ withNativeSessionStore \pool root ->
+                        loadSessionHistoryTurnsAround
+                            pool root sessionId center (fromIntegral radius)
+                    case result of
+                        Left exception ->
+                            sessionTurnFailure callback context
+                                (Text.pack (show exception))
+                        Right (Left err) ->
+                            sessionTurnFailure callback context err
+                        Right (Right page) -> do
+                            forM_ page.pageTurns \(turnIndex, turn) ->
+                                emitSessionTurn callback context turnIndex turn
+                            sessionTurnTerminal callback context
+                                page.pageHasOlder page.pageHasNewer
+                pure 0
+
+ha_session_fork
+    :: Ptr Word8 -> CSize -> Int64
+    -> FunPtr SessionTransferResultCallback -> Ptr () -> IO CInt
+ha_session_fork sessionBytes (CSize sessionLength) throughIndex callback context
+    | callback == nullFunPtr = pure 2
+    | sessionBytes == nullPtr || sessionLength == 0 || throughIndex < 0 = pure 2
+    | toInteger sessionLength > toInteger (maxBound :: Int) = pure 2
+    | otherwise = do
+        decoded <- tryAny (decodeUtf8Input sessionBytes sessionLength)
+        case decoded of
+            Left _ -> pure 3
+            Right (Left ()) -> pure 2
+            Right (Right sessionId) -> do
+                _ <- forkIO do
+                    result <- tryAny $ withNativeSessionStore \pool root ->
+                        forkSessionAtTurn pool root sessionId throughIndex
+                    completeSessionResult callback context result
+                pure 0
+
+ha_session_export
+    :: Ptr Word8 -> CSize
+    -> FunPtr SessionExportCallback -> Ptr () -> IO CInt
+ha_session_export sessionBytes (CSize sessionLength) callback context
+    | callback == nullFunPtr = pure 2
+    | sessionBytes == nullPtr || sessionLength == 0 = pure 2
+    | toInteger sessionLength > toInteger (maxBound :: Int) = pure 2
+    | otherwise = do
+        decoded <- tryAny (decodeUtf8Input sessionBytes sessionLength)
+        case decoded of
+            Left _ -> pure 3
+            Right (Left ()) -> pure 2
+            Right (Right sessionId) -> do
+                _ <- forkIO do
+                    result <- tryAny $ withNativeSessionStore \pool root ->
+                        streamSessionTransfer pool root sessionId
+                            (emitSessionExportChunk callback context)
+                    case result of
+                        Left exception ->
+                            sessionExportFailure callback context
+                                (Text.pack (show exception))
+                        Right (Left err) ->
+                            sessionExportFailure callback context err
+                        Right (Right ()) ->
+                            invokeSessionExportCallback callback
+                                context 1 nullPtr 0 nullPtr 0
+                pure 0
+
+ha_session_import
+    :: Ptr Word8 -> CSize
+    -> FunPtr SessionTransferResultCallback -> Ptr () -> IO CInt
+ha_session_import bytes (CSize length) callback context
+    | callback == nullFunPtr = pure 2
+    | bytes == nullPtr || length == 0 = pure 2
+    | toInteger length > 512 * 1024 * 1024 = pure 2
+    | otherwise = do
+        payload <- BS.packCStringLen (castPtr bytes, fromIntegral length)
+        _ <- forkIO do
+            result <- tryAny $
+                case TextEncoding.decodeUtf8' payload of
+                    Left _ ->
+                        pure
+                            (Left
+                                "invalid session transfer: invalid UTF-8")
+                    Right _ ->
+                        case
+                            (Aeson.eitherDecodeStrict' payload
+                                :: Either String SessionTransferEnvelope)
+                        of
+                            Left err ->
+                                pure
+                                    (Left
+                                        ("invalid session transfer: "
+                                            <> Text.pack err))
+                            Right envelope ->
+                                withNativeSessionStore \pool root ->
+                                    importSessionTransferRemapped
+                                        pool root Nothing envelope
+            completeSessionResult callback context result
+        pure 0
+
+withNativeSessionStore
+    :: (StorePool -> OsPath -> IO (Either Text a))
+    -> IO (Either Text a)
+withNativeSessionStore action = do
+    home <- getHomeDirectory
+    config <- managedPostgresConfigForHome home
+    openStore config >>= \case
+        Left err -> pure (Left (renderStoreError err))
+        Right opened ->
+            bracket (pure opened) closeStore \store ->
+                action (trustedPool store) (sessionsRoot home)
+
+emitSessionTurn
+    :: FunPtr SessionTurnCallback
+    -> Ptr ()
+    -> Int64
+    -> SessionTurn
+    -> IO ()
+emitSessionTurn callback context turnIndex turn =
+    withText (Text.pack (show turn.turnAt)) \occurred occurredLength ->
+    withText turn.turnUserText \user userLength ->
+    withOptionalText turn.turnAssistantText \assistant assistantLength ->
+    withOptionalText turn.turnError \turnError turnErrorLength ->
+    withOptionalText turn.turnResponseId \response responseLength ->
+    withText (transcriptEffectName turn.turnEffect) \effect effectLength ->
+    BS.useAsCStringLen
+        (LBS.toStrict (Aeson.encode turn.turnItems))
+        \(items, itemsLength) -> do
+            let (inputTokens', outputTokens', cachedTokens') =
+                    maybe (-1, -1, -1)
+                        (\usage ->
+                            ( fromIntegral usage.inputTokens
+                            , fromIntegral usage.outputTokens
+                            , fromIntegral usage.cachedTokens
+                            ))
+                        turn.turnUsage
+            invokeSessionTurnCallback callback context 0 turnIndex
+                occurred occurredLength
+                user userLength
+                assistant assistantLength
+                turnError turnErrorLength
+                response responseLength
+                effect effectLength
+                items (fromIntegral itemsLength)
+                inputTokens' outputTokens' cachedTokens'
+                0 0 nullPtr 0
+
+sessionTurnTerminal
+    :: FunPtr SessionTurnCallback -> Ptr () -> Bool -> Bool -> IO ()
+sessionTurnTerminal callback context hasOlder hasNewer =
+    invokeSessionTurnCallback callback context 1 (-1)
+        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+        (-1) (-1) (-1)
+        (if hasOlder then 1 else 0)
+        (if hasNewer then 1 else 0)
+        nullPtr 0
+
+sessionTurnFailure
+    :: FunPtr SessionTurnCallback -> Ptr () -> Text -> IO ()
+sessionTurnFailure callback context err =
+    withText err \errorPointer errorLength ->
+        invokeSessionTurnCallback callback context (-1) (-1)
+            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            nullPtr 0 (-1) (-1) (-1) 0 0 errorPointer errorLength
+
+transcriptEffectName :: TranscriptEffect -> Text
+transcriptEffectName = \case
+    TranscriptAppend -> "append"
+    TranscriptReplace -> "replace"
+    TranscriptReset -> "reset"
+
+completeSessionResult
+    :: FunPtr SessionTransferResultCallback
+    -> Ptr ()
+    -> Either SomeException (Either Text Text)
+    -> IO ()
+completeSessionResult callback context = \case
+    Left exception ->
+        emitSessionResult callback context (-1) Nothing
+            (Just (Text.pack (show exception)))
+    Right (Left err) ->
+        emitSessionResult callback context (-1) Nothing (Just err)
+    Right (Right sessionId) ->
+        emitSessionResult callback context 0 (Just sessionId) Nothing
+
+emitSessionResult
+    :: FunPtr SessionTransferResultCallback
+    -> Ptr ()
+    -> CInt
+    -> Maybe Text
+    -> Maybe Text
+    -> IO ()
+emitSessionResult callback context status sessionId err =
+    withOptionalText sessionId \sessionPointer sessionLength ->
+    withOptionalText err \errorPointer errorLength ->
+        invokeSessionTransferResultCallback callback context status
+            sessionPointer sessionLength errorPointer errorLength
+
+emitSessionExportChunk
+    :: FunPtr SessionExportCallback -> Ptr () -> BS.ByteString -> IO ()
+emitSessionExportChunk callback context chunk =
+    BS.useAsCStringLen chunk \(pointer, length) ->
+        invokeSessionExportCallback callback context 0
+            (castPtr pointer) (fromIntegral length) nullPtr 0
+
+sessionExportFailure
+    :: FunPtr SessionExportCallback -> Ptr () -> Text -> IO ()
+sessionExportFailure callback context err =
+    withText err \pointer length ->
+        invokeSessionExportCallback callback context (-1)
+            nullPtr 0 pointer length
+
 ha_learned_skills_list
     :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
 ha_learned_skills_list cwdBytes (CSize cwdLength) callback context
@@ -3444,6 +3792,66 @@ enqueueSessionMutation pointer mutation callback context
             Right False -> 3
             Right True -> 0
 
+ha_engine_cancel_task
+    :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
+ha_engine_cancel_task pointer taskID (CSize taskIDLength)
+    | pointer == nullPtr = pure 1
+    | taskID == nullPtr || taskIDLength == 0 = pure 2
+    | otherwise = do
+        accepted <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            taskIDBytes <- BS.packCStringLen
+                (castPtr taskID, fromIntegral taskIDLength)
+            case TextEncoding.decodeUtf8' taskIDBytes of
+                Left _ -> pure Nothing
+                Right taskIDText
+                    | Text.null taskIDText -> pure Nothing
+                    | otherwise -> Just <$> atomically
+                        (acceptEngineCommand
+                            engine.engineCommands
+                            (EngineCancelTask taskIDText))
+        pure $ case accepted of
+            Left _ -> 3
+            Right Nothing -> 2
+            Right (Just False) -> 3
+            Right (Just True) -> 0
+
+ha_engine_list_tasks
+    :: Ptr () -> FunPtr TaskSnapshotCallback -> Ptr () -> IO CInt
+ha_engine_list_tasks pointer callback context
+    | pointer == nullPtr = pure 1
+    | callback == nullFunPtr = pure 2
+    | otherwise = do
+        accepted <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            atomically $ acceptEngineCommand
+                engine.engineCommands
+                (EngineTaskSnapshot callback context)
+        pure $ case accepted of
+            Left _ -> 3
+            Right False -> 3
+            Right True -> 0
+
+ha_engine_set_task_limit :: Ptr () -> CSize -> IO CInt
+ha_engine_set_task_limit pointer rawLimit
+    | pointer == nullPtr = pure 1
+    | limit < 1 || limit > 32 = pure 2
+    | otherwise = do
+        accepted <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            atomically $ acceptEngineCommand
+                engine.engineCommands
+                (EngineSetTaskLimit limit)
+        pure $ case accepted of
+            Left _ -> 3
+            Right False -> 3
+            Right True -> 0
+  where
+    limit = fromIntegral rawLimit
+
 ha_engine_destroy :: Ptr () -> IO ()
 ha_engine_destroy pointer
     | pointer == nullPtr = pure ()
@@ -3469,10 +3877,12 @@ workerLifecycle callback context config root commands stagedImages browser =
     (do
         store <- newMVar Nothing
         processRuntime <- newNativeProcessRuntime root
+        workerRegistry <- newTVarIO Map.empty
         let cleanup =
-                closeNativeProcessRuntime processRuntime
+                shutdownRunningTurns workerRegistry
+                    `finally` closeNativeProcessRuntime processRuntime
                     `finally` closeEngineStore store
-        idleLoop
+        supervisorLoop
             callback
             context
             config
@@ -3482,6 +3892,13 @@ workerLifecycle callback context config root commands stagedImages browser =
             commands
             stagedImages
             browser
+            workerRegistry
+            TaskSupervisor
+                { supervisorLimit = defaultTaskLimit
+                , supervisorPending = Seq.empty
+                , supervisorRunning = Map.empty
+                , supervisorKnownTaskIds = Set.empty
+                }
             `finally` cleanup)
         `finally` cancelPendingMcpRestarts commands
 
@@ -3497,7 +3914,7 @@ cancelPendingMcpRestarts commands = do
                     invokeMcpResultCallback callback context (-1) expected
         _ -> pure ()
 
-idleLoop
+supervisorLoop
     :: FunPtr EventCallback
     -> Ptr ()
     -> ManagedPostgresConfig
@@ -3507,186 +3924,406 @@ idleLoop
     -> EngineMailbox EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
+    -> TVar (Map Text RunningTurn)
+    -> TaskSupervisor
     -> IO ()
-idleLoop callback context config store root processRuntime commands stagedImages browser =
-    atomically (readEngineCommand commands) >>= \case
-        EngineStop -> pure ()
+supervisorLoop
+        callback context config store root processRuntime commands stagedImages browser
+        workerRegistry =
+    go
+  where
+    go supervisor0 = do
+        supervisor <- startRunnableTasks supervisor0
+        atomically (readEngineCommand commands) >>= handleCommand supervisor
+
+    handleCommand supervisor = \case
+        EngineStop ->
+            shutdownSupervisor supervisor
         EngineSearch query limit searchCallback searchContext -> do
             runConversationSearch
                 config store query limit searchCallback searchContext
-            continue
+            go supervisor
         EngineSessionMutation mutation resultCallback resultContext -> do
             runSessionMutation
                 config store root mutation resultCallback resultContext
-            continue
+            go supervisor
         EngineMcpRestart expected name resultCallback resultContext -> do
-            restarted <- tryAny do
-                home <- getHomeDirectory
-                mcpAdminTry
-                    (restartMcpAdminServer home expected name
-                        (restartNativeMcpRuntime processRuntime))
-            case restarted of
-                Left exception ->
-                    withText (Text.pack (show exception)) $
-                        invokeMcpResultCallback resultCallback
-                            resultContext (-1) expected
-                Right (Left err) ->
-                    emitMcpResult resultCallback resultContext
-                        (Left err
-                            :: Either McpAdminError (McpAdminSnapshot ()))
-                Right (Right snapshot) ->
-                    invokeMcpResultCallback resultCallback resultContext
-                        0 snapshot.mcpAdminRevision nullPtr 0
-            continue
-        EngineRequest request
-            | request.requestMethod == "turn.start" ->
-                case (parseParams request
-                    :: Either Text TurnStart) of
-                    Left err -> do
-                        atomically $ modifyTVar' stagedImages
-                            (Map.delete request.requestId)
-                        sendEvent callback context
-                            (failureEvent request.requestId err)
-                        continue
-                    Right start -> do
-                        images <- atomically $ do
-                            staged <- readTVar stagedImages
-                            writeTVar stagedImages
-                                (Map.delete start.turnStartId staged)
-                            pure (Map.findWithDefault [] start.turnStartId staged)
-                        nativeBrowserTools <- browserToolsWhenEnabled browser
-                        control <- newTurnControl start.turnStartId
-                        sendEvent callback context $
-                            successEvent request.requestId $
-                                Aeson.object
-                                    [ "turnId" Aeson..= start.turnStartId
-                                    ]
-                        sendTurnStatus
-                            callback
-                            context
-                            start.turnStartId
-                            (if start.turnStartWorktree
-                                then "Creating worktree…"
-                                else "Starting…")
-                        withAsync
-                            (runNativeTurn
-                                callback
-                                context
-                                processRuntime
-                                control
-                                nativeBrowserTools
-                                start
-                                images)
-                            \running ->
-                                activeLoop
-                                    callback
-                                    context
-                                    config
-                                    store
-                                    root
-                                    commands
-                                    control
-                                    running >>= \case
-                                        ActiveContinue -> continue
-                                        ActiveStop -> pure ()
-            | request.requestMethod `elem`
-                ["turn.cancel", "approval.resolve"] -> do
+            if Map.null supervisor.supervisorRunning
+                then do
+                    restarted <- tryAny do
+                        home <- getHomeDirectory
+                        mcpAdminTry
+                            (restartMcpAdminServer home expected name
+                                (restartNativeMcpRuntime processRuntime))
+                    case restarted of
+                        Left exception ->
+                            withText (Text.pack (show exception)) $
+                                invokeMcpResultCallback resultCallback
+                                    resultContext (-1) expected
+                        Right (Left err) ->
+                            emitMcpResult resultCallback resultContext
+                                (Left err
+                                    :: Either
+                                        McpAdminError
+                                        (McpAdminSnapshot ()))
+                        Right (Right snapshot) ->
+                            invokeMcpResultCallback
+                                resultCallback
+                                resultContext
+                                0
+                                snapshot.mcpAdminRevision
+                                nullPtr
+                                0
+                else
+                    withText "cannot restart MCP while tasks are active" $
+                        invokeMcpResultCallback resultCallback resultContext
+                            (-1) expected
+            go supervisor
+        EngineCancelTask taskId -> do
+            next <- cancelTaskById supervisor taskId
+            go next
+        EngineTaskSnapshot snapshotCallback snapshotContext -> do
+            sendTaskSnapshot snapshotCallback snapshotContext supervisor
+            go supervisor
+        EngineSetTaskLimit limit ->
+            go supervisor { supervisorLimit = limit }
+        EngineTaskSession taskId sessionId -> do
+            case Map.lookup taskId supervisor.supervisorRunning of
+                Nothing -> pure ()
+                Just running -> atomically $
+                    writeTVar
+                        running.runningTurnControl.turnControlSessionId
+                        (Just sessionId)
+            go supervisor
+        EngineTaskFinished taskId outcome -> do
+            case Map.lookup taskId supervisor.supervisorRunning of
+                Nothing -> pure ()
+                Just running -> do
+                    _ <- waitCatch running.runningTurnWorker
+                    sessionId <- readTVarIO
+                        running.runningTurnControl.turnControlSessionId
+                    cancelled <- readTVarIO
+                        running.runningTurnControl.turnControlCancelled
+                    if cancelled
+                        then do
+                            sendTaskState taskId sessionId "cancelled"
+                            sendEvent callback context $
+                                turnFailedEvent taskId "turn cancelled"
+                        else do
+                            sendTaskState
+                                taskId
+                                (taskResultSessionId sessionId outcome)
+                                (taskResultState outcome)
+                            finishTurnEvent callback context taskId outcome
+            atomically $ modifyTVar' workerRegistry (Map.delete taskId)
+            go supervisor
+                { supervisorRunning =
+                    Map.delete taskId supervisor.supervisorRunning
+                }
+        EngineRequest request ->
+            handleEngineRequest supervisor request >>= go
+
+    handleEngineRequest supervisor request
+        | request.requestMethod == "turn.start" =
+            enqueueTurn supervisor request
+        | request.requestMethod == "turn.cancel" =
+            case (parseParams request :: Either Text TurnReference) of
+                Left err -> do
+                    sendEvent callback context
+                        (failureEvent request.requestId err)
+                    pure supervisor
+                Right reference -> do
+                    let active =
+                            Map.member
+                                reference.turnReferenceId
+                                supervisor.supervisorRunning
+                        queued = any
+                            ((== reference.turnReferenceId)
+                                . (.turnStartId)
+                                . (.pendingTurnStart))
+                            supervisor.supervisorPending
+                    next <- cancelTaskById
+                        supervisor
+                        reference.turnReferenceId
                     sendEvent callback context $
-                        failureEvent
-                            request.requestId
-                            "there is no active turn"
-                    continue
-            | otherwise -> do
-                event <- handleRequest config store root request
-                sendEvent callback context event
-                continue
-  where
-    continue =
-        idleLoop
+                        if active || queued
+                            then successEvent request.requestId True
+                            else failureEvent
+                                request.requestId
+                                "turn id is not active"
+                    pure next
+        | request.requestMethod == "approval.resolve" =
+            case (parseParams request :: Either Text ApprovalResolution) of
+                Left err -> do
+                    sendEvent callback context
+                        (failureEvent request.requestId err)
+                    pure supervisor
+                Right resolution -> do
+                    matching <- filterM
+                        (approvalIsActive resolution.approvalResolutionId
+                            . (.runningTurnControl))
+                        (Map.elems supervisor.supervisorRunning)
+                    case matching of
+                        [running] ->
+                            resolveApproval running.runningTurnControl request
+                                >>= sendEvent callback context
+                        _ ->
+                            sendEvent callback context $
+                                failureEvent
+                                    request.requestId
+                                    "approval request is no longer active"
+                    pure supervisor
+        | request.requestMethod == "turn.agents" =
+            selectRunningTurn request.requestParams supervisor >>= \case
+                Left err -> do
+                    sendEvent callback context
+                        (failureEvent request.requestId err)
+                    pure supervisor
+                Right Nothing -> do
+                    sendEvent callback context $
+                        successEvent request.requestId ([] :: [Aeson.Value])
+                    pure supervisor
+                Right (Just running) ->
+                    activeAgentSnapshot running.runningTurnControl request
+                        >>= sendEvent callback context
+                        >> pure supervisor
+        | otherwise = do
+            event <- handleRequest config store root request
+            sendEvent callback context event
+            pure supervisor
+
+    selectRunningTurn params supervisor =
+        case Aeson.parseEither
+            (Aeson.withObject "turn reference" (.:? "turnId"))
+            params of
+            Left err -> pure (Left (Text.pack err))
+            Right (Just taskId) ->
+                pure $ maybe
+                    (Left "turn id is not active")
+                    (Right . Just)
+                    (Map.lookup taskId supervisor.supervisorRunning)
+            Right Nothing ->
+                pure $ case Map.elems supervisor.supervisorRunning of
+                    [running] -> Right (Just running)
+                    [] -> Right Nothing
+                    _ -> Left "turnId is required while multiple turns run"
+
+    approvalIsActive approvalId control =
+        Map.member approvalId
+            <$> readTVarIO control.turnControlApprovals
+
+    enqueueTurn supervisor request =
+        case (parseParams request :: Either Text TurnStart) of
+            Left err -> do
+                atomically $ modifyTVar' stagedImages
+                    (Map.delete request.requestId)
+                sendEvent callback context
+                    (failureEvent request.requestId err)
+                pure supervisor
+            Right start
+                | taskExists start.turnStartId supervisor -> do
+                    atomically $ modifyTVar' stagedImages
+                        (Map.delete start.turnStartId)
+                    sendEvent callback context $
+                        failureEvent request.requestId "turn id already exists"
+                    pure supervisor
+                | otherwise -> do
+                    images <- atomically $ do
+                        staged <- readTVar stagedImages
+                        writeTVar stagedImages
+                            (Map.delete start.turnStartId staged)
+                        pure
+                            (Map.findWithDefault
+                                []
+                                start.turnStartId
+                                staged)
+                    sendEvent callback context $
+                        successEvent request.requestId $
+                            Aeson.object
+                                [ "turnId" Aeson..= start.turnStartId
+                                , "state" Aeson..= ("queued" :: Text)
+                                ]
+                    sendTaskState start.turnStartId start.turnStartSessionId
+                        "queued"
+                    pure supervisor
+                        { supervisorPending =
+                            supervisor.supervisorPending
+                                Seq.|> PendingTurn start images
+                        , supervisorKnownTaskIds =
+                            Set.insert
+                                start.turnStartId
+                                supervisor.supervisorKnownTaskIds
+                        }
+
+    startRunnableTasks supervisor = do
+        sessionIds <- activeSessionIds supervisor
+        let available =
+                supervisor.supervisorLimit
+                    - Map.size supervisor.supervisorRunning
+            pending = toList supervisor.supervisorPending
+            candidates =
+                [ ( TaskIdentity
+                        pending.pendingTurnStart.turnStartId
+                        pending.pendingTurnStart.turnStartSessionId
+                  , pending
+                  )
+                | pending <- pending
+                ]
+            (selected, remaining) =
+                selectRunnableTasks available sessionIds candidates
+        running <- foldM
+            startTask
+            supervisor.supervisorRunning
+            (map snd selected)
+        pure supervisor
+            { supervisorPending = Seq.fromList (map snd remaining)
+            , supervisorRunning = running
+            }
+
+    startTask
+        :: Map Text RunningTurn
+        -> PendingTurn
+        -> IO (Map Text RunningTurn)
+    startTask running pending = do
+        let start = pending.pendingTurnStart
+        control <- newTurnControl
+            start.turnStartId
+            start.turnStartSessionId
+        sendTaskState start.turnStartId start.turnStartSessionId "running"
+        sendTurnStatus
             callback
             context
-            config
-            store
-            root
-            processRuntime
-            commands
-            stagedImages
-            browser
-
-activeLoop
-    :: FunPtr EventCallback
-    -> Ptr ()
-    -> ManagedPostgresConfig
-    -> MVar (Maybe Store)
-    -> OsPath
-    -> EngineMailbox EngineCommand
-    -> TurnControl
-    -> Async TurnOutcome
-    -> IO ActiveExit
-activeLoop callback context config store root commands control running =
-    atomically
-        ((Left <$> readEngineCommand commands)
-            `orElse` (Right <$> waitCatchSTM running)) >>= \case
-        Right outcome -> do
-            finishTurnEvent callback context control.turnControlId outcome
-            pure ActiveContinue
-        Left EngineStop -> do
-            cancelTurn control
-            cancel running
-            pure ActiveStop
-        Left (EngineSearch query limit searchCallback searchContext) -> do
-            runConversationSearch
-                config store query limit searchCallback searchContext
-            activeLoop
-                callback context config store root commands control running
-        Left (EngineSessionMutation mutation resultCallback resultContext) -> do
-            runSessionMutation
-                config store root mutation resultCallback resultContext
-            activeLoop
-                callback context config store root commands control running
-        Left (EngineMcpRestart expected _ resultCallback resultContext) -> do
-            withText "cannot restart MCP while a turn is active" $
-                invokeMcpResultCallback resultCallback resultContext (-1)
-                    expected
-            activeLoop
-                callback context config store root commands control running
-        Left (EngineRequest request) -> do
-            if request.requestMethod == "turn.cancel"
-              then
-                case (parseParams request
-                    :: Either Text TurnReference) of
-                    Right reference
-                        | reference.turnReferenceId == control.turnControlId -> do
-                            cancelTurn control
-                            cancel running
-                            sendEvent callback context $
-                                successEvent request.requestId True
-                    _ ->
-                        sendEvent callback context $
-                            failureEvent request.requestId "turn id is not active"
-              else if request.requestMethod == "approval.resolve"
-              then
-                resolveApproval control request >>= sendEvent callback context
-              else if request.requestMethod == "turn.agents"
-              then
-                activeAgentSnapshot control request
-                    >>= sendEvent callback context
-              else if request.requestMethod == "turn.start"
-              then
-                sendEvent callback context $
-                    failureEvent request.requestId "a turn is already running"
-              else
-                handleRequest config store root request
-                    >>= sendEvent callback context
-            activeLoop
+            start.turnStartId
+            (if start.turnStartWorktree
+                then "Creating worktree…"
+                else "Starting…")
+        nativeBrowserTools <- browserToolsWhenEnabled browser
+        worker <- launchTrackedWorker start.turnStartId do
+            runNativeTurn
                 callback
                 context
-                config
-                store
-                root
                 commands
+                processRuntime
                 control
-                running
+                nativeBrowserTools
+                start
+                pending.pendingTurnImages
+        let runningTurn =
+                RunningTurn
+                    { runningTurnControl = control
+                    , runningTurnWorker = worker
+                    }
+        atomically $ modifyTVar' workerRegistry $
+            Map.insert start.turnStartId runningTurn
+        pure $ Map.insert
+            start.turnStartId
+            runningTurn
+            running
+
+    launchTrackedWorker taskId action =
+        mask \_ -> do
+            gate <- newEmptyMVar
+            worker <- asyncWithUnmask \unmask -> do
+                takeMVar gate
+                outcome <- newIORef (TaskFailure "turn cancelled")
+                (tryAny (unmask action) >>= \case
+                    Left exception ->
+                        writeIORef outcome
+                            (TaskFailure (Text.pack (show exception)))
+                    Right value ->
+                        writeIORef outcome (TaskOutcome value))
+                    `finally` do
+                        result <- readIORef outcome
+                        void $ atomically $ acceptEngineCommand
+                            commands
+                            (EngineTaskFinished taskId result)
+            putMVar gate ()
+            pure worker
+
+    activeSessionIds supervisor = do
+        sessions <- mapM
+            (readTVarIO . (.turnControlSessionId) . (.runningTurnControl))
+            (Map.elems supervisor.supervisorRunning)
+        pure (Set.fromList [session | Just session <- sessions])
+
+    cancelTaskById supervisor taskId =
+        case Map.lookup taskId supervisor.supervisorRunning of
+            Just running -> do
+                cancelTurn running.runningTurnControl
+                cancel running.runningTurnWorker
+                pure supervisor
+            Nothing -> do
+                let (cancelled, retained) = partition
+                        ((== taskId)
+                            . (.turnStartId)
+                            . (.pendingTurnStart))
+                        (toList supervisor.supervisorPending)
+                forM_ cancelled \pending ->
+                    let start = pending.pendingTurnStart
+                    in do
+                        sendTaskState
+                            start.turnStartId
+                            start.turnStartSessionId
+                            "cancelled"
+                        sendEvent callback context $
+                            turnFailedEvent
+                                start.turnStartId
+                                "turn cancelled"
+                pure supervisor
+                    { supervisorPending = Seq.fromList retained }
+
+    taskExists taskId supervisor =
+        Set.member taskId supervisor.supervisorKnownTaskIds
+
+    shutdownSupervisor _ =
+        shutdownRunningTurns workerRegistry
+
+    sendTaskState :: Text -> Maybe Text -> Text -> IO ()
+    sendTaskState taskId sessionId state =
+        sendEvent callback context $
+            Aeson.object
+                [ "event" Aeson..= ("task.state" :: Text)
+                , "taskId" Aeson..= taskId
+                , "sessionId" Aeson..= sessionId
+                , "state" Aeson..= state
+                ]
+
+    sendTaskSnapshot snapshotCallback snapshotContext supervisor = do
+        forM_ supervisor.supervisorPending \pending ->
+            sendSnapshotItem
+                snapshotCallback
+                snapshotContext
+                pending.pendingTurnStart.turnStartId
+                pending.pendingTurnStart.turnStartSessionId
+                0
+        forM_ (Map.elems supervisor.supervisorRunning) \running -> do
+            sessionId <- readTVarIO
+                running.runningTurnControl.turnControlSessionId
+            sendSnapshotItem
+                snapshotCallback
+                snapshotContext
+                running.runningTurnControl.turnControlId
+                sessionId
+                1
+        invokeTaskSnapshotCallback snapshotCallback snapshotContext
+            1 nullPtr 0 nullPtr 0 0 nullPtr 0
+
+    sendSnapshotItem snapshotCallback snapshotContext taskId sessionId state =
+        withTextBytes taskId \taskPointer taskLength ->
+        withMaybeTextBytes sessionId \sessionPointer sessionLength ->
+            invokeTaskSnapshotCallback snapshotCallback snapshotContext
+                0 taskPointer taskLength sessionPointer sessionLength
+                state nullPtr 0
+
+shutdownRunningTurns :: TVar (Map Text RunningTurn) -> IO ()
+shutdownRunningTurns workerRegistry = do
+    running <- atomically do
+        current <- readTVar workerRegistry
+        writeTVar workerRegistry Map.empty
+        pure (Map.elems current)
+    forM_ running (cancelTurn . (.runningTurnControl))
+    mapM_ (cancel . (.runningTurnWorker)) running
+    mapM_ (waitCatch . (.runningTurnWorker)) running
 
 runSessionMutation
     :: ManagedPostgresConfig
@@ -3905,13 +4542,16 @@ browserStatusMessage = \case
 runNativeTurn
     :: FunPtr EventCallback
     -> Ptr ()
+    -> EngineMailbox EngineCommand
     -> NativeProcessRuntime
     -> TurnControl
     -> [AppTool]
     -> TurnStart
     -> [ImageAttachment]
     -> IO TurnOutcome
-runNativeTurn callback context processRuntime control nativeBrowserTools start images = do
+runNativeTurn
+        callback context commands processRuntime control nativeBrowserTools
+        start images = do
     sessionIdRef <- newIORef start.turnStartSessionId
     completedRef <- newIORef False
     let hooks = NativeRunHooks
@@ -3926,6 +4566,9 @@ runNativeTurn callback context processRuntime control nativeBrowserTools start i
                             (sendEvent callback context)
             , nativeOnSessionId = \sessionId -> do
                 writeIORef sessionIdRef (Just sessionId)
+                void $ atomically $ acceptEngineCommand
+                    commands
+                    (EngineTaskSession control.turnControlId sessionId)
                 sendEvent callback context $
                     Aeson.object
                         [ "event" Aeson..= ("turn.session" :: Text)
@@ -4042,10 +4685,12 @@ withTurnImages prompt images action = do
                 BS.writeFile path image.imageBytes
                 withImageFiles directory rest (action . (path :))
 
-newTurnControl :: Text -> IO TurnControl
-newTurnControl turnId =
+newTurnControl :: Text -> Maybe Text -> IO TurnControl
+newTurnControl turnId sessionId =
     TurnControl turnId
-        <$> newTVarIO (pure ())
+        <$> newTVarIO sessionId
+        <*> newTVarIO False
+        <*> newTVarIO (pure ())
         <*> newTVarIO Map.empty
         <*> newTVarIO 0
         <*> newTVarIO Set.empty
@@ -4086,6 +4731,7 @@ agentStepStateText = \case
 
 cancelTurn :: TurnControl -> IO ()
 cancelTurn control = do
+    atomically $ writeTVar control.turnControlCancelled True
     cancelAction <- readTVarIO control.turnControlCancel
     cancelAction
     waiters <- atomically do
@@ -4207,13 +4853,13 @@ finishTurnEvent
     :: FunPtr EventCallback
     -> Ptr ()
     -> Text
-    -> Either SomeException TurnOutcome
+    -> TaskResult
     -> IO ()
 finishTurnEvent callback context turnId = \case
-    Left exception ->
+    TaskFailure message ->
         sendEvent callback context $
-            turnFailedEvent turnId (Text.pack (show exception))
-    Right outcome ->
+            turnFailedEvent turnId message
+    TaskOutcome outcome ->
         case outcome.turnOutcomeError of
             Just err ->
                 sendEvent callback context (turnFailedEvent turnId err)
@@ -4224,6 +4870,19 @@ finishTurnEvent callback context turnId = \case
                         , "turnId" Aeson..= turnId
                         , "sessionId" Aeson..= outcome.turnOutcomeSessionId
                         ]
+
+taskResultSessionId :: Maybe Text -> TaskResult -> Maybe Text
+taskResultSessionId fallback = \case
+    TaskFailure _ -> fallback
+    TaskOutcome outcome -> outcome.turnOutcomeSessionId <|> fallback
+
+taskResultState :: TaskResult -> Text
+taskResultState = \case
+    TaskFailure _ -> "failed"
+    TaskOutcome outcome ->
+        case outcome.turnOutcomeError of
+            Just _ -> "failed"
+            Nothing -> "succeeded"
 
 nativeLoopEvent :: Text -> LoopEvent -> Maybe Aeson.Value
 nativeLoopEvent turnId = \case
