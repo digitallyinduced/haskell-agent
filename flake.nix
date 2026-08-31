@@ -20,10 +20,17 @@
             skylighting,
             ...
         }:
-        flake-utils.lib.eachDefaultSystem (
+        let
+            skillsFor = pkgs: import ./nix/skills.nix { inherit pkgs; };
+        in
+        {
+            lib = { inherit skillsFor; };
+        }
+        // flake-utils.lib.eachDefaultSystem (
             system:
             let
                 pkgs = import nixpkgs { inherit system; };
+                skillLib = skillsFor pkgs;
                 bun_1_4 = pkgs.bun.overrideAttrs (_old: {
                     version = "1.4.0";
                     src = pkgs.fetchurl {
@@ -69,18 +76,18 @@
                     rev = intercom2xSkillsRev;
                     hash = "sha256-zyLCqcygYUKkReLX+UchnhvhFa5Rz3eo+rIaR4wUsSM=";
                 };
-                attachGithubAssetsSkill = pkgs.runCommand
-                    "attach-github-assets-skill-${intercom2xSkillsRev}"
-                    { nativeBuildInputs = [ pkgs.patch ]; }
-                    ''
-                        sourceSkill="${intercom2xSkills}/plugins/pr-tools/skills/attach-github-assets"
-                        targetSkill="$out/attach-github-assets"
-                        mkdir -p "$out"
-                        cp -R "$sourceSkill" "$targetSkill"
-                        chmod -R u+w "$out"
-                        cp "${intercom2xSkills}/LICENSE" "$targetSkill/LICENSE"
-                        patch -l -d "$targetSkill" -p1 < ${./patches/attach-github-assets.patch}
-                    '';
+                attachGithubAssetsSkill = skillLib.mkSkill {
+                    name = "attach-github-assets";
+                    src = intercom2xSkills;
+                    skillPath = "plugins/pr-tools/skills/attach-github-assets";
+                    patches = [ ./patches/attach-github-assets.patch ];
+                    licensePath = "LICENSE";
+                };
+                builtInSkills = [ attachGithubAssetsSkill ];
+                builtInSkillsBundle = skillLib.mkSkillBundle {
+                    name = "haskell-agent-skills";
+                    skills = builtInSkills;
+                };
 
                 agentOpenaiSource = nix-filter.lib {
                     root = ./packages/agent-openai;
@@ -475,7 +482,7 @@
                                 ]).overrideAttrs
                                 (old: {
                                     preCheck = (old.preCheck or "") + ''
-                                        export HASKELL_AGENT_BUILTIN_SKILLS=${attachGithubAssetsSkill}
+                                        export HASKELL_AGENT_BUILTIN_SKILLS=${builtInSkillsBundle}
                                     '';
                                 }));
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
@@ -521,7 +528,7 @@
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
                                         --prefix HASKELL_AGENT_BUILTIN_SKILLS : \
-                                            "${attachGithubAssetsSkill}" \
+                                            "${builtInSkillsBundle}" \
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
                                                 pkgs.ffmpeg
@@ -689,6 +696,8 @@
                 packages.claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
                 packages.agent-claude = agentClaudePackage;
                 packages.agent-openai-login = agentOpenaiExecutables;
+                packages.skills = builtInSkillsBundle;
+                packages.skills-attach-github-assets = attachGithubAssetsSkill;
 
                 apps.default = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-cli;
@@ -733,7 +742,7 @@
                         export AGENT_POSTGRES_BIN=${pkgs.postgresql_18}/bin
                         # Expose nix-fetched built-in skills to GHCi without
                         # copying their upstream files into the checkout.
-                        export HASKELL_AGENT_BUILTIN_SKILLS="${attachGithubAssetsSkill}''${HASKELL_AGENT_BUILTIN_SKILLS:+:$HASKELL_AGENT_BUILTIN_SKILLS}"
+                        export HASKELL_AGENT_BUILTIN_SKILLS="${builtInSkillsBundle}''${HASKELL_AGENT_BUILTIN_SKILLS:+:$HASKELL_AGENT_BUILTIN_SKILLS}"
                         # Development builds embed the nix-fetched Codex catalog
                         # at compile time; provision it into the checkout.
                         if [ -d packages/agent-openai ]; then

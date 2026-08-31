@@ -97,6 +97,19 @@ Install [Nix](https://nixos.org/download/) with flakes enabled, then install
 nix profile add github:digitallyinduced/haskell-agent
 ```
 
+The flake also exposes skills as composable Nix packages. NixOS and
+nix-darwin configurations can use the complete built-in bundle without
+copying skill sources into a home directory:
+
+```nix
+environment.sessionVariables.HASKELL_AGENT_BUILTIN_SKILLS =
+  "${inputs.haskell-agent.packages.${pkgs.system}.skills}";
+```
+
+Downstream flakes can build their own skill packages with
+`inputs.haskell-agent.lib.skillsFor pkgs` and combine them with
+`mkSkillBundle`.
+
 ## Run
 
 Start an interactive session:
