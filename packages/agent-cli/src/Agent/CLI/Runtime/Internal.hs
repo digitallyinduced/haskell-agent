@@ -23,6 +23,8 @@ module Agent.CLI.Runtime.Internal
 
 import Agent.CLI.AgentSessions
     ( closeSessionThreadManager, newSessionThreadManager )
+import Agent.CLI.AppleFoundationModels
+    ( withAppleFoundationModelRuntime )
 import Agent.CLI.GatewayClient (runGatewayCommand)
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
@@ -176,7 +178,8 @@ run = do
 runAgentWithRestarts :: CliOptions -> IO DevResult
 runAgentWithRestarts options =
     catchUserInterrupt
-        (do
+        (withAppleFoundationModelRuntime \getRuntimeResponsesModel -> do
+            runtimeResponsesModel <- getRuntimeResponsesModel
             home <- getHomeDirectory
             let root = sessionsRoot home
             mcpSupervisor <- MCP.newMcpSupervisor
@@ -186,6 +189,8 @@ runAgentWithRestarts options =
             let processRuntime = AgentProcessRuntime
                     { processMcpSupervisor = mcpSupervisor
                     , processSessionThreads = sessionThreads
+                    , processRuntimeResponsesModel =
+                        runtimeResponsesModel
                     }
             withRestoredCurrentDirectory
                 (runAgentWithRuntime processRuntime foregroundRunMode options)

@@ -2,6 +2,8 @@
 module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
+    , functionSchemasFromAppTools
+    , responseToolNames
     , schemasFromAppTools
     , hostedSearchToolNames
     , hostedSearchToolCollisions
@@ -92,6 +94,33 @@ schemasFromAppTools dialect tools = case dialectToolLayout dialect of
         hostedSearchTools dialect ++ mapMaybe (schemaFromAppTool dialect) tools
     NoHostToolLayout ->
         []
+
+-- | Project only ordinary function tools for transports, such as local Chat
+-- Completions servers, that cannot execute provider-hosted or custom tools.
+functionSchemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
+functionSchemasFromAppTools dialect =
+    filter isFunctionTool . schemasFromAppTools dialect
+  where
+    isFunctionTool = \case
+        FunctionToolValue _ -> True
+        _ -> False
+
+-- | Model-facing names corresponding exactly to the projected wire schemas.
+responseToolNames :: [ResponseTool] -> [Text]
+responseToolNames = map responseToolName
+  where
+    responseToolName = \case
+        FunctionToolValue function -> function.name
+        KnownResponseTool toolType tagged ->
+            taggedName
+                (responseToolTypeText toolType)
+                tagged.fields
+        UnknownResponseTool tagged ->
+            taggedName tagged.tag tagged.fields
+    taggedName fallback fields =
+        case KeyMap.lookup "name" fields of
+            Just (Aeson.String name) -> name
+            _ -> fallback
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames

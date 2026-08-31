@@ -4,6 +4,7 @@ module Agent.CLI.Prompt
     , subscriptionSubagentModelGuidance
     , sessionTempGuidance
     , systemPrompt
+    , systemPromptForAvailableTools
     , systemPromptForTools
     ) where
 
@@ -78,8 +79,24 @@ systemPromptForTools
     -> Day
     -> Bool
     -> Text
-systemPromptForTools
-        dialect toolNames cwd sessionTmp today isNonInteractive =
+systemPromptForTools dialect toolNames =
+    systemPromptForAvailableTools
+        dialect
+        (hostedSearchToolNames dialect ++ toolNames)
+
+-- | Render a prompt from the exact set of names exposed by the wire
+-- transport. Unlike 'systemPromptForTools', this does not assume hosted
+-- search is available.
+systemPromptForAvailableTools
+    :: Dialect
+    -> [Text]
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptForAvailableTools
+        dialect available cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
@@ -90,7 +107,6 @@ systemPromptForTools
             , timeContextGuidance
             ]
   where
-    available = hostedSearchToolNames dialect ++ toolNames
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
             grokSystemPromptForTools

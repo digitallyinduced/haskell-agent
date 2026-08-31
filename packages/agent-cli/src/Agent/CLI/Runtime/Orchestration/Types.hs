@@ -12,6 +12,7 @@ module Agent.CLI.Runtime.Orchestration.Types
 import Agent.CLI.AgentSessions ( SessionThreadManager )
 import Agent.CLI.AgentViewport ( AgentEntry )
 import Agent.CLI.Permission ( PermissionChoice )
+import Agent.CLI.RuntimeModel ( RuntimeResponsesModel )
 import Agent.Error ( ApiError )
 import Agent.Loop ( LoopEvent )
 import Agent.Provider ( Credential, TokenProvider )
@@ -37,6 +38,9 @@ data AccountSwitchRequest
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
     , processSessionThreads :: !SessionThreadManager
+    -- | An ephemeral model endpoint supplied by a trusted native host. It is
+    -- never read from or written to the user model catalog.
+    , processRuntimeResponsesModel :: !(Maybe RuntimeResponsesModel)
     }
 
 data NativeRunHooks = NativeRunHooks

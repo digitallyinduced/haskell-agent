@@ -45,6 +45,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Responses.Codec
                     , Agent.Responses.Client
+                    , Agent.Responses.ChatCompletions
                     , Agent.Responses.Error
                     , Agent.Responses.GenericBackend
                     , Agent.Responses.GenericClient
@@ -77,6 +78,7 @@ test-suite agent-responses-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Responses.ClientSpec
+                    , Agent.Responses.ChatCompletionsSpec
                     , Agent.Responses.LoopBackendSpec
                     , Agent.Responses.GenericClientSpec
                     , Agent.Responses.ResponseMergeSpec

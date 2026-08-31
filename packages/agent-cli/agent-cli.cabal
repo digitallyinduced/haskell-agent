@@ -98,6 +98,7 @@ library
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
                     , Agent.CLI.Auth
+                    , Agent.CLI.AppleFoundationModels
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
@@ -156,6 +157,7 @@ library
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
+                    , Agent.CLI.RuntimeModel
                     , Agent.CLI.Session
                     , Agent.CLI.Session.History
                     , Agent.CLI.Session.StoreCodec

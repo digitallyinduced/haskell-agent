@@ -53,7 +53,7 @@ import Agent.Provider
     , Provider
     , TokenProvider
     )
-import Agent.Responses.Types (ResponseCreateParams)
+import Agent.Responses.Types (ResponseCreateParams, ResponseTool)
 import Agent.Skills
     ( SkillCatalog
     , SkillInvocation
@@ -95,6 +95,8 @@ data SessionRequest = SessionRequest
     , dialect :: !Dialect
     , policy :: !ApprovalPolicy
     , allTools :: ![AppTool]
+    , projectTools :: !([AppTool] -> ([Text], [ResponseTool]))
+    , finalizeRequestParams :: !(ResponseCreateParams -> ResponseCreateParams)
     , suspendGhci :: !(IO ())
     , grokRuntime :: !(Maybe GrokRuntimeControl)
     , mcpRegistrations :: ![MCP.McpToolRegistration]
