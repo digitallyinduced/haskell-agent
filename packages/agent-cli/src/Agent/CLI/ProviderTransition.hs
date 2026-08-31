@@ -5,6 +5,7 @@ module Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
+    , resumePendingTurnIfPresent
     , setPendingExitAfter
     , transitionCommitsImmediately
     ) where
@@ -16,6 +17,7 @@ import Agent.Loop (TurnInput)
 import Agent.Provider (BillingMode, Provider)
 import Agent.Tools.PlanMode (PlanModeState)
 import Control.Applicative ((<|>))
+import Data.IORef (IORef, atomicModifyIORef')
 import Data.Set (Set)
 import Data.Text (Text)
 
@@ -74,6 +76,20 @@ applyProviderTransition options transition =
 setPendingExitAfter :: Bool -> PendingTurn -> PendingTurn
 setPendingExitAfter exitAfter pending =
     pending { pendingExitAfter = exitAfter }
+
+-- | Atomically claim a pending turn before resuming it. This keeps one
+-- explicit recovery action from racing another, such as /retry and account
+-- refresh.
+resumePendingTurnIfPresent
+    :: IORef (Maybe PendingTurn)
+    -> (PendingTurn -> IO result)
+    -> IO result
+    -> IO result
+resumePendingTurnIfPresent pendingTurnRef resume noPendingTurn =
+    atomicModifyIORef'
+        pendingTurnRef
+        (\pending -> (Nothing, pending))
+        >>= maybe noPendingTurn resume
 
 -- | Manual selections become the project/session target immediately.
 -- Automatic fallbacks remain provisional until their replacement backend

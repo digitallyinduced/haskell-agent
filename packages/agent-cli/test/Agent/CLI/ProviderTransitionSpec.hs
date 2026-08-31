@@ -6,6 +6,8 @@ import Agent.CLI.ProviderTransition
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Agent.Tools.PlanMode (PlanModeState(..))
+import Data.IORef (newIORef, readIORef)
+import Data.Maybe (isNothing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Test.Hspec
@@ -44,6 +46,33 @@ spec = do
             updated.pendingExitAfter `shouldBe` True
             updated.pendingPlanState `shouldBe` PlanActive
 
+    describe "resumePendingTurnIfPresent" do
+        it "atomically claims and resumes the failed turn once" do
+            failedTurnRef <- newIORef (Just pendingTurn)
+
+            result <- resumePendingTurnIfPresent
+                failedTurnRef
+                (pure . (.pendingPromptText))
+                (pure "no failed turn")
+
+            result `shouldBe` "continue the conversation"
+            fmap isNothing (readIORef failedTurnRef) `shouldReturn` True
+            resumePendingTurnIfPresent
+                failedTurnRef
+                (pure . (.pendingPromptText))
+                (pure "already claimed")
+                `shouldReturn` "already claimed"
+
+        it "continues normally when no failed turn is stored" do
+            failedTurnRef <- newIORef Nothing
+
+            result <- resumePendingTurnIfPresent
+                failedTurnRef
+                (\_ -> pure ("unexpected retry" :: Text))
+                (pure ("no failed turn" :: Text))
+
+            result `shouldBe` "no failed turn"
+
     describe "transitionCommitsImmediately" do
         it "keeps a startup automatic fallback provisional" do
             transitionCommitsImmediately (transition Nothing Nothing)
@@ -74,4 +103,13 @@ transition sessionId pending = ProviderTransition
     , transitionUnavailableProviders = Set.singleton XAIProvider
     , transitionCause = AutomaticFallback
     , transitionAutomaticBilling = Just SubscriptionBilled
+    }
+
+pendingTurn :: PendingTurn
+pendingTurn = PendingTurn
+    { pendingPromptText = "continue the conversation"
+    , pendingInputs = []
+    , pendingCheckpointed = False
+    , pendingExitAfter = False
+    , pendingPlanState = PlanInactive
     }

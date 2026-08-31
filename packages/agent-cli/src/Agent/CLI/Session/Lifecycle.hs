@@ -203,7 +203,8 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
             now <- getCurrentTime
             case providerRecoveryPreference
                     allowCooldownRetry now apiError of
-                RetryCurrentProviderAfter delay ->
+                RetryCurrentProviderAfter delay -> do
+                    writeIORef env.sessionLastFailedTurn (Just pending')
                     waitAndRetryPendingTurn
                         (continuation.resumeSessionWithDraft env)
                         (runPendingTurnWithCooldownRetry
@@ -217,6 +218,9 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                         Just providerTransition ->
                             pure (RunSwitchProvider providerTransition)
                         Nothing -> do
+                            writeIORef
+                                env.sessionLastFailedTurn
+                                (Just pending')
                             if env.sessionBackground
                                 then
                                     putTextLn
