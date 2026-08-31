@@ -95,11 +95,8 @@ These are important product features, but not the core differentiation.
 
 ## Install
 
-1. Install [Determinate Nix](https://docs.determinate.systems/determinate-nix/):
-
-   ```console
-   curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
-   ```
+1. Install [Determinate Nix](https://docs.determinate.systems/determinate-nix/)
+   by following its platform-specific installation instructions.
 
 2. **Copy this prompt to your coding agent to install:**
 
