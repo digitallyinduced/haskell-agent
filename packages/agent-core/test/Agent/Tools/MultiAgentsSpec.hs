@@ -213,7 +213,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , name = "spawn_agent"
                 , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
-                    \\"model\":\"gpt-denied\"}"
+                    \\"model\":\"gpt-denied\",\"fork_turns\":\"none\"}"
                 , callKind = FunctionCallKind
                 , argumentsEncrypted = False
                 }
@@ -251,7 +251,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 "task"
                 (Just " gpt-allowed ")
                 Nothing
-                Nothing
+                (Just "none")
         result `shouldSatisfy` isRightResult
         options <- atomically (takeTMVar prepared)
         options.collaborationModel `shouldBe` Just "gpt-allowed"
@@ -280,7 +280,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         denied <-
             spawnSharedSubagent
                 context call "worker" "task"
-                (Just "company-b") Nothing Nothing
+                (Just "company-b") Nothing (Just "none")
         denied
             `shouldBe`
                 Left
@@ -289,7 +289,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         accepted <-
             spawnSharedSubagent
                 context call "worker" "task"
-                (Just "company-b") Nothing Nothing
+                (Just "company-b") Nothing (Just "none")
         accepted `shouldSatisfy` isRightResult
         options <- atomically (takeTMVar prepared)
         options.collaborationModel `shouldBe` Just "company-b"

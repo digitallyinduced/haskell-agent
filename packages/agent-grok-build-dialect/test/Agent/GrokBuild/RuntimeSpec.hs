@@ -502,32 +502,36 @@ call tools name arguments =
         (functionToolCall "call-1" name arguments)
 
 rootContext registry = MultiAgentContext
-    registry
-    (unsafeEncodeUtf "/tmp")
-    Nothing
-    0
-    taskPathRoot
-    (pure Nothing)
-    Nothing
-    Nothing
-    Nothing
-    Nothing
-    Nothing
-    Nothing
+    { multiRegistry = registry
+    , multiCwd = unsafeEncodeUtf "/tmp"
+    , multiSelfId = Nothing
+    , multiDepth = 0
+    , multiTaskPath = taskPathRoot
+    , multiRootTurnId = pure Nothing
+    , multiResumeFromDisk = Nothing
+    , multiCreateWorktree = Nothing
+    , multiPrepareSpawn = Nothing
+    , multiSendToRoot = Nothing
+    , multiSpawnModelGuidance = Nothing
+    , multiAllowedChildModels = Nothing
+    , multiChildModelAllowed = Nothing
+    }
 
 childContext registry = MultiAgentContext
-    registry
-    (unsafeEncodeUtf "/tmp")
-    (Just (SubagentId "agent-parent"))
-    1
-    taskPathRoot
-    (pure Nothing)
-    Nothing
-    Nothing
-    Nothing
-    Nothing
-    Nothing
-    Nothing
+    { multiRegistry = registry
+    , multiCwd = unsafeEncodeUtf "/tmp"
+    , multiSelfId = Just (SubagentId "agent-parent")
+    , multiDepth = 1
+    , multiTaskPath = taskPathRoot
+    , multiRootTurnId = pure Nothing
+    , multiResumeFromDisk = Nothing
+    , multiCreateWorktree = Nothing
+    , multiPrepareSpawn = Nothing
+    , multiSendToRoot = Nothing
+    , multiSpawnModelGuidance = Nothing
+    , multiAllowedChildModels = Nothing
+    , multiChildModelAllowed = Nothing
+    }
 
 withRegistry action =
     bracket
