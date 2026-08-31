@@ -607,6 +607,7 @@ uiEventLogicalBytes = \case
     UiSetPromptEffort text -> logicalTextBytes text
     UiSetPromptLimitStatus status ->
         maybe 128 (logicalTextBytes . (.promptLimitText)) status
+    UiSetContextUsage _ _ -> 128
     UiSetAwaitingInput _ -> 128
     UiSetRepository branch cwd root ->
         logicalTextsBytes [branch, cwd, root]

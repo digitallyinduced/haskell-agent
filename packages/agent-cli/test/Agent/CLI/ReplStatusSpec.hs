@@ -27,7 +27,7 @@ import Agent.CLI
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
-import Agent.CLI.Status (formatTokenUsageOrZero)
+import Agent.CLI.Status (formatContextUsage, formatTokenUsageOrZero)
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
@@ -460,6 +460,14 @@ spec = do
 
         it "formats fresh-session zeroes with arrows when required" do
             formatTokenUsageOrZero emptyTokenUsage `shouldBe` "0 ↓ · 0 ↑"
+
+        it "formats current context occupancy against model capacity" do
+            formatContextUsage (Just 197000) (Just 272000)
+                `shouldBe` "197K / 272K"
+
+        it "shows a known context capacity before the first response" do
+            formatContextUsage Nothing (Just 272000)
+                `shouldBe` "0K / 272K"
 
         it "formats compact input/output counts with arrows" do
             formatTokenUsage TokenUsage

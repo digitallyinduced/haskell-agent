@@ -13,7 +13,10 @@ import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(CompactionInstalled)
+    , reportedOccupancy
     )
+import Agent.CLI.Compaction.Projection (reportedContextTokens)
+import Agent.CLI.Context (contextUsageTokens)
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
@@ -332,6 +335,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 planMode
             clearImageGenerationHistory
             writeIORef usageRef emptyTokenUsage
+            writeIORef contextOccupancyRef Nothing
             modifyIORef' renderStateRef clearRenderTokenRate
             writeIORef lastAssistantRef Nothing
             writeIORef subagentSessions Map.empty
@@ -441,6 +445,13 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         emitLoop event = do
             recordAgentViewportEvent agentViewportRuntime event
             managedLoopPublisher event
+            case event of
+                TurnFinished turn -> do
+                    history <- readLiveTranscript conversationRef
+                    forM_ (reportedContextTokens turn.tokenUsage) \tokens ->
+                        writeIORef contextOccupancyRef $
+                            Just (reportedOccupancy tokens (length history))
+                _ -> pure ()
             case fullscreen of
                 Nothing -> renderEvent render event
                 Just runtime -> do
@@ -461,6 +472,21 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 recordRenderTurnRate now turn state
                             _ -> state
                     emitUiEvent runtime (UiLoop event)
+                    case event of
+                        TurnFinished _ -> do
+                            occupancy <- readIORef contextOccupancyRef
+                            params <- readIORef paramsRef
+                            history <- readLiveTranscript conversationRef
+                            contextWindow <- currentContextWindow
+                            emitUiEvent runtime $
+                                UiSetContextUsage
+                                    (Just
+                                        (contextUsageTokens
+                                            occupancy
+                                            params
+                                            history))
+                                    contextWindow
+                        _ -> pure ()
         shellToolAllowed call = do
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef

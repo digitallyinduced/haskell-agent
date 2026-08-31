@@ -1,7 +1,7 @@
 module Agent.CLI.ContextSpec (spec) where
 
 import Agent.CLI.Compaction (estimatedOccupancy, reportedOccupancy)
-import Agent.CLI.Context (formatContextReport)
+import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.CLI.Request (requestParams)
 import Agent.Provider (Provider(OpenAIProvider))
 import Agent.Responses.Types
@@ -43,6 +43,19 @@ spec = describe "Agent.CLI.Context" do
                 []
         Text.unpack output `shouldSatisfy` isInfixOf "estimated"
         Text.unpack output `shouldSatisfy` isInfixOf "Window: unknown"
+
+    it "shares provider-reported versus estimated semantics with compact UI" do
+        contextUsageTokens
+            (Just (reportedOccupancy 42 (length history)))
+            params
+            history
+            `shouldBe` 42
+        contextUsageTokens
+            (Just (reportedOccupancy 42 0))
+            params
+            history
+            `shouldBe`
+                contextUsageTokens Nothing params history
 
     it "attributes Responses Lite instructions and tool schemas" do
         let liteParams =

@@ -549,6 +549,7 @@ uiEventMayExposeSyntax = \case
     UiSetPromptTarget _ _ -> False
     UiSetPromptEffort _ -> False
     UiSetPromptLimitStatus _ -> False
+    UiSetContextUsage _ _ -> False
     UiSetAwaitingInput _ -> False
     UiSetRepository _ _ _ -> False
     UiSetNotice _ -> False

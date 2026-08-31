@@ -79,7 +79,10 @@ import Agent.CLI.Session ()
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ( readLiveAttachments )
-import Agent.CLI.Session.Interaction ( buildPromptState )
+import Agent.CLI.Session.Interaction
+    ( buildPromptState
+    , syncFullscreenContext
+    )
 import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
 import Agent.CLI.Session.Runtime.Types ()
 import Agent.CLI.Session.Selection ()
@@ -276,6 +279,7 @@ replWithDraft env@SessionEnv
     account <- readIORef accountRef
     mlineResult <- case fullscreen of
         Just runtime -> do
+            syncFullscreenContext env
             setFullscreenImagePreviews runtime pendingAttachments
             let promptState =
                     buildPromptState
