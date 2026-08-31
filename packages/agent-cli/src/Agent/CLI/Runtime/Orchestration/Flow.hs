@@ -43,7 +43,7 @@ import Agent.CLI.Options
       isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
-                 optPromptFile, optResume, optCwd, optCodeMode),
+                 optPromptFile, optResume, optCwd, optCodeMode, optYolo),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -73,9 +73,9 @@ import Agent.CLI.Runtime.HistorySource
 import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Initialized
-    ( PreparedStartupAuth
-    , prepareStartupAuth
+    ( PreparedStartupAuthWorker
     , runAgentInitialized
+    , withPreparedStartupAuth
     )
 import Agent.CLI.Runtime.Orchestration.Restart
     ( RestartCallbacks(..), runFullscreenRestartLoop )
@@ -193,7 +193,6 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ( defaultToolEnv, ToolEnv(toolCancel) )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
-import Control.Concurrent.Async ( Async, withAsync )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar
     ( newEmptyMVar, newMVar, readMVar, tryPutMVar )
@@ -804,7 +803,7 @@ prepareAgentIterationTracked
     writeIORef uiRuntimeRef fullscreen
     resumeLock <- readIORef resumeLockRef
     let runAction
-            :: Maybe (Async PreparedStartupAuth)
+            :: Maybe PreparedStartupAuthWorker
             -> IO RunResult
         runAction preparedAuth =
             do
@@ -915,16 +914,16 @@ prepareAgentIterationTracked
         action
             | options.optWorktree
             , isNothing resumed
-            , isNothing transition =
+            , isNothing transition = do
                 let prepareAccountUsage =
-                        isNothing fullscreen
+                        options.optYolo
+                            || isNothing fullscreen
                             || isJust options.optProvider
                             || isJust options.optModel
-                in withAsync
-                    (prepareStartupAuth
-                        prepareAccountUsage
-                        options.optProvider) $
-                    runAction . Just
+                withPreparedStartupAuth
+                    prepareAccountUsage
+                    options.optProvider
+                    (runAction . Just)
             | otherwise = runAction Nothing
         cleanup = do
             writeIORef uiRuntimeRef Nothing
