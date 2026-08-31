@@ -384,6 +384,7 @@ data AgentHover = AgentHover
 
 data ChoicePresentation
     = ChoiceDialog
+    | ChoiceDocument
     | ChoiceOnboarding
     deriving (Eq, Show)
 

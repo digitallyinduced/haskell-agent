@@ -15,6 +15,7 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Approval ( setApprovalPolicy, toggleAlwaysApprove )
 import Agent.CLI.Artifact ( fencedCodeBlock, lastDiffBlock )
 import Agent.CLI.Auth ()
+import Agent.CLI.Changelog (loadReleaseNotes)
 import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
     ( CopyRequest(..),
@@ -213,6 +214,7 @@ import Agent.CLI.TUI.App
       commitFullscreenHistoryTurn,
       emitUiEvent,
       requestFullscreenChoiceWithBody,
+      requestFullscreenDocument,
       requestFullscreenFilterChoice,
       requestFullscreenSecret,
       requestFullscreenText,
@@ -852,10 +854,16 @@ handleReplLine
                             Text.putStrLn (roleMuted color message)
                         continue
                     ReplChangelog -> do
-                        let message =
-                                "[View the Haskell Agent changelog]\
-                                \(https://github.com/digitallyinduced/haskell-agent/releases)"
-                        displayInfo message (Text.putStrLn message)
+                        releaseNotes <- loadReleaseNotes
+                        case fullscreen of
+                            Just runtime -> do
+                                requestFullscreenDocument
+                                    runtime
+                                    "Release Notes"
+                                    releaseNotes
+                            Nothing ->
+                                displayInfo releaseNotes
+                                    (Text.putStrLn releaseNotes)
                         continue
                     action@ReplShowEffort -> handleSelectionAction env continue action
                     action@ReplSetEffort{} -> handleSelectionAction env continue action

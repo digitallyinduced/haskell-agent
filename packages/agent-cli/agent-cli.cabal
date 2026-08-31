@@ -11,7 +11,8 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
-data-files:         skills/add-model/SKILL.md
+data-files:         data/CHANGELOG.md
+                  , skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
                   , skills/post-task-learning-review/SKILL.md
                   , skills/telegram-agent/SKILL.md
@@ -46,6 +47,7 @@ library
                     , Agent.CLI.AgentSessions.Render
                     , Agent.CLI.AgentViewport.Status
                     , Agent.CLI.Approval.Decision
+                    , Agent.CLI.Changelog
                     , Agent.CLI.Command.Types
                     , Agent.CLI.Command.Catalog
                     , Agent.CLI.Command.Instructions
