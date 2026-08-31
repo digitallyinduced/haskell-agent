@@ -1,0 +1,14 @@
+scenario	sample	real-seconds	user-seconds	sys-seconds	compiled-lines	agent-cli-built	runtime-built	telegram-built
+# base-revision	d0df7e20249aca5ee86f91a1e9aac145e1dce949
+# stage	refactored
+# jobs	8
+# ghc	9.10.3
+# cabal	3.16.1.0
+cold-agent-cli	1	301.830	374.770	41.610	510	true	true	false
+cold-agent-cli	2	312.640	380.960	46.750	511	true	true	false
+cold-agent-cli	3	397.190	402.310	52.410	511	true	true	false
+# median cold-agent-cli	312.640	380.960	46.750
+cold-agent-telegram	1	248.870	238.600	32.670	288	false	true	true
+cold-agent-telegram	2	261.590	247.530	33.130	288	false	true	true
+cold-agent-telegram	3	245.380	253.130	32.850	288	false	true	true
+# median cold-agent-telegram	248.870	247.530	32.850

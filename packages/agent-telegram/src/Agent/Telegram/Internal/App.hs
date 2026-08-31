@@ -1,9 +1,9 @@
 module Agent.Telegram.Internal.App where
 
 
-import Agent.CLI.AgentSessions ()
+import Agent.CLI.AgentSessions.Process ()
 import Agent.CLI.ManagedTurn ()
-import Agent.CLI.Options ()
+import Agent.CLI.Runtime.Options ()
 import Agent.CLI.Models ()
 import Agent.CLI.ModelConfig ()
 import Agent.CLI.Session ()

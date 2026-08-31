@@ -123,7 +123,7 @@ import Agent.CLI.Session.Codec
     , validateSessionMeta
     )
 import Agent.CLI.Models (ModelTarget(..))
-import Agent.CLI.SessionTitle (titleRefreshIndex)
+import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import Agent.Dialect (DialectId)
 import Agent.Loop (TokenUsage(..))
 import Agent.OpenAI.Compaction (rewindSessionUserText)

@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, agent-cli, agent-core, agent-json
+{ mkDerivation, aeson, agent-cli-runtime, agent-core, agent-json
 , agent-store, async, base, bytestring, containers, directory
 , filelock, filepath, hspec, http-client, http-client-tls
 , http-types, lib, process, retry, safe-exceptions, temporary, text
@@ -11,8 +11,8 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    aeson agent-cli agent-core agent-json agent-store async base
-    bytestring containers directory filelock filepath http-client
+    aeson agent-cli-runtime agent-core agent-json agent-store async
+    base bytestring containers directory filelock filepath http-client
     http-client-tls http-types process retry safe-exceptions text time
     unix vector
   ];
