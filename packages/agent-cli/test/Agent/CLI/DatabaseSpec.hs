@@ -2,8 +2,40 @@ module Agent.CLI.DatabaseSpec (spec) where
 
 import Agent.CLI.Database
 import Agent.CLI.Database.Storage
-import Agent.CLI.Database.Store (deriveDatabaseScopes)
+import Agent.CLI.Database.Store
+    ( DatabaseBrowsePage(..)
+    , deriveDatabaseScopes
+    , listDatabaseObjects
+    , loadDatabaseRows
+    , scopeForDatabase
+    )
 import Agent.CLI.Options (StorageCommand(..))
+import Agent.Store.Postgres
+    ( ManagedPostgresConfig(..)
+    , ManagedPostgresPaths(..)
+    , Store
+    , closeStore
+    , defaultManagedPostgresConfig
+    , openStore
+    , provisioningPool
+    , scopePool
+    , trustedPool
+    )
+import Agent.Store.Postgres.Connection (StorePool, storePool)
+import Agent.Store.Postgres.Custom
+    ( CustomAuditContext(..)
+    , CatalogColumn(..)
+    , CatalogDefinition(..)
+    , CatalogObject(..)
+    , defaultQueryLimits
+    , executeCustom
+    )
+import Agent.Store.Postgres.Managed (stopManagedPostgres)
+import Agent.Store.Postgres.Scope
+    ( ScopeDatabase(..)
+    , lookupScopeDatabase
+    , provisionScope
+    )
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , ToolDispatchConfig(..)
@@ -13,12 +45,20 @@ import Agent.Tools.Types
     ( appToolHandlers
     )
 import Agent.ToolDispatch (dispatchToolCall)
-import Control.Exception.Safe (displayException)
+import Control.Exception.Safe (displayException, finally, onException)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Directory
+    ( createDirectory
+    , getCurrentDirectory
+    , getTemporaryDirectory
+    , removePathForcibly
+    )
+import System.FilePath ((</>))
+import System.Posix.Process (getProcessID)
 import Test.Hspec
 
 spec :: Spec
@@ -104,6 +144,31 @@ spec = do
                     "{\"query\":\"nothing\"}")
             result.output `shouldBe` "(no matching conversations)"
 
+    describe "native data browser store" do
+        it "does not provision on browse and returns typed table rows" $
+            withBrowserDirectories \stateDirectory socketDirectory -> do
+                let
+                    baseConfig =
+                        defaultManagedPostgresConfig stateDirectory ""
+                    config = baseConfig
+                        { postgresPaths = baseConfig.postgresPaths
+                            { postgresSocketDirectory = socketDirectory
+                            }
+                        }
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (openStore config >>= \case
+                    Left err ->
+                        expectationFailure (
+                            "could not open store: " <> show err
+                        )
+                    Right store ->
+                        finally
+                            (exerciseDataBrowser store stateDirectory)
+                            (closeStore store)
+                    ) `finally` cleanup
+
     describe "runStorageCommand" do
         it "dispatches each administrative command to its store action" do
             let env = StorageCommandEnv
@@ -137,6 +202,146 @@ spec = do
                 "/tmp/haskell-agent-state"
                 "/tmp/haskell-agent-checkout-b"
             first `shouldNotBe` second
+
+withBrowserDirectories
+    :: (FilePath -> FilePath -> IO value)
+    -> IO value
+withBrowserDirectories action = do
+    currentDirectory <- getCurrentDirectory
+    temporaryDirectory <- getTemporaryDirectory
+    processId <- getProcessID
+    let
+        suffix = show processId
+        stateDirectory = currentDirectory </> (".ha-db-" <> suffix)
+        socketDirectory = temporaryDirectory </> ("s" <> suffix)
+    createDirectory stateDirectory
+    createDirectory socketDirectory
+        `onException` removePathForcibly stateDirectory
+    action stateDirectory socketDirectory
+        `finally`
+            (removePathForcibly stateDirectory
+                `finally` removePathForcibly socketDirectory)
+
+exerciseDataBrowser :: Store -> FilePath -> IO ()
+exerciseDataBrowser store stateDirectory =
+    deriveDatabaseScopes stateDirectory stateDirectory >>= \case
+        Left err ->
+            expectationFailure (
+                "could not derive database scopes: " <> Text.unpack err
+            )
+        Right scopes -> do
+            let
+                scope =
+                    scopeForDatabase scopes DatabaseRepositoryScope
+                provisionPool = storePool (provisioningPool store)
+            lookupScopeDatabase provisionPool scope
+                `shouldReturn` Right Nothing
+            listDatabaseObjects
+                store scopes DatabaseRepositoryScope
+                `shouldReturn` Right []
+            lookupScopeDatabase provisionPool scope
+                `shouldReturn` Right Nothing
+
+            provisionScope provisionPool scope >>= \case
+                Left err ->
+                    expectationFailure (
+                        "could not provision scope: " <> Text.unpack err
+                    )
+                Right database ->
+                    scopePool store database.scopeDatabaseRole >>= \case
+                        Left err ->
+                            expectationFailure (
+                                "could not open scope pool: " <> show err
+                            )
+                        Right scoped -> do
+                            let
+                                audit = CustomAuditContext
+                                    { customAuditSessionId = Nothing
+                                    , customAuditAgentId = Nothing
+                                    }
+                            seedBrowserTable store scoped database audit
+
+                            objects <- listDatabaseObjects
+                                store scopes DatabaseRepositoryScope
+                            assertBrowserCatalog objects
+
+                            loadDatabaseRows
+                                store
+                                scopes
+                                DatabaseRepositoryScope
+                                "notes"
+                                0
+                                500
+                                >>= assertDataPage
+                            loadDatabaseRows
+                                store
+                                scopes
+                                DatabaseRepositoryScope
+                                "notes"
+                                1
+                                500
+                                `shouldReturn`
+                                    Left "data preview offset must be zero"
+
+seedBrowserTable
+    :: Store
+    -> StorePool
+    -> ScopeDatabase
+    -> CustomAuditContext
+    -> IO ()
+seedBrowserTable store scoped database audit =
+    executeCustom
+        (storePool (trustedPool store))
+        (storePool scoped)
+        database
+        audit
+        defaultQueryLimits
+        "test native data browser"
+        "CREATE TABLE notes (\
+        \ id bigint PRIMARY KEY,\
+        \ title text NOT NULL,\
+        \ done boolean NOT NULL,\
+        \ metadata jsonb);\
+        \ INSERT INTO notes VALUES\
+        \ (1, 'first', true, '{\"priority\":2}'::jsonb)"
+        >>= \case
+            Left err ->
+                expectationFailure (
+                    "could not seed browser table: " <> Text.unpack err
+                )
+            Right _ -> pure ()
+
+assertBrowserCatalog :: Either Text [CatalogObject] -> IO ()
+assertBrowserCatalog = \case
+    Left err ->
+        expectationFailure (
+            "could not list browser tables: " <> Text.unpack err
+        )
+    Right [object] -> do
+        object.catalogObjectName `shouldBe` "notes"
+        map (.columnName)
+            object.catalogObjectDefinition.definitionColumns
+            `shouldBe` ["id", "title", "done", "metadata"]
+    Right unexpected ->
+        expectationFailure (
+            "unexpected browser catalog: " <> show unexpected
+        )
+
+assertDataPage :: Either Text DatabaseBrowsePage -> IO ()
+assertDataPage = \case
+    Left err ->
+        expectationFailure (
+            "could not load browser rows: " <> Text.unpack err
+        )
+    Right page -> do
+        page.databaseBrowseHasMore `shouldBe` False
+        page.databaseBrowseRows `shouldBe`
+            [ [ Aeson.Number 1
+              , Aeson.String "first"
+              , Aeson.Bool True
+              , object ["priority" .= (2 :: Int)]
+              ]
+            ]
 
 testEnv :: DatabaseToolsEnv
 testEnv = DatabaseToolsEnv

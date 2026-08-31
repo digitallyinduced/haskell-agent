@@ -1,10 +1,13 @@
 -- | Adapter from the CLI database tools to the Hasql-backed PostgreSQL store.
 module Agent.CLI.Database.Store
     ( DatabaseScopes
+    , DatabaseBrowsePage(..)
     , deriveDatabaseScopes
     , scopeForDatabase
     , applicableDatabaseScopes
     , databaseToolsEnvForStore
+    , listDatabaseObjects
+    , loadDatabaseRows
     ) where
 
 import Agent.CLI.Database
@@ -27,6 +30,7 @@ import Agent.Store.Postgres.Custom
     , CustomAuditContext(..)
     , CustomExecutionResult(..)
     , CustomQueryResult(..)
+    , QueryLimits(..)
     , defaultQueryLimits
     , executeCustom
     , inspectCustomSchema
@@ -41,6 +45,7 @@ import Agent.Store.Postgres.Scope
     , ScopeDatabase(..)
     , ScopeId
     , ScopeKind(..)
+    , lookupScopeDatabase
     , mkScopeId
     , provisionScope
     )
@@ -48,8 +53,13 @@ import Agent.Store.Types (renderStoreError)
 import Control.Exception.Safe (SomeException, try)
 import Data.Aeson (Value, toJSON)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AesonKey
+import qualified Data.Aeson.KeyMap as AesonKeyMap
 import Data.Bits (xor)
 import qualified Data.ByteString as ByteString
+import Data.Int (Int64)
+import Data.List (find)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -64,6 +74,12 @@ data DatabaseScopes = DatabaseScopes
     { userScope :: !Scope
     , repositoryScope :: !Scope
     , checkoutScope :: !Scope
+    }
+    deriving (Eq, Show)
+
+data DatabaseBrowsePage = DatabaseBrowsePage
+    { databaseBrowseRows :: ![[Value]]
+    , databaseBrowseHasMore :: !Bool
     }
     deriving (Eq, Show)
 
@@ -128,6 +144,106 @@ databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
             Left err -> pure (Left (renderStoreError err))
             Right results -> pure $ Right $ toJSON (map searchResultValue results)
     }
+
+-- | List the table-like objects exposed by one user-defined scope. Sequences
+-- are intentionally omitted from the native data browser.
+listDatabaseObjects
+    :: Store
+    -> DatabaseScopes
+    -> DatabaseScope
+    -> IO (Either Text [CatalogObject])
+listDatabaseObjects store scopes selected =
+    withExistingScopeDatabase
+        store
+        (scopeForDatabase scopes selected)
+        (Right [])
+        \database pool ->
+            fmap (filter isBrowseableObject)
+                <$> inspectCustomSchema pool database
+
+-- | Load one bounded preview in catalog column order. A preview is read by one
+-- PostgreSQL statement, rather than multiple OFFSET queries whose snapshots can
+-- drift while a table is changing. The object name must first resolve through
+-- the isolated custom-schema catalog, so quoting cannot expose harness-owned
+-- or sibling-scope relations.
+loadDatabaseRows
+    :: Store
+    -> DatabaseScopes
+    -> DatabaseScope
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text DatabaseBrowsePage)
+loadDatabaseRows store scopes selected objectName offset limit
+    | offset /= 0 = pure (Left "data preview offset must be zero")
+    | limit <= 0 || limit > 500 =
+        pure (Left "data page size must be between 1 and 500")
+    | otherwise =
+        withExistingScopeDatabase
+            store
+            (scopeForDatabase scopes selected)
+            (Left "the selected data table no longer exists")
+            \database pool ->
+                inspectCustomSchema pool database >>= \case
+                    Left err -> pure (Left err)
+                    Right catalog ->
+                        case find matchesObject catalog of
+                            Nothing ->
+                                pure (Left "the selected data table no longer exists")
+                            Just object -> do
+                                let columns =
+                                        object.catalogObjectDefinition.definitionColumns
+                                    requested = fromIntegral limit + 1
+                                    limits = defaultQueryLimits
+                                        { queryMaxRows = requested
+                                        , queryMaxOutputBytes = 8 * 1024 * 1024
+                                        }
+                                    sql =
+                                        "select * from "
+                                            <> quoteBrowseIdentifier objectName
+                                            <> " limit " <> Text.pack (show requested)
+                                queryCustom pool database limits sql >>= \case
+                                    Left err -> pure (Left err)
+                                    Right result ->
+                                        pure $ do
+                                            rows <- decodeBrowseRows
+                                                columns
+                                                result.customQueryRows
+                                            pure DatabaseBrowsePage
+                                                { databaseBrowseRows =
+                                                    take limit rows
+                                                , databaseBrowseHasMore =
+                                                    length rows > limit
+                                                }
+  where
+    matchesObject object =
+        object.catalogObjectName == objectName
+            && isBrowseableObject object
+
+isBrowseableObject :: CatalogObject -> Bool
+isBrowseableObject object =
+    object.catalogObjectKind
+        `elem` ["table", "partitioned_table", "view", "materialized_view"]
+
+decodeBrowseRows :: [CatalogColumn] -> Text -> Either Text [[Value]]
+decodeBrowseRows columns encoded =
+    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 encoded) of
+        Left err -> Left ("database rows: " <> Text.pack err)
+        Right values -> traverse rowValues (values :: [Value])
+  where
+    rowValues (Aeson.Object object) =
+        Right
+            [ fromMaybe Aeson.Null $
+                AesonKeyMap.lookup
+                    (AesonKey.fromText column.columnName)
+                    object
+            | column <- columns
+            ]
+    rowValues _ = Left "database rows did not have the expected shape"
+
+quoteBrowseIdentifier :: Text -> Text
+quoteBrowseIdentifier value =
+    "\"" <> Text.replace "\"" "\"\"" value <> "\""
 
 queryResultValue :: CustomQueryResult -> Either Text Value
 queryResultValue result = do
@@ -209,12 +325,30 @@ searchResultValue result = Aeson.object
 withScopeDatabase
     :: Store
     -> Scope
-    -> (ScopeDatabase -> HasqlPool -> IO (Either Text Value))
-    -> IO (Either Text Value)
+    -> (ScopeDatabase -> HasqlPool -> IO (Either Text value))
+    -> IO (Either Text value)
 withScopeDatabase store scope action =
     provisionScope (storePool (provisioningPool store)) scope >>= \case
         Left err -> pure (Left err)
         Right database ->
+            scopePool store database.scopeDatabaseRole >>= \case
+                Left err -> pure (Left (renderStoreError err))
+                Right pool -> action database (storePool pool)
+
+-- | Run a native browser read only when the scope already exists. Unlike the
+-- agent database tools, merely opening Data must not create a role, schema, or
+-- scope-registry row.
+withExistingScopeDatabase
+    :: Store
+    -> Scope
+    -> Either Text value
+    -> (ScopeDatabase -> HasqlPool -> IO (Either Text value))
+    -> IO (Either Text value)
+withExistingScopeDatabase store scope missing action =
+    lookupScopeDatabase (storePool (provisioningPool store)) scope >>= \case
+        Left err -> pure (Left err)
+        Right Nothing -> pure missing
+        Right (Just database) ->
             scopePool store database.scopeDatabaseRole >>= \case
                 Left err -> pure (Left (renderStoreError err))
                 Right pool -> action database (storePool pool)
