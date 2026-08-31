@@ -9,6 +9,7 @@ module Agent.CLI.Skills
     , queueSkillCatalogContext
     , queueSkillCatalogContextWithOmissions
     , reservedSlashNames
+    , resolvePromptSkillMentions
     , skillInvocationCommand
     ) where
 
@@ -47,6 +48,15 @@ reservedSlashNames =
     concatMap
         (\command -> command.slashName : command.slashAliases)
         slashCommands
+
+resolvePromptSkillMentions
+    :: Bool
+    -> [SkillInvocation]
+    -> Text
+    -> Either Text [SkillInvocation]
+resolvePromptSkillMentions pasted invocations prompt
+    | pasted = Right []
+    | otherwise = resolveSkillMentions invocations prompt
 
 loadSkillsCatalog
     :: CliOptions
