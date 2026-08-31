@@ -30,6 +30,7 @@ import Agent.Provider
     )
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Exception.Safe (bracket)
+import Control.Monad (when)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -109,8 +110,9 @@ spec = do
                     loadAuth (Just OpenAIProvider) >>= \case
                         Left err -> expectationFailure (Text.unpack err)
                         Right loaded -> do
-                            loaded.loadedOpenAiPool
-                                `shouldSatisfy` isNothing
+                            when (not (isNothing loaded.loadedOpenAiPool)) $
+                                expectationFailure
+                                    "connected gateway exposed a local fallback pool"
                             gatewayCredential <-
                                 getNextToken
                                     loaded.loadedTokenProvider
