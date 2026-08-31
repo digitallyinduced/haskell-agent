@@ -14,6 +14,14 @@ spec = do
         it "decodes modified CSI arrows" do
             decodePickerKey "\ESC[1;2A" `shouldBe` Just PickerKeyUp
             decodePickerKey "\ESC[1;5B" `shouldBe` Just PickerKeyDown
+            decodePickerKey "\ESC[1;2C" `shouldBe` Just PickerKeyRight
+            decodePickerKey "\ESC[1;5D" `shouldBe` Just PickerKeyLeft
+
+        it "decodes normal and SS3 horizontal arrows" do
+            decodePickerKey "\ESC[C" `shouldBe` Just PickerKeyRight
+            decodePickerKey "\ESC[D" `shouldBe` Just PickerKeyLeft
+            decodePickerKey "\ESCOC" `shouldBe` Just PickerKeyRight
+            decodePickerKey "\ESCOD" `shouldBe` Just PickerKeyLeft
 
         it "ignores Kitty key releases instead of moving twice" do
             decodePickerKey "\ESC[1;1:1A" `shouldBe` Just PickerKeyUp

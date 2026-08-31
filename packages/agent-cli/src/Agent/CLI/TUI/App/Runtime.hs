@@ -268,7 +268,7 @@ newFullscreenRuntimeWithSyntaxLoader
         sessionActions <- newIORef FullscreenSessionActions
             { sessionProvider = Nothing
             , sessionCancel = cancelAction
-            , sessionSteer = const (pure (Right ()))
+            , sessionSteer = \_ _ -> pure (Right ())
             , sessionBtw = const (pure ())
             , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
@@ -282,9 +282,9 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeInput = inputBuffer
             , runtimeCancel =
                 readIORef sessionActions >>= (.sessionCancel)
-            , runtimeSteer = \text ->
+            , runtimeSteer = \pasted text ->
                 readIORef sessionActions >>= \actions ->
-                    actions.sessionSteer text
+                    actions.sessionSteer pasted text
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
@@ -334,7 +334,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> Maybe Provider
     -> IO ()
-    -> (Text -> IO (Either Text ()))
+    -> (Bool -> Text -> IO (Either Text ()))
     -> (Text -> IO ())
     -> IO ()
     -> (Text -> IO ())
@@ -860,6 +860,21 @@ requestFullscreenPermission runtime workspace call = do
     let summary = approvalToolCallPromptRelative workspace call
     notifyAttention stderr PermissionRequested
     enqueueAppEvent runtime (AppAskPermission summary reply)
+    atomically (readTMVar reply)
+
+-- | Open a searchable choice whose right-hand value can be adjusted with
+-- left/right. Both returned indices refer to the original unfiltered row and
+-- that row's adjustment list.
+requestFullscreenAdjustableFilterChoice
+    :: FullscreenRuntime
+    -> Text
+    -> Int
+    -> [(Text, Text, [Text], Int)]
+    -> IO (Maybe (Int, Int))
+requestFullscreenAdjustableFilterChoice runtime title initial rows = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskAdjustableFilterChoice title initial rows reply)
     atomically (readTMVar reply)
 
 requestFullscreenChoice

@@ -1,7 +1,7 @@
 module Agent.CLI.Runtime.Orchestration.Initialized
-    ( PreparedStartupAuth
-    , prepareStartupAuth
+    ( PreparedStartupAuthWorker
     , runAgentInitialized
+    , withPreparedStartupAuth
     ) where
 
 import Agent.CLI.AccountPicker ()
@@ -64,7 +64,7 @@ import Agent.CLI.Models
       ModelOption(modelTarget),
       ModelTarget(targetWireModelId, ModelTarget, targetConnectionId,
                   targetProvider, targetModelId, targetDialect) )
-import Agent.CLI.Options ( CliOptions(optModel, optProvider) )
+import Agent.CLI.Options ( CliOptions(optModel, optProvider, optYolo) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
 import Agent.CLI.Project
@@ -186,13 +186,21 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
-import Control.Concurrent.Async ( Async, concurrently, wait )
+import Control.Concurrent.Async
+    ( Async, cancel, concurrently, poll, wait, withAsync )
 import Control.Concurrent.Chan ()
-import Control.Concurrent.MVar ( modifyMVar_, newMVar, readMVar )
+import Control.Concurrent.MVar
+    ( modifyMVar_
+    , newEmptyMVar
+    , newMVar
+    , readMVar
+    , takeMVar
+    , tryPutMVar
+    )
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe ( onException )
-import Control.Monad ( when )
+import Control.Monad ( void, when )
 import Data.Functor ()
 import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
 import Data.List ()
@@ -230,6 +238,11 @@ data PreparedStartupAuth = PreparedStartupAuth
     , preparedAccountUsage :: !(Maybe PreparedProviderAccounts)
     }
 
+data PreparedStartupAuthWorker = PreparedStartupAuthWorker
+    { preparedStartupAsync :: !(Async PreparedStartupAuth)
+    , retirePreparedStartup :: !(IO ())
+    }
+
 prepareStartupAuth :: Bool -> Maybe Provider -> IO PreparedStartupAuth
 prepareStartupAuth prepareAccountUsage requestedProvider = do
     authResult <- loadAuth requestedProvider
@@ -244,6 +257,25 @@ prepareStartupAuth prepareAccountUsage requestedProvider = do
         , preparedAccountUsage = accountUsage
         }
 
+withPreparedStartupAuth
+    :: Bool
+    -> Maybe Provider
+    -> (PreparedStartupAuthWorker -> IO a)
+    -> IO a
+withPreparedStartupAuth prepareAccountUsage requestedProvider action =
+    withAsync
+        (prepareStartupAuth prepareAccountUsage requestedProvider)
+        \worker -> do
+            retire <- newEmptyMVar
+            withAsync
+                (takeMVar retire >> cancel worker)
+                \_ ->
+                    action PreparedStartupAuthWorker
+                        { preparedStartupAsync = worker
+                        , retirePreparedStartup =
+                            void (tryPutMVar retire ())
+                        }
+
 runAgentInitialized
     :: (AgentRunMode -> CliOptions -> IO DevResult)
     -> AgentProcessRuntime
@@ -255,7 +287,7 @@ runAgentInitialized
     -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
-    -> Maybe (Async PreparedStartupAuth)
+    -> Maybe PreparedStartupAuthWorker
     -> IO RunResult
 runAgentInitialized
         runAgentChild processRuntime options transition home root resumed resumeLock cwd startup preparedAuth =
@@ -274,7 +306,7 @@ runAgentInitializedWithLock
     -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
-    -> Maybe (Async PreparedStartupAuth)
+    -> Maybe PreparedStartupAuthWorker
     -> IO RunResult
 runAgentInitializedWithLock
         runAgentChild processRuntime
@@ -466,6 +498,7 @@ runAgentInitializedWithLock
             Nothing -> do
                 (startupAuth, accountUsage) <- loadPreparedOrStartupAuth
                     preparedAuth
+                    (options.optYolo && checkStartupUsageInBackground)
                     startup
                     transition
                     requestedProvider
@@ -534,7 +567,8 @@ runAgentInitializedWithLock
             | not
                 (loadedAuthSupportsUsageAccountSelection initialLoaded) ->
                     pure (initialLoaded, Nothing)
-            | checkStartupUsageInBackground -> do
+            | checkStartupUsageInBackground
+            , isNothing preparedAccountUsage -> do
                 -- Make the remembered model/account usable immediately. The
                 -- scoped availability worker below checks the account pool
                 -- after the prompt is ready and triggers startup fallback if
@@ -814,7 +848,7 @@ runAgentInitializedWithLock
         activeSelectionRef
         baseToolEnv
         catalog
-        checkStartupUsageInBackground
+        (checkStartupUsageInBackground && isNothing preparedAccountUsage)
         configuredOptionTarget
         customResponses
         cwd
@@ -851,30 +885,50 @@ runAgentInitializedWithLock
         unavailableProviders
 
 loadPreparedOrStartupAuth
-    :: Maybe (Async PreparedStartupAuth)
+    :: Maybe PreparedStartupAuthWorker
+    -> Bool
     -> StartupRuntime
     -> Maybe ProviderTransition
     -> Maybe Provider
     -> IO ((LoadedAuth, Bool), Maybe PreparedProviderAccounts)
-loadPreparedOrStartupAuth prepared startup transition requestedProvider =
+loadPreparedOrStartupAuth
+    prepared
+    usePreparedOnlyIfReady
+    startup
+    transition
+    requestedProvider =
     case prepared of
-        Nothing ->
-            (, Nothing)
-                <$> loadStartupAuth startup transition requestedProvider
-        Just worker ->
-            wait worker >>= \case
-                preparedResult
-                    | Right loaded <- preparedResult.preparedAuthResult
+        Nothing -> loadFallback
+        Just preparedWorker -> do
+            let worker = preparedWorker.preparedStartupAsync
+            preparedResult <-
+                if usePreparedOnlyIfReady
+                    then
+                        poll worker >>= \case
+                            Nothing -> do
+                                -- Some HTTP clients take time to acknowledge
+                                -- async cancellation. Ask the scoped retirement
+                                -- worker to handle that wait so startup can
+                                -- continue to the post-prompt availability
+                                -- probe.
+                                preparedWorker.retirePreparedStartup
+                                pure Nothing
+                            Just _ -> Just <$> wait worker
+                    else Just <$> wait worker
+            case preparedResult of
+                Just result
+                    | Right loaded <- result.preparedAuthResult
                     , maybe True (== loaded.loadedProvider) requestedProvider ->
-                        (, preparedResult.preparedAccountUsage)
+                        (, result.preparedAccountUsage)
                             <$> loadStartupAuthFromResult
                                 startup
                                 transition
                                 requestedProvider
-                                preparedResult.preparedAuthResult
-                _ ->
-                    (, Nothing)
-                        <$> loadStartupAuth startup transition requestedProvider
+                                result.preparedAuthResult
+                _ -> loadFallback
+  where
+    loadFallback =
+        (, Nothing) <$> loadStartupAuth startup transition requestedProvider
 
 trackCredentialAccount
     :: IORef Text

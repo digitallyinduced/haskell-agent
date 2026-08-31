@@ -39,10 +39,11 @@ import Agent.CLI.Models
       ModelTarget(targetDialect, targetConnectionId, targetProvider,
                   targetModelId) )
 import Agent.CLI.Options
-    ( isOneShot,
+    ( defaultEffortFor,
+      isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
-                 optPromptFile, optResume, optCwd, optCodeMode),
+                 optPromptFile, optResume, optCwd, optCodeMode, optYolo),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -60,7 +61,7 @@ import Agent.CLI.ProviderTransition
                          transitionUnavailableProviders, transitionPendingTurn,
                          transitionTarget, transitionAccountSelectionId,
                          transitionAccountId, transitionAutomaticBilling,
-                         transitionSessionId),
+                         transitionSessionId, transitionEffort),
       TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
@@ -72,9 +73,9 @@ import Agent.CLI.Runtime.HistorySource
 import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Initialized
-    ( PreparedStartupAuth
-    , prepareStartupAuth
+    ( PreparedStartupAuthWorker
     , runAgentInitialized
+    , withPreparedStartupAuth
     )
 import Agent.CLI.Runtime.Orchestration.Restart
     ( RestartCallbacks(..), runFullscreenRestartLoop )
@@ -105,7 +106,9 @@ import Agent.CLI.Session
       sessionsRoot,
       SessionMeta(metaId, metaCwd) )
 import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ( modelChoice )
+import Agent.CLI.ModelPicker
+    ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
+import Agent.CLI.Session.Choices ( modelChoiceWithEffort )
 import Agent.CLI.Session.History ()
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
@@ -199,7 +202,6 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ( defaultToolEnv, ToolEnv(toolCancel) )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
-import Control.Concurrent.Async ( Async, withAsync )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar
     ( newEmptyMVar, newMVar, readMVar, tryPutMVar )
@@ -212,7 +214,7 @@ import Data.Functor ()
 import Data.IORef
     ( IORef, atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
-import Data.Maybe ( isJust, isNothing )
+import Data.Maybe ( fromMaybe, isJust, isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
 import System.Console.ANSI ()
@@ -494,27 +496,38 @@ runAgent
                                             (Left
                                                 "No configured models are available.")
                                     Just current ->
-                                        modelChoice
+                                        modelChoiceWithEffort
                                             catalog
                                             (Just runtime)
                                             color
                                             current.targetConnectionId
                                             current.targetProvider
                                             current.targetModelId
-                                            current.targetDialect >>= \case
+                                            current.targetDialect
+                                            (fromMaybe
+                                                (defaultEffortFor
+                                                    current.targetProvider)
+                                                ( (nextTransition
+                                                        >>= (.transitionEffort))
+                                                    <|> nextOptions.optEffort
+                                                ))
+                                            >>= \case
                                                 Nothing ->
                                                     pure (Right Nothing)
-                                                Just choice ->
+                                                Just selection ->
                                                     pure $ Right $ Just $
                                                         recoveryModelTransition
                                                             nextOptions
                                                             nextTransition
-                                                            choice.modelTarget
-                    recoveryModelTransition nextOptions nextTransition target =
+                                                            selection.modelPickerOption.modelTarget
+                                                            selection.modelPickerEffort
+                    recoveryModelTransition
+                            nextOptions nextTransition target selectedEffort =
                         case nextTransition of
                             Just active ->
                                 active
                                     { transitionTarget = target
+                                    , transitionEffort = Just selectedEffort
                                     , transitionAccountSelectionId = Nothing
                                     , transitionAccountId = Nothing
                                     , transitionUnavailableProviders = Set.empty
@@ -524,6 +537,7 @@ runAgent
                             Nothing ->
                                 ProviderTransition
                                     { transitionTarget = target
+                                    , transitionEffort = Just selectedEffort
                                     , transitionAccountSelectionId = Nothing
                                     , transitionAccountId = Nothing
                                     , transitionSessionId = nextOptions.optResume
@@ -798,7 +812,7 @@ prepareAgentIterationTracked
     writeIORef uiRuntimeRef fullscreen
     resumeLock <- readIORef resumeLockRef
     let runAction
-            :: Maybe (Async PreparedStartupAuth)
+            :: Maybe PreparedStartupAuthWorker
             -> IO RunResult
         runAction preparedAuth =
             do
@@ -864,7 +878,7 @@ prepareAgentIterationTracked
                         runtime
                         Nothing
                         (requestCancel toolEnv.toolCancel)
-                        (const (pure (Right ())))
+                        (\_ _ -> pure (Right ()))
                         (const (pure ()))
                         (pure ())
                         (\level ->
@@ -913,16 +927,16 @@ prepareAgentIterationTracked
         action
             | options.optWorktree
             , isNothing resumed
-            , isNothing transition =
+            , isNothing transition = do
                 let prepareAccountUsage =
-                        isNothing fullscreen
+                        options.optYolo
+                            || isNothing fullscreen
                             || isJust options.optProvider
                             || isJust options.optModel
-                in withAsync
-                    (prepareStartupAuth
-                        prepareAccountUsage
-                        options.optProvider) $
-                    runAction . Just
+                withPreparedStartupAuth
+                    prepareAccountUsage
+                    options.optProvider
+                    (runAction . Just)
             | otherwise = runAction Nothing
         cleanup = do
             forM_ runMode.runNativeHooks \hooks ->
@@ -952,7 +966,7 @@ resetFullscreenSessionActions runtime =
         runtime
         Nothing
         (pure ())
-        (const (pure (Right ())))
+        (\_ _ -> pure (Right ()))
         (const (pure ()))
         (pure ())
         (const (pure ()))

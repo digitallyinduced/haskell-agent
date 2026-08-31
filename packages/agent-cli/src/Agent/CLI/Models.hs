@@ -62,6 +62,7 @@ data ModelTarget = ModelTarget
 
 data ModelOption = ModelOption
     { modelTarget :: !ModelTarget
+    , modelContextWindow :: !(Maybe Int)
     , modelLabel :: !(Maybe Text)
     , modelFallbackPriority :: !(Maybe Int)
     }
@@ -82,6 +83,8 @@ data PickerState = PickerState
 data PickerEvent
     = PickerUp
     | PickerDown
+    | PickerLeft
+    | PickerRight
     | PickerConfirm
     | PickerCancel
     | PickerBackspace
@@ -104,6 +107,7 @@ modelOptionFromCatalog catalog model = do
             , targetWireModelId = model.catalogModelWireId
             , targetDialect = model.catalogModelDialect
             }
+        , modelContextWindow = model.catalogModelContextWindow
         , modelLabel = model.catalogModelLabel
         , modelFallbackPriority = model.catalogModelFallbackPriority
         }
@@ -145,6 +149,7 @@ rawModelOption provider model =
             , targetWireModelId = model
             , targetDialect = dialectIdForModel provider model
             }
+        , modelContextWindow = Nothing
         , modelLabel = Nothing
         , modelFallbackPriority = Nothing
         }
@@ -169,6 +174,7 @@ ensureCurrentInList connectionId provider current currentDialect options
                 , targetWireModelId = current
                 , targetDialect = currentDialect
                 }
+            , modelContextWindow = Nothing
             , modelLabel = Just "current"
             , modelFallbackPriority = Nothing
             }
@@ -304,6 +310,8 @@ applyPickerEvent event state = case event of
     PickerConfirm -> Left (selectedOption state)
     PickerUp -> Right (move (-1) state)
     PickerDown -> Right (move 1 state)
+    PickerLeft -> Right state
+    PickerRight -> Right state
     PickerBackspace ->
         Right $ clampSelection state
             { pickerFilter = Text.dropEnd 1 state.pickerFilter

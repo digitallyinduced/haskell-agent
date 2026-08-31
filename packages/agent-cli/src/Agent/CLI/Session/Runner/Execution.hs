@@ -926,7 +926,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             runtime
             (Just provider)
             (requestCancel toolEnv.toolCancel)
-            (\text -> do
+            (\pasted text -> do
                 images <- loadImagesFromPastedText text
                 let input = case images of
                         Just attached@(_:_) ->
@@ -935,7 +935,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 (map ImageAttachmentItem attached)
                         _ -> UserMessage text
                 callbacks.runnerPreparePromptSkillInputs
-                    env text [input] >>= \case
+                    env pasted text [input] >>= \case
                         Left err ->
                             emitUiEvent runtime (UiErrorMessage err)
                                 >> pure (Left err)
@@ -986,6 +986,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         skillInputs <-
                             callbacks.runnerPreparePromptSkillInputs
                                 env
+                                False
                                 request.managedTurnText
                                 inputs
                                 >>= either
@@ -1016,6 +1017,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             skillInputs <-
                 callbacks.runnerPreparePromptSkillInputs
                     env
+                    False
                     text
                     [UserMessage text]
                     >>= either

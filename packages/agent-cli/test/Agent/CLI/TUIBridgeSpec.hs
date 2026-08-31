@@ -326,7 +326,7 @@ spec = describe "fullscreen TUI bridge" do
                 state.mailboxPendingBytes
                     `shouldSatisfy` (>= BS.length encoded)
 
-    it "rebinds provider-specific actions without replacing the runtime" do
+    it "rebinds provider actions and forwards steering paste provenance" do
         calls <- newIORef ([] :: [String])
         input <- newFullscreenInputBuffer
         runtime <- newFullscreenRuntime
@@ -349,9 +349,10 @@ spec = describe "fullscreen TUI bridge" do
             runtime
             (Just XAIProvider)
             (modifyIORef' calls (<> ["new cancel"]))
-            (const
-                (modifyIORef' calls (<> ["new steer"])
-                    >> pure (Right ())))
+            (\pasted _ -> do
+                modifyIORef' calls (<> ["new steer"])
+                pasted `shouldBe` True
+                pure (Right ()))
             (const (modifyIORef' calls (<> ["new btw"])))
             (modifyIORef' calls (<> ["new recap"]))
             (const (modifyIORef' calls (<> ["new effort"])))
@@ -359,7 +360,7 @@ spec = describe "fullscreen TUI bridge" do
             (pure (AgentRoot, []))
             (const (modifyIORef' calls (<> ["new agent"])))
         runtime.runtimeCancel
-        runtime.runtimeSteer "guidance"
+        _ <- runtime.runtimeSteer True "guidance"
         runtime.runtimeBtw "question"
         runtime.runtimeRecap
         runtime.runtimeRestartEffort "high"

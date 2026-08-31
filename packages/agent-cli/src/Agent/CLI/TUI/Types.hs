@@ -9,7 +9,9 @@ module Agent.CLI.TUI.Types
     , DictationSession(..)
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
+    , ChoiceSelection(..)
     , choiceVisibleRows
+    , selectedChoice
     , selectedChoiceIndex
     , FullscreenInput(..)
     , FullscreenInputBuffer(..)
@@ -132,6 +134,11 @@ data AppEvent
         !Int
         ![(Text, Text)]
         !(TMVar (Maybe Int))
+    | AppAskAdjustableFilterChoice
+        !Text
+        !Int
+        ![(Text, Text, [Text], Int)]
+        !(TMVar (Maybe (Int, Int)))
     | AppAskText
         !TextInputMode
         !Text
@@ -235,7 +242,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMailbox :: !AppEventMailbox
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
-    , runtimeSteer :: !(Text -> IO (Either Text ()))
+    , runtimeSteer :: !(Bool -> Text -> IO (Either Text ()))
     , runtimeBtw :: !(Text -> IO ())
     , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
@@ -288,7 +295,7 @@ data DictationSession = DictationSession
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionProvider :: !(Maybe Provider)
     , sessionCancel :: !(IO ())
-    , sessionSteer :: !(Text -> IO (Either Text ()))
+    , sessionSteer :: !(Bool -> Text -> IO (Either Text ()))
     , sessionBtw :: !(Text -> IO ())
     , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())
@@ -307,7 +314,7 @@ data AppState = AppState
     , appRuntime :: !FullscreenRuntime
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
-    , appChoiceReply :: !(Maybe (Maybe Int -> IO ()))
+    , appChoiceReply :: !(Maybe (Maybe ChoiceSelection -> IO ()))
     , appResume :: !(Maybe ResumeOverlay)
     , appResumeReply :: !(Maybe (TMVar (Maybe ResumeEntry)))
     , appResumeLoad :: !(Maybe (Text -> IO (Either Text ResumeEntry)))
@@ -387,8 +394,19 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceRows :: ![(Text, Text)]
     , choiceSearch :: !Bool
     , choiceQuery :: !Text
+    -- | Optional values that can be adjusted horizontally for each source
+    -- row. The parallel index list stores the current value per source row.
+    , choiceAdjustments :: !(Maybe [[Text]])
+    , choiceAdjustmentIndices :: ![Int]
     , choiceCloseOnTurnEnd :: !Bool
     }
+    deriving (Eq, Show)
+
+data ChoiceSelection = ChoiceSelection
+    { choiceSelectionIndex :: !Int
+    , choiceSelectionAdjustment :: !(Maybe Int)
+    }
+    deriving (Eq, Show)
 
 -- | Rows currently visible in a choice overlay.  Searchable overlays retain
 -- each row's source index so callers can return the original choice even
@@ -411,10 +429,22 @@ choiceVisibleRows choice
 -- | Resolve the selected row to its source index.  Empty searchable results
 -- have no selection; static choices retain their historical index behavior.
 selectedChoiceIndex :: ChoiceOverlay -> Maybe Int
-selectedChoiceIndex choice
-    | not choice.choiceSearch = Just choice.choiceIndex
-    | otherwise =
-        fst <$> listAt choice.choiceIndex (choiceVisibleRows choice)
+selectedChoiceIndex = fmap (.choiceSelectionIndex) . selectedChoice
+
+-- | Resolve the selected row and its optional adjustable value to source
+-- indices. Search filtering never changes either returned source index.
+selectedChoice :: ChoiceOverlay -> Maybe ChoiceSelection
+selectedChoice choice = do
+    sourceIndex <-
+        if not choice.choiceSearch
+            then Just choice.choiceIndex
+            else fst <$> listAt choice.choiceIndex (choiceVisibleRows choice)
+    pure ChoiceSelection
+        { choiceSelectionIndex = sourceIndex
+        , choiceSelectionAdjustment = do
+            _ <- choice.choiceAdjustments
+            listAt sourceIndex choice.choiceAdjustmentIndices
+        }
   where
     listAt index values
         | index < 0 = Nothing

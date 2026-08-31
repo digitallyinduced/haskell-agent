@@ -5,6 +5,7 @@ module Agent.CLI.Runtime.Repl
     , runPendingTurn
     , finishTurn
     , preparePromptSkillInputs
+    , preparePromptSkillInputsWithPaste
     ) where
 
 import Agent.CLI.AccountPicker ()
@@ -65,7 +66,10 @@ import Agent.CLI.Request ()
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl.Commands
-    ( handleReplLine, preparePromptSkillInputs )
+    ( handleReplLine
+    , preparePromptSkillInputs
+    , preparePromptSkillInputsWithPaste
+    )
 import Agent.CLI.Runtime.Types
     ( PendingTurnPresentation
     , RunResult(RunSwitchProvider)

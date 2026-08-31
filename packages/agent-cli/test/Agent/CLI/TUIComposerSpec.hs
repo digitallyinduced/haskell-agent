@@ -76,6 +76,15 @@ spec = describe "fullscreen composer" do
             (ReplText "ordinary follow-up")
             `shouldBe` Nothing
 
+    it "preserves paste provenance for steering prompts" do
+        steeringPrompt
+            initialUiState { uiRunning = True }
+            True
+            "WHERE listings.agent_id = $1"
+            `shouldBe` Just (True, "WHERE listings.agent_id = $1")
+        steeringPrompt initialUiState True "not running"
+            `shouldBe` Nothing
+
     it "dismisses slash completion or preserves the draft while idle" do
         composerEscapeAction True True
             `shouldBe` EscapeDismissSlashMenu

@@ -16,6 +16,7 @@ import Agent.Loop
     )
 import Agent.Error (ApiError(..))
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (poll, withAsync)
 import Control.Exception.Safe (SomeException, bracket, onException)
 import qualified Control.Exception.Safe as Exception
 import Control.Monad (forM_, when)
@@ -60,6 +61,18 @@ main = do
             benchmarkPendingInputs False (read count) (read samples)
         ["pending-seq", count, samples] ->
             benchmarkPendingInputs True (read count) (read samples)
+        ["startup-accounts-serial", worktreeMillis, accountMillis, samples] ->
+            benchmarkStartupOverlap
+                False
+                (read worktreeMillis)
+                (read accountMillis)
+                (read samples)
+        ["startup-accounts-overlap", worktreeMillis, accountMillis, samples] ->
+            benchmarkStartupOverlap
+                True
+                (read worktreeMillis)
+                (read accountMillis)
+                (read samples)
         _ -> benchmarkConcurrency args
 
 benchmarkConcurrency :: [String] -> IO ()
@@ -110,6 +123,52 @@ benchmarkPendingInputs useSequence count sampleCount = do
                 <> " cpu-ms=" <> show sample.sampleCpuMillis
                 <> " allocated-bytes=" <> show sample.sampleAllocatedBytes
             )
+
+benchmarkStartupOverlap :: Bool -> Int -> Int -> Int -> IO ()
+benchmarkStartupOverlap useOverlap worktreeMillis accountMillis sampleCount = do
+    statsEnabled <- getRTSStatsEnabled
+    when (not statsEnabled) $
+        fail "run with +RTS -T"
+    let action =
+            if useOverlap
+                then overlapStartup worktreeMillis accountMillis
+                else serialStartup worktreeMillis accountMillis
+        label =
+            if useOverlap
+                then "startup-accounts-overlap"
+                else "startup-accounts-serial"
+    samples <- mapM (const (measure action)) [1 .. max 1 sampleCount]
+    let sample = medianSample samples
+    putStrLn
+        ( label
+            <> " worktree-ms=" <> show worktreeMillis
+            <> " account-ms=" <> show accountMillis
+            <> " samples=" <> show sampleCount
+            <> " elapsed-ms=" <> show sample.sampleElapsedMillis
+            <> " cpu-ms=" <> show sample.sampleCpuMillis
+            <> " allocated-bytes=" <> show sample.sampleAllocatedBytes
+        )
+
+serialStartup :: Int -> Int -> IO Int
+serialStartup worktreeMillis accountMillis = do
+    threadDelay (worktreeMillis * 1000)
+    threadDelay (accountMillis * 1000)
+    pure 2
+
+overlapStartup :: Int -> Int -> IO Int
+overlapStartup worktreeMillis accountMillis =
+    withAsync
+        (threadDelay (accountMillis * 1000) >> pure 1)
+        \accountWorker -> do
+            threadDelay (worktreeMillis * 1000)
+            poll accountWorker >>= \case
+                Nothing -> do
+                    -- The real startup retires an unfinished speculative
+                    -- refresh and lets its established post-prompt probe run.
+                    threadDelay (accountMillis * 1000)
+                    pure 2
+                Just (Left err) -> Exception.throwIO err
+                Just (Right accountResult) -> pure (1 + accountResult)
 
 medianSample :: [Sample] -> Sample
 medianSample samples =

@@ -5,6 +5,7 @@ import Agent.CLI.Options (CliOptions(..), defaultCliOptions, isOneShot)
 import Agent.CLI.ProviderTransition
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (BillingMode(..), Provider(..))
+import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.Tools.PlanMode (PlanModeState(..))
 import Data.IORef (newIORef, readIORef)
 import Data.Maybe (isNothing)
@@ -32,6 +33,14 @@ spec = do
             let transitioned = applyProviderTransition defaultCliOptions
                     (transition (Just "session-1") Nothing)
             transitioned.optResume `shouldBe` Just "session-1"
+
+        it "carries an effort selected with the target model" do
+            let selected =
+                    (transition Nothing Nothing)
+                        { transitionEffort = Just EffortHigh }
+                transitioned =
+                    applyProviderTransition defaultCliOptions selected
+            transitioned.optEffort `shouldBe` Just EffortHigh
 
     describe "setPendingExitAfter" do
         it "preserves the plan state while changing exit behavior" do
@@ -96,6 +105,7 @@ transition sessionId pending = ProviderTransition
         , targetWireModelId = "gpt-5.6-sol"
         , targetDialect = CodexDialect
         }
+    , transitionEffort = Nothing
     , transitionAccountSelectionId = Nothing
     , transitionAccountId = Nothing
     , transitionSessionId = sessionId

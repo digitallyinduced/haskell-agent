@@ -551,6 +551,8 @@ applyResumeKey key state = case key of
     PickerKeyConfirm -> Left (selectedResume state)
     PickerKeyUp -> Right (move (-1) state)
     PickerKeyDown -> Right (move 1 state)
+    PickerKeyLeft -> Right state
+    PickerKeyRight -> Right state
     PickerKeyBackspace ->
         Right $ clampSel state
             { resumeFilter = Text.dropEnd 1 state.resumeFilter

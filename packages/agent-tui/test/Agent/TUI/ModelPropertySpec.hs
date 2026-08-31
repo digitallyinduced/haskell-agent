@@ -141,6 +141,7 @@ generatedUiEvent = frequency
     , (4, UiSetDraft <$> generatedText <*> chooseInt (-20, 120))
     , (3, UiInputQueued <$> generatedText)
     , (3, UiInputPromoted <$> generatedText)
+    , (3, UiSetPromptTarget <$> generatedText <*> generatedText)
     , (3, UiSetPromptEffort <$> generatedText)
     , (3, UiSetRepository <$> generatedText <*> generatedText <*> generatedText)
     , (3, UiSetNotice <$> generatedNotice)

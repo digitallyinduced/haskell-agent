@@ -168,6 +168,7 @@ data UiEvent
     | UiQueuedInputStarted
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
+    | UiSetPromptTarget !Text !Text
     | UiSetPromptEffort !Text
     | UiSetPromptLimitStatus !(Maybe PromptLimitStatus)
     | UiSetAwaitingInput !Bool

@@ -34,6 +34,7 @@ module Agent.CLI.TUI.Composer
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
     , slashMenuWindowStart
+    , steeringPrompt
     , takeFullscreenInput
     , takeFullscreenInputOr
     , requestDictationStop
@@ -195,8 +196,9 @@ handleEffortControlClick applyUiEvent = do
                     current = ui.uiPrompt.promptEffort
                     initial = fromMaybe 0 (elemIndex current efforts)
                     choose = \case
-                        Just index
-                            | index >= 0
+                        Just selection
+                            | let index = selection.choiceSelectionIndex
+                            , index >= 0
                             , index < length efforts -> do
                                 let level = efforts !! index
                                 when (level /= current) $
@@ -213,6 +215,8 @@ handleEffortControlClick applyUiEvent = do
                             , choiceRows = [(effort, "") | effort <- efforts]
                             , choiceSearch = False
                             , choiceQuery = ""
+                            , choiceAdjustments = Nothing
+                            , choiceAdjustmentIndices = []
                             , choiceCloseOnTurnEnd = True
                             }
                         , appChoiceReply = Just choose
@@ -305,6 +309,15 @@ prepareBracketedPaste awaitingInput draft cursor pasted =
             , Just (ReplClipboardPasteOrText draft pasted pastedDraft)
             )
         else (pastedDraft, pastedCursor, Nothing)
+
+steeringPrompt :: UiState -> Bool -> Text -> Maybe (Bool, Text)
+steeringPrompt ui pasted text
+    | not ui.uiRunning = Nothing
+    | otherwise =
+        case parseReplLine text of
+            ReplPrompt prompt -> Just (pasted, prompt)
+            ReplExpandedPrompt _ prompt -> Just (pasted, prompt)
+            _ -> Nothing
 
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
 -- page scrolling because those actions also affect non-composer UI state.
@@ -543,10 +556,12 @@ handleComposerKey
                 _ <- liftIO (state.appRuntime.runtimeBtw question)
                 pure True
             Nothing ->
-                case steeringPrompt state.appUi text of
-                    Just prompt -> do
+                case steeringPrompt state.appUi pasted text of
+                    Just (steeringPasted, prompt) -> do
                         result <- liftIO
-                            (state.appRuntime.runtimeSteer prompt)
+                            (state.appRuntime.runtimeSteer
+                                steeringPasted
+                                prompt)
                         case result of
                             Left message -> do
                                 applyUiEvent
@@ -574,14 +589,6 @@ handleComposerKey
                     , appHistoryDraft = ""
                     }
             vScrollToEnd (viewportScroll ConversationViewport)
-
-    steeringPrompt ui text
-        | not ui.uiRunning = Nothing
-        | otherwise =
-            case parseReplLine text of
-                ReplPrompt prompt -> Just prompt
-                ReplExpandedPrompt _ prompt -> Just prompt
-                _ -> Nothing
 
     sendNow = do
         state <- get

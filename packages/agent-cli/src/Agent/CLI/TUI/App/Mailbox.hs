@@ -602,6 +602,8 @@ uiEventLogicalBytes = \case
     UiQueuedInputStarted -> 128
     UiSetDraft text _ -> logicalTextBytes text
     UiSetPrompt prompt -> promptStateLogicalBytes prompt
+    UiSetPromptTarget model account ->
+        logicalTextBytes model + logicalTextBytes account
     UiSetPromptEffort text -> logicalTextBytes text
     UiSetPromptLimitStatus status ->
         maybe 128 (logicalTextBytes . (.promptLimitText)) status
@@ -652,6 +654,17 @@ appEventLogicalBytes = \case
             (saturatingAdd
                 (logicalTextBytes title)
                 (textRowsLogicalBytes rows))
+    AppAskAdjustableFilterChoice title _ rows _ ->
+        saturatingAdd 256 $
+            saturatingAdd
+                (logicalTextBytes title)
+                ( foldl'
+                    (\size (label, detail, values, _) ->
+                        saturatingAdd size
+                            (logicalTextsBytes (label : detail : values)))
+                    0
+                    rows
+                )
     AppAskText _ title body draft _ ->
         saturatingAdd 256 (logicalTextsBytes [title, body, draft])
     AppAskResume browser _ _ _ _ ->

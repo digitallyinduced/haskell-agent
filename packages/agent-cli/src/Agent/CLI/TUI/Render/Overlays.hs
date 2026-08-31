@@ -9,6 +9,7 @@ module Agent.CLI.TUI.Render.Overlays
     , drawTextPrompt
     , drawMetaConsole
     , choiceRowColumns
+    , filterChoiceRowLimit
     , onboardingVisibleRowIndices
     , normalizeTextOverlayInsertion
     , maskedSecretText
@@ -60,8 +61,10 @@ import Agent.CLI.TUI.Types
       MetaConsoleOverlay(metaConsoleDraft, metaConsoleCursor),
       ResumeOverlay(resumeOverlayBrowser),
       ChoiceOverlay(choicePresentation, choiceIndex, choiceRows,
-                    choiceTitle, choiceBody, choiceSearch, choiceQuery),
+                    choiceTitle, choiceBody, choiceSearch, choiceQuery,
+                    choiceAdjustments, choiceAdjustmentIndices),
       choiceVisibleRows,
+      selectedChoiceIndex,
       ChoicePresentation(ChoiceOnboarding, ChoiceDialog),
       AppState(appRuntime,
                appDictation, appTextPrompt, appChoice, appMetaConsole,
@@ -257,6 +260,8 @@ drawFooter state =
                 then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
                 else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
         (_, Nothing, Just choice, _, _, _)
+            | isJust choice.choiceAdjustments ->
+                ""
             | choice.choiceSearch ->
                 "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
         (_, Nothing, Just _, _, _, _) ->
@@ -521,9 +526,21 @@ drawChoice appState choice
 
 drawFilterChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawFilterChoice appState choice =
-    centerLayer $
-        hLimitPercent 82 $
-            vLimitPercent 78 $
+    Widget Greedy Greedy do
+        context <- getContext
+        let adjustable = isJust choice.choiceAdjustments
+            dialogHeight = filterChoiceDialogHeight context.availHeight
+            compact =
+                dialogHeight < filterChoiceFixedRows adjustable + 1
+            rowLimit =
+                filterChoiceRowLimit context.availHeight adjustable
+            compactContent =
+                ( if context.availHeight > 1
+                    then [filterChoiceQuery choice]
+                    else []
+                )
+                    <> [filterChoiceRows rowLimit appState choice]
+            decoratedContent =
                 overrideAttr Border.borderAttr Theme.borderActiveAttr $
                     withBorderStyle unicodeRounded $
                         borderWithLabel
@@ -532,18 +549,34 @@ drawFilterChoice appState choice =
                                 vBox
                                     [ filterChoiceQuery choice
                                     , Border.hBorder
-                                    , filterChoiceRows appState choice
+                                    , filterChoiceRows
+                                        rowLimit
+                                        appState
+                                        choice
+                                    , adjustableChoiceDetail choice
                                     , Border.hBorder
                                     , withAttr Theme.footerAttr $
                                         terminalTxt
-                                            "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
+                                            (choiceFooter choice)
                                     ]
+        render $
+            centerLayer $
+                hLimitPercent 82 $
+                    vLimit dialogHeight $
+                        if compact
+                            then vBox compactContent
+                            else decoratedContent
 
 filterChoiceQuery :: ChoiceOverlay -> Widget Name
 filterChoiceQuery choice =
-    let prefix = "search: "
+    let adjustable = isJust choice.choiceAdjustments
+        prefix = if adjustable then "/ " else "search: "
         query = if Text.null choice.choiceQuery
-            then withAttr Theme.mutedAttr (txt "(type to filter)")
+            then withAttr Theme.mutedAttr $
+                txt
+                    (if adjustable
+                        then "Type to search"
+                        else "(type to filter)")
             else terminalTxt choice.choiceQuery
         content = hBox
             [ terminalTxt prefix
@@ -555,8 +588,8 @@ filterChoiceQuery choice =
                 + terminalTextWidth choice.choiceQuery
     in showCursor OverlayCursor (Location (cursorColumn, 0)) content
 
-filterChoiceRows :: AppState -> ChoiceOverlay -> Widget Name
-filterChoiceRows appState choice =
+filterChoiceRows :: Int -> AppState -> ChoiceOverlay -> Widget Name
+filterChoiceRows rowLimit appState choice =
     case visible of
         [] ->
             padTop (Pad 1) $
@@ -569,14 +602,83 @@ filterChoiceRows appState choice =
                     visibleIndex
                     originalIndex
                     row
+                    (choiceAdjustmentText choice originalIndex)
                 | (visibleIndex, (originalIndex, row)) <-
                     zip [start ..] rows
                 ]
   where
     visible = choiceVisibleRows choice
     count = length visible
-    start = max 0 (min choice.choiceIndex (max 0 (count - 14)))
-    rows = take 14 (drop start visible)
+    start = max 0 (min choice.choiceIndex (max 0 (count - rowLimit)))
+    rows = take rowLimit (drop start visible)
+
+-- | Number of searchable choice rows that fit below the fixed dialog chrome.
+-- Adjustable choices reserve two additional lines for the selected model's
+-- metadata. The lower bound keeps keyboard navigation visible even in a very
+-- short terminal; the outer height limit may still crop decorative chrome.
+filterChoiceRowLimit :: Int -> Bool -> Int
+filterChoiceRowLimit terminalHeight adjustable =
+    if compact
+        then max 1 (min 14 (availableHeight - queryRows))
+        else max 1 (min 14 (dialogHeight - fixedRows))
+  where
+    availableHeight = max 1 terminalHeight
+    dialogHeight = filterChoiceDialogHeight terminalHeight
+    fixedRows = filterChoiceFixedRows adjustable
+    compact = dialogHeight < fixedRows + 1
+    queryRows
+        | availableHeight > 1 = 1
+        | otherwise = 0
+
+filterChoiceDialogHeight :: Int -> Int
+filterChoiceDialogHeight terminalHeight =
+    min availableHeight (max 14 percentHeight)
+  where
+    availableHeight = max 1 terminalHeight
+    percentHeight = max 1 (availableHeight * 78 `div` 100)
+
+filterChoiceFixedRows :: Bool -> Int
+filterChoiceFixedRows adjustable
+    | adjustable = 10
+    | otherwise = 8
+
+choiceAdjustmentText :: ChoiceOverlay -> Int -> Maybe Text
+choiceAdjustmentText choice sourceIndex = do
+    rows <- choice.choiceAdjustments
+    values <- listAt sourceIndex rows
+    valueIndex <- listAt sourceIndex choice.choiceAdjustmentIndices
+    listAt valueIndex values
+
+adjustableChoiceDetail :: ChoiceOverlay -> Widget Name
+adjustableChoiceDetail choice =
+    case choice.choiceAdjustments of
+        Nothing -> emptyWidget
+        Just _ ->
+            case
+                selectedChoiceIndex choice >>= \index ->
+                    listAt index choice.choiceRows
+            of
+                Just (_, detail)
+                    | not (Text.null (Text.strip detail)) ->
+                        vLimit 2 $
+                            padTop (Pad 1) $
+                                withAttr Theme.mutedAttr
+                                    (terminalTxtWrap detail)
+                _ -> emptyWidget
+
+choiceFooter :: ChoiceOverlay -> Text
+choiceFooter choice
+    | isJust choice.choiceAdjustments =
+        "↑↓ select · ←→ reasoning effort · ↵ confirm · esc cancel"
+    | otherwise =
+        "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
+
+listAt :: Int -> [a] -> Maybe a
+listAt index values
+    | index < 0 = Nothing
+    | otherwise = case drop index values of
+        value : _ -> Just value
+        [] -> Nothing
 
 drawDialogChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawDialogChoice appState choice =
@@ -604,6 +706,7 @@ drawDialogChoice appState choice =
                                             visibleIndex
                                             originalIndex
                                             row
+                                            Nothing
                                         | (visibleIndex, (originalIndex, row)) <-
                                             zip [start ..] rows
                                         ]
@@ -866,10 +969,18 @@ choiceRow
     -> Int
     -> Int
     -> (Text, Text)
+    -> Maybe Text
     -> Widget Name
-choiceRow appState selected visibleIndex originalIndex (label, detail) =
+choiceRow
+        appState selected visibleIndex originalIndex (label, detail)
+        adjustment =
     let prefix = if selected == visibleIndex then "› " else "  "
         name = ChoiceRow originalIndex
+        shownRight = case adjustment of
+            Nothing -> detail
+            Just value
+                | selected == visibleIndex -> "← " <> value <> " →"
+                | otherwise -> value
         row =
             Widget Greedy Fixed do
                 context <- getContext
@@ -877,7 +988,7 @@ choiceRow appState selected visibleIndex originalIndex (label, detail) =
                         choiceRowColumns
                             context.availWidth
                             (prefix <> label)
-                            detail
+                            shownRight
                 render $
                     hBox
                         [ terminalTxt shownLabel

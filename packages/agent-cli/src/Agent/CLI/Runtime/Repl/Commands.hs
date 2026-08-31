@@ -2,6 +2,7 @@
 module Agent.CLI.Runtime.Repl.Commands
     ( handleReplLine
     , preparePromptSkillInputs
+    , preparePromptSkillInputsWithPaste
     ) where
 
 import Agent.CLI.AccountPicker ()
@@ -194,7 +195,10 @@ import Agent.CLI.SessionEnv ( SessionEnv(..) )
 import Agent.CLI.SessionLock ()
 import Agent.CLI.SessionState ()
 import Agent.CLI.SessionTitle ()
-import Agent.CLI.Skills ( formatSkillsListing )
+import Agent.CLI.Skills
+    ( formatSkillsListing
+    , resolvePromptSkillMentions
+    )
 import Agent.CLI.Startup.Auth ()
 import Agent.CLI.Startup.Format ()
 import Agent.CLI.StartupContext ()
@@ -259,7 +263,6 @@ import Agent.Skills
     ( SkillInvocation(invocationSkill),
       formatSkillActivation,
       resolveSkillInvocation,
-      resolveSkillMentions,
       Skill(skillName) )
 import Agent.Store.Postgres ()
 import Agent.Store.Types ()
@@ -498,7 +501,7 @@ handleReplLine
                                                 ImageAttachmentItem
                                                 pendingImages)
                                         ]
-                                preparePromptSkillInputs env text turnInputs >>= \case
+                                preparePromptSkillInputsWithPaste env pasted text turnInputs >>= \case
                                     Left err -> do
                                         displayError err $
                                             Text.hPutStrLn stderr
@@ -509,8 +512,8 @@ handleReplLine
                                         result <- runOneTurn env text skillInputs
                                         finishTurn False result
                     ReplExpandedPrompt original expanded ->
-                        submitExpandedTurn
-                            continue color original expanded
+                        submitExpandedTurnWithPaste
+                            pasted continue color original expanded
                     ReplInit -> do
                         let guidePath = cwd </> unsafeEncodeUtf "AGENTS.md"
                         tryIO
@@ -1183,7 +1186,8 @@ handleReplLine
                         displayError err $
                             Text.hPutStrLn stderr (roleError color err)
                         continue
-    submitExpandedTurn next color original expanded = do
+    submitExpandedTurn = submitExpandedTurnWithPaste False
+    submitExpandedTurnWithPaste pasted next color original expanded = do
         pendingImages <-
             modifyLiveAttachments conversationRef \imgs -> ([], imgs)
         forM_ fullscreen \runtime ->
@@ -1193,7 +1197,7 @@ handleReplLine
                     expanded
                     (map ImageAttachmentItem pendingImages)
                 ]
-        preparePromptSkillInputs env original turnInputs >>= \case
+        preparePromptSkillInputsWithPaste env pasted original turnInputs >>= \case
             Left err -> do
                 displayError err $
                     Text.hPutStrLn stderr (roleError color err)
@@ -2145,10 +2149,18 @@ preparePromptSkillInputs
     -> Text
     -> [TurnInput]
     -> IO (Either Text [TurnInput])
-preparePromptSkillInputs env prompt inputs = do
+preparePromptSkillInputs env = preparePromptSkillInputsWithPaste env False
+
+preparePromptSkillInputsWithPaste
+    :: SessionEnv
+    -> Bool
+    -> Text
+    -> [TurnInput]
+    -> IO (Either Text [TurnInput])
+preparePromptSkillInputsWithPaste env pasted prompt inputs = do
     invocations <- readIORef env.sessionSkillInvocations
     pure do
-        selected <- resolveSkillMentions invocations prompt
+        selected <- resolvePromptSkillMentions pasted invocations prompt
         let activations =
                 [ UserMessage (formatSkillActivation invocation prompt)
                 | invocation <- selected

@@ -8,15 +8,18 @@ module Agent.CLI.ProviderTransition
     , resumePendingTurnIfPresent
     , setPendingExitAfter
     , transitionCommitsImmediately
+    , withOptimisticPromptTarget
     ) where
 
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..))
+import Agent.ReasoningEffort (ReasoningEffort)
 import Agent.Error (ApiError)
 import Agent.Loop (TurnInput)
 import Agent.Provider (BillingMode, Provider)
 import Agent.Tools.PlanMode (PlanModeState)
 import Control.Applicative ((<|>))
+import Control.Exception.Safe (mask, onException)
 import Data.IORef (IORef, atomicModifyIORef')
 import Data.Set (Set)
 import Data.Text (Text)
@@ -38,6 +41,9 @@ data TransitionCause
 
 data ProviderTransition = ProviderTransition
     { transitionTarget :: !ModelTarget
+    -- | Explicit effort selected with the target model. 'Nothing' keeps the
+    -- resumed session's effort or lets the target provider choose its default.
+    , transitionEffort :: !(Maybe ReasoningEffort)
     -- | Stable credential-source key to select after rebuilding the provider.
     , transitionAccountSelectionId :: !(Maybe Text)
     -- | Provider account id used by transports whose live pool selects by id.
@@ -69,7 +75,7 @@ applyProviderTransition options transition =
         , optModel = Just transition.transitionTarget.targetModelId
         , optCwd = Nothing
         , optWorktree = False
-        , optEffort = Nothing
+        , optEffort = transition.transitionEffort
         , optResume = transition.transitionSessionId <|> options.optResume
         }
 
@@ -97,3 +103,19 @@ resumePendingTurnIfPresent pendingTurnRef resume noPendingTurn =
 transitionCommitsImmediately :: ProviderTransition -> Bool
 transitionCommitsImmediately transition =
     transition.transitionCause == ManualTransition
+
+-- | Publish a provisional prompt target before a slow validation action,
+-- restoring the prior target if that action rejects, throws, or is cancelled.
+withOptimisticPromptTarget
+    :: IO ()
+    -> IO ()
+    -> IO (Either err value)
+    -> IO (Either err value)
+withOptimisticPromptTarget publish rollback action =
+    mask \restoreMask -> do
+        result <-
+            (publish >> restoreMask action)
+                `onException` rollback
+        case result of
+            Left err -> rollback >> pure (Left err)
+            Right value -> pure (Right value)

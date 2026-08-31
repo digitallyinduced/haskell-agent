@@ -144,6 +144,16 @@ spec = describe "Agent.CLI.Skills" do
                     [invocation]
         listing `shouldSatisfy` Text.isInfixOf "$deploy, /deploy"
 
+    it "does not interpret dollar-prefixed SQL parameters in pasted prompts" do
+        let invocations = [SkillInvocation "deploy" fakeSkill True]
+            pastedSql = "WHERE listings.agent_id = $1"
+        resolvePromptSkillMentions True invocations pastedSql
+            `shouldBe` Right []
+        resolvePromptSkillMentions False invocations pastedSql
+            `shouldSatisfy` isLeft
+        resolvePromptSkillMentions False invocations "please $deploy"
+            `shouldBe` Right invocations
+
     it "installs a deferred catalog, invocations, and startup context together" do
         context <- newIORef (Just "agents")
         catalogRef <- newIORef (SkillCatalog [] [])
