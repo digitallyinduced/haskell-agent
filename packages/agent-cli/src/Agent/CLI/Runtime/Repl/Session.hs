@@ -70,6 +70,7 @@ import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReset),
       appendTurnKeepTitleIndexed,
+      appendTurnWithPromptResetIndexed,
       createSession,
       forkSessionAt,
       loadSession,
@@ -90,7 +91,7 @@ import Agent.CLI.Session
       SessionMeta(metaTitle, metaLastResponseId, metaUpdatedAt,
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
-                  metaTitleUserTurns, metaId, metaCwd),
+                  metaTitleUserTurns, metaPromptSnapshot, metaId, metaCwd),
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
@@ -340,23 +341,19 @@ handleSessionAction
                                 , turnProviderTelemetry = []
                                 }
                         (handle', turnIndex) <-
-                            appendTurnKeepTitleIndexed handle turn
+                            appendTurnWithPromptResetIndexed handle turn \meta ->
+                                meta
+                                    { metaLastResponseId = Nothing
+                                    , metaInputTokens = 0
+                                    , metaOutputTokens = 0
+                                    , metaCachedTokens = 0
+                                    , metaLastRecap = Nothing
+                                    , metaLastTurnSummary = Nothing
+                                    , metaLastRecapMainTurns = 0
+                                    }
                         let meta = handle'.sessionMeta
-                                { metaLastResponseId = Nothing
-                                , metaUpdatedAt = now
-                                , metaInputTokens = 0
-                                , metaOutputTokens = 0
-                                , metaCachedTokens = 0
-                                , metaLastRecap = Nothing
-                                , metaLastTurnSummary = Nothing
-                                , metaLastRecapMainTurns = 0
-                                }
-                        writeSessionMeta
-                            handle'.sessionPool
-                            handle'.sessionMetaPath
-                            meta
                         writeIORef slotRef
-                            (PersistenceActive handle'{sessionMeta = meta})
+                            (PersistenceActive handle')
                         forM_ fullscreen \runtime ->
                             commitFullscreenHistoryTurn
                                 runtime

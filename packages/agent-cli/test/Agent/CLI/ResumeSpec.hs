@@ -340,4 +340,5 @@ sampleMeta sid title =
         , metaLastRecap = Nothing
         , metaLastTurnSummary = Nothing
         , metaLastRecapMainTurns = 0
+        , metaPromptSnapshot = Nothing
         }

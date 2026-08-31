@@ -2,6 +2,7 @@ module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
 import Agent.CLI.SessionLock (acquireSessionLock, releaseSessionLock)
+import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session.StoreCodec
     ( fromStoredResponseItem
     , toStoredResponseItem
@@ -25,6 +26,7 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Connection (StorePool)
+import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Concurrent.Async (concurrently, mapConcurrently)
@@ -457,6 +459,57 @@ contentPartKind = \case
 spec :: Spec
 spec = describe "Agent.CLI.Session" do
     describe "pure compatibility helpers" do
+        it "reuses prompt bytes only for the same target and tool identities" do
+            let sessionId = "session-prompt"
+                snapshot =
+                    (testPromptSnapshot sessionId)
+                        { promptSnapshotTools =
+                            [promptFunctionTool "lookup" "old documentation"]
+                        }
+                regenerated =
+                    requestParams
+                        XAIProvider
+                        "grok-4"
+                        "new binary instructions"
+                        [promptFunctionTool "lookup" "new documentation"]
+                        "low"
+                renamed =
+                    requestParams
+                        XAIProvider
+                        "grok-4"
+                        "new binary instructions"
+                        [promptFunctionTool "search" "new documentation"]
+                        "low"
+                compatible params cwd cacheKey =
+                    compatibleSessionPromptSnapshot
+                        XAIProvider
+                        "xai"
+                        GrokBuildDialect
+                        cwd
+                        cacheKey
+                        params
+                        (Just snapshot)
+            compatible
+                regenerated
+                (fromFilePath "/tmp/work")
+                (Just sessionId)
+                `shouldBe` Just snapshot
+            compatible
+                renamed
+                (fromFilePath "/tmp/work")
+                (Just sessionId)
+                `shouldBe` Nothing
+            compatible
+                regenerated
+                (fromFilePath "/tmp/other")
+                (Just sessionId)
+                `shouldBe` Nothing
+            compatible
+                regenerated
+                (fromFilePath "/tmp/work")
+                (Just "other-session")
+                `shouldBe` Nothing
+
         it "round-trips typed computer calls through storage" do
             let items =
                     [ ComputerCallItem ComputerCall
@@ -1288,6 +1341,61 @@ spec = describe "Agent.CLI.Session" do
                 PersistenceActive again <- readIORef slot
                 again.sessionMeta.metaId `shouldBe` handle.sessionMeta.metaId
 
+        it "creates and advances immutable prompt epochs before first use" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                PersistenceEnabled slot <-
+                    newPendingPersistence (testCreate pool root)
+                PersistencePending _ reservedId _ <- readIORef slot
+                let initial = testPromptSnapshot reservedId
+                handle <-
+                    ensureSessionWithPromptSnapshot slot initial
+                handle.sessionMeta.metaPromptSnapshot
+                    `shouldBe` Just initial
+                initialEpoch <-
+                    Store.loadLatestSessionPromptEpoch pool reservedId
+                fmap (fmap (.sessionPromptEpochIndex)) initialEpoch
+                    `shouldBe` Right (Just 0)
+
+                -- Consuming the one-shot generated context does not create a
+                -- new epoch; the original value remains available to repair
+                -- a crash before the first transcript turn is durable.
+                unchanged <-
+                    ensureSessionWithPromptSnapshot
+                        slot
+                        initial
+                            { promptSnapshotGeneratedContext = Nothing
+                            , promptSnapshotGrokContext = Nothing
+                            }
+                unchanged.sessionMeta.metaPromptSnapshot
+                    `shouldBe` Just initial
+                unchangedEpoch <-
+                    Store.loadLatestSessionPromptEpoch pool reservedId
+                fmap (fmap (.sessionPromptEpochIndex)) unchangedEpoch
+                    `shouldBe` Right (Just 0)
+
+                let advanced = initial
+                        { promptSnapshotInstructions =
+                            "updated persisted instructions"
+                        , promptSnapshotGeneratedContext = Nothing
+                        , promptSnapshotGrokContext = Nothing
+                        }
+                latest <-
+                    ensureSessionWithPromptSnapshot slot advanced
+                latest.sessionMeta.metaPromptSnapshot
+                    `shouldBe` Just advanced
+                advancedEpoch <-
+                    Store.loadLatestSessionPromptEpoch pool reservedId
+                fmap (fmap (.sessionPromptEpochIndex)) advancedEpoch
+                    `shouldBe` Right (Just 1)
+                loadSession pool root reservedId >>= \case
+                    Right (loadedMeta, []) ->
+                        loadedMeta.metaPromptSnapshot
+                            `shouldBe` Just advanced
+                    result ->
+                        expectationFailure
+                            ("unexpected prompt session: " <> show result)
+
         it "cleans scratch space for a pending session that never persists" $
             withTempStore \store root -> do
                 let pool = trustedPool store
@@ -1402,7 +1510,33 @@ testMeta sessionId = SessionMeta
     , metaLastRecap = Nothing
     , metaLastTurnSummary = Nothing
     , metaLastRecapMainTurns = 0
+    , metaPromptSnapshot = Nothing
     }
+
+testPromptSnapshot :: Text.Text -> SessionPromptSnapshot
+testPromptSnapshot sessionId = SessionPromptSnapshot
+    { promptSnapshotVersion = 1
+    , promptSnapshotCreatedAt = fixedTime
+    , promptSnapshotProvider = XAIProvider
+    , promptSnapshotConnection = "xai"
+    , promptSnapshotModel = "grok-4"
+    , promptSnapshotDialect = GrokBuildDialect
+    , promptSnapshotCwd = fromFilePath "/tmp/work"
+    , promptSnapshotInstructions = "persisted instructions"
+    , promptSnapshotTools = []
+    , promptSnapshotGeneratedContext = Just "project and skill context"
+    , promptSnapshotGrokContext = Just "grok first-turn context"
+    , promptSnapshotCacheKey = sessionId
+    }
+
+promptFunctionTool :: Text.Text -> Text.Text -> ResponseTool
+promptFunctionTool toolName documentation =
+    FunctionToolValue FunctionTool
+        { name = toolName
+        , description = Just documentation
+        , parameters = Nothing
+        , strict = Just True
+        }
 
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 19) (secondsToDiffTime 0)

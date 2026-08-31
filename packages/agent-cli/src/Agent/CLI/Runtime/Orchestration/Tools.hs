@@ -82,7 +82,10 @@ import Agent.CLI.Plan
     ( cliPlanHooks
     , resumedPlanNeedsApproval
     )
-import Agent.CLI.Prompt ( subscriptionSubagentModelGuidance )
+import Agent.CLI.Prompt
+    ( mcpInstructionsForRequest
+    , subscriptionSubagentModelGuidance
+    )
 import Agent.CLI.PromptHooks
     ( fullscreenAwareImageHooks, fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
 import Agent.CLI.Provider.OpenAI ()
@@ -276,6 +279,7 @@ import qualified Agent.MCP as MCP
       mcpFleetInstructions,
       mcpFleetMetaTools,
       mcpFleetResourceTools,
+      mcpFleetStatuses,
       mcpFleetTools,
       releaseMcpFleetLease,
       McpFleet(mcpFleetRegistrations, mcpFleetWarnings),
@@ -741,7 +745,17 @@ runAgentTools
         (if isOneShot options || not isTty
             then Nothing
             else Just (cliMcpElicitation escPaused uiRuntimeRef))
-    let reportProgressiveMcp statuses = do
+    let enqueueMcpSnapshot statuses =
+            unless (null statuses) do
+                instructions <-
+                    readIORef mcpFleetRef
+                        >>= maybe (pure []) MCP.mcpFleetInstructions
+                enqueuePendingNotice pendingNotices PendingMcpNotice
+                    (UserMessage
+                        (formatMcpModelNoticeFor dialectId statuses
+                            <> formatMcpInstructionsNotice instructions))
+                    >>= either (reportStartupWarning startup) pure
+        reportProgressiveMcp statuses = do
             finished <- readIORef startup.startupFinished
             unless finished do
                 setStartupNotice startup.startupFullscreen
@@ -757,15 +771,7 @@ runAgentTools
             settled <-
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
-            when (settled && not (null statuses)) do
-                instructions <-
-                    readIORef mcpFleetRef
-                        >>= maybe (pure []) MCP.mcpFleetInstructions
-                enqueuePendingNotice pendingNotices PendingMcpNotice
-                    (UserMessage
-                        (formatMcpModelNoticeFor dialectId statuses
-                            <> formatMcpInstructionsNotice instructions))
-                    >>= either (reportStartupWarning startup) pure
+            when settled (enqueueMcpSnapshot statuses)
     mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
@@ -794,6 +800,13 @@ runAgentTools
             Right lease -> pure lease
     let mcpFleet = mcpLease.mcpLeaseFleet
     writeIORef mcpFleetRef (Just mcpFleet)
+    when progressiveMcp $
+        MCP.mcpFleetStatuses mcpFleet >>= enqueueMcpSnapshot
+    currentMcpInstructions <- MCP.mcpFleetInstructions mcpFleet
+    let mcpInstructions =
+            mcpInstructionsForRequest
+                progressiveMcp
+                currentMcpInstructions
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
     coding <-
@@ -1054,6 +1067,7 @@ runAgentTools
         learnedSkillAppTools
         legacySubagentTarget
         mcpFleet
+        mcpInstructions
         mcpTools
         model
         multiCtx

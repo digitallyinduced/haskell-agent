@@ -6,6 +6,8 @@ module Agent.CLI.Session.Codec
     , decodeStoredSession
     , toStoredMetadata
     , fromStoredMetadata
+    , toStoredPromptSnapshot
+    , fromStoredPromptSnapshot
     , toStoredTurn
     , fromStoredTurn
     , toStoredUsage
@@ -30,6 +32,7 @@ import Agent.Provider (parseProvider, providerSlug)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (renderStoreError)
+import Agent.Responses.Types.Tools (responseToolDecoder)
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, except, throwE)
@@ -82,10 +85,16 @@ decodeStoredSession
     :: Int
     -> (Text -> Bool)
     -> Text
+    -> Maybe Store.SessionPromptEpoch
     -> Store.StoredSession
     -> ExceptT Text IO (SessionMeta, [SessionTurn])
-decodeStoredSession schemaVersion validId sessionId stored = do
-    meta <- except (fromStoredMetadata stored.storedMetadata)
+decodeStoredSession schemaVersion validId sessionId storedPrompt stored = do
+    baseMeta <- except (fromStoredMetadata stored.storedMetadata)
+    promptSnapshot <- except $
+        traverse
+            (fromStoredPromptSnapshot . (.sessionPromptEpochSnapshot))
+            storedPrompt
+    let meta = baseMeta { metaPromptSnapshot = promptSnapshot }
     validateSessionMeta schemaVersion validId sessionId meta
     turns <- except $
         traverse
@@ -123,6 +132,74 @@ toStoredMetadata meta = Store.SessionMetadata
     , sessionMetadataLastRecapMainTurns =
         fromIntegral meta.metaLastRecapMainTurns
     }
+
+toStoredPromptSnapshot
+    :: SessionPromptSnapshot
+    -> Store.SessionPromptSnapshot
+toStoredPromptSnapshot snapshot = Store.SessionPromptSnapshot
+    { sessionPromptVersion = fromIntegral snapshot.promptSnapshotVersion
+    , sessionPromptCreatedAt = snapshot.promptSnapshotCreatedAt
+    , sessionPromptProvider = providerSlug snapshot.promptSnapshotProvider
+    , sessionPromptConnection = snapshot.promptSnapshotConnection
+    , sessionPromptModel = snapshot.promptSnapshotModel
+    , sessionPromptDialect = dialectSlug snapshot.promptSnapshotDialect
+    , sessionPromptCwd =
+        Text.pack (unsafeToFilePath snapshot.promptSnapshotCwd)
+    , sessionPromptInstructions = snapshot.promptSnapshotInstructions
+    , sessionPromptTools =
+        TextEncoding.decodeUtf8
+            (LBS.toStrict (Aeson.encode snapshot.promptSnapshotTools))
+    , sessionPromptGeneratedContext =
+        snapshot.promptSnapshotGeneratedContext
+    , sessionPromptGrokContext = snapshot.promptSnapshotGrokContext
+    , sessionPromptCacheKey = snapshot.promptSnapshotCacheKey
+    }
+
+fromStoredPromptSnapshot
+    :: Store.SessionPromptSnapshot
+    -> Either Text SessionPromptSnapshot
+fromStoredPromptSnapshot stored = do
+    provider <- maybe
+        (Left ("unknown stored prompt provider: "
+            <> stored.sessionPromptProvider))
+        Right
+        (parseProvider stored.sessionPromptProvider)
+    dialect <- maybe
+        (Left ("unknown stored prompt dialect: "
+            <> stored.sessionPromptDialect))
+        Right
+        (parseDialect stored.sessionPromptDialect)
+    unless (providerSupportsDialect provider dialect) $
+        Left
+            ( "stored prompt dialect "
+                <> stored.sessionPromptDialect
+                <> " is incompatible with provider "
+                <> stored.sessionPromptProvider
+            )
+    tools <- case Hermes.decodeEither
+            (Hermes.list responseToolDecoder)
+            (TextEncoding.encodeUtf8 stored.sessionPromptTools) of
+        Left err ->
+            Left ("invalid stored prompt tools: "
+                <> Hermes.jsonErrorMessage err)
+        Right decoded -> Right decoded
+    pure SessionPromptSnapshot
+        { promptSnapshotVersion =
+            fromIntegral stored.sessionPromptVersion
+        , promptSnapshotCreatedAt = stored.sessionPromptCreatedAt
+        , promptSnapshotProvider = provider
+        , promptSnapshotConnection = stored.sessionPromptConnection
+        , promptSnapshotModel = stored.sessionPromptModel
+        , promptSnapshotDialect = dialect
+        , promptSnapshotCwd =
+            unsafeEncodeUtf (Text.unpack stored.sessionPromptCwd)
+        , promptSnapshotInstructions = stored.sessionPromptInstructions
+        , promptSnapshotTools = tools
+        , promptSnapshotGeneratedContext =
+            stored.sessionPromptGeneratedContext
+        , promptSnapshotGrokContext = stored.sessionPromptGrokContext
+        , promptSnapshotCacheKey = stored.sessionPromptCacheKey
+        }
 
 fromStoredMetadata :: Store.SessionMetadata -> Either Text SessionMeta
 fromStoredMetadata stored = do
@@ -173,6 +250,7 @@ fromStoredMetadata stored = do
         , metaLastTurnSummary = stored.sessionMetadataLastTurnSummary
         , metaLastRecapMainTurns =
             fromIntegral stored.sessionMetadataLastRecapMainTurns
+        , metaPromptSnapshot = Nothing
         }
 
 toStoredLegacyTarget
@@ -330,6 +408,8 @@ importLegacySession schemaVersion validId sessionDirForId pool sessionId = do
                         contentFingerprint (metaBytes <> transcriptBytes)
                     , legacyMetadata = toStoredMetadata meta
                     , legacyTurns = map toStoredTurn turns
+                    , legacyPromptSnapshot =
+                        toStoredPromptSnapshot <$> meta.metaPromptSnapshot
                     }
             lift (Store.importLegacySession pool legacy) >>= \case
                 Left err -> throwE (renderStoreError err)

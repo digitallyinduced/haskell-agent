@@ -93,6 +93,7 @@ runSession
     -> IO RunResult
 runSession callbacks SessionRequest{..} SessionBackend{..} = do
   initialPrevious <- readLivePreviousResponseId conversationRef
+  grokFirstTurnContextRef <- newIORef initialGrokContext
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
@@ -279,7 +280,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 ( omitted
                 , max 0 (contextLength after - contextLength before)
                 )
-        installLearnedSkills context maximum =
+        installLearnedSkills context maximum queueContext =
             loadApplicableLearnedSkillsForStore
                 startup.startupDatabaseStore
                 databaseScopes >>= \case
@@ -289,10 +290,12 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         pure []
                     Right learnedSkills -> do
                         omitted <-
-                            queueLearnedSkillContextWithOmissions
-                                maximum
-                                context
-                                learnedSkills
+                            if queueContext
+                                then queueLearnedSkillContextWithOmissions
+                                    maximum
+                                    context
+                                    learnedSkills
+                                else pure 0
                         when (omitted > 0) $
                             reportLearnedSkillWarning
                                 ("learned skills: "
@@ -319,6 +322,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             void $ installLearnedSkills
                 freshAgents
                 defaultLearnedSkillContextMaxChars
+                True
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         sessionReset = do
@@ -331,6 +335,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             modifyIORef' renderStateRef clearRenderTokenRate
             writeIORef lastAssistantRef Nothing
             writeIORef subagentSessions Map.empty
+            writeIORef grokFirstTurnContextRef Nothing
             resetAgentViewport agentViewportRuntime
             case multiCtx of
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
@@ -787,6 +792,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
             , sessionStartupContext = startupContext
+            , sessionGrokFirstTurnContext = grokFirstTurnContextRef
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
@@ -865,7 +871,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             skills <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
             (omitted, _) <- installSkills startupContext
-                needsInitialContext
+                queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
             learnedSkills <-
@@ -873,6 +879,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     then installLearnedSkills
                         startupContext
                         defaultLearnedSkillContextMaxChars
+                        queueInitialContext
                     else pure []
             callbacks.runnerFinishStartup startup
             pure learnedSkills

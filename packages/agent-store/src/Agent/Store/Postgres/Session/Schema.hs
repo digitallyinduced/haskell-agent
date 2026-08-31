@@ -3,6 +3,7 @@
 module Agent.Store.Postgres.Session.Schema
     ( sessionSchemaStatements
     , sessionSearchIndexStatements
+    , sessionPromptEpochSchemaStatements
     ) where
 
 import Data.ByteString (ByteString)
@@ -152,6 +153,36 @@ sessionSchemaStatements =
        \ BEFORE UPDATE OR DELETE ON harness.session_turns\
        \ FOR EACH ROW EXECUTE FUNCTION harness.reject_session_fact_mutation()"
        ]
+    <> sessionPromptEpochSchemaStatements
+
+sessionPromptEpochSchemaStatements :: [ByteString]
+sessionPromptEpochSchemaStatements =
+    [ "CREATE TABLE IF NOT EXISTS harness.session_prompt_epochs (\
+      \ session_id uuid NOT NULL\
+      \   REFERENCES harness.sessions(session_id),\
+      \ epoch_index bigint NOT NULL CHECK (epoch_index >= 0),\
+      \ is_active boolean NOT NULL DEFAULT TRUE,\
+      \ prompt_version integer NOT NULL CHECK (prompt_version > 0),\
+      \ created_at timestamptz NOT NULL,\
+      \ provider text NOT NULL CHECK (length(btrim(provider)) > 0),\
+      \ connection_id text NOT NULL CHECK (length(btrim(connection_id)) > 0),\
+      \ model_id text NOT NULL CHECK (length(btrim(model_id)) > 0),\
+      \ dialect text NOT NULL CHECK (length(btrim(dialect)) > 0),\
+      \ cwd_text text NOT NULL CHECK (length(btrim(cwd_text)) > 0),\
+      \ instructions_text text NOT NULL,\
+      \ tools_text text NOT NULL,\
+      \ generated_context_text text,\
+      \ grok_context_text text,\
+      \ prompt_cache_key text NOT NULL\
+      \   CHECK (length(btrim(prompt_cache_key)) > 0),\
+      \ PRIMARY KEY (session_id, epoch_index)\
+      \ )"
+    , "DROP TRIGGER IF EXISTS session_prompt_epochs_immutable\
+      \ ON harness.session_prompt_epochs"
+    , "CREATE TRIGGER session_prompt_epochs_immutable\
+      \ BEFORE UPDATE OR DELETE ON harness.session_prompt_epochs\
+      \ FOR EACH ROW EXECUTE FUNCTION harness.reject_session_fact_mutation()"
+    ]
 
 -- | Trigram indexes that make the substring branches of conversation search
 -- indexable. Without them the @ILIKE@ fallbacks in 'searchTurnsStatement'

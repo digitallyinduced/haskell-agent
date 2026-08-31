@@ -142,6 +142,12 @@ data UiState = UiState
     , uiTurnStartBlock :: !Int
     , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
+    -- | Background shell session IDs mapped to the block that owns their
+    -- lifecycle. Empty write_stdin calls update that block instead of adding
+    -- one retained block per poll.
+    , uiShellProcesses :: !(Map.Map Int BlockId)
+    -- | Empty write_stdin call IDs currently waiting on a known shell session.
+    , uiShellPolls :: !(Map.Map Text Int)
     , uiTodos :: ![TodoDisplayLine]
     , uiGenerating :: !Bool
     , uiGenerationChars :: !Int

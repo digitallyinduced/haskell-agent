@@ -15,6 +15,7 @@ module Agent.Store.Postgres.Session.Read
     , loadSessionWithImplementation
     , loadSessions
     , loadSessionMetadata
+    , loadLatestSessionPromptEpoch
     , loadActiveSession
     , loadActiveSessionWithImplementation
     , loadRecentSessionTurns
@@ -153,6 +154,15 @@ loadSessionMetadata pool sessionKey =
     withSession pool $
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement sessionKey loadMetadataStatement
+
+loadLatestSessionPromptEpoch
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe SessionPromptEpoch))
+loadLatestSessionPromptEpoch pool sessionKey =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement sessionKey loadLatestPromptEpochStatement
 
 loadActiveSession
     :: StorePool
@@ -406,6 +416,43 @@ loadMetadataManyStatement = mkStatement
            \ ORDER BY array_position($1::text[], session_key)")
     textArrayParams
     (Decoders.rowVector metadataRow)
+    True
+
+loadLatestPromptEpochStatement
+    :: Statement Text (Maybe SessionPromptEpoch)
+loadLatestPromptEpochStatement = mkStatement
+    "SELECT latest.epoch_index, latest.prompt_version, latest.created_at,\
+    \ latest.provider, latest.connection_id, latest.model_id, latest.dialect,\
+    \ latest.cwd_text, latest.instructions_text, latest.tools_text,\
+    \ latest.generated_context_text, latest.grok_context_text,\
+    \ latest.prompt_cache_key\
+    \ FROM (\
+    \   SELECT epoch.*\
+    \   FROM harness.session_prompt_epochs epoch\
+    \   JOIN harness.sessions session\
+    \     ON session.session_id = epoch.session_id\
+    \   WHERE session.session_key = $1 AND session.deleted_at IS NULL\
+    \   ORDER BY epoch.epoch_index DESC\
+    \   LIMIT 1\
+    \ ) latest\
+    \ WHERE latest.is_active"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowMaybe $
+        SessionPromptEpoch
+            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> (SessionPromptSnapshot
+                <$> Decoders.column (Decoders.nonNullable Decoders.int4)
+                <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 loadMetadataStatement :: Statement Text (Maybe SessionMetadata)

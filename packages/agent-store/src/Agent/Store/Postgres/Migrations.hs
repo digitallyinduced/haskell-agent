@@ -33,6 +33,7 @@ import Agent.Store.Postgres.Scope (customSchemaStatements)
 import Agent.Store.Postgres.Session
     ( sessionSchemaStatements
     , sessionSearchIndexStatements
+    , sessionPromptEpochSchemaStatements
     )
 import Agent.Store.Postgres.Skill
     ( learnedSkillRuntimeGrantStatements
@@ -182,6 +183,24 @@ coreMigrations =
         , migrationStatements =
             [ "ALTER TABLE IF EXISTS harness.session_turns\
               \ ADD COLUMN IF NOT EXISTS provider_telemetry_json text"
+            ]
+        }
+    , Migration
+        { migrationVersion = 103
+        , migrationName = "immutable session prompt epochs"
+        , migrationStatements =
+            sessionPromptEpochSchemaStatements
+            <> [ "GRANT SELECT, INSERT\
+                 \ ON harness.session_prompt_epochs TO ha_runtime"
+               ]
+        }
+    , Migration
+        { migrationVersion = 104
+        , migrationName = "prompt epoch invalidation markers"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.session_prompt_epochs\
+              \ ADD COLUMN IF NOT EXISTS is_active boolean\
+              \ NOT NULL DEFAULT TRUE"
             ]
         }
     ]
@@ -497,6 +516,8 @@ sessionRuntimeGrantStatements =
       \ ON harness.session_tagged_items TO ha_runtime"
     , "GRANT SELECT, INSERT\
       \ ON harness.session_response_content_parts TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_prompt_epochs TO ha_runtime"
     ]
 
 runCoreMigrations :: StorePool -> IO (Either StoreError ())
