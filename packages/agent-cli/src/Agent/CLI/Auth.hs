@@ -182,7 +182,7 @@ gatewayLoadedAuth :: GatewayCredential -> Either Text LoadedAuth
 gatewayLoadedAuth gateway = do
     validateGatewayWebSocketUrl gateway.gatewayWebSocketUrl
     let credential = credentialForGateway gateway
-     in LoadedAuth
+    pure LoadedAuth
             { loadedProvider = OpenAIProvider
             , loadedTokenProvider =
                 staticCredentialProvider SubscriptionBilled credential
@@ -373,7 +373,7 @@ claudeLoadedAuth label selectionId =
             , leaseId = Nothing
             , provider = ClaudeCodeProvider
             }
-    pure LoadedAuth
+     in LoadedAuth
         { loadedProvider = ClaudeCodeProvider
         , loadedTokenProvider =
             staticCredentialProvider SubscriptionBilled credential
