@@ -129,10 +129,10 @@ isImageGenerationTool tool =
     tool.appToolName == imageGenerationToolName
 
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
-schemaFromAppTool dialect tool
-    | tool.appToolName == "computer" =
-        Just (knownResponseTool ToolComputer)
-    | otherwise = case tool.appToolSchema of
+schemaFromAppTool dialect tool =
+    case tool.appToolSchema of
+        HostedComputerSchema ->
+            Just (knownResponseTool ToolComputer)
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of
                 NoFunctionSchemas ->
@@ -251,6 +251,7 @@ namespaceTool namespaceName namespaceDescription tools =
         RawJsonFunctionSchema parameters -> parameters
         FreeformApplyPatchSchema -> Aeson.object []
         FreeformGrammarSchema _ _ -> Aeson.object []
+        HostedComputerSchema -> Aeson.object []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

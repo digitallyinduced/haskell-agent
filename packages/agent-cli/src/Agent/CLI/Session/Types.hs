@@ -53,7 +53,9 @@ import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (TranscriptEffect(..))
 import Control.Monad (unless, when)
-import Data.Aeson (ToJSON(..), object, (.=))
+import Data.Aeson (FromJSON(..), ToJSON(..), object, (.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
 import Data.Text (Text)
 import Data.Int (Int64)
@@ -170,6 +172,14 @@ instance ToJSON SessionTransfer where
         [ "meta" .= transfer.transferMeta
         , "turns" .= transfer.transferTurns
         ]
+
+instance FromJSON SessionTransfer where
+    parseJSON value =
+        case Hermes.decodeEither
+            sessionTransferDecoder
+            (LBS.toStrict (Aeson.encode value)) of
+                Left err -> fail (show err)
+                Right transfer -> pure transfer
 
 sessionTransferDecoder :: Hermes.Decoder SessionTransfer
 sessionTransferDecoder = Hermes.object $

@@ -215,6 +215,35 @@ spec = do
                                 Nothing
                                 `shouldReturn` Right localCredential
 
+        it "never exposes a direct credential to a gateway router session" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    saveTestGateway home
+                    storeOpenAiAccount
+                        "local-openai"
+                        "local-account"
+                        True
+                        farFutureAccessToken
+                    loaded <-
+                        loadAuth (Just OpenAIProvider) >>= expectRightResult
+                    let guarded =
+                            gatewayRouterTokenProvider
+                                loaded.loadedTokenProvider
+                    gatewayCredential <-
+                        getNextToken guarded Nothing >>= expectRightResult
+                    getNextToken guarded
+                        (Just FailedCredential
+                            { credential = gatewayCredential
+                            , failure = AccountAuthenticationRejected
+                            , failureReason = testAuthenticationReason
+                            })
+                        `shouldReturn`
+                            Left
+                                (CredentialError
+                                    "the connected gateway is unavailable; \
+                                    \refusing to send a router model with \
+                                    \direct OpenAI credentials")
+
         it "falls back after a gateway WebSocket handshake 403" $
             withTempHome \home ->
                 withCleanOpenAiEnv do

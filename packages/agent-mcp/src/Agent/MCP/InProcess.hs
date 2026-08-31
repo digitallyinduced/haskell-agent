@@ -224,6 +224,7 @@ schemaValue = \case
     RawJsonFunctionSchema value -> value
     FreeformApplyPatchSchema -> object []
     FreeformGrammarSchema _ _ -> object []
+    HostedComputerSchema -> object []
 
 hasJsonSchema :: ToolSchema -> Bool
 hasJsonSchema = \case
@@ -231,6 +232,7 @@ hasJsonSchema = \case
     RawJsonFunctionSchema _ -> True
     FreeformApplyPatchSchema -> False
     FreeformGrammarSchema _ _ -> False
+    HostedComputerSchema -> False
 
 isStaticallyReadOnly :: ApprovalRule -> Bool
 isStaticallyReadOnly = \case

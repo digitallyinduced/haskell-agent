@@ -22,6 +22,7 @@ module Agent.Tools.Types
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
+    , toolAcceptsCall
     , toolExecutionPolicyFor
     , toolSchedulingPlanFor
     , dispatchRegisteredToolCall
@@ -35,6 +36,7 @@ import Agent.Cancel (CancelFlag, newCancelFlag)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult
     , ToolDispatchOutcome
     , ToolDispatchConfig
@@ -73,6 +75,9 @@ data ToolSchema
     -- (@format.type = "grammar"@). The fields are the grammar syntax
     -- (for example @"lark"@) and its definition text.
     | FreeformGrammarSchema !Text !Text
+    -- | Provider-hosted desktop control. Keeping this distinct prevents an
+    -- unrelated function or MCP tool named @computer@ from acquiring it.
+    | HostedComputerSchema
     deriving (Eq, Show)
 
 -- | Whether a call may run without generic user approval.
@@ -381,7 +386,7 @@ dispatchRegisteredToolCall
     -> IO ToolCallResult
 dispatchRegisteredToolCall config registry call =
     dispatchToolHandler config
-        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        (acceptedHandler registry call)
         call
 
 dispatchRegisteredToolCallDetailed
@@ -391,8 +396,26 @@ dispatchRegisteredToolCallDetailed
     -> IO ToolDispatchOutcome
 dispatchRegisteredToolCallDetailed config registry call =
     dispatchToolHandlerDetailed config
-        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        (acceptedHandler registry call)
         call
+
+acceptedHandler :: ToolRegistry -> ToolCall -> Maybe ToolHandler
+acceptedHandler registry call = do
+    tool <- lookupRegisteredTool call.name registry
+    if toolAcceptsCall tool call
+        then Just tool.appToolHandler
+        else Nothing
+
+-- | Provider-native calls may only reach their matching hosted handler.
+toolAcceptsCall :: AppTool -> ToolCall -> Bool
+toolAcceptsCall tool call =
+    case (tool.appToolSchema, call.callKind) of
+        (HostedComputerSchema, ComputerCallKind) -> True
+        (HostedComputerSchema, ComputerFunctionCallKind) -> True
+        (HostedComputerSchema, _) -> False
+        (_, ComputerCallKind) -> False
+        (_, ComputerFunctionCallKind) -> False
+        _ -> True
 
 jsonToolParameters :: AppTool -> Maybe [PropertySchema]
 jsonToolParameters tool = case tool.appToolSchema of
@@ -400,6 +423,7 @@ jsonToolParameters tool = case tool.appToolSchema of
     RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
     FreeformGrammarSchema _ _ -> Nothing
+    HostedComputerSchema -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.

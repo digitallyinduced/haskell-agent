@@ -5,6 +5,8 @@ module Agent.Responses.Types.Tools
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , computerFunctionNamespace
+    , computerFunctionName
     , CustomTool(..)
     , NamespaceTool(..)
     , responseToolDecoder
@@ -14,6 +16,15 @@ import Agent.Responses.Types.Common
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Hermes as Hermes
 import Data.Text (Text)
+
+-- | Reserved names used when a Responses Lite transport cannot register the
+-- provider-native computer tool and must expose the same harness as a
+-- screenshot-returning function instead.
+computerFunctionNamespace :: Text
+computerFunctionNamespace = "computer_use"
+
+computerFunctionName :: Text
+computerFunctionName = "computer"
 
 data ResponseToolType
     = ToolFunction

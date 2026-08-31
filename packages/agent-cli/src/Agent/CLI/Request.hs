@@ -17,6 +17,8 @@ import Agent.Json.Decode qualified as Hermes
 import Agent.Provider (Provider(..))
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -253,7 +255,8 @@ updateResponsesLitePrefix instructionText maybeTools existingInput =
 
 -- | Convert conventional Responses tools to the Lite @additional_tools@
 -- representation. Function and custom tools share the default @functions@
--- namespace; hosted tools and non-default namespaces remain top-level.
+-- namespace. Responses Lite does not accept the native @computer@ tool, so
+-- expose the same local harness as a reserved screenshot-returning function.
 responsesLiteToolValues :: [ResponseTool] -> [RawJson]
 responsesLiteToolValues tools =
     case groupedValues of
@@ -283,7 +286,141 @@ responsesLiteToolValues tools =
                 , ungrouped
                 )
             Nothing ->
-                (firstPosition, grouped, description, ungrouped <> [encodeTool tool])
+                ( firstPosition
+                , grouped
+                , description
+                , ungrouped <> [responsesLiteToolValue tool]
+                )
+
+responsesLiteToolValue :: ResponseTool -> RawJson
+responsesLiteToolValue = \case
+    KnownResponseTool ToolComputer ->
+        rawJsonFromEncoding (Aeson.toEncoding computerFunctionNamespaceValue)
+    tool -> encodeTool tool
+
+computerFunctionNamespaceValue :: Aeson.Value
+computerFunctionNamespaceValue = Aeson.object
+    [ "type" Aeson..= ("namespace" :: Text)
+    , "name" Aeson..= computerFunctionNamespace
+    , "description" Aeson..=
+        ("Inspect and control the local macOS desktop. Every call returns a fresh screenshot." :: Text)
+    , "tools" Aeson..=
+        [ Aeson.object
+            [ "type" Aeson..= ("function" :: Text)
+            , "name" Aeson..= computerFunctionName
+            , "description" Aeson..=
+                ("Run one or more approved desktop actions and return a fresh screenshot. Start with screenshot when the UI state is unknown." :: Text)
+            , "parameters" Aeson..= computerFunctionParameters
+            , "strict" Aeson..= True
+            ]
+        ]
+    ]
+
+computerFunctionParameters :: Aeson.Value
+computerFunctionParameters = Aeson.object
+    [ "type" Aeson..= ("object" :: Text)
+    , "properties" Aeson..= Aeson.object
+        [ "actions" Aeson..= Aeson.object
+            [ "type" Aeson..= ("array" :: Text)
+            , "description" Aeson..=
+                ("Ordered desktop actions. Coordinates are logical pixels on the main display." :: Text)
+            , "items" Aeson..= Aeson.object
+                ["anyOf" Aeson..= computerActionSchemas]
+            , "minItems" Aeson..= (1 :: Int)
+            , "maxItems" Aeson..= (128 :: Int)
+            ]
+        ]
+    , "required" Aeson..= ["actions" :: Text]
+    , "additionalProperties" Aeson..= False
+    ]
+
+computerActionSchemas :: [Aeson.Value]
+computerActionSchemas =
+    [ actionSchema "screenshot" []
+    , actionSchema "click"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("button", enumProperty
+            ["left", "right", "middle", "back", "forward"])
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "double_click"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "scroll"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("scroll_x", integerProperty)
+        , ("scroll_y", integerProperty)
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "move"
+        [ ("x", integerProperty)
+        , ("y", integerProperty)
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "drag"
+        [ ("path", Aeson.object
+            [ "type" Aeson..= ("array" :: Text)
+            , "items" Aeson..= Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "x" Aeson..= integerProperty
+                    , "y" Aeson..= integerProperty
+                    ]
+                , "required" Aeson..= ["x" :: Text, "y"]
+                , "additionalProperties" Aeson..= False
+                ]
+            , "minItems" Aeson..= (2 :: Int)
+            , "maxItems" Aeson..= (1024 :: Int)
+            ])
+        , ("keys", keysProperty)
+        ]
+    , actionSchema "type"
+        [ ("text", Aeson.object
+            [ "type" Aeson..= ("string" :: Text)
+            , "maxLength" Aeson..= (8192 :: Int)
+            ])
+        ]
+    , actionSchema "keypress" [("keys", keysProperty)]
+    , actionSchema "wait" []
+    ]
+  where
+    integerProperty :: Aeson.Value
+    integerProperty = Aeson.object ["type" Aeson..= ("integer" :: Text)]
+    keysProperty :: Aeson.Value
+    keysProperty = Aeson.object
+        [ "type" Aeson..= ("array" :: Text)
+        , "items" Aeson..= Aeson.object
+            [ "type" Aeson..= ("string" :: Text)
+            , "maxLength" Aeson..= (64 :: Int)
+            ]
+        , "maxItems" Aeson..= (16 :: Int)
+        ]
+    enumProperty :: [Text] -> Aeson.Value
+    enumProperty values = Aeson.object
+        [ "type" Aeson..= ("string" :: Text)
+        , "enum" Aeson..= values
+        ]
+
+actionSchema :: Text -> [(Text, Aeson.Value)] -> Aeson.Value
+actionSchema actionType properties = Aeson.object
+    [ "type" Aeson..= ("object" :: Text)
+    , "properties" Aeson..= Aeson.Object
+        (KeyMap.fromList
+            ((Key.fromText "type", enumProperty [actionType])
+                : [(Key.fromText name, value) | (name, value) <- properties]))
+    , "required" Aeson..= ("type" : map fst properties)
+    , "additionalProperties" Aeson..= False
+    ]
+  where
+    enumProperty :: [Text] -> Aeson.Value
+    enumProperty values = Aeson.object
+        [ "type" Aeson..= ("string" :: Text)
+        , "enum" Aeson..= values
+        ]
 
 groupedToolValues :: ResponseTool -> Maybe ([RawJson], Maybe Text)
 groupedToolValues tool = case tool of
@@ -352,8 +489,17 @@ liteToolValuesToConventional = concatMap flatten
   where
     flatten value = case decodeTool value of
         Just (NamespaceToolValue namespace)
-            | namespace.name == "functions" -> namespace.tools
+            | namespace.name == computerFunctionNamespace
+            , any isComputerFunction namespace.tools ->
+                [knownResponseTool ToolComputer]
+        Just (NamespaceToolValue namespace)
+            | namespace.name == "functions" ->
+                namespace.tools
         decoded -> maybe [] pure decoded
+
+    isComputerFunction = \case
+        FunctionToolValue tool -> tool.name == computerFunctionName
+        _ -> False
 
 decodeTool :: RawJson -> Maybe ResponseTool
 decodeTool value =

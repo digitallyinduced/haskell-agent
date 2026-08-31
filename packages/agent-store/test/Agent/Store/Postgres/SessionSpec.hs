@@ -369,6 +369,29 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected conversation search: " <> show other)
+                            setSessionArchived pool "session-2" True now
+                                `shouldReturn` Right True
+                            searchNativeConversations pool "second" 10 >>= \case
+                                Right [match] -> do
+                                    match.nativeSearchSessionId
+                                        `shouldBe` "session-2"
+                                    match.nativeSearchArchived `shouldBe` True
+                                    match.nativeSearchTurnIndex `shouldBe` Nothing
+                                other ->
+                                    expectationFailure
+                                        ("unexpected native metadata search: "
+                                            <> show other)
+                            searchNativeConversations pool "batch load 2" 10
+                                >>= \case
+                                Right [match] -> do
+                                    match.nativeSearchSessionId
+                                        `shouldBe` "session-2"
+                                    match.nativeSearchTurnIndex `shouldBe` Just 1
+                                    match.nativeSearchRole `shouldBe` Just "user"
+                                other ->
+                                    expectationFailure
+                                        ("unexpected native turn search: "
+                                            <> show other)
                             deleteSession pool "session-1" now
                                 `shouldReturn` Right True
                             events <- loadSessionEvents pool "session-1"
@@ -456,6 +479,38 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected recent page: " <> show other)
+                            loadRecentSessionHistoryTurns pool "session-1" 2
+                                >>= \case
+                                    Right (Just page) -> do
+                                        map (.storedTurnIndex)
+                                            (toList page.sessionPageTurns)
+                                            `shouldBe` [4, 5]
+                                        page.sessionPageGenerationStart
+                                            `shouldBe` 0
+                                        page.sessionPageTotal `shouldBe` 6
+                                        page.sessionPageHasOlder `shouldBe` True
+                                        page.sessionPageHasNewer `shouldBe` False
+                                    other ->
+                                        expectationFailure
+                                            ( "unexpected full-history recent page: "
+                                                <> show other
+                                            )
+                            loadSessionHistoryTurnsBefore pool "session-1" 2 2
+                                >>= \case
+                                    Right (Just page) -> do
+                                        map (.storedTurnIndex)
+                                            (toList page.sessionPageTurns)
+                                            `shouldBe` [0, 1]
+                                        page.sessionPageGenerationStart
+                                            `shouldBe` 0
+                                        page.sessionPageTotal `shouldBe` 6
+                                        page.sessionPageHasOlder `shouldBe` False
+                                        page.sessionPageHasNewer `shouldBe` True
+                                    other ->
+                                        expectationFailure
+                                            ( "unexpected full-history older page: "
+                                                <> show other
+                                            )
                             loadSessionTurnsBefore pool "session-1" 4 2 >>= \case
                                 Right (Just page) -> do
                                     map (.storedTurnIndex)
@@ -578,6 +633,31 @@ spec = describe "PostgreSQL session schema" do
                                     expectationFailure
                                         ("unexpected before-reset page: "
                                             <> show other)
+                            loadRecentSessionHistoryTurns pool "session-1" 10
+                                >>= \case
+                                    Right (Just page) -> do
+                                        map
+                                            (\storedTurn ->
+                                                storedTurn.storedTurn
+                                                    .sessionTurnUserText
+                                            )
+                                            (toList page.sessionPageTurns)
+                                            `shouldBe`
+                                                [ "/before-1"
+                                                , "/compact"
+                                                , "/after-compact"
+                                                , "/clear"
+                                                , "/after-clear"
+                                                ]
+                                        page.sessionPageGenerationStart
+                                            `shouldBe` 0
+                                        page.sessionPageTotal `shouldBe` 5
+                                        page.sessionPageHasOlder `shouldBe` False
+                                        page.sessionPageHasNewer `shouldBe` False
+                                    other ->
+                                        expectationFailure
+                                            ("unexpected raw reset history: "
+                                                <> show other)
                         )
                         (closeStore store)
                 ) `finally` cleanup

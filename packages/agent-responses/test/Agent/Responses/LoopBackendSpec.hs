@@ -80,7 +80,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         let call = ComputerCall
                 { computerCallItemId = Just "item-1"
                 , computerCallId = "call-1"
-                , computerActions = [ClickAction 20 30 "left", TypeAction "secret"]
+                , computerActions =
+                    [ClickAction 20 30 "left" [], TypeAction "secret"]
                 , pendingSafetyChecks = []
                 , computerCallStatus = Nothing
                 , computerCallExtra = KeyMap.empty

@@ -1,5 +1,7 @@
 module Agent.Store.Postgres.Skill.Mapping.Statements.ListSkills
     ( listSkillsStatement
+    , listAllSkillsStatement
+    , listAllSkillsLimitedStatement
     ) where
 
 import Data.Functor.Contravariant ((>$<))
@@ -25,6 +27,34 @@ listSkillsStatement = mkStatement
     applicableScopesEncoder
     (Decoders.rowList skillRowDecoder)
     True
+
+listAllSkillsStatement :: Statement ApplicableScopes [SkillRow]
+listAllSkillsStatement = mkStatement
+    (skillSelectSql
+        <> applicableWhereSql
+        <> " ORDER BY scope_kind, title, slug")
+    applicableScopesEncoder
+    (Decoders.rowList skillRowDecoder)
+    True
+
+listAllSkillsLimitedStatement :: Statement SkillListParams [SkillRow]
+listAllSkillsLimitedStatement = mkStatement
+    (skillSelectSql
+        <> applicableWhereSql
+        <> " AND ($4::text IS NULL OR scope_kind = $4)\
+           \ ORDER BY scope_kind, title, slug LIMIT $5")
+    ( ((.applicableUserScopeId) . (.skillListScopes) >$< textParam)
+        <> ((.applicableRepositoryScopeId) . (.skillListScopes) >$< textParam)
+        <> ((.applicableCheckoutScopeId) . (.skillListScopes) >$< textParam)
+        <> ((.skillListKind)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.skillListLimit)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList skillRowDecoder)
+    True
+  where
+    textParam = Encoders.param (Encoders.nonNullable Encoders.text)
 
 applicableScopesEncoder :: Encoders.Params ApplicableScopes
 applicableScopesEncoder =

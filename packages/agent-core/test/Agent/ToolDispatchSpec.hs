@@ -3,6 +3,16 @@ module Agent.ToolDispatchSpec (spec) where
 import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
+    , ToolSchema(..)
+    , dispatchRegisteredToolCall
+    , dispatchRegisteredToolCallDetailed
+    , mkToolRegistry
+    , toolAcceptsCall
+    )
 import qualified Control.Exception as Exception
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Text (Text)
@@ -221,6 +231,50 @@ spec = describe "dispatchToolCall" do
             (functionToolCall "call-1" "cancel" "{}")
             `shouldThrow` (== Exception.ThreadKilled)
 
+    it "accepts only privileged computer kinds at the hosted handler" do
+        let hosted = computerTool (pure (Right "ok"))
+            ordinary =
+                hosted
+                    { appToolSchema = JsonFunctionSchema []
+                    }
+            call kind = ToolCall
+                { callId = "computer-1"
+                , name = "computer"
+                , arguments = "{}"
+                , callKind = kind
+                , argumentsEncrypted = False
+                }
+        map (toolAcceptsCall hosted . call)
+            [ FunctionCallKind
+            , CustomCallKind
+            , ComputerCallKind
+            , ComputerFunctionCallKind
+            ]
+            `shouldBe` [False, False, True, True]
+        map (toolAcceptsCall ordinary . call)
+            [ FunctionCallKind
+            , CustomCallKind
+            , ComputerCallKind
+            , ComputerFunctionCallKind
+            ]
+            `shouldBe` [True, True, False, False]
+
+    it "rejects mismatched computer calls in both registry dispatch paths" do
+        executions <- newIORef (0 :: Int)
+        let hosted = computerTool do
+                modifyIORef' executions (+ 1)
+                pure (Right "desktop changed")
+            registry =
+                either (error . Text.unpack) id (mkToolRegistry [hosted])
+            spoofed = functionToolCall "computer-1" "computer" "{}"
+        result <- dispatchRegisteredToolCall testConfig registry spoofed
+        outcome <-
+            dispatchRegisteredToolCallDetailed testConfig registry spoofed
+        result.output `shouldBe` "ERR unknown:computer"
+        outcome.toolDispatchResult.output `shouldBe` "ERR unknown:computer"
+        outcome.toolDispatchSucceeded `shouldBe` False
+        readIORef executions `shouldReturn` 0
+
 testConfig :: ToolDispatchConfig
 testConfig = ToolDispatchConfig
     { toolDispatchUnknownTool = \name -> "unknown:" <> name
@@ -236,4 +290,15 @@ functionResult callId output = ToolCallResult
     { callId
     , output
     , callKind = FunctionCallKind
+    }
+
+computerTool :: IO (Either Text Text) -> AppTool
+computerTool action = AppTool
+    { appToolName = "computer"
+    , appToolDescription = "Control the desktop."
+    , appToolSchema = HostedComputerSchema
+    , appToolHandler = noArgsTool "computer" action
+    , appToolApproval = AlwaysPrompt
+    , appToolExecution = TurnSequential
+    , appToolResourceClaims = Nothing
     }

@@ -19,12 +19,19 @@ module Agent.Store.Postgres.Session.Read
     , loadActiveSession
     , loadActiveSessionWithImplementation
     , loadRecentSessionTurns
+    , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
+    , loadSessionHistoryTurnsBefore
     , loadSessionTurnsAfter
+    , loadSessionHistoryTurnsRange
+    , loadSessionHistoryTurnsRangeBounded
+    , loadSessionHistorySnapshot
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , listSessionArchiveKeys
     , searchConversationTurns
+    , searchNativeConversations
     ) where
 
 import Data.Functor.Contravariant ((>$<))
@@ -204,6 +211,22 @@ loadRecentSessionTurns pool sessionKey limit =
     loadTurnPage pool sessionKey
         (Transaction.statement (sessionKey, fromIntegral (max 1 limit + 1))
             loadRecentTurnsStatement)
+        (Transaction.statement sessionKey displayHistoryBoundsStatement)
+        (max 1 limit)
+        PageRecent
+
+-- | Page the complete durable conversation, including turns hidden by an
+-- explicit transcript reset.
+loadRecentSessionHistoryTurns
+    :: StorePool
+    -> Text
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadRecentSessionHistoryTurns pool sessionKey limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement (sessionKey, fromIntegral (max 1 limit + 1))
+            loadRecentHistoryTurnsStatement)
+        (Transaction.statement sessionKey fullHistoryBoundsStatement)
         (max 1 limit)
         PageRecent
 
@@ -218,6 +241,22 @@ loadSessionTurnsBefore pool sessionKey cursor limit =
         (Transaction.statement
             (sessionKey, cursor, fromIntegral (max 1 limit + 1))
             loadTurnsBeforeStatement)
+        (Transaction.statement sessionKey displayHistoryBoundsStatement)
+        (max 1 limit)
+        PageBefore
+
+loadSessionHistoryTurnsBefore
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionHistoryTurnsBefore pool sessionKey cursor limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            (sessionKey, cursor, fromIntegral (max 1 limit + 1))
+            loadHistoryTurnsBeforeStatement)
+        (Transaction.statement sessionKey fullHistoryBoundsStatement)
         (max 1 limit)
         PageBefore
 
@@ -232,8 +271,63 @@ loadSessionTurnsAfter pool sessionKey cursor limit =
         (Transaction.statement
             (sessionKey, cursor, fromIntegral (max 1 limit + 1))
             loadTurnsAfterStatement)
+        (Transaction.statement sessionKey displayHistoryBoundsStatement)
         (max 1 limit)
         PageAfter
+
+loadSessionHistoryTurnsRange
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionHistoryTurnsRange pool sessionKey start limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            (sessionKey, max 0 start, fromIntegral (max 1 limit + 1))
+            loadHistoryTurnsRangeStatement)
+        (Transaction.statement sessionKey fullHistoryBoundsStatement)
+        (max 1 limit)
+        PageAfter
+
+loadSessionHistoryTurnsRangeBounded
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionHistoryTurnsRangeBounded pool sessionKey start endExclusive limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            ( sessionKey
+            , max 0 start
+            , max 0 endExclusive
+            , fromIntegral (max 1 limit + 1)
+            )
+            loadHistoryTurnsRangeBoundedStatement)
+        (Transaction.statement sessionKey fullHistoryBoundsStatement)
+        (max 1 limit)
+        PageAfter
+
+loadSessionHistorySnapshot
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe SessionHistorySnapshot))
+loadSessionHistorySnapshot pool sessionKey =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read do
+            metadata <- Transaction.statement sessionKey loadMetadataStatement
+            case metadata of
+                Nothing -> pure Nothing
+                Just value -> do
+                    (start, total) <-
+                        Transaction.statement sessionKey fullHistoryBoundsStatement
+                    pure $ Just SessionHistorySnapshot
+                        { sessionSnapshotMetadata = value
+                        , sessionSnapshotStart = start
+                        , sessionSnapshotTotal = total
+                        }
 
 loadSessionResumeStats
     :: StorePool
@@ -253,10 +347,11 @@ loadTurnPage
     :: StorePool
     -> Text
     -> Transaction.Transaction (Vector.Vector TurnRow)
+    -> Transaction.Transaction (Int64, Int64)
     -> Int
     -> PageMode
     -> IO (Either StoreError (Maybe SessionTurnPage))
-loadTurnPage pool sessionKey loadRows limit mode =
+loadTurnPage pool sessionKey loadRows loadBounds limit mode =
     withSession pool
         (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
             metadata <- Transaction.statement sessionKey loadMetadataStatement
@@ -264,8 +359,7 @@ loadTurnPage pool sessionKey loadRows limit mode =
                 Nothing -> pure (Right Nothing)
                 Just _ -> do
                     rows0 <- loadRows
-                    (generationStart, total) <-
-                        Transaction.statement sessionKey displayHistoryBoundsStatement
+                    (generationStart, total) <- loadBounds
                     let visibleRows = case mode of
                             PageRecent -> Vector.reverse (Vector.take limit rows0)
                             PageBefore -> Vector.reverse (Vector.take limit rows0)
@@ -315,6 +409,14 @@ listSessionMetadata pool =
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement () listMetadataStatement
 
+listSessionArchiveKeys
+    :: StorePool
+    -> IO (Either StoreError [Text])
+listSessionArchiveKeys pool =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement () listArchiveKeysStatement
+
 searchConversationTurns
     :: StorePool
     -> Text
@@ -325,6 +427,17 @@ searchConversationTurns pool query limit =
         HasqlSession.statement
             (query, fromIntegral (max 1 (min 100 limit)))
             searchTurnsStatement
+
+searchNativeConversations
+    :: StorePool
+    -> Text
+    -> Int
+    -> IO (Either StoreError [NativeConversationSearchResult])
+searchNativeConversations pool query limit =
+    withSession pool $
+        HasqlSession.statement
+            (query, fromIntegral (max 1 (min 100 limit)))
+            searchNativeConversationsStatement
 
 data TurnRow = TurnRow
     { turnRowId :: !Text
@@ -418,6 +531,72 @@ loadMetadataManyStatement = mkStatement
     (Decoders.rowVector metadataRow)
     True
 
+searchNativeConversationsStatement
+    :: Statement (Text, Int64) [NativeConversationSearchResult]
+searchNativeConversationsStatement = mkStatement
+    "WITH query AS (SELECT websearch_to_tsquery('english', $1) AS ts,\
+    \ lower(btrim($1)) AS needle), candidates AS (\
+    \ SELECT s.session_key,s.title,s.cwd,s.provider,s.model_id,s.updated_at,\
+    \ s.archived_at IS NOT NULL,NULL::bigint,NULL::timestamptz,NULL::text,\
+    \ NULL::text,NULL::text,CASE WHEN lower(s.title)=query.needle THEN 1000::float8\
+    \ WHEN lower(s.title) LIKE query.needle || '%' THEN 800::float8\
+    \ WHEN s.title ILIKE '%' || $1 || '%' THEN 600::float8\
+    \ WHEN s.cwd ILIKE '%' || $1 || '%' THEN 400::float8 ELSE 300::float8 END\
+    \ FROM harness.sessions s CROSS JOIN query WHERE s.deleted_at IS NULL AND (\
+    \ s.title ILIKE '%' || $1 || '%' OR s.cwd ILIKE '%' || $1 || '%' OR\
+    \ s.provider ILIKE '%' || $1 || '%' OR s.model_id ILIKE '%' || $1 || '%')\
+    \ UNION ALL\
+    \ SELECT s.session_key,s.title,s.cwd,s.provider,s.model_id,s.updated_at,\
+    \ s.archived_at IS NOT NULL,t.turn_index,t.occurred_at,\
+    \ CASE WHEN t.user_text ILIKE '%' || $1 || '%' OR\
+    \ to_tsvector('english',coalesce(t.user_text,'')) @@ query.ts\
+    \ THEN 'user' ELSE 'assistant' END,\
+    \ t.user_text,t.assistant_text,\
+    \ (100 + ts_rank_cd(t.search_vector,query.ts)*100)::float8\
+    \ FROM harness.session_turns t JOIN harness.sessions s ON s.session_id=t.session_id\
+    \ CROSS JOIN query WHERE s.deleted_at IS NULL AND (\
+    \ t.search_vector @@ query.ts OR t.user_text ILIKE '%' || $1 || '%' OR\
+    \ t.assistant_text ILIKE '%' || $1 || '%'))\
+    \ SELECT * FROM candidates ORDER BY 13 DESC,6 DESC,9 DESC NULLS LAST LIMIT $2"
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList $
+        NativeConversationSearchResult
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nullable Decoders.int8)
+            <*> Decoders.column (Decoders.nullable Decoders.timestamptz)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.float8))
+    True
+
+fullHistoryBoundsStatement :: Statement Text (Int64, Int64)
+fullHistoryBoundsStatement = mkStatement
+    "WITH target AS (\
+    \ SELECT session_id\
+    \ FROM harness.sessions\
+    \ WHERE session_key = $1 AND deleted_at IS NULL\
+    \ )\
+    \ SELECT COALESCE(min(t.turn_index), 0)::bigint,\
+    \ count(t.turn_id)::bigint\
+    \ FROM target\
+    \ LEFT JOIN harness.session_turns t\
+    \ ON t.session_id = target.session_id"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow $
+        (,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+    True
+
 loadLatestPromptEpochStatement
     :: Statement Text (Maybe SessionPromptEpoch)
 loadLatestPromptEpochStatement = mkStatement
@@ -472,6 +651,16 @@ listMetadataStatement = mkStatement
     (Decoders.rowList metadataRow)
     True
 
+listArchiveKeysStatement :: Statement () [Text]
+listArchiveKeysStatement = mkStatement
+    "SELECT session_key FROM harness.sessions\
+    \ WHERE deleted_at IS NULL AND archived_at IS NOT NULL\
+    \ ORDER BY archived_at DESC, session_key ASC"
+    Encoders.noParams
+    (Decoders.rowList $
+        Decoders.column (Decoders.nonNullable Decoders.text))
+    True
+
 metadataSelectSql :: Text
 metadataSelectSql =
     "SELECT session_key, session_schema_version, created_at, updated_at,\
@@ -516,6 +705,76 @@ loadActiveTurnsStatement = mkStatement
            \ ), 0)\
            \ ORDER BY t.turn_index ASC")
     (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowVector turnRowDecoder)
+    True
+
+loadHistoryTurnsRangeStatement
+    :: Statement (Text, Int64, Int64) (Vector.Vector TurnRow)
+loadHistoryTurnsRangeStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ AND t.turn_index >= $2\
+           \ ORDER BY t.turn_index ASC\
+           \ LIMIT $3")
+    ( ((\(value, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowVector turnRowDecoder)
+    True
+
+loadHistoryTurnsRangeBoundedStatement
+    :: Statement (Text, Int64, Int64, Int64) (Vector.Vector TurnRow)
+loadHistoryTurnsRangeBoundedStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ AND t.turn_index >= $2\
+           \ AND t.turn_index < $3\
+           \ ORDER BY t.turn_index ASC\
+           \ LIMIT $4")
+    ( ((\(value, _, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowVector turnRowDecoder)
+    True
+
+loadHistoryTurnsBeforeStatement
+    :: Statement (Text, Int64, Int64) (Vector.Vector TurnRow)
+loadHistoryTurnsBeforeStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ AND t.turn_index < $2\
+           \ ORDER BY t.turn_index DESC\
+           \ LIMIT $3")
+    ( ((\(value, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowVector turnRowDecoder)
+    True
+
+loadRecentHistoryTurnsStatement
+    :: Statement (Text, Int64) (Vector.Vector TurnRow)
+loadRecentHistoryTurnsStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ ORDER BY t.turn_index DESC\
+           \ LIMIT $2")
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
     (Decoders.rowVector turnRowDecoder)
     True
 

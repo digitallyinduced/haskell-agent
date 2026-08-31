@@ -18,6 +18,7 @@ packages:
     packages/agent-store
     packages/claude-agent-sdk-haskell
     packages/agent-claude
+    packages/agent-runtime-daemon
 
 tests: True
 multi-repl: True

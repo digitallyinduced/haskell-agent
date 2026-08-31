@@ -38,6 +38,7 @@ import Agent.CLI.Options
 import Agent.CLI.PendingInputs
 import Agent.CLI.SteeringInputs
 import Agent.CLI.Runtime.Types
+import Agent.CLI.Runtime.Orchestration.Types (NativeRunHooks(..))
 import Agent.CLI.Session.Runtime.Types
 import Agent.CLI.Interrupt
 import Agent.Store.Postgres
@@ -48,6 +49,10 @@ import Agent.CLI.Render
 import Agent.CLI.Session
 import Agent.CLI.Session.History
 import Agent.CLI.SessionEnv
+import Agent.CLI.SessionLock
+    ( acquireSessionActivityLock
+    , releaseSessionLock
+    )
 import Agent.CLI.Session.Interaction
 import Agent.CLI.Skills
 import Agent.CLI.StartupContext
@@ -78,7 +83,12 @@ import Agent.OsPath
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception.Safe (catchAny, uninterruptibleMask_)
+import Control.Exception.Safe
+    ( catchAny
+    , mask_
+    , onException
+    , uninterruptibleMask_
+    )
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -267,6 +277,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             agentViewportEnvironment agentViewportRuntime
     writeIORef startup.startupAgentSnapshot
         (loadAgentSnapshot agentViewportRuntime False)
+    forM_ startup.startupNativeHooks \hooks ->
+        hooks.nativeRegisterAgentSnapshot
+            (snd <$> loadAgentSnapshot agentViewportRuntime False)
     writeIORef startup.startupAgentSelect
         (selectAgentViewport agentViewportRuntime)
     let installSkills context queueContext skills = do
@@ -439,6 +452,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , renderWorkspace = toText cwd
             }
         emitLoop event = do
+            forM_ startup.startupNativeHooks \hooks ->
+                hooks.nativeOnLoopEvent event
             recordAgentViewportEvent agentViewportRuntime event
             managedLoopPublisher event
             case fullscreen of
@@ -471,48 +486,63 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         approveToolWithClassification classifiedReadOnly call =
             withMVar ioLock \_ ->
                 let classify = const (pure classifiedReadOnly)
-                in case promptRequest of
-                    Just request
-                        | isJust request.managedTurnBridgeDirectory ->
-                            approveToolDecisionWithReporterAndPersistenceClassified
-                                classify
-                                (requestManagedApproval request)
-                                (const (pure ()))
-                                (pure ())
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
-                    _ -> case fullscreen of
-                        Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecisionClassified
+                in case startup.startupNativeHooks of
+                    Just hooks ->
+                        approveToolDecisionWithReporterAndPersistenceClassified
+                            classify
+                            hooks.nativeRequestApproval
+                            (const (pure ()))
+                            (pure ())
+                            policyRef
+                            allowedToolsRef
+                            toolRegistry
+                            planMode
+                            call
+                    Nothing -> case promptRequest of
+                        Just request
+                            | isJust request.managedTurnBridgeDirectory ->
+                                approveToolDecisionWithReporterAndPersistenceClassified
                                     classify
+                                    (requestManagedApproval request)
+                                    (const (pure ()))
+                                    (pure ())
                                     policyRef
                                     allowedToolsRef
                                     toolRegistry
                                     planMode
-                                    projectRoot
-                                    cwd
                                     call
-                        Just runtime ->
-                            approveToolDecisionWithReporterAndPersistenceClassified
-                                classify
-                                (requestFullscreenPermission runtime (toText cwd))
-                                (\case
-                                    ApprovalWarning _ -> pure ()
-                                    ApprovalSuccess message ->
-                                        emitUiEvent runtime
-                                            (UiSetNotice
-                                                (Just
-                                                    (successNotice message))))
-                                (saveProjectAutoApprove projectRoot True)
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
+                        _ -> case fullscreen of
+                            Nothing ->
+                                withStdinPaused escPaused $
+                                    approveToolDecisionClassified
+                                        classify
+                                        policyRef
+                                        allowedToolsRef
+                                        toolRegistry
+                                        planMode
+                                        projectRoot
+                                        cwd
+                                        call
+                            Just runtime ->
+                                approveToolDecisionWithReporterAndPersistenceClassified
+                                    classify
+                                    (requestFullscreenPermission
+                                        runtime
+                                        (toText cwd))
+                                    (\case
+                                        ApprovalWarning _ -> pure ()
+                                        ApprovalSuccess message ->
+                                            emitUiEvent runtime
+                                                (UiSetNotice
+                                                    (Just
+                                                        (successNotice
+                                                            message))))
+                                    (saveProjectAutoApprove projectRoot True)
+                                    policyRef
+                                    allowedToolsRef
+                                    toolRegistry
+                                    planMode
+                                    call
         approveRegisteredTool =
             approveToolWithClassification Nothing
         config = LoopConfig
@@ -527,7 +557,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , loopDispatch =
                 defaultLoopDispatch
                     { toolDispatchFinalizeOutput = \call output ->
-                        if call.callKind == ComputerCallKind
+                        if isComputerToolCallKind call.callKind
                             then pure output
                             else finalizeToolOutput toolEnv call output
                     }
@@ -694,7 +724,63 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         pure (Right result)
     btwRequests <- newChan
     recapRequests <- newChan
+    turnActivityRef <- newIORef Nothing
+    turnIsActiveRef <- newIORef False
+    nativeSessionIdRef <- newIORef Nothing
     let
+        acquireTurnActivity handle = mask_ do
+            current <- readIORef turnActivityRef
+            if isNothing current
+                then
+                    acquireSessionActivityLock
+                        handle.sessionDir
+                        handle.sessionMeta.metaId >>= \case
+                            Left err -> fail (Text.unpack err)
+                            Right lock -> do
+                                writeIORef turnActivityRef (Just lock)
+                                pure True
+                else pure False
+        beginTurnActivity = do
+            case persist of
+                PersistenceDisabled -> pure ()
+                PersistenceEnabled slotRef ->
+                    readIORef slotRef >>= \case
+                        PersistencePending{} -> pure ()
+                        PersistenceActive handle -> void (acquireTurnActivity handle)
+            writeIORef turnIsActiveRef True
+        endTurnActivity = do
+            writeIORef turnIsActiveRef False
+            atomicModifyIORef' turnActivityRef
+                (\current -> (Nothing, current))
+                >>= mapM_ releaseSessionLock
+        notifyNativeSessionId sessionId = do
+            shouldNotify <-
+                atomicModifyIORef' nativeSessionIdRef \current ->
+                    if current == Just sessionId
+                        then (current, False)
+                        else (Just sessionId, True)
+            when shouldNotify $
+                forM_ startup.startupNativeHooks
+                    (\hooks -> hooks.nativeOnSessionId sessionId)
+                `onException`
+                    atomicModifyIORef' nativeSessionIdRef
+                        (\current ->
+                            if current == Just sessionId
+                                then (Nothing, ())
+                                else (current, ()))
+        onPersistedWithActivity handle = do
+            -- Preserve the established lock order: own the session before its
+            -- activity marker. Publish the native session ID only after both
+            -- locks are established so observers never see an idle new turn.
+            onPersisted handle
+            active <- readIORef turnIsActiveRef
+            acquired <-
+                if active
+                    then acquireTurnActivity handle
+                    else pure False
+            notifyNativeSessionId handle.sessionMeta.metaId
+                `onException`
+                    when acquired endTurnActivity
         reloadGeneratedContextSafely =
             reloadGeneratedContext `catchAny` \err ->
                 reportSessionError
@@ -819,13 +905,15 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionSetWindowTitle = setWindowTitle
             , sessionBeginWindowTitleBusy = beginWindowTitleBusy
             , sessionEndWindowTitleBusy = endWindowTitleBusy
+            , sessionBeginTurnActivity = beginTurnActivity
+            , sessionEndTurnActivity = endTurnActivity
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
             , sessionAbortSubagentTurn = abortSubagentTurn
             , sessionConcurrentLimit = currentConcurrentLimit
             , sessionSetConcurrentLimit = setConcurrentLimit
-            , sessionOnPersisted = onPersisted
+            , sessionOnPersisted = onPersistedWithActivity
             , sessionReset = sessionReset
             }
     writeIORef automaticCompactionHookRef commitAutomaticCompaction

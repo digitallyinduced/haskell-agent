@@ -1,6 +1,7 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeToolProjection(..)
     , imageGenerationCodeModeProjection
@@ -21,7 +22,12 @@ import Agent.Subagents
     , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (taskPathRoot)
-import Agent.ToolDispatch (noArgsTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallKind(..)
+    , ToolCallResult(..)
+    , noArgsTool
+    )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Codex.Dialect.Runtime
@@ -38,6 +44,7 @@ import Agent.Tools.Types
     , defaultToolEnv
     , freeformApplyPatchAppTool
     , jsonAppTool
+    , mkToolRegistry
     , rawJsonAppTool
     )
 import Control.Exception.Safe (bracket)
@@ -51,10 +58,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "schemasFromAppTools" do
     it "advertises the reserved computer tool as a built-in" do
-        let computer = jsonAppTool "computer" "Control this computer" []
-                AlwaysPrompt
-                (noArgsTool "computer" (pure (Right "ok")))
-        schemasFromAppTools codexDialect [computer]
+        schemasFromAppTools codexDialect [computerUseTool]
             `shouldBe`
                 [ webSearchTool
                 , knownResponseTool ToolComputer
@@ -67,6 +71,17 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+    it "keeps hosted computer use direct and out of code mode" do
+        let tools =
+                [ testTool "read_file"
+                , testTool "shell_command"
+                , computerUseTool
+                ]
+            projection = projectCodeModeTools CodeOnlyToolMode tools
+        map (.appToolName) projection.directCodeModeTools
+            `shouldBe` ["shell_command", "computer"]
+        map (.appToolName) projection.nestedCodeModeTools
+            `shouldBe` ["read_file", "shell_command"]
     it "nests only imagegen for code-only models when full code mode is off" do
         let tools = map testTool ["read_file", "imagegen", "shell_command"]
         case imageGenerationCodeModeProjection CodeOnlyToolMode tools of

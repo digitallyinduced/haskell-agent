@@ -8,7 +8,9 @@ import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
-    ( LoadedAuth(loadedTokenProvider) )
+    ( LoadedAuth(loadedTokenProvider)
+    , isGatewayLoadedAuth
+    )
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Claude (newClaudeSessionRuntimeSlot)
 import Agent.CLI.CodeModeRuntime
@@ -442,12 +444,15 @@ runAgentSession
         -- rejects its direct namespace. The offline lookup never blocks
         -- startup on the network.
         codexModelInfo <-
-            loadCodexCatalogModelInfo
-                stateDirectory
-                provider
-                dialect
-                (Just loaded.loadedTokenProvider)
-                model
+            if isGatewayLoadedAuth loaded
+                then pure Nothing
+                else
+                    loadCodexCatalogModelInfo
+                        stateDirectory
+                        provider
+                        dialect
+                        (Just selectableTokenProvider)
+                        model
         let initializeCodeMode =
                 if options.optCodeMode
                     then codeModeSessionRuntimeFor codexModelInfo tools
@@ -559,12 +564,7 @@ runAgentSession
         policyRef <- newIORef policy
         claudeRuntimeSlot <- newClaudeSessionRuntimeSlot
         let claudeBridgeTools =
-                filter isClaudeBridgeTool $
-                    coding.codingAppTools
-                        <> mcpTools
-                        <> sessionTools
-                        <> databaseAppTools
-                        <> learnedSkillAppTools
+                filter isClaudeBridgeTool allTools
             isClaudeBridgeTool tool =
                 canonicalToolName tool.appToolName
                     `notElem`

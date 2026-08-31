@@ -36,6 +36,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
 import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -99,7 +100,7 @@ storedResponseItemRoundTrip :: StoredRoundTripItem -> Property
 storedResponseItemRoundTrip (StoredRoundTripItem item) =
     checkCoverage $
         foldr
-            (\label -> cover 7 (responseItemKind item == label) label)
+            (\label -> cover 5 (responseItemKind item == label) label)
             (counterexample ("failed to round-trip " <> show item) $
             fromStoredResponseItem (toStoredResponseItem item)
                 === Right item)
@@ -132,6 +133,8 @@ genResponseItem =
         , FunctionCallOutputItem <$> genFunctionCallOutput
         , CustomToolCallItem <$> genCustomToolCall
         , CustomToolCallOutputItem <$> genCustomToolCallOutput
+        , ComputerCallItem <$> genComputerCall
+        , ComputerCallOutputItem <$> genComputerCallOutput
         , ReasoningItemValue <$> genReasoningItem
         , ItemReferenceValue <$> genItemReference
         , AgentMessageItem <$> genResponseAgentMessage
@@ -240,6 +243,67 @@ genCustomToolCallOutput =
         <*> genMaybe genText
         <*> genRawJson
         <*> genMaybe genItemStatus
+
+genComputerCall :: Gen ComputerCall
+genComputerCall =
+    ComputerCall
+        <$> genMaybe genText
+        <*> genText
+        <*> genSmallList genComputerAction
+        <*> genSmallList genSafetyCheck
+        <*> genMaybe genItemStatus
+        <*> fmap
+            (withoutReservedKeys
+                [ "type", "id", "call_id", "actions"
+                , "pending_safety_checks", "status"
+                ])
+            genJsonObject
+
+genComputerCallOutput :: Gen ComputerCallOutput
+genComputerCallOutput =
+    ComputerCallOutput
+        <$> genMaybe genText
+        <*> genText
+        <*> (("data:image/png;base64," <>) <$> genText)
+        <*> genSmallList genSafetyCheck
+        <*> genMaybe genItemStatus
+        <*> fmap
+            (withoutReservedKeys
+                [ "type", "id", "call_id", "output"
+                , "acknowledged_safety_checks", "status"
+                ])
+            genJsonObject
+
+genComputerAction :: Gen ComputerAction
+genComputerAction =
+    oneof
+        [ pure ScreenshotAction
+        , ClickAction <$> smallInt <*> smallInt <*> pure "left"
+            <*> genSmallList genText
+        , DoubleClickAction <$> smallInt <*> smallInt
+            <*> genSmallList genText
+        , TypeAction <$> genText
+        , KeypressAction <$> genSmallList genText
+        , ScrollAction <$> smallInt <*> smallInt <*> smallInt <*> smallInt
+            <*> genSmallList genText
+        , MoveAction <$> smallInt <*> smallInt <*> genSmallList genText
+        , pure WaitAction
+        , DragAction <$> genSmallList
+            (ComputerPoint <$> smallInt <*> smallInt)
+            <*> genSmallList genText
+        ]
+  where
+    smallInt = chooseInt (0, 1000)
+
+genSafetyCheck :: Gen SafetyCheck
+genSafetyCheck =
+    SafetyCheck
+        <$> genText
+        <*> genMaybe genText
+        <*> genMaybe genText
+        <*> fmap
+            (withoutReservedKeys ["id", "code", "message"])
+            genJsonObject
 
 genReasoningItem :: Gen ReasoningItem
 genReasoningItem =
@@ -406,7 +470,8 @@ genSmallList value = do
 responseItemKinds :: [String]
 responseItemKinds =
     [ "message", "function call", "function output"
-    , "custom call", "custom output", "reasoning"
+    , "custom call", "custom output", "computer call", "computer output"
+    , "reasoning"
     , "reference", "agent message", "known tagged", "unknown tagged"
     ]
 
@@ -515,7 +580,7 @@ spec = describe "Agent.CLI.Session" do
                     [ ComputerCallItem ComputerCall
                         { computerCallItemId = Just "item-1"
                         , computerCallId = "call-1"
-                        , computerActions = [ClickAction 12 34 "left"]
+                        , computerActions = [ClickAction 12 34 "left" []]
                         , pendingSafetyChecks = []
                         , computerCallStatus = Nothing
                         , computerCallExtra = KeyMap.empty
@@ -1324,6 +1389,114 @@ spec = describe "Agent.CLI.Session" do
                 Directory.removeDirectoryRecursive (toFilePath dir)
                 loadSession pool root sessionId
                     `shouldReturn` Right (meta, [turn])
+
+        it "forks immutable prefixes and remaps transfer imports" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                    turn prompt response effect usage = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = prompt
+                        , turnAssistantText = Just ("answer " <> prompt)
+                        , turnError = Nothing
+                        , turnResponseId = response
+                        , turnItems = []
+                        , turnUsage = usage
+                        , turnEffect = effect
+                        }
+                    first = turn "one" (Just "resp-1") TranscriptAppend
+                        (Just TokenUsage
+                            { inputTokens = 10
+                            , outputTokens = 2
+                            , cachedTokens = 1
+                            })
+                    compacted = turn "/compact" Nothing TranscriptReplace Nothing
+                    third = turn "three" (Just "resp-3") TranscriptAppend
+                        (Just TokenUsage
+                            { inputTokens = 7
+                            , outputTokens = 3
+                            , cachedTokens = 0
+                            })
+                    cleared = turn "/clear" Nothing TranscriptReset Nothing
+                    fifth = turn "five" (Just "resp-5") TranscriptAppend Nothing
+                source0 <- createSession (testCreate pool root)
+                source1 <- appendTurn source0 first
+                source2 <- appendTurnWithMetaUpdate source1 compacted
+                    \meta -> meta { metaLastResponseId = Nothing }
+                source3 <- appendTurn source2 third
+                source4 <- appendTurnWithMetaUpdate source3 cleared
+                    \meta -> meta { metaLastResponseId = Nothing }
+                _source5 <- appendTurn source4 fifth
+
+                loadSessionHistoryTurnsAround
+                    pool root source0.sessionMeta.metaId 1 1 >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right page -> do
+                            map fst page.pageTurns `shouldBe` [0, 1, 2]
+                            map snd page.pageTurns
+                                `shouldBe` [first, compacted, third]
+                            page.pageHasOlder `shouldBe` False
+                            page.pageHasNewer `shouldBe` True
+
+                forkSessionAtTurn pool root source0.sessionMeta.metaId 1
+                    >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right forkId -> do
+                            forkId `shouldNotBe` source0.sessionMeta.metaId
+                            loadSession pool root forkId >>= \case
+                                Left err -> expectationFailure (Text.unpack err)
+                                Right (meta, turns) -> do
+                                    turns `shouldBe` [first, compacted]
+                                    meta.metaLastResponseId `shouldBe` Nothing
+                                    meta.metaInputTokens `shouldBe` 10
+                                    meta.metaOutputTokens `shouldBe` 2
+                            loadSession pool root source0.sessionMeta.metaId
+                                >>= \case
+                                    Left err ->
+                                        expectationFailure (Text.unpack err)
+                                    Right (sourceMeta, sourceTurns) -> do
+                                        sourceMeta.metaId
+                                            `shouldBe` source0.sessionMeta.metaId
+                                        sourceTurns
+                                            `shouldBe`
+                                                [ first
+                                                , compacted
+                                                , third
+                                                , cleared
+                                                , fifth
+                                                ]
+
+                chunks <- newIORef []
+                streamSessionTransfer
+                    pool root source0.sessionMeta.metaId
+                    (\chunk -> modifyIORef' chunks (chunk :))
+                    `shouldReturn` Right ()
+                payload <- BS.concat . reverse <$> readIORef chunks
+                envelope <- case Aeson.eitherDecodeStrict' payload of
+                    Left err -> expectationFailure err >> fail err
+                    Right value -> pure value
+                validateSessionTransferEnvelope envelope
+                    `shouldBe` Right envelope
+                envelope.transferSession.transferTurns
+                    `shouldBe`
+                        [first, compacted, third, cleared, fifth]
+                importSessionTransferRemapped pool root Nothing envelope
+                    >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right importedId -> do
+                            importedId `shouldNotBe` source0.sessionMeta.metaId
+                            loadSession pool root importedId >>= \case
+                                Left err ->
+                                    expectationFailure (Text.unpack err)
+                                Right (importedMeta, importedTurns) -> do
+                                    importedMeta.metaId `shouldBe` importedId
+                                    importedTurns
+                                        `shouldBe`
+                                            [ first
+                                            , compacted
+                                            , third
+                                            , cleared
+                                            , fifth
+                                            ]
 
         it "keeps pending persistence lazy" $
             withTempStore \store root -> do

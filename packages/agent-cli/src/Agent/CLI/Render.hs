@@ -79,6 +79,7 @@ import Agent.CLI.Error
     , formatApiErrorAt
     , formatApiErrorPersistedAt
     )
+import Agent.CLI.ComputerUse (summarizeComputerToolCall)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -119,13 +120,12 @@ import Agent.TUI.Presentation
     , formatToolOutput
     , formatToolOutputRelative
     , parseSearchReplaceDiff
-    , summarizeToolCall
-    , summarizeToolCallRelative
     , toolCallDiff
     , toolDetail
     , toolVerb
     , workspaceRelativeDisplayPath
     )
+import qualified Agent.TUI.Presentation as Presentation
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -161,6 +161,18 @@ import Agent.TUI.Motion
     )
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
+
+summarizeToolCall :: ToolCall -> Text
+summarizeToolCall call =
+    fromMaybe
+        (Presentation.summarizeToolCall call)
+        (summarizeComputerToolCall call)
+
+summarizeToolCallRelative :: Text -> ToolCall -> Text
+summarizeToolCallRelative workspace call =
+    fromMaybe
+        (Presentation.summarizeToolCallRelative workspace call)
+        (summarizeComputerToolCall call)
 
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool

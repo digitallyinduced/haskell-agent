@@ -399,6 +399,8 @@ decodeApplyPatchArguments call = case call.callKind of
     CustomCallKind -> Right call.arguments
     FunctionCallKind -> decodeToolArguments applyPatchArgsDecoder call.arguments
     ComputerCallKind -> Left "computer calls are not apply_patch calls"
+    ComputerFunctionCallKind ->
+        Left "computer calls are not apply_patch calls"
 
 --------------------------------------------------------------------------------
 -- update_plan

@@ -403,6 +403,30 @@ toolResultToItem result = case result.callKind of
             , computerOutputStatus = Nothing
             , computerOutputExtra = KeyMap.empty
             }
+    ComputerFunctionCallKind ->
+        FunctionCallOutputItem FunctionCallOutput
+            { itemId = Nothing
+            , callId = result.callId
+            , name = Nothing
+            , namespace = Nothing
+            , provider = Nothing
+            , output = computerFunctionOutput result.output
+            , status = Nothing
+            }
+
+computerFunctionOutput :: Text -> RawJson
+computerFunctionOutput rawOutput =
+    case Hermes.decodeEither computerCallOutputDecoder
+        (Text.encodeUtf8 rawOutput) of
+            Right ComputerCallOutput{screenshotDataUrl} ->
+                rawJsonFromEncoding . Aeson.toEncoding $
+                    [ Aeson.object
+                        [ "type" Aeson..= ("input_image" :: Text)
+                        , "image_url" Aeson..= screenshotDataUrl
+                        , "detail" Aeson..= ("original" :: Text)
+                        ]
+                    ]
+            Left _ -> rawJsonFromEncoding (Aeson.toEncoding rawOutput)
 
 toolResultOutput :: ToolCallResult -> RawJson
 toolResultOutput result =
@@ -520,6 +544,18 @@ tokenUsageFromResponse = maybe emptyTokenUsage \usage ->
 
 responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
+    FunctionCallItem call
+        | call.namespace == Just computerFunctionNamespace
+        , call.name == computerFunctionName ->
+            Just ToolCall
+                { callId = call.callId
+                , name = "computer"
+                , arguments = call.arguments
+                , callKind = ComputerFunctionCallKind
+                -- Desktop input may contain typed secrets. Conservatively
+                -- redact every reserved computer-function payload.
+                , argumentsEncrypted = True
+                }
     FunctionCallItem call ->
         let toolName = namespacedToolName call.namespace call.name
         in Just ToolCall

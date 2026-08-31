@@ -1,15 +1,15 @@
 { mkDerivation, aeson, agent-claude, agent-codex-dialect
 , agent-core, agent-gemini, agent-grok-build-dialect, agent-json
 , agent-mcp, agent-openai, agent-openrouter, agent-process
-, agent-responses, agent-responses-types, agent-store, agent-syntax
-, agent-tui, agent-xai, ansi-terminal, async, base
-, base64-bytestring, brick, bytestring, colour, containers, crypton
-, deepseq, directory, entropy, filelock, filepath, haskeline
-, hasql-pool, hspec, http-client, http-client-tls, http-types
-, JuicyPixels, lib, memory, mtl, network, network-uri
-, optparse-applicative, process, QuickCheck, retry, safe-exceptions
-, scientific, stm, tagsoup, text, time, transformers, unix, vector
-, vty, vty-crossplatform
+, agent-responses, agent-responses-types, agent-runtime-daemon
+, agent-store, agent-syntax, agent-tui, agent-xai, ansi-terminal
+, async, base, base64-bytestring, brick, bytestring, colour
+, containers, crypton, deepseq, directory, entropy, filelock
+, filepath, haskeline, hasql-pool, hspec, http-client
+, http-client-tls, http-types, JuicyPixels, lib, memory, mtl
+, network, network-uri, optparse-applicative, process, QuickCheck
+, retry, safe-exceptions, scientific, stm, tagsoup, text, time
+, transformers, unix, vector, vty, vty-crossplatform
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -18,10 +18,12 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   enableSeparateDataOutput = true;
+  # cabal2nix does not emit a separate foreign-library dependency list.
+  # Keep agent-runtime-daemon here for the Darwin bridge component.
   libraryHaskellDepends = [
     aeson agent-claude agent-codex-dialect agent-core agent-gemini
     agent-grok-build-dialect agent-json agent-mcp agent-openai
-    agent-openrouter agent-process agent-responses
+    agent-openrouter agent-process agent-responses agent-runtime-daemon
     agent-responses-types agent-store agent-syntax agent-tui agent-xai
     ansi-terminal async base base64-bytestring brick bytestring colour
     containers crypton directory entropy filelock filepath haskeline
@@ -38,11 +40,11 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-claude agent-codex-dialect agent-core agent-gemini
     agent-grok-build-dialect agent-json agent-mcp agent-openai
-    agent-openrouter agent-responses agent-responses-types agent-store
-    agent-tui agent-xai ansi-terminal async base brick bytestring
-    colour containers directory filepath haskeline hspec JuicyPixels
-    process QuickCheck safe-exceptions stm text time transformers unix
-    vty
+    agent-openrouter agent-responses agent-responses-types
+    agent-runtime-daemon agent-store agent-tui agent-xai ansi-terminal
+    async base brick bytestring colour containers directory filepath
+    haskeline hspec JuicyPixels process QuickCheck safe-exceptions stm
+    text time transformers unix vty
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types

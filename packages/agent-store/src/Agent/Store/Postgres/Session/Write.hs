@@ -9,11 +9,14 @@ module Agent.Store.Postgres.Session.Write
     , createSessionWithInitialPromptEpoch
     , createSessionFromSnapshot
     , replaceSessionMetadata
+    , setSessionTitle
+    , setGeneratedSessionTitle
     , appendSessionPromptEpoch
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedWithPromptReset
     , appendSessionTurns
+    , setSessionArchived
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
@@ -21,7 +24,7 @@ module Agent.Store.Postgres.Session.Write
 
 import Control.Monad (forM_, unless, when)
 import Data.Functor.Contravariant ((>$<))
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import qualified Hasql.Decoders as Decoders
@@ -38,6 +41,15 @@ import Agent.Store.Postgres.Hasql (mkStatement)
 import Agent.Store.Postgres.Session.Types
 import Agent.Store.Postgres.SessionItem (insertResponseItems)
 import Agent.Store.Types (StoreError)
+
+data TitleUpdate = TitleUpdate
+    { titleUpdateKey :: !Text
+    , titleUpdateTitle :: !Text
+    , titleUpdateManual :: !Bool
+    , titleUpdateRefreshIndex :: !Int32
+    , titleUpdateOccurredAt :: !UTCTime
+    , titleUpdateOnlyWhenAutomatic :: !Bool
+    }
 
 createSession
     :: StorePool
@@ -63,6 +75,66 @@ createSession pool metadata =
                             , eventInsertKind = "session.created"
                             , eventInsertOccurredAt =
                                 metadata.sessionMetadataCreatedAt
+                            }
+                        insertEventStatement
+                    pure True
+
+setSessionTitle
+    :: StorePool
+    -> Text
+    -> Text
+    -> Bool
+    -> Int32
+    -> UTCTime
+    -> IO (Either StoreError Bool)
+setSessionTitle pool sessionKey title manual refreshIndex occurredAt =
+    updateSessionTitle pool TitleUpdate
+        { titleUpdateKey = sessionKey
+        , titleUpdateTitle = title
+        , titleUpdateManual = manual
+        , titleUpdateRefreshIndex = refreshIndex
+        , titleUpdateOccurredAt = occurredAt
+        , titleUpdateOnlyWhenAutomatic = False
+        }
+
+setGeneratedSessionTitle
+    :: StorePool
+    -> Text
+    -> Text
+    -> Int32
+    -> UTCTime
+    -> IO (Either StoreError Bool)
+setGeneratedSessionTitle pool sessionKey title refreshIndex occurredAt =
+    updateSessionTitle pool TitleUpdate
+        { titleUpdateKey = sessionKey
+        , titleUpdateTitle = title
+        , titleUpdateManual = False
+        , titleUpdateRefreshIndex = refreshIndex
+        , titleUpdateOccurredAt = occurredAt
+        , titleUpdateOnlyWhenAutomatic = True
+        }
+
+updateSessionTitle
+    :: StorePool
+    -> TitleUpdate
+    -> IO (Either StoreError Bool)
+updateSessionTitle pool update =
+    withSession pool $
+        Transactions.transaction Transactions.Serializable Transactions.Write do
+            _ <- Transaction.statement
+                update.titleUpdateKey
+                blockingAdvisoryLockStatement
+            changed <- Transaction.statement update setTitleProjectionStatement
+            case changed of
+                Nothing -> pure False
+                Just (sessionId, sequence) -> do
+                    _ <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = sequence
+                            , eventInsertKind = "session.title_updated"
+                            , eventInsertOccurredAt =
+                                update.titleUpdateOccurredAt
                             }
                         insertEventStatement
                     pure True
@@ -268,6 +340,35 @@ appendSessionTurns pool turns metadata =
             then appendAll rest
             else Transaction.condemn >> pure False
 
+setSessionArchived
+    :: StorePool
+    -> Text
+    -> Bool
+    -> UTCTime
+    -> IO (Either StoreError Bool)
+setSessionArchived pool sessionKey archived occurredAt =
+    withSession pool $
+        Transactions.transaction Transactions.Serializable Transactions.Write do
+            _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
+            changed <- Transaction.statement
+                (sessionKey, archived, occurredAt)
+                setArchivedProjectionStatement
+            case changed of
+                Nothing -> pure False
+                Just (sessionId, sequence) -> do
+                    _ <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = sequence
+                            , eventInsertKind =
+                                if archived
+                                    then "session.archived"
+                                    else "session.restored"
+                            , eventInsertOccurredAt = occurredAt
+                            }
+                        insertEventStatement
+                    pure True
+
 deleteSession
     :: StorePool
     -> Text
@@ -430,6 +531,27 @@ sessionExistsStatement = mkStatement
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
     True
 
+setArchivedProjectionStatement
+    :: Statement (Text, Bool, UTCTime) (Maybe (Text, Int64))
+setArchivedProjectionStatement = mkStatement
+    "UPDATE harness.sessions SET\
+    \ archived_at = CASE WHEN $2 THEN $3 ELSE NULL END,\
+    \ next_event_sequence = next_event_sequence + 1\
+    \ WHERE session_key = $1 AND deleted_at IS NULL\
+    \ RETURNING session_id::text, next_event_sequence - 1"
+    ( ((\(key, _, _) -> key)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, archived, _) -> archived)
+            >$< Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> ((\(_, _, occurredAt) -> occurredAt)
+            >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+    )
+    (Decoders.rowMaybe $
+        (,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+    True
+
 insertPromptEpochStatement
     :: Statement (Text, SessionPromptSnapshot) (Maybe Int64)
 insertPromptEpochStatement = mkStatement
@@ -571,11 +693,44 @@ metadataUpdateSql =
     \ transport_model_id = $8, dialect = $9,\
     \ legacy_target_provider = $10, legacy_target_connection = $11,\
     \ legacy_target_effective_model = $12, legacy_target_dialect = $13,\
-    \ cwd = $14, effort = $15, title = $16, title_is_manual = $17,\
-    \ title_refresh_index = $18, title_user_turns = $19,\
+    \ cwd = $14, effort = $15,\
+    \ title = CASE WHEN title_is_manual THEN title ELSE $16 END,\
+    \ title_is_manual = CASE\
+    \   WHEN title_is_manual THEN title_is_manual ELSE $17 END,\
+    \ title_refresh_index = CASE\
+    \   WHEN title_is_manual THEN title_refresh_index ELSE $18 END,\
+    \ title_user_turns = $19,\
     \ last_response_id = $20, input_tokens = $21, output_tokens = $22,\
     \ cached_tokens = $23, last_recap = $24, last_turn_summary = $25,\
     \ last_recap_main_turns = $26"
+
+setTitleProjectionStatement
+    :: Statement TitleUpdate (Maybe (Text, Int64))
+setTitleProjectionStatement = mkStatement
+    "UPDATE harness.sessions SET\
+    \ title = $2, title_is_manual = $3, title_refresh_index = $4,\
+    \ updated_at = $5, next_event_sequence = next_event_sequence + 1\
+    \ WHERE session_key = $1 AND deleted_at IS NULL\
+    \ AND (NOT $6 OR NOT title_is_manual)\
+    \ RETURNING session_id::text, next_event_sequence - 1"
+    ( ((.titleUpdateKey)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.titleUpdateTitle)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.titleUpdateManual)
+            >$< Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> ((.titleUpdateRefreshIndex)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> ((.titleUpdateOccurredAt)
+            >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+        <> ((.titleUpdateOnlyWhenAutomatic)
+            >$< Encoders.param (Encoders.nonNullable Encoders.bool))
+    )
+    (Decoders.rowMaybe $
+        (,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+    True
 
 insertEventStatement :: Statement EventInsert Text
 insertEventStatement = mkStatement

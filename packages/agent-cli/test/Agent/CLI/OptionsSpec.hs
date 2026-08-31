@@ -187,10 +187,57 @@ spec = do
 
 
         it "parses session administration commands" do
-            parseArgs ["sessions"] `shouldBe` Right ListSessions
-            parseArgs ["sessions", "list"] `shouldBe` Right ListSessions
+            parseArgs ["sessions"]
+                `shouldBe` Right (ListSessions SessionHuman)
+            parseArgs ["sessions", "list"]
+                `shouldBe` Right (ListSessions SessionHuman)
+            parseArgs ["sessions", "list", "--json"]
+                `shouldBe` Right (ListSessions SessionJSON)
             parseArgs ["sessions", "show", "2026-08-19-abcd1234"]
-                `shouldBe` Right (ShowSession "2026-08-19-abcd1234")
+                `shouldBe`
+                    Right
+                        (ShowSession
+                            "2026-08-19-abcd1234"
+                            SessionHuman
+                            Nothing)
+            parseArgs
+                [ "sessions", "show", "2026-08-19-abcd1234", "--json" ]
+                `shouldBe`
+                    Right
+                        (ShowSession
+                            "2026-08-19-abcd1234"
+                            SessionJSON
+                            Nothing)
+            parseArgs
+                [ "sessions", "show", "2026-08-19-abcd1234"
+                , "--json", "--limit", "50"
+                ]
+                `shouldBe`
+                    Right
+                        (ShowSession
+                            "2026-08-19-abcd1234"
+                            SessionJSON
+                            (Just (SessionRecent 50)))
+            parseArgs
+                [ "sessions", "show", "2026-08-19-abcd1234"
+                , "--before", "100", "--json"
+                ]
+                `shouldBe`
+                    Right
+                        (ShowSession
+                            "2026-08-19-abcd1234"
+                            SessionJSON
+                            (Just (SessionBefore 100 50)))
+            parseArgs
+                [ "sessions", "show", "2026-08-19-abcd1234"
+                , "--limit", "50"
+                ]
+                `shouldSatisfy` isLeft
+            parseArgs
+                [ "sessions", "show", "2026-08-19-abcd1234"
+                , "--json", "--limit", "501"
+                ]
+                `shouldSatisfy` isLeft
             parseArgs ["sessions", "wait", "2026-08-19-abcd1234"]
                 `shouldBe` Right (WaitSession "2026-08-19-abcd1234")
             parseArgs ["sessions", "import"]
