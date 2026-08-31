@@ -75,8 +75,9 @@ data ToolSchema
     -- (@format.type = "grammar"@). The fields are the grammar syntax
     -- (for example @"lark"@) and its definition text.
     | FreeformGrammarSchema !Text !Text
-    -- | Provider-hosted desktop control. Keeping this distinct prevents an
-    -- unrelated function or MCP tool named @computer@ from acquiring it.
+    -- | The privileged local computer function. Keeping this distinct from
+    -- caller-defined JSON functions prevents an unrelated MCP tool from
+    -- acquiring the desktop-control handler or its output encoding.
     | HostedComputerSchema
     deriving (Eq, Show)
 

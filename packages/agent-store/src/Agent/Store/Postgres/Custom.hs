@@ -22,6 +22,7 @@ module Agent.Store.Postgres.Custom
     , inspectCustomSchema
     , inspectCustomSchemaSequential
     , queryCustom
+    , queryCustomJson
     , executeCustom
     , normalizeCustomQuery
     , normalizeCustomExecution
@@ -30,7 +31,7 @@ module Agent.Store.Postgres.Custom
 import Control.Monad (forM_, unless)
 import qualified Data.ByteString as ByteString
 import Data.Functor.Contravariant ((>$<))
-import Data.Int (Int32)
+import Data.Int (Int32, Int64)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -48,6 +49,7 @@ import qualified Hasql.Transaction.Sessions as TxSessions
 
 import Agent.Store.Custom.QueryResult
     ( CustomQueryResult(..)
+    , customJsonQueryStatement
     , customQueryStatement
     )
 import Agent.Store.Postgres.Scope
@@ -131,12 +133,32 @@ queryCustom
     -> QueryLimits
     -> Text
     -> IO (Either Text CustomQueryResult)
-queryCustom scopePool database limits rawQuery =
+queryCustom = queryCustomWith customQueryStatement
+
+-- | Execute a confined read-only query and return its rows as one JSON array.
+-- This is reserved for trusted structured clients; agent-facing database
+-- queries continue to use the bounded human-readable representation.
+queryCustomJson
+    :: Pool
+    -> ScopeDatabase
+    -> QueryLimits
+    -> Text
+    -> IO (Either Text CustomQueryResult)
+queryCustomJson = queryCustomWith customJsonQueryStatement
+
+queryCustomWith
+    :: (Int64 -> Text -> Statement () CustomQueryResult)
+    -> Pool
+    -> ScopeDatabase
+    -> QueryLimits
+    -> Text
+    -> IO (Either Text CustomQueryResult)
+queryCustomWith statementFor scopePool database limits rawQuery =
     case validateLimits limits *> normalizeCustomQuery rawQuery of
         Left err -> pure (Left err)
         Right query -> do
             let statement =
-                    customQueryStatement limits.queryMaxRows query
+                    statementFor limits.queryMaxRows query
                 transaction = do
                     expectedIdentity <- Tx.statement
                         database.scopeDatabaseRole
