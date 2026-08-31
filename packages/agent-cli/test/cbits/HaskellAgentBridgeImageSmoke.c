@@ -136,6 +136,66 @@ int ha_mcp_admin_abi_smoke(void) {
     return 0;
 }
 
+/*
+ * Compile the typed data-browser callbacks and validate that both entry points
+ * reject a missing callback and non-zero preview offsets synchronously,
+ * without opening PostgreSQL.
+ */
+static void data_rows_callback(
+        void *context, int32_t status, int64_t offset, int64_t row_index,
+        int32_t column_index, int32_t value_kind, const uint8_t *value,
+        size_t value_length, int64_t row_count, int32_t has_more,
+        const uint8_t *error, size_t error_length) {
+    (void)context;
+    (void)status;
+    (void)offset;
+    (void)row_index;
+    (void)column_index;
+    (void)value_kind;
+    (void)value;
+    (void)value_length;
+    (void)row_count;
+    (void)has_more;
+    (void)error;
+    (void)error_length;
+}
+
+int ha_data_browser_abi_smoke(void) {
+    ha_data_catalog_callback catalog_callback = NULL;
+    ha_data_rows_callback rows_callback = NULL;
+    const uint8_t object_name[] = "example";
+
+    if (HA_DATA_SCOPE_USER != 0 || HA_DATA_SCOPE_REPOSITORY != 1
+            || HA_DATA_SCOPE_CHECKOUT != 2
+            || HA_DATA_CATALOG_OBJECT != 0
+            || HA_DATA_CATALOG_COLUMN != 1
+            || HA_DATA_CATALOG_COMPLETE != 2
+            || HA_DATA_CATALOG_ERROR != -1
+            || HA_DATA_OBJECT_TABLE != 0 || HA_DATA_OBJECT_VIEW != 1
+            || HA_DATA_ROWS_VALUE != 0 || HA_DATA_ROWS_COMPLETE != 1
+            || HA_DATA_ROWS_ERROR != -1
+            || HA_DATA_VALUE_NULL != 0 || HA_DATA_VALUE_TEXT != 1
+            || HA_DATA_VALUE_NUMBER != 2 || HA_DATA_VALUE_BOOLEAN != 3
+            || HA_DATA_VALUE_JSON != 4) {
+        return 30;
+    }
+    if (ha_data_catalog_list(NULL, 0, catalog_callback, NULL) != 1) {
+        return 31;
+    }
+    if (ha_data_rows_load(
+            NULL, 0, HA_DATA_SCOPE_USER, NULL, 0, 0, 100,
+            rows_callback, NULL) != 1) {
+        return 32;
+    }
+    if (ha_data_rows_load(
+            NULL, 0, HA_DATA_SCOPE_USER,
+            object_name, sizeof(object_name) - 1, 1, 100,
+            data_rows_callback, NULL) != 3) {
+        return 33;
+    }
+    return 0;
+}
+
 static void image_stage_callback(void *context, const uint8_t *bytes,
                                  size_t length) {
     (void)context;
