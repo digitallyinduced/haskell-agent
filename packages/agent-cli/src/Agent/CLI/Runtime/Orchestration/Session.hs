@@ -155,7 +155,8 @@ import Agent.CLI.Subagents.Runtime
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
-                      subagentSpawnModelGuidance, subagentAllowedChildModels) )
+                      subagentSpawnModelGuidance, subagentAllowedChildModels,
+                      subagentChildModelAllowed) )
 import Agent.CLI.Subagents.Runtime.Types
     (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
@@ -294,6 +295,7 @@ runAgentSession
     -> [AppTool]
     -> IORef Bool
     -> Maybe [Text]
+    -> Maybe (Text -> IO Bool)
     -> OsPath
     -> ModelTarget
     -> InterruptState
@@ -377,6 +379,7 @@ runAgentSession
     gatewayTools
     ghciEnabledRef
     allowedChildModels
+    childModelAllowed
     home
     inferredTarget
     interrupt
@@ -636,6 +639,7 @@ runAgentSession
                                 provider
                                 (tokenProviderBillingMode tokenProvider)
                 , subagentAllowedChildModels = allowedChildModels
+                , subagentChildModelAllowed = childModelAllowed
                 , subagentOpenAiChild = openaiChild
                 }
         let conversationRef = startup.startupSessionState.sessionConversation

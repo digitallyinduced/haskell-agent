@@ -154,7 +154,9 @@ spec = do
             actionLabels
                 `shouldSatisfy` not . any (Text.isInfixOf "Refresh usage")
             loginAccountDetail gateway
-                `shouldSatisfy` Text.isInfixOf "preferred"
+                `shouldSatisfy`
+                    Text.isInfixOf
+                        "Local accounts are unavailable until the gateway is disconnected."
 
         it "offers usage refresh and opens each discovered account" do
             let rows = loginDashboardRows [openai, openRouter]

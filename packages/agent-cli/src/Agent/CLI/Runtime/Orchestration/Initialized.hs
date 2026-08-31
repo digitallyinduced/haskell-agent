@@ -382,9 +382,7 @@ runAgentInitializedWithLock
                                 <> connection <> "/" <> model
                                 <> " is not present in ~/.haskell-agent/models.json"
         resumedTargetResult
-            | isJust connectedGateway
-                || isJust transitionTarget
-                || isJust options.optModel =
+            | isJust transitionTarget || isJust options.optModel =
                 Right Nothing
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing

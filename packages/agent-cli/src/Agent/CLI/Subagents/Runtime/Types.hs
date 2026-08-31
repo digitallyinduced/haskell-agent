@@ -72,6 +72,7 @@ data SubagentRuntime = SubagentRuntime
         :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
     , subagentSpawnModelGuidance :: !(Maybe Text)
     , subagentAllowedChildModels :: !(Maybe [Text])
+    , subagentChildModelAllowed :: !(Maybe (Text -> IO Bool))
     , subagentOpenAiChild :: !(Maybe TokenProvider)
     }
 

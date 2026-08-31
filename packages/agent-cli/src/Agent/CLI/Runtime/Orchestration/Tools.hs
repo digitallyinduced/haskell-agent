@@ -10,6 +10,7 @@ import Agent.CLI.AgentSessions
       AgentSessionToolsEnv(toolsSessionStatus, AgentSessionToolsEnv,
                            toolsPool, toolsRoot, toolsProvider, toolsConnection, toolsModel,
                            toolsTransportModel, toolsDialect, toolsAllowedModels,
+                           toolsChildModelAllowed,
                            toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn) )
 import Agent.CLI.AgentViewport ()
@@ -315,7 +316,7 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
-import qualified Data.Text as Text ( intercalate, pack, unpack )
+import qualified Data.Text as Text ( intercalate, pack, strip, unpack )
 import qualified Data.Text.IO as Text ()
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Client as XAIClient ()
@@ -701,6 +702,19 @@ runAgentTools
                         Just (grokRootChildModels (isJust openaiChild))
                     _ ->
                         Nothing
+        childModelAllowed
+            | isNothing gatewayAllowedChildModels = Nothing
+            | otherwise =
+                Just \modelId ->
+                    readIORef gatewayModelsRef >>= \case
+                        Nothing -> pure False
+                        Just access ->
+                            cachedGatewayModels access >>= \case
+                                Nothing -> pure False
+                                Just modelIds ->
+                                    pure
+                                        (Text.strip modelId
+                                            `elem` map Text.strip modelIds)
         sendToRoot message = do
             enqueuePendingInput pendingNotices (AgentMessage message) >>= \case
                 Left err -> pure (Left err)
@@ -755,6 +769,7 @@ runAgentTools
                             provider
                             (tokenProviderBillingMode tokenProvider)
             , multiAllowedChildModels = allowedChildModels
+            , multiChildModelAllowed = childModelAllowed
             }
     promptRequest <- loadPrompt options
     let promptText = fmap (\request -> request.managedTurnText) promptRequest
@@ -1058,6 +1073,7 @@ runAgentTools
             , toolsTransportModel = inferredTarget.targetWireModelId
             , toolsDialect = dialectId
             , toolsAllowedModels = gatewayAllowedChildModels
+            , toolsChildModelAllowed = childModelAllowed
             , toolsCwd = cwd
             , toolsEffort = effortText
             , toolsCurrentSessionId =
@@ -1219,6 +1235,7 @@ runAgentTools
         gatewayTools
         ghciEnabledRef
         allowedChildModels
+        childModelAllowed
         home
         inferredTarget
         interrupt

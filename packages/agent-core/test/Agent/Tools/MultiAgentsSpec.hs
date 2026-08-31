@@ -257,6 +257,44 @@ spec = describe "Agent.Tools.MultiAgents" do
         options.collaborationModel `shouldBe` Just "gpt-allowed"
         closeSubagentRegistry registry
 
+    it "enforces refreshed child-model policy without rebuilding tools" do
+        prepared <- newEmptyTMVarIO
+        currentModels <- newIORef ["company-a"]
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiAllowedChildModels = Just ["company-a"]
+                , multiChildModelAllowed = Just
+                    (\model -> elem model <$> readIORef currentModels)
+                , multiPrepareSpawn = Just
+                    (\_ options -> atomically (putTMVar prepared options))
+                }
+            call = ToolCall
+                { callId = "refreshed-policy"
+                , name = "host-tool"
+                , arguments = "{}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        denied <-
+            spawnSharedSubagent
+                context call "worker" "task"
+                (Just "company-b") Nothing Nothing
+        denied
+            `shouldBe`
+                Left
+                    "The requested child model is not allowed by this organization."
+        writeIORef currentModels ["company-b"]
+        accepted <-
+            spawnSharedSubagent
+                context call "worker" "task"
+                (Just "company-b") Nothing Nothing
+        accepted `shouldSatisfy` isRightResult
+        options <- atomically (takeTMVar prepared)
+        options.collaborationModel `shouldBe` Just "company-b"
+        closeSubagentRegistry registry
+
     it "allows an inherited child model under an allowlist" do
         prepared <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -635,6 +673,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiSendToRoot = Just deliverRoot
                 , multiSpawnModelGuidance = Nothing
                 , multiAllowedChildModels = Nothing
+                , multiChildModelAllowed = Nothing
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools context))
@@ -673,6 +712,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiSendToRoot = sendToRoot
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
+    , multiChildModelAllowed = Nothing
     }
 
 childContext :: SubagentRegistry -> SubagentId -> Int -> IO MultiAgentContext

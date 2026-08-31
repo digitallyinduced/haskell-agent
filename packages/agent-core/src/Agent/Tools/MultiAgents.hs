@@ -114,6 +114,10 @@ data MultiAgentContext = MultiAgentContext
     , multiSpawnModelGuidance :: !(Maybe Text)
       -- | When set, spawn_subagent may only use these model slugs (or inherit).
     , multiAllowedChildModels :: !(Maybe [Text])
+      -- | Optional live policy used instead of the advertised snapshot above.
+      -- This lets hosts enforce organization catalog refreshes without
+      -- rebuilding every tool definition in an active session.
+    , multiChildModelAllowed :: !(Maybe (Text -> IO Bool))
     }
 
 multiAgentNamespace :: Text
@@ -238,15 +242,18 @@ runSpawn ctx workspace call args
             "full-history forks inherit the parent model and reasoning effort; \
             \set fork_turns to none or a positive integer when overriding \
             \model or reasoning_effort")
-    | not (allowedModelOverride ctx.multiAllowedChildModels args.model) =
-        pure
-            (Left
-                "The requested child model is not allowed by this organization.")
-    | otherwise = mask \restore ->
-        resolveSpawnWorkspace ctx workspace >>= \case
-            Left err -> pure (Left err)
-            Right (childCwd, worktree) ->
-                restore (spawnInWorkspace ctx call args childCwd worktree)
+    | otherwise = do
+        modelAllowed <- childModelOverrideAllowed ctx args.model
+        if not modelAllowed
+            then
+                pure
+                    (Left
+                        "The requested child model is not allowed by this organization.")
+            else mask \restore ->
+                resolveSpawnWorkspace ctx workspace >>= \case
+                    Left err -> pure (Left err)
+                    Right (childCwd, worktree) ->
+                        restore (spawnInWorkspace ctx call args childCwd worktree)
 
 -- | Spawn a tracked child in the caller's shared workspace.
 --
@@ -407,6 +414,22 @@ allowedModelOverride allowed override =
                 True
                 (elem requested . map Text.strip)
                 allowed
+
+childModelOverrideAllowed
+    :: MultiAgentContext
+    -> Maybe Text
+    -> IO Bool
+childModelOverrideAllowed ctx override =
+    case sanitizeOverride override of
+        Nothing -> pure True
+        Just requested ->
+            case ctx.multiChildModelAllowed of
+                Just isAllowed -> isAllowed requested
+                Nothing ->
+                    pure
+                        (allowedModelOverride
+                            ctx.multiAllowedChildModels
+                            (Just requested))
 
 allowedModelGuidance :: Maybe [Text] -> [Text]
 allowedModelGuidance = \case

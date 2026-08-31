@@ -458,9 +458,8 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                     childModel
                     childEffort
         sessionTmp <- readIORef runtime.subagentSessionTmp
-        case allowedChildModelError
-                runtime.subagentAllowedChildModels
-                model
+        modelPolicyError <- allowedChildModelErrorFor runtime model
+        case modelPolicyError
                 <|> activeSubagentTargetError
                     OpenAIProvider runtime.subagentConnection
                     model prepared.preparedSession of
@@ -834,6 +833,7 @@ prepareChild
                     NoHostChildAgentProtocol -> Nothing
             , multiSpawnModelGuidance = runtime.subagentSpawnModelGuidance
             , multiAllowedChildModels = runtime.subagentAllowedChildModels
+            , multiChildModelAllowed = runtime.subagentChildModelAllowed
             }
     pure PreparedChild
         { preparedParentParams = parentParams
@@ -880,6 +880,26 @@ allowedChildModelError (Just allowed) model
     | model `elem` map Text.strip allowed = Nothing
     | otherwise =
         Just "The child model is not allowed by this organization."
+
+allowedChildModelErrorFor
+    :: SubagentRuntime
+    -> Text
+    -> IO (Maybe Text)
+allowedChildModelErrorFor runtime model =
+    case runtime.subagentChildModelAllowed of
+        Nothing ->
+            pure
+                (allowedChildModelError
+                    runtime.subagentAllowedChildModels
+                    model)
+        Just isAllowed ->
+            isAllowed model >>= \allowed ->
+                pure
+                    (if allowed
+                        then Nothing
+                        else
+                            Just
+                                "The child model is not allowed by this organization.")
 
 runPreparedChild
     :: SubagentRuntime

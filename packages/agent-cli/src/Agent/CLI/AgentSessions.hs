@@ -109,6 +109,7 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsTransportModel :: !Text
     , toolsDialect :: !DialectId
     , toolsAllowedModels :: !(Maybe [Text])
+    , toolsChildModelAllowed :: !(Maybe (Text -> IO Bool))
     , toolsCwd :: !OsPath
     , toolsEffort :: !Text
     , toolsCurrentSessionId :: !(IO (Maybe Text))
@@ -317,10 +318,13 @@ createAgentSessionTool env = jsonTool
         (runCreateAgentSession env))
   where
     modelPropertyType =
-        maybe
-            PropertyString
-            (PropertyEnum . normalizedAllowedModels)
-            env.toolsAllowedModels
+        case env.toolsChildModelAllowed of
+            Just _ -> PropertyString
+            Nothing ->
+                maybe
+                    PropertyString
+                    (PropertyEnum . normalizedAllowedModels)
+                    env.toolsAllowedModels
     modelPropertyDescription =
         case env.toolsAllowedModels of
             Nothing ->
@@ -337,59 +341,71 @@ runCreateAgentSession env args
         pure (Left "create_agent_session requires a non-empty message")
     | maybe False ((> 100) . Text.length . Text.strip) args.title =
         pure (Left "create_agent_session title must be at most 100 characters")
-    | not (allowedModelOverride env.toolsAllowedModels normalizedOverride) =
-        pure
-            (Left
-                "The requested session model is not allowed by this organization.")
     | otherwise = do
         let model = fromMaybe env.toolsModel normalizedOverride
-        target <- case normalizedOverride of
+        modelAllowed <- case env.toolsChildModelAllowed of
+            Just isAllowed -> isAllowed model
             Nothing ->
-                pure ModelOption
-                    { modelTarget = ModelTarget
-                        { targetProvider = env.toolsProvider
-                        , targetConnectionId = env.toolsConnection
-                        , targetModelId = model
-                        , targetWireModelId = env.toolsTransportModel
-                        , targetDialect = env.toolsDialect
+                pure
+                    (allowedModelOverride
+                        env.toolsAllowedModels
+                        normalizedOverride)
+        if not modelAllowed
+            then
+                pure
+                    (Left
+                        "The requested session model is not allowed by this organization.")
+            else do
+                target <- case normalizedOverride of
+                    Nothing ->
+                        pure ModelOption
+                            { modelTarget = ModelTarget
+                                { targetProvider = env.toolsProvider
+                                , targetConnectionId = env.toolsConnection
+                                , targetModelId = model
+                                , targetWireModelId = env.toolsTransportModel
+                                , targetDialect = env.toolsDialect
+                                }
+                            , modelContextWindow = Nothing
+                            , modelLabel = Nothing
+                            , modelFallbackPriority = Nothing
+                            }
+                    Just _ ->
+                        resolveModelOptionDialect ModelOption
+                            { modelTarget = ModelTarget
+                                { targetProvider = env.toolsProvider
+                                , targetConnectionId = env.toolsConnection
+                                , targetModelId = model
+                                , targetWireModelId = model
+                                , targetDialect =
+                                    dialectIdForModel env.toolsProvider model
+                                }
+                            , modelContextWindow = Nothing
+                            , modelLabel = Nothing
+                            , modelFallbackPriority = Nothing
+                            }
+                let title = case Text.strip <$> args.title of
+                        Just value | not (Text.null value) -> value
+                        _ -> sessionTitleFromPrompt args.message
+                    spec = SessionCreate
+                        { createPool = env.toolsPool
+                        , createRoot = env.toolsRoot
+                        , createTarget = target.modelTarget
+                        , createCwd = env.toolsCwd
+                        , createEffort =
+                            fromMaybe env.toolsEffort args.reasoningEffort
+                        , createTitleHint = Just title
+                        , createTitleIsManual =
+                            maybe False
+                                (not . Text.null . Text.strip)
+                                args.title
                         }
-                    , modelContextWindow = Nothing
-                    , modelLabel = Nothing
-                    , modelFallbackPriority = Nothing
-                    }
-            Just _ ->
-                resolveModelOptionDialect ModelOption
-                    { modelTarget = ModelTarget
-                        { targetProvider = env.toolsProvider
-                        , targetConnectionId = env.toolsConnection
-                        , targetModelId = model
-                        , targetWireModelId = model
-                        , targetDialect =
-                            dialectIdForModel env.toolsProvider model
-                        }
-                    , modelContextWindow = Nothing
-                    , modelLabel = Nothing
-                    , modelFallbackPriority = Nothing
-                    }
-        let title = case Text.strip <$> args.title of
-                Just value | not (Text.null value) -> value
-                _ -> sessionTitleFromPrompt args.message
-            spec = SessionCreate
-                { createPool = env.toolsPool
-                , createRoot = env.toolsRoot
-                , createTarget = target.modelTarget
-                , createCwd = env.toolsCwd
-                , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
-                , createTitleHint = Just title
-                , createTitleIsManual =
-                    maybe False (not . Text.null . Text.strip) args.title
-                }
-        handle <- createSession spec
-        launchToolSessionTurn env handle args.message >>= \case
-            Left err -> pure $ Left $
-                "created session " <> handle.sessionMeta.metaId
-                    <> " but failed to start it: " <> err
-            Right result -> pure (Right result)
+                handle <- createSession spec
+                launchToolSessionTurn env handle args.message >>= \case
+                    Left err -> pure $ Left $
+                        "created session " <> handle.sessionMeta.metaId
+                            <> " but failed to start it: " <> err
+                    Right result -> pure (Right result)
   where
     normalizedOverride = normalizeModelOverride args.model
     allowedModelOverride allowed requested =

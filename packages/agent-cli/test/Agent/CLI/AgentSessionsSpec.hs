@@ -115,6 +115,36 @@ spec = describe "Agent.CLI.AgentSessions" do
             [(handle, _)] <- readIORef launched
             handle.sessionMeta.metaModel `shouldBe` "company-b"
 
+    it "uses refreshed organization models for persisted child sessions" $
+        withTempEnv \env launched -> do
+            currentModels <- newIORef ["company-a"]
+            let scopedEnv = env
+                    { toolsAllowedModels = Just ["company-a"]
+                    , toolsChildModelAllowed =
+                        Just (\model -> elem model <$> readIORef currentModels)
+                    }
+                createTool = head (agentSessionTools scopedEnv)
+            case createTool.appToolSchema of
+                JsonFunctionSchema properties ->
+                    [ propertyKind
+                    | PropertySchema propertyKey propertyKind _ _ <- properties
+                    , propertyKey == "model"
+                    ]
+                        `shouldBe` [PropertyString]
+                other ->
+                    expectationFailure
+                        ("expected JSON function schema, got " <> show other)
+            rejected <- runTool scopedEnv "create_agent_session"
+                "{\"message\":\"not yet\",\"model\":\"company-b\"}"
+            rejected `shouldSatisfy`
+                Text.isInfixOf "not allowed by this organization"
+            writeIORef currentModels ["company-b"]
+            accepted <- runTool scopedEnv "create_agent_session"
+                "{\"message\":\"now approved\",\"model\":\"company-b\"}"
+            accepted `shouldSatisfy` Text.isInfixOf "Status: running"
+            [(handle, _)] <- readIORef launched
+            handle.sessionMeta.metaModel `shouldBe` "company-b"
+
     it "inherits the active dialect and resolves explicit model overrides" $
         withTempEnv \env launched -> do
             let openRouterEnv = env
@@ -576,6 +606,7 @@ withTempEnv action =
                 , toolsTransportModel = "model-1"
                 , toolsDialect = GrokBuildDialect
                 , toolsAllowedModels = Nothing
+                , toolsChildModelAllowed = Nothing
                 , toolsCwd = fromFilePath "/tmp/work"
                 , toolsEffort = "low"
                 , toolsCurrentSessionId = pure Nothing

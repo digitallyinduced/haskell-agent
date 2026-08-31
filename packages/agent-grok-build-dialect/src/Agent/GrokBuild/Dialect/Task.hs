@@ -224,7 +224,7 @@ sanitizeOptional value = value >>= \raw ->
 
 taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
 taskTool baseCwd ctx specsRef =
-    jsonAppToolWithExecution "task" (taskDescription ctx.multiAllowedChildModels)
+    jsonAppToolWithExecution "task" (taskDescription advertisedModels)
         [ PropertySchema "prompt" PropertyString True $ Just
             "The full task prompt for the subagent to execute."
         , PropertySchema "description" PropertyString True $ Just
@@ -238,13 +238,18 @@ taskTool baseCwd ctx specsRef =
         , PropertySchema "cwd" PropertyString False $ Just
             "Explicit working directory for the subagent. Mutually exclusive with isolation=\"worktree\"."
         , PropertySchema "model" PropertyString False $ Just
-            (taskModelProperty ctx.multiAllowedChildModels)
+            (taskModelProperty advertisedModels)
         , PropertySchema "isolation" (PropertyEnum ["none", "worktree"]) False $ Just
             "Isolation mode: \"none\" (default, shared workspace) or \"worktree\" (isolated git worktree). Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
         (taskApproval ctx)
         TurnSequential
         (typedTool "task" taskArgsDecoder (runTask baseCwd ctx specsRef))
+  where
+    advertisedModels =
+        case ctx.multiChildModelAllowed of
+            Just _ -> Nothing
+            Nothing -> ctx.multiAllowedChildModels
 
 taskApproval :: MultiAgentContext -> ApprovalRule
 taskApproval ctx = case ctx.multiSelfId of
@@ -296,8 +301,8 @@ runTask baseCwd ctx typesRef args
     , Just iso <- args.isolation
     , isWorktreeIsolation iso =
         pure (Left "cwd and isolation are mutually exclusive.")
-    | otherwise =
-        case resolveRequestedGrokChildModel ctx.multiAllowedChildModels args.model of
+    | otherwise = do
+        resolveTaskChildModel ctx args.model >>= \case
             Left err -> pure (Left err)
             Right model -> mask \restore ->
                 resolveTaskWorkspace baseCwd ctx args >>= \case
@@ -310,6 +315,29 @@ runTask baseCwd ctx typesRef args
                                 ctx
                                 typesRef
                                 args { model })
+
+resolveTaskChildModel
+    :: MultiAgentContext
+    -> Maybe Text
+    -> IO (Either Text (Maybe Text))
+resolveTaskChildModel ctx requested =
+    case ctx.multiChildModelAllowed of
+        Nothing ->
+            pure
+                (resolveRequestedGrokChildModel
+                    ctx.multiAllowedChildModels
+                    requested)
+        Just isAllowed ->
+            case sanitizeOptional requested of
+                Nothing -> pure (Right Nothing)
+                Just model ->
+                    isAllowed model >>= \allowed ->
+                        pure
+                            (if allowed
+                                then Right (Just model)
+                                else
+                                    Left
+                                        "The requested child model is not allowed by this organization.")
 
 spawnFresh
     :: OsPath
