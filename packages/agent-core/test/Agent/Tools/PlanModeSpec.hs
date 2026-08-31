@@ -134,6 +134,7 @@ spec = describe "Agent.Tools.PlanMode" do
                       , [ "Postgres — Reliable relational database — "
                             <> "Preview: CREATE TABLE users (...);"
                         , "SQLite — Simple embedded database"
+                        , "Type a custom reply"
                         ]
                       )
                     , ( "Which features?"
@@ -141,6 +142,7 @@ spec = describe "Agent.Tools.PlanMode" do
                         , "Logging — Audit logs"
                         , "Done selecting"
                         , "← Back to previous question"
+                        , "Type a custom reply"
                         ]
                       )
                     , ( "Review your answers before sending them:\n\n"
@@ -224,9 +226,46 @@ spec = describe "Agent.Tools.PlanMode" do
                         <> "\"Which database?\"=\"Postgres\". "
                         <> "You can now continue with the user's answers in mind."
                 readIORef seen `shouldReturn`
-                    [ ("Which database?", ["Postgres", "SQLite"])
+                    [ ( "Which database?"
+                      , ["Postgres", "SQLite", "Type a custom reply"]
+                      )
                     , ( "Review your answers before sending them:\n\n"
                             <> "1. Which database?\n   Postgres"
+                      , ["Submit answers", "← Back to last question"]
+                      )
+                    ]
+
+        it "offers a custom reply last and returns the entered text" do
+            seen <- newIORef []
+            answers <- newIORef
+                [ "Type a custom reply"
+                , "Use CockroachDB instead"
+                , "Submit answers"
+                ]
+            let hooks = testHooks \question choices -> do
+                    modifyIORef' seen (<> [(question, choices)])
+                    atomicModifyIORef' answers \case
+                        answer : rest -> (rest, Just answer)
+                        [] -> ([], Nothing)
+            withTempPlanHooks hooks \env -> do
+                output <- runAskTool env
+                    ( "{\"questions\":[{\"question\":\"Which database?\","
+                        <> "\"options\":[{\"label\":\"Postgres\","
+                        <> "\"description\":\"Relational database\"}]}]}"
+                    )
+                output `shouldBe`
+                    "User has answered your questions: "
+                        <> "\"Which database?\"=\"Use CockroachDB instead\". "
+                        <> "You can now continue with the user's answers in mind."
+                readIORef seen `shouldReturn`
+                    [ ( "Which database?"
+                      , [ "Postgres — Relational database"
+                        , "Type a custom reply"
+                        ]
+                      )
+                    , ("Which database?\nEnter a custom reply:", [])
+                    , ( "Review your answers before sending them:\n\n"
+                            <> "1. Which database?\n   Use CockroachDB instead"
                       , ["Submit answers", "← Back to last question"]
                       )
                     ]

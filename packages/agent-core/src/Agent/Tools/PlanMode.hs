@@ -509,21 +509,32 @@ runAskUserQuestion env args
         | otherwise = do
             let displayed = map formatOption question.options
                 backChoice = optionalBackChoice allowBack displayed
+                customChoice =
+                    freshControlChoice
+                        customReplyChoice
+                        (displayed <> [choice | Just choice <- [backChoice]])
                 choices =
                     displayed
                         <> [choice | Just choice <- [backChoice]]
+                        <> [customChoice]
                 labelsByChoice =
                     Map.fromList
                         (zip displayed (map (.label) question.options))
             answer <- env.planHooks.planAskQuestion question.question choices
-            pure $ case answer of
-                Nothing -> Left "No answer from user."
+            case answer of
+                Nothing -> pure (Left "No answer from user.")
                 Just text | Text.null (Text.strip text) ->
-                    Left "No answer from user."
+                    pure (Left "No answer from user.")
                 Just text | Just text == backChoice ->
-                    Right AskQuestionBack
+                    pure (Right AskQuestionBack)
+                Just text | text == customChoice ->
+                    askCustomReply env question.question >>= \case
+                        Left err -> pure (Left err)
+                        Right custom ->
+                            pure $ Right $ AskQuestionAnswered
+                                (question.question, custom)
                 Just text ->
-                    Right $ AskQuestionAnswered
+                    pure $ Right $ AskQuestionAnswered
                         ( question.question
                         , fromMaybe text (Map.lookup text labelsByChoice)
                         )
@@ -545,10 +556,18 @@ runAskUserQuestion env args
             let displayed = map formatOption remaining
                 labelsByDisplayed =
                     Map.fromList (zip displayed (map (.label) remaining))
+                customChoice =
+                    freshControlChoice
+                        customReplyChoice
+                        ( displayed
+                            <> [doneChoice]
+                            <> [choice | Just choice <- [backChoice]]
+                        )
                 choices =
                     displayed
                         <> [doneChoice]
                         <> [choice | Just choice <- [backChoice]]
+                        <> [customChoice]
                 prompt
                     | null selected = question.question
                     | otherwise =
@@ -568,6 +587,14 @@ runAskUserQuestion env args
                             else pure
                                 (answered
                                     (Text.intercalate ", " (reverse selected)))
+                    | raw == customChoice ->
+                        askCustomReply env question.question >>= \case
+                            Left err -> pure (Left err)
+                            Right custom ->
+                                pure $
+                                    answered $
+                                        Text.intercalate ", "
+                                            (reverse selected <> [custom])
                     | Just label <-
                         Map.lookup raw labelsByDisplayed ->
                             choose
@@ -597,6 +624,17 @@ optionalBackChoice allowBack unavailable
         Just (freshControlChoice backToPreviousQuestionChoice unavailable)
     | otherwise = Nothing
 
+askCustomReply :: PlanModeEnv -> Text -> IO (Either Text Text)
+askCustomReply env question = do
+    answer <- env.planHooks.planAskQuestion
+        (question <> "\nEnter a custom reply:")
+        []
+    pure $ case Text.strip <$> answer of
+        Nothing -> Left "No answer from user."
+        Just text
+            | Text.null text -> Left "No answer from user."
+            | otherwise -> Right text
+
 freshControlChoice :: Text -> [Text] -> Text
 freshControlChoice base unavailable = go 1
   where
@@ -618,6 +656,9 @@ backToPreviousQuestionChoice = "← Back to previous question"
 
 backToLastQuestionChoice :: Text
 backToLastQuestionChoice = "← Back to last question"
+
+customReplyChoice :: Text
+customReplyChoice = "Type a custom reply"
 
 -- | Collect native-provider answers without the host tool's final review
 -- prompt. Native callbacks already have their own submit boundary.
@@ -642,15 +683,24 @@ collectNativeAskUserQuestionAnswers env (question : rest) =
                 Right answer -> pure (Right (question.question, answer))
         | otherwise = do
             let choices = map formatOption question.options
+                customChoice =
+                    freshControlChoice customReplyChoice choices
                 labelsByChoice =
                     Map.fromList (zip choices (map (.label) question.options))
-            answer <- env.planHooks.planAskQuestion question.question choices
-            pure $ case answer of
-                Nothing -> Left "No answer from user."
+            answer <-
+                env.planHooks.planAskQuestion
+                    question.question
+                    (choices <> [customChoice])
+            case answer of
+                Nothing -> pure (Left "No answer from user.")
                 Just text | Text.null (Text.strip text) ->
-                    Left "No answer from user."
+                    pure (Left "No answer from user.")
+                Just text | text == customChoice ->
+                    fmap
+                        (fmap \custom -> (question.question, custom))
+                        (askCustomReply env question.question)
                 Just text ->
-                    Right
+                    pure $ Right
                         ( question.question
                         , fromMaybe text (Map.lookup text labelsByChoice)
                         )
@@ -664,7 +714,11 @@ collectNativeAskUserQuestionAnswers env (question : rest) =
             let displayed = map formatOption remaining
                 labelsByDisplayed =
                     Map.fromList (zip displayed (map (.label) remaining))
-                choices = displayed <> [doneChoice]
+                customChoice =
+                    freshControlChoice
+                        customReplyChoice
+                        (displayed <> [doneChoice])
+                choices = displayed <> [doneChoice, customChoice]
                 prompt
                     | null selected = question.question
                     | otherwise =
@@ -681,6 +735,14 @@ collectNativeAskUserQuestionAnswers env (question : rest) =
                             then pure (Left "No answer from user.")
                             else pure
                                 (Right (Text.intercalate ", " (reverse selected)))
+                    | raw == customChoice ->
+                        askCustomReply env question.question >>= \case
+                            Left err -> pure (Left err)
+                            Right custom ->
+                                pure $
+                                    Right $
+                                        Text.intercalate ", "
+                                            (reverse selected <> [custom])
                     | Just label <- Map.lookup raw labelsByDisplayed ->
                         choose
                             (label : selected)
