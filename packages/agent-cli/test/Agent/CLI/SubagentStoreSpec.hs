@@ -26,6 +26,7 @@ import Agent.CLI.Subagents.Runtime
     , validatePersistedSubagentTarget
     )
 import Agent.CLI.Request (requestParams)
+import Agent.GrokBuild.Dialect.Task (lookupAgentReasoningEffort)
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents
@@ -64,7 +65,7 @@ toFilePath path = either (error . show) id (decodeUtf path)
 spec :: Spec
 spec = describe "Agent.CLI.SubagentStore" do
     describe "nested subagent model inheritance" do
-        it "uses the immediate parent's effective model when no override is set" do
+        it "inherits the immediate parent's model and effort for full-history forks" do
             sessionsRef <- newIORef Map.empty
             storeRootRef <- newIORef Nothing
             typesRef <- newIORef Map.empty
@@ -75,6 +76,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "openai"
                 id
                 "gpt-5.6-luna"
+                "medium"
                 CodexDialect
                 Nothing
                 sessionsRef
@@ -88,12 +90,50 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , collaborationForkTurns = Nothing
                     }
             Just session <- Map.lookup agentId <$> readIORef sessionsRef
+            lookupAgentReasoningEffort typesRef agentId
+                `shouldReturn` Just "medium"
             let rootParams =
                     requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
             resolveChildModelAndEffort
                 OpenAIProvider
                 rootParams
                 session.subSessionEffectiveModel
+                Nothing
+                (Just "medium")
+                `shouldBe` ("gpt-5.6-luna", "medium")
+
+        it "keeps the Luna floor for bounded forks without an effort override" do
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef Nothing
+            typesRef <- newIORef Map.empty
+            forkSourceRef <- newIORef Nothing
+            let agentId = SubagentId "agent-bounded"
+            prepareCollaborationSpawn
+                OpenAIProvider
+                "openai"
+                id
+                "gpt-5.6-luna"
+                "medium"
+                CodexDialect
+                Nothing
+                sessionsRef
+                storeRootRef
+                typesRef
+                forkSourceRef
+                agentId
+                CollaborationSpawnOptions
+                    { collaborationModel = Nothing
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Just "3"
+                    }
+            lookupAgentReasoningEffort typesRef agentId
+                `shouldReturn` Nothing
+            let rootParams =
+                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
+            resolveChildModelAndEffort
+                OpenAIProvider
+                rootParams
+                "gpt-5.6-luna"
                 Nothing
                 Nothing
                 `shouldBe` ("gpt-5.6-luna", "high")

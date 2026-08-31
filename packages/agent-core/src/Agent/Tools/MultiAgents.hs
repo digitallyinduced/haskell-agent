@@ -195,12 +195,13 @@ spawnAgentParameters ctx encryptMessage =
     , PropertySchema "model" PropertyString False $ Just
         (Text.intercalate " " $
             [ "Model override for the new agent. Omit unless an explicit override is needed."
+            , "Model or reasoning-effort overrides require `fork_turns` to be `none` or a positive integer."
             ]
                 <> maybe [] pure ctx.multiSpawnModelGuidance)
     , PropertySchema "reasoning_effort" PropertyString False $ Just
-        "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+        "Reasoning effort override for the new agent. Omit to inherit the parent effort. Overrides require `fork_turns` to be `none` or a positive integer."
     , PropertySchema "fork_turns" PropertyString False $ Just
-        "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        "Optional number of turns to fork. Defaults to `all`. Full-history forks (`all` or omitted) inherit the parent model and reasoning effort and do not accept overrides. Use `none` or a positive integer string such as `3` when setting `model` or `reasoning_effort`."
     ]
 
 spawnAgentDescription :: Text
@@ -231,6 +232,11 @@ runSpawn ctx workspace call args
         pure (Left (spawnToolName workspace <> " requires a non-empty message"))
     | not (validForkTurns args.forkTurns) =
         pure (Left "fork_turns must be none, all, or a positive integer string")
+    | hasSpawnOverride args && usesFullHistory args.forkTurns =
+        pure (Left
+            "full-history forks inherit the parent model and reasoning effort; \
+            \set fork_turns to none or a positive integer when overriding \
+            \model or reasoning_effort")
     | otherwise = mask \restore ->
         resolveSpawnWorkspace ctx workspace >>= \case
             Left err -> pure (Left err)
@@ -370,6 +376,17 @@ validForkTurns = \case
             || case readExactInt stripped of
                 Just count -> count > 0
                 _ -> False
+
+hasSpawnOverride :: SpawnAgentArgs -> Bool
+hasSpawnOverride args =
+    any (/= Nothing)
+        [ sanitizeOverride args.model
+        , sanitizeOverride args.reasoningEffort
+        ]
+
+usesFullHistory :: Maybe Text -> Bool
+usesFullHistory forkTurns =
+    normalizeForkTurns forkTurns == Just "all"
 
 sanitizeOverride :: Maybe Text -> Maybe Text
 sanitizeOverride value = value >>= \raw ->
