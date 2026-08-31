@@ -28,10 +28,12 @@ spec = do
             applyLoginKey (PickerKeyChar 'r') state
                 `shouldBe` Left (LoginRefresh 1)
 
-        it "opens add, toggle, and delete actions" do
+        it "opens provider, gateway, toggle, and delete actions" do
             let state = initialLoginState [openai]
             applyLoginKey (PickerKeyChar 'a') state
                 `shouldBe` Left LoginAdd
+            applyLoginKey (PickerKeyChar 'g') state
+                `shouldBe` Left LoginGateway
             applyLoginKey (PickerKeyChar 'e') state
                 `shouldBe` Left (LoginToggle 0)
             applyLoginKey (PickerKeyChar 'd') state
@@ -48,6 +50,15 @@ spec = do
             result <- Timeout.timeout 1_000_000
                 (launchBrowserCommand "sleep" "2")
             result `shouldBe` Just True
+
+    describe "gateway login flow selection" do
+        it "uses browser OAuth only on a local macOS session" do
+            selectGatewayLoginFlow "darwin" False
+                `shouldBe` GatewayBrowserOAuth
+            selectGatewayLoginFlow "darwin" True
+                `shouldBe` GatewayDeviceFlow
+            selectGatewayLoginFlow "linux" False
+                `shouldBe` GatewayDeviceFlow
 
     describe "renderLoginFrame" do
         it "shows providers, billing modes, sources, and usage" do
@@ -125,7 +136,7 @@ spec = do
                 rendered = Text.unlines
                     [label <> " " <> description | (label, description) <- rows]
             labels `shouldSatisfy` any (Text.isInfixOf "Connect account")
-            labels `shouldSatisfy` any (Text.isInfixOf "Connect gateway")
+            labels `shouldSatisfy` any (Text.isInfixOf "platform gateway")
             labels `shouldSatisfy` not . any (Text.isInfixOf "Refresh")
             rendered `shouldSatisfy` Text.isInfixOf "Google Gemini"
 
@@ -135,7 +146,7 @@ spec = do
                 actionLabels =
                     map fst (loginAccountActionRows gateway)
             dashboardLabels
-                `shouldSatisfy` any (Text.isInfixOf "Reconnect gateway")
+                `shouldSatisfy` any (Text.isInfixOf "Reconnect platform gateway")
             dashboardLabels
                 `shouldSatisfy` not . any (Text.isInfixOf "Refresh all")
             actionLabels

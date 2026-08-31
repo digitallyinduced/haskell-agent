@@ -84,6 +84,7 @@ data LoginAction
     = LoginClose
     | LoginRefresh !Int
     | LoginAdd
+    | LoginGateway
     | LoginToggle !Int
     | LoginDelete !Int
     | LoginImport !Int
@@ -103,6 +104,8 @@ applyLoginKey key state = case key of
     PickerKeyChar 'R' -> refresh
     PickerKeyChar 'a' -> Left LoginAdd
     PickerKeyChar 'A' -> Left LoginAdd
+    PickerKeyChar 'g' -> Left LoginGateway
+    PickerKeyChar 'G' -> Left LoginGateway
     PickerKeyChar 'e' -> selected LoginToggle
     PickerKeyChar 'E' -> selected LoginToggle
     PickerKeyChar 'd' -> selected LoginDelete
