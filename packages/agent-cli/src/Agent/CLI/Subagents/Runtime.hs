@@ -129,6 +129,7 @@ prepareCollaborationSpawn
     -> Text
     -> (Text -> Text)
     -> Text
+    -> Text
     -> DialectId
     -> Maybe LegacySubagentTarget
     -> IORef (Map SubagentId SubagentSession)
@@ -143,14 +144,20 @@ prepareCollaborationSpawn
         connection
         mapModel
         currentEffectiveModel
+        currentEffort
         currentDialect
         legacyTarget
         sessionsRef storeRootRef typesRef sourceRef agentId spawnOptions = do
     recordAgentSpec typesRef agentId GrokSubagentSpec
         { agentType = defaultSubagentType
         , modelOverride = spawnOptions.collaborationModel
-        , reasoningEffortOverride =
-            spawnOptions.collaborationReasoningEffort
+        , reasoningEffortOverride = case
+                spawnOptions.collaborationReasoningEffort of
+            Just effort -> Just effort
+            Nothing
+                | inheritsFullHistory spawnOptions.collaborationForkTurns ->
+                    Just currentEffort
+                | otherwise -> Nothing
         }
     let effectiveModel =
             maybe currentEffectiveModel mapModel spawnOptions.collaborationModel
@@ -426,7 +433,7 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
         parentParams <- readIORef runtime.subagentParams
-        let (provisionalModel, _) =
+        let (provisionalModel, provisionalEffort) =
                 resolveChildModelAndEffort
                     OpenAIProvider
                     parentParams
@@ -438,6 +445,7 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                 runtime
                 OpenAIProvider
                 provisionalModel
+                provisionalEffort
                 (dialectId codexDialect)
                 env
                 sendToRoot
@@ -597,7 +605,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                 inheritedGrokChildModel
                     runtime
                     (fromMaybe "" parentParams.model)
-            (provisionalModel, _) =
+            (provisionalModel, provisionalEffort) =
                 resolveChildModelAndEffort
                     provider
                     parentParams
@@ -611,6 +619,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                 runtime
                 provider
                 provisionalEffectiveModel
+                provisionalEffort
                 (maybe
                     (dialectId dialect)
                     (dialectIdForModel provider . runtime.subagentMapModel)
@@ -745,11 +754,14 @@ prepareChild
     :: SubagentRuntime
     -> Provider
     -> Text
+    -> Text
     -> DialectId
     -> SubagentSpawnEnv
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> IO PreparedChild
-prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoot = do
+prepareChild
+        runtime provider currentEffectiveModel currentEffort currentDialect
+        env sendToRoot = do
     parentParams <- readIORef runtime.subagentParams
     childEnv <- do
         freshEnv <- defaultToolEnv env.subCwd
@@ -794,6 +806,7 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
                     session.subSessionConnection
                     runtime.subagentMapModel
                     session.subSessionEffectiveModel
+                    currentEffort
                     session.subSessionDialect
                     (Just LegacySubagentTarget
                         { legacyTargetProvider =
@@ -850,6 +863,12 @@ resolveChildModelAndEffort
         , model == "gpt-5.6-luna"
         , inheritedEffort `notElem` ["xhigh", "max"] = "high"
         | otherwise = inheritedEffort
+
+inheritsFullHistory :: Maybe Text -> Bool
+inheritsFullHistory = \case
+    Nothing -> True
+    Just turns ->
+        Text.toLower (Text.strip turns) `elem` ["", "all"]
 
 runPreparedChild
     :: SubagentRuntime
