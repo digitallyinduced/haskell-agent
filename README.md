@@ -95,13 +95,23 @@ These are important product features, but not the core differentiation.
 
 ## Install
 
-Install [Nix](https://nixos.org/download/) with flakes enabled, then install
-`haskell-agent`. `--accept-flake-config` enables the public IHP binary cache
-declared by the flake:
+1. Install [Determinate Nix](https://docs.determinate.systems/determinate-nix/)
+   by following its platform-specific installation instructions.
 
-```console
-nix profile add --accept-flake-config github:digitallyinduced/haskell-agent
-```
+2. **Copy this prompt to your coding agent to install:**
+
+   ```text
+   Install haskell-agent by running `nix profile add --accept-flake-config github:digitallyinduced/haskell-agent`, then verify the installation by running `agent-cli --help`.
+   ```
+
+   Or install it yourself:
+
+   ```console
+   nix profile add --accept-flake-config github:digitallyinduced/haskell-agent
+   ```
+
+   `--accept-flake-config` enables the public IHP binary cache declared by the
+   flake.
 
 ## Run
 
