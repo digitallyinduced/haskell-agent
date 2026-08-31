@@ -35,6 +35,7 @@ import Agent.CLI.ModelConfig
     , ModelCatalog(..)
     , ModelConnection(..)
     , builtinConnectionId
+    , organizationGatewayConnectionId
     , catalogConnection
     , catalogDefaultForProvider
     , catalogModelById
@@ -140,6 +141,11 @@ resolveSavedModelTarget
         catalog deferToGateway provider connection model transport dialect
     | deferToGateway =
         Right persistedTarget
+    | connection == organizationGatewayConnectionId =
+        Left $
+            "saved model "
+                <> connection <> "/" <> model
+                <> " requires an active organization gateway"
     | otherwise =
         case resolveConfiguredModel catalog model of
             Just option
@@ -204,11 +210,10 @@ rawModelOption provider model =
 -- to the active gateway connection and sends the advertised alias verbatim.
 gatewayModelOptions
     :: ModelCatalog
-    -> Text
     -> Provider
     -> [Text]
     -> [ModelOption]
-gatewayModelOptions catalog connectionId provider =
+gatewayModelOptions catalog provider =
     map gatewayOption
         . nub
         . filter (not . Text.null)
@@ -219,14 +224,15 @@ gatewayModelOptions catalog connectionId provider =
                 resolveConfiguredModel catalog modelId >>= \option ->
                     let target = option.modelTarget
                     in if target.targetProvider == provider
-                        && target.targetConnectionId == connectionId
+                        && target.targetConnectionId
+                            == builtinConnectionId provider
                         then Just option
                         else Nothing
             configuredTarget = (.modelTarget) <$> configured
         in ModelOption
             { modelTarget = ModelTarget
                 { targetProvider = provider
-                , targetConnectionId = connectionId
+                , targetConnectionId = organizationGatewayConnectionId
                 , targetModelId = modelId
                 , targetWireModelId = modelId
                 , targetDialect =

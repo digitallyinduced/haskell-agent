@@ -7,6 +7,7 @@ import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ModelCatalog(..)
     , decodeModelConfig
+    , organizationGatewayConnectionId
     , packagedModelCatalogPath
     )
 import Agent.Dialect
@@ -180,7 +181,6 @@ spec = do
             let options =
                     gatewayModelOptions
                         catalog
-                        "openai"
                         OpenAIProvider
                         [ " gpt-5.6-sol "
                         , "company-private"
@@ -193,10 +193,35 @@ spec = do
                 (\option ->
                     let target = option.modelTarget
                     in target.targetProvider == OpenAIProvider
-                        && target.targetConnectionId == "openai"
+                        && target.targetConnectionId
+                            == organizationGatewayConnectionId
                         && target.targetWireModelId == target.targetModelId)
                 options
                 `shouldBe` True
+
+        it "rejects a persisted gateway route after disconnection" do
+            let resolve deferToGateway =
+                    resolveSavedModelTarget
+                        catalog
+                        deferToGateway
+                        OpenAIProvider
+                        organizationGatewayConnectionId
+                        "company-private"
+                        (Just "company-private")
+                        CodexDialect
+            resolve True
+                `shouldBe`
+                    Right
+                        (ModelTarget
+                            OpenAIProvider
+                            organizationGatewayConnectionId
+                            "company-private"
+                            "company-private"
+                            CodexDialect)
+            resolve False
+                `shouldBe`
+                    Left
+                        "saved model organization-gateway/company-private requires an active organization gateway"
 
         it "pins mapped aliases to the gateway while retaining safe metadata" do
             let known =
@@ -234,7 +259,6 @@ spec = do
             case
                 gatewayModelOptions
                     mappedCatalog
-                    "openai"
                     OpenAIProvider
                     ["company-known", "company-foreign"]
                 of
@@ -243,7 +267,7 @@ spec = do
                         `shouldBe`
                             ModelTarget
                                 OpenAIProvider
-                                "openai"
+                                organizationGatewayConnectionId
                                 "company-known"
                                 "company-known"
                                 GenericResponsesDialect
@@ -253,7 +277,7 @@ spec = do
                         `shouldBe`
                             ModelTarget
                                 OpenAIProvider
-                                "openai"
+                                organizationGatewayConnectionId
                                 "company-foreign"
                                 "company-foreign"
                                 (dialectIdForModel
@@ -269,14 +293,13 @@ spec = do
             let options =
                     gatewayModelOptions
                         catalog
-                        "openai"
                         OpenAIProvider
                         ["gpt-5.6-terra"]
             state <-
                 initialPickerStateForOptions
                     "organization gateway"
                     options
-                    "openai"
+                    organizationGatewayConnectionId
                     OpenAIProvider
                     "revoked-model"
                     CodexDialect

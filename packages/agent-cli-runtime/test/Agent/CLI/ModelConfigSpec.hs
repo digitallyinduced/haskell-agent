@@ -176,6 +176,13 @@ spec = describe "Agent.CLI.ModelConfig" do
             (Just ("models.json", overlay))
             `shouldSatisfy` leftContains "cannot redefine reserved connection"
 
+        let gatewayOverlay =
+                "{\"version\":1,\"connections\":{\"organization-gateway\":{\"api\":\"responses\",\"base_url\":\"http://localhost:8000/v1\"}}}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", gatewayOverlay))
+            `shouldSatisfy` leftContains "cannot redefine reserved connection"
+
     it "reports invalid custom references and authentication variables" do
         defaults <- readPackagedDefaults
         let overlay =

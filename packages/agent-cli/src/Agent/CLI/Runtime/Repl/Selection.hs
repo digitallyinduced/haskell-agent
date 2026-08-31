@@ -43,7 +43,6 @@ import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
-import Agent.CLI.ModelConfig ( builtinConnectionId )
 import Agent.CLI.Models
     ( gatewayModelOptions,
       modelTargetRequiresRebuild,
@@ -580,7 +579,6 @@ handleSelection
                             resolveModelOptionById
                                 (gatewayModelOptions
                                     catalog
-                                    (builtinConnectionId OpenAIProvider)
                                     OpenAIProvider
                                     modelIds)
                                 name

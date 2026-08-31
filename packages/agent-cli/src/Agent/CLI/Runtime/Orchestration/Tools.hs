@@ -64,7 +64,10 @@ import Agent.CLI.McpStatus
       formatMcpProgress,
       summarizeMcpStatuses )
 import Agent.CLI.ModelConfig
-    (ModelCatalog, ResponsesConnection(..), builtinConnectionId)
+    ( ModelCatalog
+    , ResponsesConnection(..)
+    , builtinConnectionId
+    )
 import Agent.CLI.Models
     ( defaultModelFor,
       gatewayModelOptions,
@@ -444,7 +447,6 @@ runAgentTools
                         case
                             gatewayModelOptions
                                 catalog
-                                (builtinConnectionId OpenAIProvider)
                                 OpenAIProvider
                                 modelIds
                             of
@@ -737,8 +739,6 @@ runAgentTools
                                         (resolveModelOptionById
                                             (gatewayModelOptions
                                                 catalog
-                                                (builtinConnectionId
-                                                    OpenAIProvider)
                                                 OpenAIProvider
                                                 modelIds)
                                             (Text.strip requested))

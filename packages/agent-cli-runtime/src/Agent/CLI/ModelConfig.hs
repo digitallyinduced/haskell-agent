@@ -10,6 +10,7 @@ module Agent.CLI.ModelConfig
     , ModelConnection(..)
     , ResponsesConnection(..)
     , builtinConnectionId
+    , organizationGatewayConnectionId
     , catalogConnection
     , catalogContextWindowFor
     , catalogContextWindowForTransport
@@ -160,6 +161,13 @@ modelCatalogUserPath home =
 
 builtinConnectionId :: Provider -> Text
 builtinConnectionId = providerSlug
+
+-- | Reserved persisted routing identity for organization-gateway sessions.
+--
+-- Gateway requests currently use the OpenAI transport, but must not be
+-- indistinguishable from direct OpenAI sessions after the gateway is removed.
+organizationGatewayConnectionId :: Text
+organizationGatewayConnectionId = "organization-gateway"
 
 catalogConnection :: ModelCatalog -> Text -> Maybe ModelConnection
 catalogConnection catalog connectionId =
@@ -336,7 +344,9 @@ decodeConfigFile source bytes =
 mergeConfigFiles :: ConfigFile -> Maybe ConfigFile -> Either Text ConfigFile
 mergeConfigFiles defaults Nothing = Right defaults
 mergeConfigFiles defaults (Just user) = do
-    let reserved = map builtinConnectionId allBuiltinProviders
+    let reserved =
+            organizationGatewayConnectionId
+                : map builtinConnectionId allBuiltinProviders
         overriddenReserved =
             filter (`Map.member` user.configConnections) reserved
     unless (null overriddenReserved) $
