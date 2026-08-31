@@ -24,21 +24,21 @@ spec =
                             (defaultClaudeCodeOptions "/bin/claude" "/tmp")
                                 { transport =
                                     ClaudeCodeGateway
-                                        { gatewayBaseUrl = "https://gateway.example/"
-                                        , gatewayToken = "gateway-token"
+                                        { gatewayBaseUrl = "http://127.0.0.1:43210/"
+                                        , gatewayToken = "ephemeral-capability"
                                         }
                                 }
                     sdk <- toClaudeAgentOptions ClaudeCodeDefaultTools options
                     let environment = maybe [] id sdk.environment
                     lookup "ANTHROPIC_BASE_URL" environment
-                        `shouldBe` Just "https://gateway.example/anthropic"
+                        `shouldBe` Just "http://127.0.0.1:43210"
                     lookup "ANTHROPIC_AUTH_TOKEN" environment
-                        `shouldBe` Just "gateway-token"
+                        `shouldBe` Just "ephemeral-capability"
                     lookup "ANTHROPIC_API_KEY" environment `shouldBe` Nothing
                     lookup "CLAUDE_CODE_USE_BEDROCK" environment `shouldBe` Nothing
                     lookup "HASKELL_AGENT_GATEWAY_TOKEN" environment
                         `shouldBe` Nothing
-                    show sdk `shouldNotSatisfy` isInfixOf "gateway-token"
+                    show sdk `shouldNotSatisfy` isInfixOf "ephemeral-capability"
                     show sdk `shouldSatisfy` isInfixOf "environment = <redacted>"
 
         it "does not inject provider credentials for a local subscription" do
