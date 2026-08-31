@@ -17,6 +17,13 @@ module Agent.CLI.MacOS.Bridge
     , TurnStart(..)
     , nativeExceptionMessage
     , nativeTurnArguments
+    , NativeInteractionResolution(..)
+    , PendingInteraction(..)
+    , cancelPendingInteractions
+    , discardStagedTurn
+    , discardStagedTurnById
+    , resolvePendingInteraction
+    , turnStartCleanupId
     ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
@@ -25,8 +32,10 @@ import Agent.CLI.BrowserTools
     , browserTools
     )
 import Agent.CLI.NativeRuntime
-    ( NativeProcessRuntime
+    ( NativeInteractionMode(..)
+    , NativeProcessRuntime
     , NativeRunHooks(..)
+    , NativeShellMode(..)
     , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
@@ -65,6 +74,7 @@ import Agent.Store.Postgres.Skill
     )
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
+    , encodeNativeUsageEvent
     )
 import Agent.CLI.MacOS.EngineMailbox
     ( EngineMailbox
@@ -178,7 +188,13 @@ import Agent.CLI.SessionAdmin
     , managedPostgresConfigForHome
     , sessionSummaryWithStatusJSON
     )
-import Agent.Loop (ImageAttachment(..), LoopEvent(..), TokenUsage(..))
+import Agent.Loop
+    ( ImageAttachment(..)
+    , LoopEvent(..)
+    , TokenUsage(..)
+    , TurnOutput(..)
+    , emptyTokenUsage
+    )
 import Agent.Dialect (dialectSlug)
 import Agent.Provider (Provider(..), providerSlug, parseProvider, BillingMode(..))
 import Agent.Store.Postgres
@@ -198,6 +214,10 @@ import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , isComputerToolCallKind
+    )
+import Agent.Tools.PlanMode
+    ( PlanDecision(..)
+    , PlanModeHooks(..)
     )
 import Agent.Tools.Types (AppTool)
 import Control.Concurrent
@@ -228,7 +248,8 @@ import Control.Concurrent.MVar
     , takeMVar
     )
 import Control.Concurrent.STM
-    ( TMVar
+    ( STM
+    , TMVar
     , TVar
     , atomically
     , modifyTVar'
@@ -275,6 +296,7 @@ import Data.Char (ord)
 import Data.Either (isRight)
 import Data.IORef
     ( IORef
+    , modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -299,6 +321,8 @@ import Foreign
     ( FunPtr
     , Ptr
     , StablePtr
+    , Storable(..)
+    , allocaArray
     , castPtr
     , castPtrToStablePtr
     , castStablePtrToPtr
@@ -312,6 +336,8 @@ import Foreign
     , poke
     , plusPtr
     , peekByteOff
+    , pokeByteOff
+    , pokeElemOff
     , sizeOf
     )
 import Foreign.C.String (CString)
@@ -365,6 +391,37 @@ withNullableText value action = case value of
     Just text -> withText text action
 
 type EventCallback = Ptr () -> Ptr Word8 -> CSize -> IO ()
+
+data CInteractionOption = CInteractionOption
+    { cInteractionOptionLabel :: !(Ptr Word8)
+    , cInteractionOptionLabelLength :: !CSize
+    }
+
+instance Storable CInteractionOption where
+    sizeOf _ = sizeOf (nullPtr :: Ptr Word8) + sizeOf (undefined :: CSize)
+    alignment _ =
+        max
+            (alignment (nullPtr :: Ptr Word8))
+            (alignment (undefined :: CSize))
+    peek pointer =
+        CInteractionOption
+            <$> peekByteOff pointer 0
+            <*> peekByteOff pointer (sizeOf (nullPtr :: Ptr Word8))
+    poke pointer option = do
+        pokeByteOff pointer 0 option.cInteractionOptionLabel
+        pokeByteOff
+            pointer
+            (sizeOf (nullPtr :: Ptr Word8))
+            option.cInteractionOptionLabelLength
+
+type InteractionCallback =
+    Ptr ()
+    -> Ptr Word8 -> CSize -- turn id
+    -> Ptr Word8 -> CSize -- interaction id
+    -> CInt -- kind
+    -> Ptr Word8 -> CSize -- prompt/body
+    -> Ptr CInteractionOption -> CSize
+    -> IO ()
 
 type AccountListCallback =
     Ptr () -> CInt -> CString -> CSize -> CString -> CSize
@@ -566,6 +623,10 @@ foreign import ccall "dynamic"
     invokeEventCallback :: FunPtr EventCallback -> EventCallback
 
 foreign import ccall "dynamic"
+    invokeInteractionCallback
+        :: FunPtr InteractionCallback -> InteractionCallback
+
+foreign import ccall "dynamic"
     invokeAccountListCallback
         :: FunPtr AccountListCallback -> AccountListCallback
 
@@ -764,6 +825,40 @@ instance Aeson.FromJSON TurnStart where
             (_, _, Just _, Just _) -> pure start
             _ -> fail "provider and model must be supplied together"
 
+turnStartCleanupId :: Text -> Aeson.Value -> Text
+turnStartCleanupId requestId params =
+    fromMaybe requestId $
+        Aeson.parseMaybe
+            (Aeson.withObject "TurnStartCleanup" (.:? "turnId"))
+            params
+            >>= id
+            >>= nonBlank
+  where
+    nonBlank value
+        | Text.null (Text.strip value) = Nothing
+        | otherwise = Just value
+
+discardStagedTurn
+    :: Text
+    -> Aeson.Value
+    -> TVar (Map Text a)
+    -> TVar (Map Text b)
+    -> STM ()
+discardStagedTurn requestId params stagedImages stagedOptions = do
+    discardStagedTurnById
+        (turnStartCleanupId requestId params)
+        stagedImages
+        stagedOptions
+
+discardStagedTurnById
+    :: Text
+    -> TVar (Map Text a)
+    -> TVar (Map Text b)
+    -> STM ()
+discardStagedTurnById turnId stagedImages stagedOptions = do
+    modifyTVar' stagedImages (Map.delete turnId)
+    modifyTVar' stagedOptions (Map.delete turnId)
+
 data TurnReference = TurnReference
     { turnReferenceId :: !Text
     }
@@ -834,6 +929,79 @@ data AccountAPIKeyRequest = AccountAPIKeyRequest
     , accountAPIKey :: !Text
     }
 
+data NativeTurnOptions = NativeTurnOptions
+    { nativeTurnInteractionMode :: !NativeInteractionMode
+    , nativeTurnShellMode :: !NativeShellMode
+    } deriving (Eq, Show)
+
+defaultNativeTurnOptions :: NativeTurnOptions
+defaultNativeTurnOptions = NativeTurnOptions
+    { nativeTurnInteractionMode = NativeAsk
+    , nativeTurnShellMode = NativeShellBash
+    }
+
+data NativeInteractionResolution = NativeInteractionResolution
+    { interactionSelectedIndex :: !Int
+    , interactionCustomText :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+data PendingInteraction = PendingInteraction
+    { pendingInteractionOptionCount :: !Int
+    , pendingInteractionWaiter :: !(TMVar NativeInteractionResolution)
+    }
+
+resolvePendingInteraction
+    :: TVar (Map (Text, Text) PendingInteraction)
+    -> (Text, Text)
+    -> NativeInteractionResolution
+    -> STM Bool
+resolvePendingInteraction pendingRef key resolution = do
+    pending <- readTVar pendingRef
+    case Map.lookup key pending of
+        Nothing -> pure False
+        Just interaction@PendingInteraction
+            { pendingInteractionOptionCount = optionCount
+            }
+            | resolution.interactionSelectedIndex < (-1)
+                || resolution.interactionSelectedIndex >= optionCount ->
+                pure False
+            | otherwise -> do
+                published <- tryPutTMVar
+                    interaction.pendingInteractionWaiter
+                    resolution
+                when published $
+                    writeTVar pendingRef (Map.delete key pending)
+                pure published
+
+cancelPendingInteractions
+    :: TVar (Map (Text, Text) PendingInteraction)
+    -> STM ()
+cancelPendingInteractions pendingRef = do
+    pending <- readTVar pendingRef
+    writeTVar pendingRef Map.empty
+    forM_ (Map.elems pending) \interaction ->
+        void $ tryPutTMVar
+            interaction.pendingInteractionWaiter
+            cancelledInteractionResolution
+
+cancelledInteractionResolution :: NativeInteractionResolution
+cancelledInteractionResolution = NativeInteractionResolution
+    { interactionSelectedIndex = -1
+    , interactionCustomText = Nothing
+    }
+
+data InteractionCallbackTarget = InteractionCallbackTarget
+    { interactionTargetCallback :: !(FunPtr InteractionCallback)
+    , interactionTargetContext :: !(Ptr ())
+    }
+
+data InteractionRuntime = InteractionRuntime
+    { interactionCallbackTarget :: !(TVar (Maybe InteractionCallbackTarget))
+    , interactionCallbackLock :: !(MVar ())
+    , interactionPending
+        :: !(TVar (Map (Text, Text) PendingInteraction))
+    }
+
 data EngineCommand
     = EngineRequest !BridgeRequest
     | EngineSearch !Text !Int !(FunPtr SearchCallback) !(Ptr ())
@@ -857,6 +1025,8 @@ data Engine = Engine
     , engineDone :: !(MVar ())
     , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
     , engineBrowser :: !BrowserHost
+    , engineStagedTurnOptions :: !(TVar (Map Text NativeTurnOptions))
+    , engineInteractions :: !InteractionRuntime
     }
 
 data BrowserRegistration = BrowserRegistration
@@ -876,13 +1046,17 @@ data TurnControl = TurnControl
     , turnControlApprovals
         :: !(TVar (Map Text (TMVar PermissionChoice)))
     , turnControlApprovalCounter :: !(TVar Int)
+    , turnControlInteractionCounter :: !(TVar Int)
     , turnControlAllowedTools :: !(TVar (Set.Set Text))
     , turnControlAgentSnapshot :: !(TVar (IO [Viewport.AgentEntry]))
+    , turnControlInteractions :: !InteractionRuntime
     }
 
 data TurnOutcome = TurnOutcome
     { turnOutcomeSessionId :: !(Maybe Text)
     , turnOutcomeError :: !(Maybe Text)
+    , turnOutcomeUsage :: !TokenUsage
+    , turnOutcomeProviderCostUSD :: !(Maybe Double)
     }
 
 data TaskResult
@@ -892,6 +1066,7 @@ data TaskResult
 data PendingTurn = PendingTurn
     { pendingTurnStart :: !TurnStart
     , pendingTurnImages :: ![ImageAttachment]
+    , pendingTurnOptions :: !NativeTurnOptions
     }
 
 data RunningTurn = RunningTurn
@@ -929,6 +1104,19 @@ foreign export ccall ha_engine_list_tasks
 
 foreign export ccall ha_engine_set_task_limit
     :: Ptr () -> CSize -> IO CInt
+
+foreign export ccall ha_engine_stage_turn_options
+    :: Ptr () -> Ptr Word8 -> CSize -> CInt -> CInt -> IO CInt
+
+foreign export ccall ha_engine_discard_turn_staging
+    :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
+
+foreign export ccall ha_engine_set_interaction_callback
+    :: Ptr () -> FunPtr InteractionCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_resolve_interaction
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> CInt -> Ptr Word8 -> CSize -> IO CInt
 
 foreign export ccall ha_engine_destroy
     :: Ptr () -> IO ()
@@ -3580,6 +3768,15 @@ ha_engine_create callback context
             done <- newEmptyMVar
             stagedImages <- newTVarIO Map.empty
             browser <- BrowserHost <$> newMVar Nothing
+            stagedTurnOptions <- newTVarIO Map.empty
+            interactionTarget <- newTVarIO Nothing
+            interactionLock <- newMVar ()
+            pendingInteractions <- newTVarIO Map.empty
+            let interactions = InteractionRuntime
+                    { interactionCallbackTarget = interactionTarget
+                    , interactionCallbackLock = interactionLock
+                    , interactionPending = pendingInteractions
+                    }
             _ <- forkFinally
                 (workerLifecycle
                     callback
@@ -3588,13 +3785,17 @@ ha_engine_create callback context
                     (sessionsRoot home)
                     commands
                     stagedImages
-                    browser)
+                    browser
+                    stagedTurnOptions
+                    interactions)
                 (const (putMVar done ()))
             stable <- newStablePtr Engine
                 { engineCommands = commands
                 , engineDone = done
                 , engineStagedImages = stagedImages
                 , engineBrowser = browser
+                , engineStagedTurnOptions = stagedTurnOptions
+                , engineInteractions = interactions
                 }
             pure (castStablePtrToPtr stable)
         case created of
@@ -3617,7 +3818,9 @@ ha_engine_send_json pointer bytes (CSize length)
             case (Aeson.eitherDecodeStrict' payload
                 :: Either String BridgeRequest) of
                 Left _ -> do
-                    atomically $ writeTVar engine.engineStagedImages Map.empty
+                    atomically do
+                        writeTVar engine.engineStagedImages Map.empty
+                        writeTVar engine.engineStagedTurnOptions Map.empty
                     pure Nothing
                 Right request -> Just <$> atomically
                     (acceptEngineCommand
@@ -3682,7 +3885,7 @@ ha_engine_stage_turn_images
     :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize -> IO CInt
 ha_engine_stage_turn_images pointer turnID turnIDLength imagePointer imageCount
     | pointer == nullPtr = pure 1
-    | turnID == nullPtr || turnIDLength == 0 = pure 2
+    | turnID == nullPtr || not (validNativeTurnIDLength turnIDLength) = pure 2
     | imagePointer == nullPtr && imageCount > 0 = pure 4
     | toInteger imageCount > toInteger (maxBound :: Int) = pure 4
     | otherwise = do
@@ -3852,6 +4055,170 @@ ha_engine_set_task_limit pointer rawLimit
   where
     limit = fromIntegral rawLimit
 
+ha_engine_stage_turn_options
+    :: Ptr () -> Ptr Word8 -> CSize -> CInt -> CInt -> IO CInt
+ha_engine_stage_turn_options pointer turnID turnIDLength rawMode rawShell
+    | pointer == nullPtr = pure 1
+    | turnID == nullPtr || not (validNativeTurnIDLength turnIDLength) = pure 2
+    | otherwise =
+        case (interactionModeFromCode rawMode, shellModeFromCode rawShell) of
+            (Just interactionMode, Just shellMode) -> do
+                accepted <- tryAny do
+                    let stable =
+                            castPtrToStablePtr pointer :: StablePtr Engine
+                    engine <- deRefStablePtr stable
+                    bytes <- BS.packCStringLen
+                        (castPtr turnID, fromIntegral turnIDLength)
+                    case TextEncoding.decodeUtf8' bytes of
+                        Left _ -> pure False
+                        Right turnIDText
+                            | Text.null turnIDText -> pure False
+                            | otherwise -> do
+                                atomically $ modifyTVar'
+                                    engine.engineStagedTurnOptions
+                                    (Map.insert
+                                        turnIDText
+                                        NativeTurnOptions
+                                            { nativeTurnInteractionMode =
+                                                interactionMode
+                                            , nativeTurnShellMode = shellMode
+                                            })
+                                pure True
+                pure $ case accepted of
+                    Left _ -> 3
+                    Right False -> 2
+                    Right True -> 0
+            _ -> pure 4
+
+ha_engine_discard_turn_staging
+    :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
+ha_engine_discard_turn_staging pointer turnID turnIDLength
+    | pointer == nullPtr = pure 1
+    | turnID == nullPtr || not (validNativeTurnIDLength turnIDLength) = pure 2
+    | otherwise = do
+        result <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            bytes <- BS.packCStringLen
+                (castPtr turnID, fromIntegral turnIDLength)
+            case TextEncoding.decodeUtf8' bytes of
+                Left _ -> pure False
+                Right turnIDText
+                    | Text.null turnIDText -> pure False
+                    | otherwise -> do
+                        atomically $ discardStagedTurnById
+                            turnIDText
+                            engine.engineStagedImages
+                            engine.engineStagedTurnOptions
+                        pure True
+        pure $ case result of
+            Left _ -> 3
+            Right False -> 2
+            Right True -> 0
+
+maxNativeTurnIDBytes :: Integer
+maxNativeTurnIDBytes = 1_024
+
+validNativeTurnIDLength :: CSize -> Bool
+validNativeTurnIDLength length =
+    let integerLength = toInteger length
+    in integerLength > 0
+        && integerLength <= toInteger (maxBound :: Int)
+        && integerLength <= maxNativeTurnIDBytes
+
+ha_engine_set_interaction_callback
+    :: Ptr () -> FunPtr InteractionCallback -> Ptr () -> IO CInt
+ha_engine_set_interaction_callback pointer callback callbackContext
+    | pointer == nullPtr = pure 1
+    | otherwise = do
+        result <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            withMVar
+                engine.engineInteractions.interactionCallbackLock
+                \_ -> atomically do
+                    writeTVar
+                        engine.engineInteractions.interactionCallbackTarget
+                        (if callback == nullFunPtr
+                            then Nothing
+                            else Just InteractionCallbackTarget
+                                { interactionTargetCallback = callback
+                                , interactionTargetContext = callbackContext
+                                })
+                    cancelPendingInteractions
+                        engine.engineInteractions.interactionPending
+        pure $ either (const 3) (const 0) result
+
+ha_engine_resolve_interaction
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> CInt -> Ptr Word8 -> CSize -> IO CInt
+ha_engine_resolve_interaction
+        pointer
+        turnID
+        (CSize turnIDLength)
+        interactionID
+        (CSize interactionIDLength)
+        (CInt selectedIndex)
+        customText
+        (CSize customTextLength)
+    | pointer == nullPtr = pure 1
+    | turnID == nullPtr || turnIDLength == 0 = pure 2
+    | interactionID == nullPtr || interactionIDLength == 0 = pure 2
+    | customText == nullPtr && customTextLength > 0 = pure 2
+    | otherwise = do
+        let selectedIndexValue = fromIntegral selectedIndex :: Int
+        result <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            let pendingRef =
+                    engine.engineInteractions.interactionPending
+            turnBytes <- BS.packCStringLen
+                (castPtr turnID, fromIntegral turnIDLength)
+            interactionBytes <- BS.packCStringLen
+                (castPtr interactionID, fromIntegral interactionIDLength)
+            customBytes <-
+                if customTextLength == 0
+                    then pure (Right Nothing)
+                    else fmap (fmap Just . TextEncoding.decodeUtf8')
+                        (BS.packCStringLen
+                            (castPtr customText, fromIntegral customTextLength))
+            case
+                ( TextEncoding.decodeUtf8' turnBytes
+                , TextEncoding.decodeUtf8' interactionBytes
+                , customBytes
+                )
+              of
+                (Right turnIDText, Right interactionIDText, Right custom) ->
+                    fmap (\published -> if published then 0 else 4) $
+                        atomically $
+                            resolvePendingInteraction
+                                pendingRef
+                                (turnIDText, interactionIDText)
+                                NativeInteractionResolution
+                                    { interactionSelectedIndex =
+                                        selectedIndexValue
+                                    , interactionCustomText = custom
+                                    }
+                _ -> pure 2
+        pure $ case result of
+            Left _ -> 3
+            Right status -> status
+
+interactionModeFromCode :: CInt -> Maybe NativeInteractionMode
+interactionModeFromCode = \case
+    0 -> Just NativeAsk
+    1 -> Just NativePlan
+    2 -> Just NativeYolo
+    _ -> Nothing
+
+shellModeFromCode :: CInt -> Maybe NativeShellMode
+shellModeFromCode = \case
+    0 -> Just NativeShellNone
+    1 -> Just NativeShellBash
+    2 -> Just NativeShellGhci
+    3 -> Just NativeShellBoth
+    _ -> Nothing
+
 ha_engine_destroy :: Ptr () -> IO ()
 ha_engine_destroy pointer
     | pointer == nullPtr = pure ()
@@ -3872,8 +4239,12 @@ workerLifecycle
     -> EngineMailbox EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
+    -> TVar (Map Text NativeTurnOptions)
+    -> InteractionRuntime
     -> IO ()
-workerLifecycle callback context config root commands stagedImages browser =
+workerLifecycle
+        callback context config root commands stagedImages browser
+        stagedTurnOptions interactions =
     (do
         store <- newMVar Nothing
         processRuntime <- newNativeProcessRuntime root
@@ -3892,6 +4263,8 @@ workerLifecycle callback context config root commands stagedImages browser =
             commands
             stagedImages
             browser
+            stagedTurnOptions
+            interactions
             workerRegistry
             TaskSupervisor
                 { supervisorLimit = defaultTaskLimit
@@ -3900,6 +4273,9 @@ workerLifecycle callback context config root commands stagedImages browser =
                 , supervisorKnownTaskIds = Set.empty
                 }
             `finally` cleanup)
+        `finally`
+            (atomically $
+                cancelPendingInteractions interactions.interactionPending)
         `finally` cancelPendingMcpRestarts commands
 
 cancelPendingMcpRestarts :: EngineMailbox EngineCommand -> IO ()
@@ -3924,12 +4300,14 @@ supervisorLoop
     -> EngineMailbox EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
+    -> TVar (Map Text NativeTurnOptions)
+    -> InteractionRuntime
     -> TVar (Map Text RunningTurn)
     -> TaskSupervisor
     -> IO ()
 supervisorLoop
         callback context config store root processRuntime commands stagedImages browser
-        workerRegistry =
+        stagedTurnOptions interactions workerRegistry =
     go
   where
     go supervisor0 = do
@@ -4115,28 +4493,41 @@ supervisorLoop
     enqueueTurn supervisor request =
         case (parseParams request :: Either Text TurnStart) of
             Left err -> do
-                atomically $ modifyTVar' stagedImages
-                    (Map.delete request.requestId)
+                atomically $ discardStagedTurn
+                    request.requestId
+                    request.requestParams
+                    stagedImages
+                    stagedTurnOptions
                 sendEvent callback context
                     (failureEvent request.requestId err)
                 pure supervisor
             Right start
                 | taskExists start.turnStartId supervisor -> do
-                    atomically $ modifyTVar' stagedImages
-                        (Map.delete start.turnStartId)
+                    atomically $ discardStagedTurnById
+                        start.turnStartId
+                        stagedImages
+                        stagedTurnOptions
                     sendEvent callback context $
                         failureEvent request.requestId "turn id already exists"
                     pure supervisor
                 | otherwise -> do
-                    images <- atomically $ do
+                    (images, turnOptions) <- atomically $ do
                         staged <- readTVar stagedImages
                         writeTVar stagedImages
                             (Map.delete start.turnStartId staged)
+                        options <- readTVar stagedTurnOptions
+                        writeTVar stagedTurnOptions
+                            (Map.delete start.turnStartId options)
                         pure
-                            (Map.findWithDefault
+                            ( Map.findWithDefault
                                 []
                                 start.turnStartId
-                                staged)
+                                staged
+                            , Map.findWithDefault
+                                defaultNativeTurnOptions
+                                start.turnStartId
+                                options
+                            )
                     sendEvent callback context $
                         successEvent request.requestId $
                             Aeson.object
@@ -4148,7 +4539,11 @@ supervisorLoop
                     pure supervisor
                         { supervisorPending =
                             supervisor.supervisorPending
-                                Seq.|> PendingTurn start images
+                                Seq.|> PendingTurn
+                                    { pendingTurnStart = start
+                                    , pendingTurnImages = images
+                                    , pendingTurnOptions = turnOptions
+                                    }
                         , supervisorKnownTaskIds =
                             Set.insert
                                 start.turnStartId
@@ -4189,6 +4584,7 @@ supervisorLoop
         control <- newTurnControl
             start.turnStartId
             start.turnStartSessionId
+            interactions
         sendTaskState start.turnStartId start.turnStartSessionId "running"
         sendTurnStatus
             callback
@@ -4208,6 +4604,8 @@ supervisorLoop
                 nativeBrowserTools
                 start
                 pending.pendingTurnImages
+                pending.pendingTurnOptions
+                interactions
         let runningTurn =
                 RunningTurn
                     { runningTurnControl = control
@@ -4548,16 +4946,21 @@ runNativeTurn
     -> [AppTool]
     -> TurnStart
     -> [ImageAttachment]
+    -> NativeTurnOptions
+    -> InteractionRuntime
     -> IO TurnOutcome
 runNativeTurn
         callback context commands processRuntime control nativeBrowserTools
-        start images = do
+        start images turnOptions interactions = do
     sessionIdRef <- newIORef start.turnStartSessionId
     completedRef <- newIORef False
+    usageRef <- newIORef emptyTokenUsage
     let hooks = NativeRunHooks
             { nativeOnLoopEvent = \event -> do
                 case event of
-                    TurnFinished _ -> writeIORef completedRef True
+                    TurnFinished output -> do
+                        writeIORef completedRef True
+                        modifyIORef' usageRef (<> output.tokenUsage)
                     _ -> pure ()
                 case encodeNativeLoopEvent control.turnControlId event of
                     Just bytes -> sendBinaryEvent callback context bytes
@@ -4582,6 +4985,11 @@ runNativeTurn
             , nativeRequestApproval =
                 requestApproval callback context control
             , nativeTools = nativeBrowserTools
+            , nativePlanHooks =
+                nativePlanModeHooks control interactions
+            , nativeInteractionMode =
+                turnOptions.nativeTurnInteractionMode
+            , nativeShellMode = turnOptions.nativeTurnShellMode
             }
         args = nativeTurnArguments start
     result <- tryAny $
@@ -4597,6 +5005,7 @@ runNativeTurn
                         managedFile)
     completed <- readIORef completedRef
     sessionId <- readIORef sessionIdRef
+    usage <- readIORef usageRef
     pure TurnOutcome
         { turnOutcomeSessionId = sessionId
         , turnOutcomeError =
@@ -4608,6 +5017,8 @@ runNativeTurn
                     | otherwise ->
                         Just
                             "turn ended without a completion event"
+        , turnOutcomeUsage = usage
+        , turnOutcomeProviderCostUSD = Nothing
         }
 
 nativeExceptionMessage :: SomeException -> Text
@@ -4685,16 +5096,200 @@ withTurnImages prompt images action = do
                 BS.writeFile path image.imageBytes
                 withImageFiles directory rest (action . (path :))
 
-newTurnControl :: Text -> Maybe Text -> IO TurnControl
-newTurnControl turnId sessionId =
-    TurnControl turnId
-        <$> newTVarIO sessionId
-        <*> newTVarIO False
-        <*> newTVarIO (pure ())
-        <*> newTVarIO Map.empty
-        <*> newTVarIO 0
-        <*> newTVarIO Set.empty
-        <*> newTVarIO (pure [])
+newTurnControl
+    :: Text -> Maybe Text -> InteractionRuntime -> IO TurnControl
+newTurnControl turnId sessionId interactions = do
+    sessionIdRef <- newTVarIO sessionId
+    cancelled <- newTVarIO False
+    cancelAction <- newTVarIO (pure ())
+    approvals <- newTVarIO Map.empty
+    approvalCounter <- newTVarIO 0
+    interactionCounter <- newTVarIO 0
+    allowedTools <- newTVarIO Set.empty
+    agentSnapshot <- newTVarIO (pure [])
+    pure TurnControl
+        { turnControlId = turnId
+        , turnControlSessionId = sessionIdRef
+        , turnControlCancelled = cancelled
+        , turnControlCancel = cancelAction
+        , turnControlApprovals = approvals
+        , turnControlApprovalCounter = approvalCounter
+        , turnControlInteractionCounter = interactionCounter
+        , turnControlAllowedTools = allowedTools
+        , turnControlAgentSnapshot = agentSnapshot
+        , turnControlInteractions = interactions
+        }
+
+nativePlanModeHooks
+    :: TurnControl
+    -> InteractionRuntime
+    -> PlanModeHooks
+nativePlanModeHooks control interactions = PlanModeHooks
+    { planConfirmEnter = \reason ->
+        requestNativeInteraction
+            control interactions 1 reason
+            [ "Enter plan mode"
+            , "Stay in normal mode"
+            ] >>= \case
+                Just resolution ->
+                    pure (resolution.interactionSelectedIndex == 0)
+                Nothing -> pure False
+    , planDecideExit = \planBody ->
+        requestNativeInteraction
+            control interactions 2 planBody
+            [ "Approve and implement"
+            , "Request changes"
+            , "Cancel plan"
+            ] >>= \case
+                Just resolution ->
+                    pure $ case resolution.interactionSelectedIndex of
+                        0 -> PlanApprove
+                        1 ->
+                            PlanRequestChanges
+                                (fromMaybe
+                                    "(no notes)"
+                                    (nonBlank
+                                        resolution.interactionCustomText))
+                        _ -> PlanCancel
+                Nothing -> pure PlanCancel
+    , planAskQuestion = \question options ->
+        requestNativeInteraction
+            control interactions 3 question options >>= \case
+                Nothing -> pure Nothing
+                Just resolution
+                    | resolution.interactionSelectedIndex >= 0 ->
+                        pure $
+                            atMay
+                                resolution.interactionSelectedIndex
+                                options
+                    | otherwise ->
+                        pure (nonBlank resolution.interactionCustomText)
+    }
+  where
+    nonBlank = (>>= \text ->
+        let stripped = Text.strip text
+        in if Text.null stripped then Nothing else Just stripped)
+
+requestNativeInteraction
+    :: TurnControl
+    -> InteractionRuntime
+    -> CInt
+    -> Text
+    -> [Text]
+    -> IO (Maybe NativeInteractionResolution)
+requestNativeInteraction control interactions kind prompt options = do
+    waiter <- newEmptyTMVarIO
+    registration <-
+        withMVar interactions.interactionCallbackLock \_ -> do
+            registered <- atomically do
+                target <- readTVar interactions.interactionCallbackTarget
+                case target of
+                    Nothing -> pure Nothing
+                    Just callbackTarget -> do
+                        interactionID <- register waiter
+                        pure (Just (callbackTarget, interactionID))
+            forM_ registered \(callbackTarget, interactionID) ->
+                sendNativeInteraction
+                    callbackTarget
+                    control.turnControlId
+                    interactionID
+                    kind
+                    prompt
+                    options
+                    `onException`
+                        atomically
+                            (modifyTVar'
+                                interactions.interactionPending
+                                (Map.delete
+                                    (control.turnControlId, interactionID)))
+            pure registered
+    case registration of
+        Nothing -> pure Nothing
+        Just (_, interactionID) -> do
+            let cleanup =
+                    atomically $ modifyTVar'
+                        interactions.interactionPending
+                        (Map.delete
+                            (control.turnControlId, interactionID))
+            (Just <$> atomically (takeTMVar waiter))
+                `finally` cleanup
+  where
+    register waiter = do
+        current <- readTVar control.turnControlInteractionCounter
+        let next = current + 1
+            interactionID =
+                control.turnControlId
+                    <> "-interaction-"
+                    <> Text.pack (show next)
+        writeTVar control.turnControlInteractionCounter next
+        modifyTVar'
+            interactions.interactionPending
+            (Map.insert
+                (control.turnControlId, interactionID)
+                PendingInteraction
+                    { pendingInteractionOptionCount = length options
+                    , pendingInteractionWaiter = waiter
+                    })
+        pure interactionID
+
+sendNativeInteraction
+    :: InteractionCallbackTarget
+    -> Text
+    -> Text
+    -> CInt
+    -> Text
+    -> [Text]
+    -> IO ()
+sendNativeInteraction target turnID interactionID kind prompt options =
+    withTextBytes turnID \turnPointer turnLength ->
+    withTextBytes interactionID
+        \interactionPointer interactionLength ->
+    withTextBytes prompt \promptPointer promptLength ->
+    withInteractionOptions options \optionPointer optionCount ->
+        invokeInteractionCallback
+            target.interactionTargetCallback
+            target.interactionTargetContext
+            turnPointer
+            turnLength
+            interactionPointer
+            interactionLength
+            kind
+            promptPointer
+            promptLength
+            optionPointer
+            optionCount
+
+withInteractionOptions
+    :: [Text]
+    -> (Ptr CInteractionOption -> CSize -> IO a)
+    -> IO a
+withInteractionOptions [] action = action nullPtr 0
+withInteractionOptions options action =
+    withEncodedOptions options \encoded ->
+        allocaArray (length encoded) \pointer -> do
+            forM_ (zip [0..] encoded) \(index, (label, labelLength)) ->
+                pokeElemOff pointer index CInteractionOption
+                    { cInteractionOptionLabel = label
+                    , cInteractionOptionLabelLength = labelLength
+                    }
+            action pointer (fromIntegral (length encoded))
+
+withEncodedOptions
+    :: [Text]
+    -> ([(Ptr Word8, CSize)] -> IO a)
+    -> IO a
+withEncodedOptions [] action = action []
+withEncodedOptions (option : rest) action =
+    withTextBytes option \pointer length ->
+        withEncodedOptions rest
+            (action . ((pointer, length) :))
+
+atMay :: Int -> [a] -> Maybe a
+atMay index values
+    | index < 0 = Nothing
+    | otherwise = case drop index values of
+        value : _ -> Just value
+        [] -> Nothing
 
 activeAgentSnapshot :: TurnControl -> BridgeRequest -> IO Aeson.Value
 activeAgentSnapshot control request = do
@@ -4741,6 +5336,21 @@ cancelTurn control = do
     atomically $
         forM_ waiters \waiter ->
             void (tryPutTMVar waiter PermissionDeny)
+    interactionWaiters <- atomically do
+        current <- readTVar
+            control.turnControlInteractions.interactionPending
+        let (owned, remaining) =
+                Map.partitionWithKey
+                    (\(turnID, _) _ ->
+                        turnID == control.turnControlId)
+                    current
+        writeTVar
+            control.turnControlInteractions.interactionPending
+            remaining
+        pure (map (.pendingInteractionWaiter) (Map.elems owned))
+    atomically $
+        forM_ interactionWaiters \waiter ->
+            void $ tryPutTMVar waiter cancelledInteractionResolution
 
 requestApproval
     :: FunPtr EventCallback
@@ -4859,7 +5469,14 @@ finishTurnEvent callback context turnId = \case
     TaskFailure message ->
         sendEvent callback context $
             turnFailedEvent turnId message
-    TaskOutcome outcome ->
+    TaskOutcome outcome -> do
+        forM_
+            (encodeNativeUsageEvent
+                True
+                turnId
+                outcome.turnOutcomeUsage
+                outcome.turnOutcomeProviderCostUSD)
+            (sendBinaryEvent callback context)
         case outcome.turnOutcomeError of
             Just err ->
                 sendEvent callback context (turnFailedEvent turnId err)
@@ -4868,7 +5485,8 @@ finishTurnEvent callback context turnId = \case
                     Aeson.object
                         [ "event" Aeson..= ("turn.completed" :: Text)
                         , "turnId" Aeson..= turnId
-                        , "sessionId" Aeson..= outcome.turnOutcomeSessionId
+                        , "sessionId" Aeson..=
+                            outcome.turnOutcomeSessionId
                         ]
 
 taskResultSessionId :: Maybe Text -> TaskResult -> Maybe Text

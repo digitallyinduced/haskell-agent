@@ -1,7 +1,15 @@
 module Agent.CLI.MacOS.NativeLoopEventSpec (spec) where
 
-import Agent.CLI.MacOS.NativeLoopEvent (encodeNativeLoopEvent)
-import Agent.Loop (LoopEvent(..))
+import Agent.CLI.MacOS.NativeLoopEvent
+    ( encodeNativeLoopEvent
+    , encodeNativeUsageEvent
+    )
+import Agent.Loop
+    ( LoopEvent(..)
+    , TokenUsage(..)
+    , TurnOutput(..)
+    , emptyTurnOutput
+    )
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..), ToolCallResult(..))
 import qualified Data.ByteString as BS
 import qualified Data.Text as Text
@@ -47,7 +55,28 @@ spec = describe "native loop event binary encoding" do
             Nothing -> expectationFailure "native tool event failed to encode"
             Just encoded -> BS.take 8 encoded `shouldBe` header 5 2
 
-    it "does not encode lifecycle events as native loop frames" do
+    it "encodes terminal provider token usage without inventing cost" do
+        let output =
+                (emptyTurnOutput "response" [] Nothing)
+                    { tokenUsage = TokenUsage 120 34 56 }
+        encodeNativeLoopEvent "turn" (TurnFinished output)
+            `shouldBe`
+                Just
+                    (frame 6 0 ["turn", "120", "34", "56"]
+                        <> word32BE maxBound)
+
+    it "encodes aggregate usage and exact provider-reported cost" do
+        encodeNativeUsageEvent
+            True
+            "turn"
+            (TokenUsage 200 50 80)
+            (Just 0.0125)
+            `shouldBe`
+                Just
+                    (frame 7 0
+                        ["turn", "200", "50", "80", "1.25e-2"])
+
+    it "does not encode turn-start lifecycle events as native loop frames" do
         encodeNativeLoopEvent "turn" TurnStarted `shouldBe` Nothing
 
 frame :: Word8 -> Word8 -> [String] -> BS.ByteString

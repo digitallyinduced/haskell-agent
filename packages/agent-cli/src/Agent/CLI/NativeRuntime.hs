@@ -1,5 +1,7 @@
 module Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
+    , NativeInteractionMode(..)
+    , NativeShellMode(..)
     , NativeRunHooks(..)
     , StartupFailure(..)
     , closeNativeProcessRuntime
@@ -15,11 +17,14 @@ import Agent.CLI.AgentSessions
     )
 import Agent.CLI.Options
     ( Command(..)
+    , CliOptions(..)
     , parseArgs
     )
 import Agent.CLI.Runtime.Orchestration (runAgentWithRuntime)
 import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..)
+    , NativeInteractionMode(..)
+    , NativeShellMode(..)
     , NativeRunHooks(..)
     , nativeRunMode
     )
@@ -73,10 +78,27 @@ runNativeAgent runtime output cwd hooks args =
                     , processSessionThreads = runtime.nativeSessionThreads
                     }
                 (nativeRunMode output cwd hooks)
-                options >>= \case
+                options
+                    { optGhci = nativeGhciEnabled hooks.nativeShellMode
+                    , optBash = nativeBashEnabled hooks.nativeShellMode
+                    } >>= \case
                     DevQuit -> pure (Right ())
                     DevReload _ ->
                         pure (Left
                             "native turn unexpectedly requested a reload")
         Right _ -> pure (Left
             "native turn arguments did not select an agent")
+
+nativeGhciEnabled :: NativeShellMode -> Bool
+nativeGhciEnabled = \case
+    NativeShellGhci -> True
+    NativeShellBoth -> True
+    NativeShellNone -> False
+    NativeShellBash -> False
+
+nativeBashEnabled :: NativeShellMode -> Bool
+nativeBashEnabled = \case
+    NativeShellBash -> True
+    NativeShellBoth -> True
+    NativeShellNone -> False
+    NativeShellGhci -> False
