@@ -4,6 +4,7 @@ import Agent.Loop
     ( ImageAttachment(..)
     , defaultLoopDispatch
     )
+import Agent.OpenAI.TestSupport (withLoopbackApplication)
 import Agent.OpenAI.ImageGeneration
     ( imageGenerationToolAt
     , newImageGenerationHistory
@@ -53,7 +54,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -221,7 +221,7 @@ withImageServer
     -> (Text -> IO a)
     -> IO a
 withImageServer recorded imageBytes action =
-    Warp.testWithApplication (pure app) \port ->
+    withLoopbackApplication (pure app) \port ->
         action ("http://127.0.0.1:" <> Text.pack (show port))
   where
     app request respond = do

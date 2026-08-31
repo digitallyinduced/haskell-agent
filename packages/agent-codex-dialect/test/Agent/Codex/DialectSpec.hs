@@ -38,7 +38,7 @@ import Agent.Tools.Types
     , toolSchedulingPlanFor
     )
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, tryIO)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
@@ -49,9 +49,13 @@ import System.Directory
     , getTemporaryDirectory
     , removeDirectoryRecursive
     )
+import System.Exit (ExitCode(..))
 import System.FilePath (makeRelative, (</>))
+import System.Info (os)
+import System.IO.Error (isPermissionError)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Temp (mkdtemp)
+import System.Process (readProcessWithExitCode)
 import Test.Hspec
 
 spec :: Spec
@@ -170,6 +174,7 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf "Blocked hardcoded system temp path"
 
     it "maps a /tmp shell workdir to the private session directory" do
+        requireProcessSandbox
         withTempDir \dir -> do
             let scratch = dir </> "session-scratch"
             createDirectory scratch
@@ -191,6 +196,7 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf (Text.pack canonicalScratch)
 
     it "stops retained shell commands when resetting a session" do
+        requireProcessSandbox
         withTempDir \dir -> do
             let scratch = dir </> "session-scratch"
                 output = scratch </> "retained-output"
@@ -456,6 +462,35 @@ withTempDir action = do
         (mkdtemp (tmp </> "agent-codex-dialect-XXXXXX"))
         removeDirectoryRecursive
         action
+
+requireProcessSandbox :: IO ()
+requireProcessSandbox
+    | os /= "darwin" = pure ()
+    | otherwise = do
+        doesFileExist "/usr/bin/sandbox-exec" >>= \case
+            False -> pendingWith
+                "sandbox-exec is unavailable in this test environment"
+            True -> do
+                probe <- tryIO $
+                    readProcessWithExitCode
+                        "/usr/bin/sandbox-exec"
+                        ["-p", "(version 1) (allow default)", "/usr/bin/true"]
+                        ""
+                case probe of
+                    Left err
+                        | isPermissionError err -> pendingWith
+                            "sandbox-exec is unavailable in this test environment"
+                        | otherwise -> ioError err
+                    Right (ExitSuccess, _, _) -> pure ()
+                    Right (ExitFailure 71, _, stderr)
+                        | "sandbox_apply: Operation not permitted"
+                            `Text.isInfixOf` Text.pack stderr ->
+                            pendingWith
+                                "sandbox-exec is unavailable in this test environment"
+                    Right result ->
+                        expectationFailure $
+                            "sandbox-exec capability probe failed unexpectedly: "
+                                <> show result
 
 waitForFile :: FilePath -> IO Bool
 waitForFile path = go (100 :: Int)

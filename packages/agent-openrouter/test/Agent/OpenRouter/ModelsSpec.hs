@@ -2,6 +2,7 @@ module Agent.OpenRouter.ModelsSpec (spec) where
 
 import Agent.OpenRouter.Models
 import Agent.OpenRouter.Options
+import Agent.OpenRouter.TestSupport (withLoopbackApplication)
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.CaseInsensitive as CI
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
@@ -10,7 +11,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import Test.Hspec
 
 spec :: Spec
@@ -161,7 +161,7 @@ withMockModels
     -> (ClientOptions -> IO a)
     -> IO a
 withMockModels requests response action =
-    Warp.testWithApplication (pure app) \port ->
+    withLoopbackApplication (pure app) \port ->
         action defaultClientOptions
             { baseUrl = "http://127.0.0.1:" <> show port <> "/v1"
             , requestTimeoutSeconds = 10

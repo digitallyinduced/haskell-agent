@@ -2,6 +2,10 @@ module Agent.OpenAI.TranscriptionSpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.OpenAI.Transcription
+import Agent.OpenAI.TestSupport
+    ( requireLoopbackListener
+    , withLoopbackApplication
+    )
 import Agent.Provider
     ( BillingMode(..)
     , Credential(..)
@@ -29,7 +33,6 @@ import qualified Data.Text.Encoding as TextEncoding
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Socket as Socket
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.WebSockets as WS
 import qualified System.Timeout as Timeout
 import Test.Hspec
@@ -277,7 +280,7 @@ spec = describe "OpenAI transcription" do
                                         [ "text" .=
                                             ("hello from oauth" :: Text)
                                         ]))
-        Warp.testWithApplication (pure app) \port -> do
+        withLoopbackApplication (pure app) \port -> do
             let baseUrl =
                     "http://127.0.0.1:"
                         <> Text.pack (show port)
@@ -331,6 +334,7 @@ withWebSocketServer
     -> (Int -> IO value)
     -> IO value
 withWebSocketServer server action =
+    requireLoopbackListener >>
     bracket
         (WS.makeListenSocket "127.0.0.1" 0)
         Socket.close

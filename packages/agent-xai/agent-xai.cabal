@@ -78,6 +78,7 @@ test-suite agent-xai-test
                     , Agent.XAI.ClientSpec
                     , Agent.XAI.FunctionalSpec
                     , Agent.XAI.ResponsesSpec
+                    , Agent.XAI.TestSupport
                     , Agent.XAI.TranscriptionSpec
                     , Agent.XAI.UsageSpec
     ghc-options:      -threaded

@@ -28,6 +28,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -93,37 +94,39 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             `shouldBe` ["grok-4.6", "grok-4.5", lunaSubagentModel]
 
     it "advertises the Grok-root allowlist and records Luna at high effort" do
-        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
-            (\_ _ prompt _ -> pure $ Right LoopResult
-                { finalResponseId = "c"
-                , finalText = Just ("done:" <> interAgentMessagePayload prompt)
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                })
-            (\_ _ -> pure ())
-        typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing Nothing
-                (Just (grokRootChildModels True))
-            tool = taskTool (fromFilePath "/tmp") ctx typesRef
-        tool.appToolDescription `shouldSatisfy`
-            Text.isInfixOf "gpt-5.6-luna"
-        tool.appToolDescription `shouldSatisfy`
-            Text.isInfixOf "ONLY use model slugs"
-        tool.appToolDescription `shouldSatisfy`
-            Text.isInfixOf "Do not use Luna as a blanket default"
-        tool.appToolDescription `shouldSatisfy`
-            Text.isInfixOf "Inherit the parent for ambiguous"
-        result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
-            (functionToolCall "c1" "task"
-                "{\"prompt\":\"hello\",\"description\":\"luna child\",\"model\":\"luna\"}")
-        result.output `shouldSatisfy` Text.isInfixOf "Subagent started in background"
-        specs <- Map.elems <$> readIORef typesRef
-        map (\entry -> entry.modelOverride) specs
-            `shouldBe` [Just lunaSubagentModel]
-        map (\entry -> entry.reasoningEffortOverride) specs
-            `shouldBe` [Just lunaSubagentEffort]
-        closeSubagentRegistry registry
+        withSystemTempDirectory "agent-grok-task" \dir -> do
+            let cwd = fromFilePath dir
+            registry <- newSubagentRegistry defaultSubagentConfig cwd
+                (\_ _ prompt _ -> pure $ Right LoopResult
+                    { finalResponseId = "c"
+                    , finalText = Just ("done:" <> interAgentMessagePayload prompt)
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+                (\_ _ -> pure ())
+            typesRef <- newIORef Map.empty
+            let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
+                    (pure Nothing) Nothing Nothing Nothing Nothing Nothing
+                    (Just (grokRootChildModels True))
+                tool = taskTool cwd ctx typesRef
+            tool.appToolDescription `shouldSatisfy`
+                Text.isInfixOf "gpt-5.6-luna"
+            tool.appToolDescription `shouldSatisfy`
+                Text.isInfixOf "ONLY use model slugs"
+            tool.appToolDescription `shouldSatisfy`
+                Text.isInfixOf "Do not use Luna as a blanket default"
+            tool.appToolDescription `shouldSatisfy`
+                Text.isInfixOf "Inherit the parent for ambiguous"
+            result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                (functionToolCall "c1" "task"
+                    "{\"prompt\":\"hello\",\"description\":\"luna child\",\"model\":\"luna\"}")
+            result.output `shouldSatisfy` Text.isInfixOf "Subagent started in background"
+            specs <- Map.elems <$> readIORef typesRef
+            map (\entry -> entry.modelOverride) specs
+                `shouldBe` [Just lunaSubagentModel]
+            map (\entry -> entry.reasoningEffortOverride) specs
+                `shouldBe` [Just lunaSubagentEffort]
+            closeSubagentRegistry registry
 
     it "rejects grok-4-1-fast when a Grok-root allowlist is set" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -143,40 +146,44 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         closeSubagentRegistry registry
 
     it "defaults run_in_background and spawns a background agent" do
-        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
-            (\_ _ prompt _ -> pure $ Right LoopResult
-                { finalResponseId = "c"
-                , finalText = Just ("done:" <> interAgentMessagePayload prompt)
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                })
-            (\_ _ -> pure ())
-        typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
-            tool = taskTool (fromFilePath "/tmp") ctx typesRef
-        result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
-            (functionToolCall "c1" "task"
-                "{\"prompt\":\"hello\",\"description\":\"test task\",\"model\":\"grok-4.5-mini\"}")
-        result.output `shouldSatisfy` Text.isInfixOf "Subagent started in background"
-        result.output `shouldSatisfy` Text.isInfixOf "subagent_id: agent-"
-        specs <- Map.elems <$> readIORef typesRef
-        map (\entry -> entry.modelOverride) specs `shouldBe` [Just "grok-4.5-mini"]
-        closeSubagentRegistry registry
+        withSystemTempDirectory "agent-grok-task" \dir -> do
+            let cwd = fromFilePath dir
+            registry <- newSubagentRegistry defaultSubagentConfig cwd
+                (\_ _ prompt _ -> pure $ Right LoopResult
+                    { finalResponseId = "c"
+                    , finalText = Just ("done:" <> interAgentMessagePayload prompt)
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+                (\_ _ -> pure ())
+            typesRef <- newIORef Map.empty
+            let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
+                    (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                tool = taskTool cwd ctx typesRef
+            result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                (functionToolCall "c1" "task"
+                    "{\"prompt\":\"hello\",\"description\":\"test task\",\"model\":\"grok-4.5-mini\"}")
+            result.output `shouldSatisfy` Text.isInfixOf "Subagent started in background"
+            result.output `shouldSatisfy` Text.isInfixOf "subagent_id: agent-"
+            specs <- Map.elems <$> readIORef typesRef
+            map (\entry -> entry.modelOverride) specs `shouldBe` [Just "grok-4.5-mini"]
+            closeSubagentRegistry registry
 
     it "records overrides before the child supervisor starts" do
-        typesRef <- newIORef Map.empty
-        observed <- newEmptyMVar
-        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
-            (observeSpec typesRef observed)
-            (\_ _ -> pure ())
-        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
-            tool = taskTool (fromFilePath "/tmp") ctx typesRef
-        _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
-            (functionToolCall "c1" "task" raceArgs)
-        takeMVar observed `shouldReturn` (Just "explore", Just "grok-4.5-mini")
-        closeSubagentRegistry registry
+        withSystemTempDirectory "agent-grok-task" \dir -> do
+            let cwd = fromFilePath dir
+            typesRef <- newIORef Map.empty
+            observed <- newEmptyMVar
+            registry <- newSubagentRegistry defaultSubagentConfig cwd
+                (observeSpec typesRef observed)
+                (\_ _ -> pure ())
+            let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
+                    (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                tool = taskTool cwd ctx typesRef
+            _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                (functionToolCall "c1" "task" raceArgs)
+            takeMVar observed `shouldReturn` (Just "explore", Just "grok-4.5-mini")
+            closeSubagentRegistry registry
 
     it "updates an agent type without discarding its overrides" do
         specsRef <- newIORef Map.empty

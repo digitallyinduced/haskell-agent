@@ -12,7 +12,7 @@ mkDerivation {
     unix
   ];
   testHaskellDepends = [
-    agent-core async base containers directory filepath hspec
+    agent-core async base containers directory filepath hspec process
     safe-exceptions temporary text time unix
   ];
   benchmarkHaskellDepends = [

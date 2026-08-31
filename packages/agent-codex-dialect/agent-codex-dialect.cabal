@@ -66,6 +66,7 @@ test-suite agent-codex-dialect-test
                     , directory
                     , filepath
                     , hspec
+                    , process
                     , safe-exceptions
                     , text
                     , time

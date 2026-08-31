@@ -3,6 +3,7 @@ module Agent.OpenAI.ModelsClientSpec (spec) where
 import Agent.OpenAI.Models.Client
 import Agent.OpenAI.Models.Cache (ModelsCacheKey(..))
 import Agent.OpenAI.Models.Types (ModelInfo(..), ModelsResponse(..))
+import Agent.OpenAI.TestSupport (withLoopbackApplication)
 import Agent.Provider
     ( BillingMode(..)
     , Credential(..)
@@ -18,7 +19,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import Test.Hspec
 
 spec :: Spec
@@ -152,7 +152,7 @@ withModelsServer
     -> (Text -> IO value)
     -> IO value
 withModelsServer recorded response action =
-    Warp.testWithApplication (pure app) \port ->
+    withLoopbackApplication (pure app) \port ->
         action ("http://127.0.0.1:" <> Text.pack (show port) <> "/v1")
   where
     app request respond = do

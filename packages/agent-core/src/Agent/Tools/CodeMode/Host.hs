@@ -67,6 +67,7 @@ import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
     , modifyMVar_
+    , modifyMVarMasked_
     , newEmptyMVar
     , newMVar
     , putMVar
@@ -615,12 +616,16 @@ monitorWorker
                             failClosed False "content received before ready"
                     Right WorkerExecSucceeded{..}
                         | hasStarted && responseId == "exec" ->
-                            do
-                                modifyMVar_ storedValues $
-                                    pure
-                                        . Map.union
+                            modifyMVarMasked_ storedValues \current -> do
+                                let updated =
+                                        Map.union
                                             (Map.map protocolValue
                                                 responseStoredValueWrites)
+                                            current
+                                -- Keep stored writes and terminal publication
+                                -- in one state-transition boundary. A later
+                                -- cell that sees these writes must also see
+                                -- this completed cell.
                                 atomically do
                                     values <- drainTQueue content
                                     void $ tryPutTMVar result $
@@ -628,17 +633,19 @@ monitorWorker
                                             (preferStreamedContent
                                                 values
                                                 (protocolValue responseValue)))
+                                pure updated
                         | otherwise ->
                             failClosed hasStarted
                                 "unexpected execution response id"
                     Right WorkerExecFailed{..}
                         | hasStarted && responseId == "exec" ->
-                            do
-                                modifyMVar_ storedValues $
-                                    pure
-                                        . Map.union
+                            modifyMVarMasked_ storedValues \current -> do
+                                let updated =
+                                        Map.union
                                             (Map.map protocolValue
                                                 responseStoredValueWrites)
+                                            current
+                                -- See the corresponding success branch.
                                 atomically do
                                     values <- drainTQueue content
                                     void $ tryPutTMVar result $
@@ -647,6 +654,7 @@ monitorWorker
                                                 values
                                                 (protocolValue responseValue))
                                             responseError)
+                                pure updated
                         | otherwise ->
                             failClosed hasStarted
                                 "unexpected execution error id"

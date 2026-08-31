@@ -4,6 +4,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Gemini.Client (createResponseWithEventsPolicy)
 import Agent.Gemini.Options (ClientOptions(..), defaultClientOptions)
 import Agent.Gemini.Response (GeminiStreamEvent(..))
+import Agent.Gemini.TestSupport (withLoopbackApplication)
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
     ( Response(..)
@@ -27,7 +28,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
 import Test.Hspec
 
 spec :: Spec
@@ -70,7 +70,7 @@ spec = describe "Gemini client validation" do
                 respond $ Wai.responseLBS HTTP.status200
                     [("Content-Type", "text/event-stream")]
                     geminiSse
-        Warp.testWithApplication (pure app) \port -> do
+        withLoopbackApplication (pure app) \port -> do
             let options = defaultClientOptions
                     { baseUrl = "http://127.0.0.1:"
                         <> show port <> "/v1beta"
@@ -119,7 +119,7 @@ spec = describe "Gemini client validation" do
                 respond $ Wai.responseLBS HTTP.status200
                     [("Content-Type", "text/event-stream")]
                     codeAssistSse
-        Warp.testWithApplication (pure app) \port -> do
+        withLoopbackApplication (pure app) \port -> do
             let options = defaultClientOptions
                     { codeAssistBaseUrl = "http://127.0.0.1:"
                         <> show port <> "/v1internal"
@@ -272,13 +272,13 @@ spec = describe "Gemini client validation" do
 
     it "never forwards an API key across redirects" do
         redirected <- newIORef (Nothing :: Maybe HTTP.RequestHeaders)
-        Warp.testWithApplication
+        withLoopbackApplication
             (pure \request respond -> do
                 writeIORef redirected
                     (Just (Wai.requestHeaders request))
                 respond (Wai.responseLBS HTTP.status200 [] ""))
             \targetPort ->
-                Warp.testWithApplication
+                withLoopbackApplication
                     (pure \_ respond ->
                         respond
                             (Wai.responseLBS HTTP.status307
@@ -356,7 +356,7 @@ withGeminiHttpResponse
     -> (ClientOptions -> IO result)
     -> IO result
 withGeminiHttpResponse status headers body action =
-    Warp.testWithApplication
+    withLoopbackApplication
         (pure \_ respond ->
             respond $ Wai.responseLBS status headers body)
         \port ->
