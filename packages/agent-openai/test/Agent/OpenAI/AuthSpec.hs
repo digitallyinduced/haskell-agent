@@ -22,6 +22,7 @@ import qualified "base64-bytestring" Data.ByteString.Base64 as B64
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
+import Data.List (find)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
@@ -336,6 +337,116 @@ spec = do
                             }
                         ]
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
+
+        it "recovers from a stale long cooldown without rebuilding the pool" do
+            checks <- newIORef ([] :: [Text])
+            let revalidate auth = do
+                    modifyIORef' checks (auth.accountId :)
+                    pure (Right (auth.accountId == "reset-account"))
+            pool <- newDiscoveringPoolWithRateLimitRevalidation
+                [ mkFreshAuth "still-limited"
+                , mkFreshAuth "reset-account"
+                ]
+                neverRefresh
+                noDiscovery
+                revalidate
+            reportRateLimit pool "still-limited" (Just 500_000)
+            reportRateLimit pool "reset-account" (Just 500_000)
+
+            result <- getAccessToken pool
+
+            accountIdOf result `shouldBe` "reset-account"
+            checkedAccounts <- readIORef checks
+            checkedAccounts
+                `shouldMatchList` ["still-limited", "reset-account"]
+            snapshots <- snapshotAccounts pool
+            fmap (.snapshotCooldownUntil)
+                (findSnapshot "reset-account" snapshots)
+                `shouldBe` Just Nothing
+            fmap (.snapshotCooldownUntil)
+                (findSnapshot "still-limited" snapshots)
+                `shouldSatisfy` maybe False isJust
+
+        it "revalidates an explicitly requested cooling account" do
+            pool <- newDiscoveringPoolWithRateLimitRevalidation
+                [mkFreshAuth "requested-account"]
+                neverRefresh
+                noDiscovery
+                (const (pure (Right True)))
+            reportRateLimit pool "requested-account" (Just 500_000)
+
+            getAccessTokenForAccount pool "requested-account"
+                `shouldReturn`
+                    Right
+                        ( (mkFreshAuth "requested-account").accessToken
+                        , "requested-account"
+                        )
+
+        it "refreshes an expired token before usage revalidation" do
+            refreshCalls <- newIORef (0 :: Int)
+            checkedToken <- newIORef Nothing
+            let refreshed = (mkFreshAuth "reset-account")
+                    { refreshToken = "rotated-refresh" }
+                refresh _ = do
+                    modifyIORef' refreshCalls (+ 1)
+                    pure (Right refreshed)
+                revalidate auth = do
+                    writeIORef checkedToken (Just auth.accessToken)
+                    pure (Right True)
+            pool <- newDiscoveringPoolWithRateLimitRevalidation
+                [mkExpiredAuth "reset-account"]
+                refresh
+                noDiscovery
+                revalidate
+            reportRateLimit pool "reset-account" (Just 500_000)
+
+            result <- getAccessToken pool
+
+            result `shouldBe`
+                Right (refreshed.accessToken, refreshed.accountId)
+            readIORef refreshCalls `shouldReturn` 1
+            readIORef checkedToken
+                `shouldReturn` Just refreshed.accessToken
+
+        it "throttles repeated usage revalidation while still exhausted" do
+            checks <- newIORef (0 :: Int)
+            let revalidate _ = do
+                    modifyIORef' checks (+ 1)
+                    pure (Right False)
+            pool <- newDiscoveringPoolWithRateLimitRevalidation
+                [mkFreshAuth "still-limited"]
+                neverRefresh
+                noDiscovery
+                revalidate
+            reportRateLimit pool "still-limited" (Just 500_000)
+
+            first <- getAccessToken pool
+            second <- getAccessToken pool
+
+            first `shouldSatisfy` isCredentialsExhausted
+            second `shouldSatisfy` isCredentialsExhausted
+            readIORef checks `shouldReturn` 1
+
+        it "shares recovered capacity with concurrent checkouts" do
+            checkStarted <- newEmptyMVar
+            releaseCheck <- newEmptyMVar
+            let revalidate _ = do
+                    putMVar checkStarted ()
+                    takeMVar releaseCheck
+                    pure (Right True)
+            pool <- newDiscoveringPoolWithRateLimitRevalidation
+                [mkFreshAuth "reset-account"]
+                neverRefresh
+                noDiscovery
+                revalidate
+            reportRateLimit pool "reset-account" (Just 500_000)
+
+            withAsync (getAccessToken pool) \first -> do
+                takeMVar checkStarted
+                withAsync (getAccessToken pool) \second -> do
+                    putMVar releaseCheck ()
+                    results <- sequence [wait first, wait second]
+                    results `shouldSatisfy` all isRight
 
         it "discovers a broker account that became available after startup" $ do
             discoveryCalls <- newIORef ([] :: [[Text]])
@@ -725,6 +836,9 @@ countingRefresh ref s = do
 neverRefresh :: AuthState -> IO (Either ApiError AuthState)
 neverRefresh _ = error "neverRefresh: refresh callback should not have been invoked"
 
+noDiscovery :: [Text] -> IO (Either ApiError [AuthState])
+noDiscovery _ = pure (Right [])
+
 accountIdOf :: Either ApiError (Text, Text) -> Text
 accountIdOf (Right (_, accId)) = accId
 accountIdOf (Left err) = error ("getAccessToken failed: " <> show err)
@@ -736,6 +850,15 @@ isRight _         = False
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
 isLeft _        = False
+
+isCredentialsExhausted :: Either ApiError value -> Bool
+isCredentialsExhausted (Left CredentialsExhausted{}) = True
+isCredentialsExhausted Right{} = False
+isCredentialsExhausted _ = False
+
+findSnapshot :: Text -> [AccountSnapshot] -> Maybe AccountSnapshot
+findSnapshot accountId =
+    find ((== accountId) . (.accountId) . (.snapshotAuth))
 
 uniq :: Eq a => [a] -> [a]
 uniq []     = []

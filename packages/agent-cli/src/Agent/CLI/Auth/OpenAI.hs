@@ -30,6 +30,7 @@ import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
+import qualified Agent.OpenAI.Usage as OpenAIUsage
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider
     ( BillingMode(..)
@@ -319,10 +320,20 @@ loadOpenAi = do
             filter ((== billing) . (.openAiBilling)) accounts
     refreshLock <- lift (newMVar ())
     accountSources <- lift (newIORef activeAccounts)
-    pool <- lift $ OpenAI.newDiscoveringPool
-        (map (.openAiState) activeAccounts)
-        (refreshOpenAiAccount refreshLock clientId accountSources)
-        (discoverOpenAiAccounts billing accountSources)
+    let initial = map (.openAiState) activeAccounts
+        refresh =
+            refreshOpenAiAccount refreshLock clientId accountSources
+        discover =
+            discoverOpenAiAccounts billing accountSources
+    pool <- lift $ case billing of
+        SubscriptionBilled ->
+            OpenAI.newDiscoveringPoolWithRateLimitRevalidation
+                initial
+                refresh
+                discover
+                revalidateOpenAiRateLimit
+        ApiBilled ->
+            OpenAI.newDiscoveringPool initial refresh discover
     tokenProvider <- lift
         (OpenAICredential.poolTokenProviderWithBilling billing pool)
     pure LoadedAuth
@@ -341,6 +352,22 @@ loadOpenAi = do
         , loadedSelectionId = Nothing
         , loadedOpenAiPool = Just pool
         }
+
+revalidateOpenAiRateLimit
+    :: OpenAI.AuthState
+    -> IO (Either ApiError Bool)
+revalidateOpenAiRateLimit auth =
+    fmap (fmap usageAvailable) $
+        OpenAIUsage.fetchUsage auth.accessToken auth.accountId
+  where
+    usageAvailable OpenAIUsage.UsageSnapshot{rateLimit = Nothing} = True
+    usageAvailable OpenAIUsage.UsageSnapshot
+            { rateLimit = Just OpenAIUsage.UsageLimit
+                { allowed
+                , limitReached
+                }
+            } =
+        allowed && not limitReached
 
 loadOpenAiAccounts :: IO ([Text], [OpenAiAccount])
 loadOpenAiAccounts = do
