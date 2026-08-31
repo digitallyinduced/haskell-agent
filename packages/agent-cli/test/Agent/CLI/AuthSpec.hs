@@ -97,7 +97,7 @@ spec = do
                         Right loaded ->
                             loaded.loadedProvider `shouldBe` OpenAIProvider
 
-        it "keeps a local ChatGPT fallback behind the preferred gateway" $
+        it "keeps the connected gateway authoritative without a local fallback" $
             withTempHome \home ->
                 withCleanOpenAiEnv do
                     saveTestGateway home
@@ -109,11 +109,7 @@ spec = do
                     loadAuth (Just OpenAIProvider) >>= \case
                         Left err -> expectationFailure (Text.unpack err)
                         Right loaded -> do
-                            case loaded.loadedOpenAiPool of
-                                Nothing ->
-                                    expectationFailure
-                                        "expected local OpenAI fallback pool"
-                                Just _ -> pure ()
+                            loaded.loadedOpenAiPool `shouldBe` Nothing
                             gatewayCredential <-
                                 getNextToken
                                     loaded.loadedTokenProvider
@@ -122,110 +118,6 @@ spec = do
                             gatewayCredential.accountId
                                 `shouldBe`
                                     "wss://gateway.example/v1/responses"
-                            localCredential <-
-                                getNextToken
-                                    loaded.loadedTokenProvider
-                                    (Just FailedCredential
-                                        { credential = gatewayCredential
-                                        , failure =
-                                            AccountAuthenticationRejected
-                                        , failureReason =
-                                            testAuthenticationReason
-                                        })
-                                    >>= expectRightResult
-                            localCredential.accountId
-                                `shouldBe` "local-account"
-                            getNextToken
-                                loaded.loadedTokenProvider
-                                Nothing
-                                `shouldReturn` Right localCredential
-
-        it "falls back after a gateway WebSocket handshake 403" $
-            withTempHome \home ->
-                withCleanOpenAiEnv do
-                    saveTestGateway home
-                    storeOpenAiAccount
-                        "local-openai"
-                        "local-account"
-                        True
-                        farFutureAccessToken
-                    loadAuth (Just OpenAIProvider) >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded -> do
-                            pool <- case loaded.loadedOpenAiPool of
-                                Nothing -> do
-                                    expectationFailure
-                                        "expected local OpenAI fallback pool"
-                                    fail "missing local OpenAI fallback pool"
-                                Just pool -> pure pool
-                            preferred <- newIORef Nothing
-                            let selectableProvider =
-                                    preferredOpenAiTokenProvider
-                                        preferred
-                                        pool
-                                        loaded.loadedTokenProvider
-                                runtimeProvider =
-                                    tokenProviderWithNextToken
-                                        selectableProvider
-                                        (getNextToken selectableProvider)
-                            attempts <- newIORef ([] :: [Text])
-                            result <- runWithTokenProvider
-                                runtimeProvider
-                                \credential -> do
-                                    modifyIORef'
-                                        attempts
-                                        (<> [credential.accountId])
-                                    pure $
-                                        if credential.accountId
-                                            == "wss://gateway.example/v1/responses"
-                                            then Left $ HttpError 403
-                                                "WebSocket handshake returned HTTP 403"
-                                            else Right credential.accountId
-
-                            result `shouldBe` Right "local-account"
-                            readIORef attempts `shouldReturn`
-                                [ "wss://gateway.example/v1/responses"
-                                , "local-account"
-                                ]
-
-        it "does not replay an ordinary gateway request 403" $
-            withTempHome \home ->
-                withCleanOpenAiEnv do
-                    saveTestGateway home
-                    storeOpenAiAccount
-                        "local-openai"
-                        "local-account"
-                        True
-                        farFutureAccessToken
-                    loadAuth (Just OpenAIProvider) >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded -> do
-                            pool <- case loaded.loadedOpenAiPool of
-                                Nothing -> do
-                                    expectationFailure
-                                        "expected local OpenAI fallback pool"
-                                    fail "missing local OpenAI fallback pool"
-                                Just pool -> pure pool
-                            preferred <- newIORef Nothing
-                            let provider =
-                                    preferredOpenAiTokenProvider
-                                        preferred
-                                        pool
-                                        loaded.loadedTokenProvider
-                                forbidden =
-                                    HttpError 403
-                                        "request forbidden after connection"
-                            attempts <- newIORef ([] :: [Text])
-                            result <- runWithTokenProvider provider
-                                \credential -> do
-                                    modifyIORef'
-                                        attempts
-                                        (<> [credential.accountId])
-                                    pure (Left forbidden :: Either ApiError Text)
-
-                            result `shouldBe` Left forbidden
-                            readIORef attempts `shouldReturn`
-                                ["wss://gateway.example/v1/responses"]
 
         it "does not turn a rejected gateway into API-credit spending" $
             withTempHome \home ->

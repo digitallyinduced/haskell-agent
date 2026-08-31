@@ -4,7 +4,14 @@ import Agent.CLI.GatewayClient
 import Control.Exception.Safe (bracket)
 import Data.Aeson qualified as Aeson
 import Data.Bits ((.&.))
+import Data.ByteString (ByteString)
+import Data.IORef
+import Data.String (fromString)
 import Data.Text qualified as Text
+import Control.Monad (when)
+import Network.HTTP.Types
+import Network.Wai
+import Network.Wai.Handler.Warp qualified as Warp
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
@@ -16,8 +23,89 @@ import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
 
+catalogApplication
+    :: IORef [([Text.Text], Maybe ByteString)]
+    -> Application
+catalogApplication seen request respond = do
+    modifyIORef' seen
+        (<> [(request.pathInfo, lookup hAuthorization request.requestHeaders)])
+    let ids :: [Text.Text]
+        ids
+            | request.pathInfo == ["v1", "models"] = ["gpt-5.6-sol"]
+            | otherwise = ["sonnet", "opus"]
+    respond $
+        responseLBS status200 [(hContentType, "application/json")] $
+            Aeson.encode $
+                Aeson.object
+                    [ "object" Aeson..= ("list" :: Text.Text)
+                    , "data" Aeson..=
+                        [ Aeson.object ["id" Aeson..= modelId]
+                        | modelId <- ids
+                        ]
+                    ]
+
+redirectApplication :: Int -> Application
+redirectApplication leakPort _request respond =
+    respond $
+        responseLBS
+            status302
+            [(hLocation, "http://127.0.0.1:" <> fromString (show leakPort))]
+            ""
+
+leakApplication :: IORef Bool -> Application
+leakApplication leaked request respond = do
+    when
+        (lookup hAuthorization request.requestHeaders
+            == Just "Bearer must-not-leak")
+        (writeIORef leaked True)
+    respond (responseLBS status200 [] "{}")
+
 spec :: Spec
 spec = describe "gateway device authorization" do
+    it "discovers both authenticated alias catalogs" do
+        seen <- newIORef []
+        Warp.testWithApplication (pure (catalogApplication seen)) \port -> do
+            let origin = "http://127.0.0.1:" <> Text.pack (show port)
+            fetchGatewayModelCatalog
+                GatewayCredential
+                    { gatewayBaseUrl = origin
+                    , gatewayWebSocketUrl =
+                        "ws://127.0.0.1:" <> Text.pack (show port)
+                    , gatewayAccessToken = "catalog-secret"
+                    }
+                `shouldReturn`
+                    Right GatewayModelCatalog
+                        { gatewayResponsesModels = ["gpt-5.6-sol"]
+                        , gatewayAnthropicModels = ["sonnet", "opus"]
+                        }
+            readIORef seen
+                `shouldReturn`
+                    [ (["v1", "models"], Just "Bearer catalog-secret")
+                    , (["anthropic", "v1", "models"], Just "Bearer catalog-secret")
+                    ]
+
+    it "does not follow model-catalog redirects with the bearer" do
+        leaked <- newIORef False
+        Warp.testWithApplication (pure (leakApplication leaked)) \leakPort ->
+            Warp.testWithApplication
+                (pure (redirectApplication leakPort))
+                \gatewayPort -> do
+                    let origin =
+                            "http://127.0.0.1:"
+                                <> Text.pack (show gatewayPort)
+                    result <-
+                        fetchGatewayModelCatalog
+                            GatewayCredential
+                                { gatewayBaseUrl = origin
+                                , gatewayWebSocketUrl =
+                                    "ws://127.0.0.1:"
+                                        <> Text.pack (show gatewayPort)
+                                , gatewayAccessToken = "must-not-leak"
+                                }
+                    result `shouldBe`
+                        Left "Unable to load the connected gateway model catalog."
+                    readIORef leaked `shouldReturn` False
+
     it "decodes the device response contract" do
         let payload =
                 "{\"device_code\":\"had_secret\",\"user_code\":\"ABCD-1234\",\
