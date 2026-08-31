@@ -40,7 +40,7 @@ listDirTool :: ToolEnv -> AppTool
 listDirTool env = withToolResourceClaims (listDirClaims env) $
     jsonTool "list_dir" listDirDescription
     [ PropertySchema "target_directory" PropertyString True $ Just
-        "Path to a directory within an allowed filesystem root. Relative paths use the workspace root; absolute paths may resolve within the workspace or session temp directory."
+        "Path to a directory within an allowed filesystem root. Relative paths use the workspace root; absolute paths may resolve within the workspace or session temp directory. If the user does not specify a directory, use \".\"."
     ]
     True
     ParallelSafe

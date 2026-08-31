@@ -138,6 +138,18 @@ spec = describe "systemPrompt" do
         prompt `shouldNotSatisfy` Text.isInfixOf "Prefer ghci for scripting"
         prompt `shouldNotSatisfy` Text.isInfixOf "Use ask_secret"
 
+    it "does not invent hosted search for an exact local tool set" do
+        let prompt =
+                systemPromptForAvailableTools
+                    genericResponsesDialect
+                    ["read_file", "list_dir", "grep"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        prompt `shouldSatisfy` Text.isInfixOf "read_file"
+        prompt `shouldNotSatisfy` Text.isInfixOf "web_search"
+
     it "adds secret guidance only when ask_secret is registered" do
         let withSecret =
                 systemPromptForTools

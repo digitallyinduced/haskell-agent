@@ -71,7 +71,7 @@ import Agent.CLI.Project
     , saveProjectMaxConcurrentAgents
     )
 import Agent.CLI.Prompt
-    ( systemPromptForTools )
+    ( systemPromptForAvailableTools )
 import Agent.CLI.Resume (resumeNeedsGeneratedContext)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
@@ -127,11 +127,7 @@ import Agent.CLI.Terminal
     , resolveColor
     )
 import Agent.CLI.Request (setRequestInstructionsAndTools)
-import Agent.CLI.Tools
-    ( hostedSearchToolNames
-    , requireToolRegistry
-    , schemasFromAppTools
-    )
+import Agent.CLI.Tools (requireToolRegistry)
 import Agent.CLI.Dialects
     ( filterBashTools
     , filterGhciTools
@@ -161,13 +157,7 @@ import Agent.CLI.WindowTitle
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.Cancel (requestCancel)
 import Agent.Loop
-import Agent.Dialect
-    ( DialectId(..)
-    , ToolLayout(..)
-    , dialectId
-    , dialectToolLayout
-    , grokBuildPublicToolName
-    )
+import Agent.Dialect (dialectId)
 import Agent.Skills
     ( SkillCatalog(..)
     , SkillWarning(..)
@@ -190,15 +180,11 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
     )
-import Agent.Tools.MultiAgents
-    ( MultiAgentContext(..)
-    , multiAgentToolNames
-    )
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..) )
 import Agent.Tools.Types
-    ( AppTool(..)
-    , ToolEnv(..)
+    ( ToolEnv(..)
     , setToolSessionTmp
     )
 import Agent.OsPath (toText)
@@ -831,32 +817,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         currentActiveToolNames = do
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef
-            let active =
-                    activeShellTools ghciEnabled bashEnabled
-                internalNames = map (.appToolName) active
-                projectedNames =
-                    case dialectToolLayout dialect of
-                        NoHostToolLayout -> []
-                        FlatToolLayout
-                            | dialectId dialect
-                                == GrokBuildDialect ->
-                                    map
-                                        grokBuildPublicToolName
-                                        internalNames
-                            | otherwise -> internalNames
-                        CollaborationNamespaceLayout ->
-                            filter
-                                (`notElem` multiAgentToolNames)
-                                internalNames
-                                <> if any
-                                    (`elem` multiAgentToolNames)
-                                    internalNames
-                                    then ["collaboration"]
-                                    else []
             pure $
-                case dialectToolLayout dialect of
-                    NoHostToolLayout -> []
-                    _ -> hostedSearchToolNames dialect ++ projectedNames
+                fst
+                    (projectTools
+                        (activeShellTools ghciEnabled bashEnabled))
         shellModeFlags = \case
             ShellGhci -> (True, False)
             ShellBash -> (False, True)
@@ -871,19 +835,22 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             sessionTmp <- readIORef toolEnv.toolSessionTmp
             today <- utctDay <$> getCurrentTime
             let enabledTools = activeShellTools ghciEnabled bashEnabled
+                (promptToolNames, toolSchemas) =
+                    projectTools enabledTools
                 instructionText =
-                    systemPromptForTools
+                    systemPromptForAvailableTools
                         dialect
-                        (map (.appToolName) enabledTools)
+                        promptToolNames
                         cwd
                         sessionTmp
                         today
                         (isOneShot options)
-                toolSchemas = schemasFromAppTools dialect enabledTools
             modifyIORef' paramsRef
-                (setRequestInstructionsAndTools
-                    instructionText
-                    (Just toolSchemas))
+                ( finalizeRequestParams
+                    . setRequestInstructionsAndTools
+                        instructionText
+                        (Just toolSchemas)
+                )
         setShellMode mode = do
             let (ghciEnabled, bashEnabled) = shellModeFlags mode
             writeIORef ghciEnabledRef ghciEnabled

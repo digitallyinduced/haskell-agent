@@ -12,6 +12,7 @@ import Agent.CLI.AgentSessions
     , closeSessionThreadManager
     , newSessionThreadManager
     )
+import Agent.CLI.RuntimeModel ( RuntimeResponsesModel )
 import Agent.CLI.Options
     ( Command(..)
     , parseArgs
@@ -53,12 +54,13 @@ closeNativeProcessRuntime runtime =
 
 runNativeAgent
     :: NativeProcessRuntime
+    -> Maybe RuntimeResponsesModel
     -> Handle
     -> OsPath
     -> NativeRunHooks
     -> [String]
     -> IO (Either Text ())
-runNativeAgent runtime output cwd hooks args =
+runNativeAgent runtime runtimeModel output cwd hooks args =
     case parseArgs args of
         Left err -> pure (Left (Text.pack err))
         Right (RunAgent options) ->
@@ -66,6 +68,7 @@ runNativeAgent runtime output cwd hooks args =
                 AgentProcessRuntime
                     { processMcpSupervisor = runtime.nativeMcpSupervisor
                     , processSessionThreads = runtime.nativeSessionThreads
+                    , processRuntimeResponsesModel = runtimeModel
                     }
                 (nativeRunMode output cwd hooks)
                 options >>= \case

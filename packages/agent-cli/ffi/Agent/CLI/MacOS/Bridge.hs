@@ -15,6 +15,10 @@ module Agent.CLI.MacOS.Bridge
     ) where
 
 import qualified Agent.CLI.AgentViewport as Viewport
+import Agent.CLI.AppleFoundationModels
+    ( appleFoundationModelId
+    , withAppleFoundationModelRuntime
+    )
 import Agent.CLI.BrowserTools
     ( BrowserCommand(..)
     , browserTools
@@ -90,6 +94,10 @@ import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ModelCatalog
     , catalogModelById
+    )
+import Agent.CLI.RuntimeModel
+    ( RuntimeResponsesModel
+    , applyRuntimeResponsesModel
     )
 import Agent.CLI.GatewayModels (loadGatewayModelCatalogAt)
 import Agent.CLI.Database (DatabaseScope(..))
@@ -1719,23 +1727,26 @@ workerLifecycle
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> IO ()
-workerLifecycle callback context config root commands stagedImages browser = do
-    store <- newMVar Nothing
-    processRuntime <- newNativeProcessRuntime root
-    let cleanup =
-            closeNativeProcessRuntime processRuntime
-                `finally` closeEngineStore store
-    idleLoop
-        callback
-        context
-        config
-        store
-        root
-        processRuntime
-        commands
-        stagedImages
-        browser
-        `finally` cleanup
+workerLifecycle
+        callback context config root commands stagedImages browser =
+    withAppleFoundationModelRuntime \runtimeResponsesModel -> do
+        store <- newMVar Nothing
+        processRuntime <- newNativeProcessRuntime root
+        let cleanup =
+                closeNativeProcessRuntime processRuntime
+                    `finally` closeEngineStore store
+        idleLoop
+            callback
+            context
+            config
+            store
+            root
+            processRuntime
+            commands
+            stagedImages
+            browser
+            runtimeResponsesModel
+            `finally` cleanup
 
 idleLoop
     :: FunPtr EventCallback
@@ -1747,8 +1758,11 @@ idleLoop
     -> TQueue EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
+    -> IO (Maybe RuntimeResponsesModel)
     -> IO ()
-idleLoop callback context config store root processRuntime commands stagedImages browser =
+idleLoop
+        callback context config store root processRuntime commands stagedImages
+        browser runtimeResponsesModel =
     atomically (readTQueue commands) >>= \case
         EngineStop -> pure ()
         EngineSearch query limit searchCallback searchContext -> do
@@ -1770,46 +1784,24 @@ idleLoop callback context config store root processRuntime commands stagedImages
                             (failureEvent request.requestId err)
                         continue
                     Right start -> do
-                        images <- atomically $ do
-                            staged <- readTVar stagedImages
-                            writeTVar stagedImages
-                                (Map.delete start.turnStartId staged)
-                            pure (Map.findWithDefault [] start.turnStartId staged)
-                        nativeBrowserTools <- browserToolsWhenEnabled browser
-                        control <- newTurnControl start.turnStartId
-                        sendEvent callback context $
-                            successEvent request.requestId $
-                                Aeson.object
-                                    [ "turnId" Aeson..= start.turnStartId
-                                    ]
-                        sendTurnStatus
-                            callback
-                            context
-                            start.turnStartId
-                            (if start.turnStartWorktree
-                                then "Creating worktree…"
-                                else "Starting…")
-                        withAsync
-                            (runNativeTurn
-                                callback
-                                context
-                                processRuntime
-                                control
-                                nativeBrowserTools
-                                start
-                                images)
-                            \running ->
-                                activeLoop
-                                    callback
-                                    context
-                                    config
-                                    store
-                                    root
-                                    commands
-                                    control
-                                    running >>= \case
-                                        ActiveContinue -> continue
-                                        ActiveStop -> pure ()
+                        selectedRuntimeModel <-
+                            validatedRuntimeModel runtimeResponsesModel
+                        case selectedRuntimeModel of
+                            Nothing
+                                | start.turnStartModel
+                                    == Just appleFoundationModelId -> do
+                                        atomically $ modifyTVar' stagedImages
+                                            (Map.delete start.turnStartId)
+                                        sendEvent callback context $
+                                            failureEvent
+                                                request.requestId
+                                                "Apple Intelligence is no longer available"
+                                        continue
+                            _ ->
+                                launchTurn
+                                    request.requestId
+                                    start
+                                    selectedRuntimeModel
             | request.requestMethod `elem`
                 ["turn.cancel", "approval.resolve"] -> do
                     sendEvent callback context $
@@ -1818,10 +1810,55 @@ idleLoop callback context config store root processRuntime commands stagedImages
                             "there is no active turn"
                     continue
             | otherwise -> do
-                event <- handleRequest config store root request
+                event <- handleRequest
+                    config store root runtimeResponsesModel request
                 sendEvent callback context event
                 continue
   where
+    launchTurn startRequestId start selectedRuntimeModel = do
+        images <- atomically $ do
+            staged <- readTVar stagedImages
+            writeTVar stagedImages
+                (Map.delete start.turnStartId staged)
+            pure (Map.findWithDefault [] start.turnStartId staged)
+        nativeBrowserTools <- browserToolsWhenEnabled browser
+        control <- newTurnControl start.turnStartId
+        sendEvent callback context $
+            successEvent startRequestId $
+                Aeson.object
+                    [ "turnId" Aeson..= start.turnStartId
+                    ]
+        sendTurnStatus
+            callback
+            context
+            start.turnStartId
+            (if start.turnStartWorktree
+                then "Creating worktree…"
+                else "Starting…")
+        withAsync
+            (runNativeTurn
+                callback
+                context
+                processRuntime
+                selectedRuntimeModel
+                control
+                nativeBrowserTools
+                start
+                images)
+            \running ->
+                activeLoop
+                    callback
+                    context
+                    config
+                    store
+                    root
+                    commands
+                    control
+                    runtimeResponsesModel
+                    running >>= \case
+                        ActiveContinue -> continue
+                        ActiveStop -> pure ()
+
     continue =
         idleLoop
             callback
@@ -1833,6 +1870,7 @@ idleLoop callback context config store root processRuntime commands stagedImages
             commands
             stagedImages
             browser
+            runtimeResponsesModel
 
 activeLoop
     :: FunPtr EventCallback
@@ -1842,9 +1880,12 @@ activeLoop
     -> OsPath
     -> TQueue EngineCommand
     -> TurnControl
+    -> IO (Maybe RuntimeResponsesModel)
     -> Async TurnOutcome
     -> IO ActiveExit
-activeLoop callback context config store root commands control running =
+activeLoop
+        callback context config store root commands control runtimeResponsesModel
+        running =
     atomically
         ((Left <$> readTQueue commands)
             `orElse` (Right <$> waitCatchSTM running)) >>= \case
@@ -1859,12 +1900,14 @@ activeLoop callback context config store root commands control running =
             runConversationSearch
                 config store query limit searchCallback searchContext
             activeLoop
-                callback context config store root commands control running
+                callback context config store root commands control
+                    runtimeResponsesModel running
         Left (EngineSessionMutation mutation resultCallback resultContext) -> do
             runSessionMutation
                 config store root mutation resultCallback resultContext
             activeLoop
-                callback context config store root commands control running
+                callback context config store root commands control
+                    runtimeResponsesModel running
         Left (EngineRequest request) -> do
             if request.requestMethod == "turn.cancel"
               then
@@ -1891,7 +1934,8 @@ activeLoop callback context config store root commands control running =
                 sendEvent callback context $
                     failureEvent request.requestId "a turn is already running"
               else
-                handleRequest config store root request
+                handleRequest
+                    config store root runtimeResponsesModel request
                     >>= sendEvent callback context
             activeLoop
                 callback
@@ -1901,6 +1945,7 @@ activeLoop callback context config store root commands control running =
                 root
                 commands
                 control
+                runtimeResponsesModel
                 running
 
 runSessionMutation
@@ -2121,12 +2166,15 @@ runNativeTurn
     :: FunPtr EventCallback
     -> Ptr ()
     -> NativeProcessRuntime
+    -> Maybe RuntimeResponsesModel
     -> TurnControl
     -> [AppTool]
     -> TurnStart
     -> [ImageAttachment]
     -> IO TurnOutcome
-runNativeTurn callback context processRuntime control nativeBrowserTools start images = do
+runNativeTurn
+        callback context processRuntime runtimeResponsesModel control
+        nativeBrowserTools start images = do
     sessionIdRef <- newIORef start.turnStartSessionId
     completedRef <- newIORef False
     let hooks = NativeRunHooks
@@ -2161,6 +2209,7 @@ runNativeTurn callback context processRuntime control nativeBrowserTools start i
             withFile "/dev/null" WriteMode \output ->
                 runNativeAgent
                     processRuntime
+                    runtimeResponsesModel
                     output
                     (unsafeEncodeUtf start.turnStartCwd)
                     hooks
@@ -2476,9 +2525,10 @@ handleRequest
     :: ManagedPostgresConfig
     -> MVar (Maybe Store)
     -> OsPath
+    -> IO (Maybe RuntimeResponsesModel)
     -> BridgeRequest
     -> IO Aeson.Value
-handleRequest config store root request = do
+handleRequest config store root runtimeResponsesModel request = do
     result <- tryAny (handleMethod request)
     pure $ either
         (failureEvent request.requestId . Text.pack . show)
@@ -2534,9 +2584,12 @@ handleRequest config store root request = do
                         pure (failureEvent current.requestId err)
                     Right parameters -> do
                         activeStore <- acquireStore config store
+                        runtimeModel <-
+                            validatedRuntimeModel runtimeResponsesModel
                         catalogResult <- loadNativeModelCatalog
                             activeStore
                             root
+                            runtimeModel
                             parameters
                         pure $ either
                             (failureEvent current.requestId)
@@ -2546,12 +2599,18 @@ handleRequest config store root request = do
                 pure $ failureEvent current.requestId
                     ("unknown method: " <> method)
 
+validatedRuntimeModel
+    :: IO (Maybe RuntimeResponsesModel)
+    -> IO (Maybe RuntimeResponsesModel)
+validatedRuntimeModel = id
+
 loadNativeModelCatalog
     :: Store
     -> OsPath
+    -> Maybe RuntimeResponsesModel
     -> ModelsListRequest
     -> IO (Either Text Aeson.Value)
-loadNativeModelCatalog store root request = do
+loadNativeModelCatalog store root runtimeResponsesModel request = do
     let home = takeDirectory (takeDirectory root)
         requestedCwd = unsafeEncodeUtf request.modelsListCwd
     contextResult <- currentModelContext
@@ -2564,7 +2623,11 @@ loadNativeModelCatalog store root request = do
         Right (cwd, maybeTarget) ->
             loadGatewayModelCatalogAt home cwd >>= \case
                 Left err -> pure (Left err)
-                Right catalog -> do
+                Right loadedCatalog -> do
+                    let catalog = maybe
+                            loadedCatalog
+                            (`applyRuntimeResponsesModel` loadedCatalog)
+                            runtimeResponsesModel
                     let configuredTarget = do
                             target <- maybeTarget
                             option <-

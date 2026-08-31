@@ -1,7 +1,9 @@
--- | Provider-neutral HTTP transport for streaming Responses endpoints.
+-- | Provider-neutral HTTP transports for Responses endpoints.
 module Agent.Responses.HttpSSE
-    ( HttpSseConfig(..)
+    ( HttpJsonConfig(..)
+    , HttpSseConfig(..)
     , StreamEventCallback
+    , performChatCompletionsHttpJson
     , performResponsesHttpSse
     ) where
 
@@ -21,6 +23,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
+import qualified Data.Aeson as Aeson
 import qualified Network.HTTP.Client as HttpClient
 import qualified Network.HTTP.Client.TLS as HttpTls
 import Network.HTTP.Simple hiding (Response)
@@ -36,6 +39,79 @@ data HttpSseConfig = HttpSseConfig
     , buildResponse :: !([ResponseStreamEvent] -> Either ApiError Response)
       -- ^ Assemble retained terminal events into the provider response.
     }
+
+data HttpJsonConfig = HttpJsonConfig
+    { jsonExceptionPrefix :: !Text
+      -- ^ Prefix used when request setup or transport code throws.
+    , jsonClassifyFailure :: !(Int -> Maybe Int -> Text -> ApiError)
+      -- ^ Classify a non-success status, optional @Retry-After@, and body.
+    }
+
+-- | POST one non-streaming Chat Completions request and decode its JSON
+-- response. This shares failure and timeout behavior with the Responses
+-- transport while using the endpoint's distinct path.
+performChatCompletionsHttpJson
+    :: Aeson.FromJSON response
+    => HttpJsonConfig
+    -> String
+    -> Int
+    -> LBS.ByteString
+    -> (Request -> Request)
+    -> IO (Either ApiError response)
+performChatCompletionsHttpJson = performHttpJson "/chat/completions"
+
+performHttpJson
+    :: Aeson.FromJSON response
+    => String
+    -> HttpJsonConfig
+    -> String
+    -> Int
+    -> LBS.ByteString
+    -> (Request -> Request)
+    -> IO (Either ApiError response)
+performHttpJson
+    endpoint
+    HttpJsonConfig{jsonExceptionPrefix, jsonClassifyFailure}
+    baseUrl
+    timeoutSeconds
+    requestBody
+    configureRequest =
+        tryAny performRequest >>= \case
+            Left exception -> pure $ Left $ ConnectionError
+                (jsonExceptionPrefix <> ": " <> Text.pack (show exception))
+            Right result -> pure result
+  where
+    performRequest = do
+        baseRequest <- parseRequest
+            ("POST " <> trimTrailingSlash baseUrl <> endpoint)
+        response <- httpLBS
+            ( setRequestBodyLBS requestBody
+            $ configureRequest
+            $ setRequestHeader "Content-Type" ["application/json"]
+            $ setRequestHeader "Accept" ["application/json"]
+            $ setRequestResponseTimeout
+                (HttpClient.responseTimeoutMicro
+                    (timeoutSeconds * 1_000_000))
+                baseRequest
+            )
+        let status = getResponseStatusCode response
+            body = getResponseBody response
+        if status >= 200 && status < 300
+            then case Aeson.eitherDecode' body of
+                Left err -> pure $ Left $ ConnectionError
+                    ( jsonExceptionPrefix
+                        <> ": invalid JSON response: "
+                        <> Text.pack err
+                    )
+                Right decoded -> pure (Right decoded)
+            else do
+                let bodyText = Text.decodeUtf8With Text.lenientDecode
+                        (LBS.toStrict body)
+                pure $ Left $
+                    jsonClassifyFailure status
+                        (parseRetryAfterSeconds
+                            (getResponseHeader "Retry-After" response))
+                        bodyText
 
 -- | POST one streaming Responses request and deliver decoded events in wire
 -- order. The request modifier supplies provider-specific authentication and

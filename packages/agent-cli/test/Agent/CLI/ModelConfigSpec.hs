@@ -1,6 +1,14 @@
 module Agent.CLI.ModelConfigSpec (spec) where
 
 import Agent.CLI.ModelConfig
+import Agent.CLI.RuntimeModel
+    ( RuntimeModelTransport(..)
+    , RuntimeResponsesModel(..)
+    , appleFoundationModelsConnectionId
+    , appleFoundationModelsModelId
+    , applyRuntimeResponsesModel
+    , mkAppleFoundationModelsRuntime
+    )
 import Agent.Dialect (DialectId(..))
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Provider (Provider(..))
@@ -114,6 +122,58 @@ spec = describe "Agent.CLI.ModelConfig" do
             `shouldBe` [GenericResponsesDialect]
         fmap (.catalogModelContextWindow) custom
             `shouldBe` [Just 32_768]
+
+    it "adds the authenticated on-device Apple model only at runtime" do
+        defaults <- readPackagedDefaults
+        catalog <- expectRight (decodeModelConfig "models.default.json" defaults)
+        runtime <- expectRight $
+            mkAppleFoundationModelsRuntime
+                "http://127.0.0.1:49152/v1/"
+                "ephemeral-token"
+                4096
+        let augmented = applyRuntimeResponsesModel runtime catalog
+        runtime.runtimeResponsesBearerToken `shouldBe` "ephemeral-token"
+        runtime.runtimeResponsesTransport
+            `shouldBe` RuntimeChatCompletionsTransport
+        fmap (.catalogModelId)
+            (catalogModelById augmented appleFoundationModelsModelId)
+            `shouldBe` Just appleFoundationModelsModelId
+        fmap (.catalogModelContextWindow)
+            (catalogModelById augmented appleFoundationModelsModelId)
+            `shouldBe` Just (Just 4096)
+        nextRuntime <- expectRight $
+            mkAppleFoundationModelsRuntime
+                "http://127.0.0.1:49153/v1"
+                "ephemeral-token"
+                8192
+        nextRuntime.runtimeResponsesCatalogModel.catalogModelContextWindow
+            `shouldBe` Just 8192
+        fmap (.catalogModelReasoningEfforts)
+            (catalogModelById augmented appleFoundationModelsModelId)
+            `shouldBe` Just (Just [])
+        Map.lookup appleFoundationModelsConnectionId
+            augmented.catalogConnections
+            `shouldBe`
+                Just ModelConnection
+                    { connectionId = appleFoundationModelsConnectionId
+                    , connectionKind =
+                        CustomResponsesConnection ResponsesConnection
+                            { responsesBaseUrl =
+                                "http://127.0.0.1:49152/v1"
+                            , responsesApiKeyEnv = Nothing
+                            , responsesApiKeyOptional = False
+                            , responsesRequestTimeoutSeconds = 600
+                            }
+                    }
+        case mkAppleFoundationModelsRuntime
+            "https://example.invalid/v1"
+            "ephemeral-token"
+            4096 of
+            Left err ->
+                err `shouldSatisfy` Text.isInfixOf "127.0.0.1"
+            Right _ ->
+                expectationFailure
+                    "expected a non-loopback Apple runtime URL to be rejected"
 
     it "uses the effective configured wire model after a transport remap" do
         defaults <- readPackagedDefaults

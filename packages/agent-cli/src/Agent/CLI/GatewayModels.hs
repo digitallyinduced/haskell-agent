@@ -1,9 +1,9 @@
 -- | Canonical model aliases exposed by the Digitally Induced LLM gateway.
 --
--- Gateway credentials are process-wide, so the active catalog is deliberately
--- exclusive: direct provider models disappear while connected and gateway
--- aliases disappear while disconnected. This prevents a direct model id from
--- being sent to the gateway (or a router alias from reaching a provider).
+-- Gateway credentials are process-wide. Built-in direct-provider models are
+-- hidden while connected, but explicitly configured custom Responses
+-- connections remain available because they carry independent authentication
+-- and transport.
 module Agent.CLI.GatewayModels
     ( catalogForGatewayState
     , catalogUsesGateway
@@ -16,12 +16,15 @@ module Agent.CLI.GatewayModels
 import Agent.CLI.GatewayClient (loadGatewayCredentialAt)
 import Agent.CLI.ModelConfig
     ( CatalogModel(..)
+    , ConnectionKind(..)
     , ModelCatalog(..)
+    , ModelConnection(..)
     , builtinConnectionId
     , loadModelCatalogAt
     )
 import Agent.Dialect (DialectId (CodexDialect))
 import Agent.Provider (Provider (OpenAIProvider))
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import System.OsPath (OsPath)
 
@@ -40,12 +43,22 @@ isGatewayModelId modelId = modelId `elem` gatewayModelIds
 
 catalogUsesGateway :: ModelCatalog -> Bool
 catalogUsesGateway catalog =
-    not (null catalog.catalogModels)
-        && all (isGatewayModelId . (.catalogModelId)) catalog.catalogModels
+    any (isGatewayModelId . (.catalogModelId)) catalog.catalogModels
 
 catalogForGatewayState :: Bool -> ModelCatalog -> ModelCatalog
 catalogForGatewayState connected catalog
-    | connected = catalog { catalogModels = canonicalGatewayModels }
+    | connected =
+        catalog
+            { catalogModels =
+                canonicalGatewayModels
+                    <> filter
+                        (\model ->
+                            usesCustomConnection catalog model
+                                && not
+                                    (isGatewayModelId
+                                        model.catalogModelId))
+                        catalog.catalogModels
+            }
     | otherwise =
         catalog
             { catalogModels =
@@ -53,6 +66,15 @@ catalogForGatewayState connected catalog
                     (not . isGatewayModelId . (.catalogModelId))
                     catalog.catalogModels
             }
+
+usesCustomConnection :: ModelCatalog -> CatalogModel -> Bool
+usesCustomConnection catalog model =
+    case Map.lookup
+        model.catalogModelConnectionId
+        catalog.catalogConnections of
+        Just ModelConnection
+            { connectionKind = CustomResponsesConnection _ } -> True
+        _ -> False
 
 loadGatewayModelCatalogAt
     :: OsPath

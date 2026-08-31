@@ -112,7 +112,9 @@ import Agent.CLI.Project
       resolveProjectRoot,
       saveProjectModel )
 import Agent.CLI.Prompt
-    ( subscriptionSubagentModelGuidance, systemPromptForTools )
+    ( subscriptionSubagentModelGuidance
+    , systemPromptForAvailableTools
+    )
 import Agent.CLI.PromptHooks
     ( fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
 import Agent.CLI.Provider.OpenAI
@@ -139,6 +141,12 @@ import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
 import Agent.CLI.Request ( requestParams )
 import Agent.CLI.Runtime.Persistence ( preparePersistence )
+import Agent.CLI.RuntimeModel
+    ( RuntimeModelTransport(..)
+    , RuntimeResponsesModel(..)
+    , applyRuntimeResponsesModel
+    , runtimeResponsesModelMatches
+    )
 import Agent.CLI.Runtime.Recap
     ( runSessionRecap, runSessionTurnSummary )
 import Agent.CLI.Runtime.Repl
@@ -253,7 +261,11 @@ import Agent.CLI.Terminal
       reportTerminalCwd,
       resolveColor,
       TerminalCapabilities(terminalNativeProgress) )
-import Agent.CLI.Tools ( schemasFromAppTools )
+import Agent.CLI.Tools
+    ( functionSchemasFromAppTools
+    , responseToolNames
+    , schemasFromAppTools
+    )
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
@@ -421,6 +433,12 @@ import qualified Agent.Responses.GenericClient as GenericResponses
     ( GenericClientOptions(model),
       createResponseWith,
       createResponseWithEvents )
+import qualified Agent.Responses.ChatCompletions as ChatCompletions
+    ( ChatCompletionsOptions(..)
+    , createChatCompletionWith
+    , createChatCompletionWithEvents
+    , reinforceFunctionSchemas
+    )
 import qualified Agent.MCP as MCP
     ( acquireMcpFleetProgressive,
       acquireMcpFleetWithProgress,
@@ -1070,11 +1088,14 @@ runAgentInitializedWithLock
                 (detectGitBranch cwd))
     catalog <- either
         (startupDie startup . Text.unpack)
-        pure
+        (pure . maybe
+            id
+            applyRuntimeResponsesModel
+            processRuntime.processRuntimeResponsesModel)
         catalogResult
     setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
-    let gatewayMode = catalogUsesGateway catalog
+    let gatewayAvailable = catalogUsesGateway catalog
         transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         unavailableProviders =
@@ -1085,12 +1106,34 @@ runAgentInitializedWithLock
         gatewayDefaultTarget =
             (.modelTarget)
                 <$> resolveConfiguredModel catalog gatewayDefaultModelId
+        gatewayCompatibleTarget target =
+            case resolveConfiguredModel catalog target.targetModelId of
+                Just option
+                    | option.modelTarget == target ->
+                        isGatewayModelId target.targetModelId
+                            || case catalogConnection
+                                catalog
+                                target.targetConnectionId of
+                                Just ModelConnection
+                                    { connectionKind =
+                                        CustomResponsesConnection _ } ->
+                                            True
+                                _ -> False
+                _ -> False
         savedTarget provider connection model transport dialect =
             case resolveConfiguredModel catalog model of
                 Just option
                     | option.modelTarget.targetConnectionId == connection ->
                         Right option.modelTarget
                 _
+                    | isGatewayModelId model ->
+                        Left
+                            "gateway router models require an active gateway connection"
+                    | gatewayAvailable ->
+                        Left $
+                            "saved direct-provider model "
+                                <> connection <> "/" <> model
+                                <> " is unavailable while the gateway is connected"
                     | connection == builtinConnectionId provider ->
                         Right ModelTarget
                             { targetProvider = provider
@@ -1105,14 +1148,10 @@ runAgentInitializedWithLock
                                 <> connection <> "/" <> model
                                 <> " is not present in ~/.haskell-agent/models.json"
         resumedTargetResult
-            | gatewayMode =
-                Right Nothing
             | isJust transitionTarget || isJust options.optModel =
                 Right Nothing
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
-            Just meta
-                | isGatewayModelId meta.metaModel -> Right Nothing
             Just meta ->
                 Just <$> savedTarget
                     meta.metaProvider
@@ -1121,8 +1160,6 @@ runAgentInitializedWithLock
                     meta.metaTransportModel
                     meta.metaDialect
         projectTargetResult
-            | gatewayMode =
-                Right Nothing
             | isJust transitionTarget
                 || isJust options.optModel
                 || isJust resumed =
@@ -1131,31 +1168,36 @@ runAgentInitializedWithLock
             Nothing -> Right Nothing
             Just remembered ->
                 let target = remembered.projectModelTarget
-                in if isGatewayModelId target.targetModelId
-                    then Right Nothing
-                    else
-                        Just <$> savedTarget
-                            target.targetProvider
-                            target.targetConnectionId
-                            target.targetModelId
-                            (Just target.targetWireModelId)
-                            target.targetDialect
+                in Just <$> savedTarget
+                    target.targetProvider
+                    target.targetConnectionId
+                    target.targetModelId
+                    (Just target.targetWireModelId)
+                    target.targetDialect
     when
-        ( gatewayMode
+        ( gatewayAvailable
             && isJust options.optModel
             && isNothing configuredOptionTarget
         ) $
         startupDie startup
-            "the connected gateway accepts router-default, router-codex, or \
-            \router-grok; direct provider model ids are unavailable"
+            "the requested model is unavailable while the gateway is connected"
     when
-        ( not gatewayMode
+        ( gatewayAvailable
+            && maybe
+                False
+                (not . gatewayCompatibleTarget)
+                transitionTarget
+        ) $
+        startupDie startup
+            "the requested provider transition is unavailable while the gateway is connected"
+    when
+        ( not gatewayAvailable
             && maybe False isGatewayModelId options.optModel
         ) $
         startupDie startup
             "gateway router models require an active gateway connection"
     when
-        ( not gatewayMode
+        ( not gatewayAvailable
             && maybe
                 False
                 (isGatewayModelId . (.targetModelId))
@@ -1167,23 +1209,18 @@ runAgentInitializedWithLock
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
         either (startupDie startup . Text.unpack) pure projectTargetResult
-    let gatewayTarget candidate =
-            candidate >>= \target ->
-                if isGatewayModelId target.targetModelId
-                    then Just target
+    let targetHint =
+            transitionTarget
+                <|> configuredOptionTarget
+                <|> resumedTarget
+                <|> if isNothing options.optModel
+                    then projectTarget <|> gatewayDefaultTarget
                     else Nothing
-        targetHint
-            | gatewayMode =
-                gatewayTarget transitionTarget
-                    <|> configuredOptionTarget
-                    <|> gatewayDefaultTarget
-            | otherwise =
-                transitionTarget
-                    <|> configuredOptionTarget
-                    <|> resumedTarget
-                    <|> if isNothing options.optModel
-                        then projectTarget
-                        else Nothing
+        gatewayMode =
+            maybe
+                False
+                (isGatewayModelId . (.targetModelId))
+                targetHint
         requestedProvider =
             (.targetProvider) <$> targetHint
                 <|> options.optProvider
@@ -1197,6 +1234,16 @@ runAgentInitializedWithLock
                 CustomResponsesConnection responses -> Just
                     (connection.connectionId, responses)
                 BuiltinConnection _ -> Nothing
+        selectedRuntimeModel =
+            case
+                (processRuntime.processRuntimeResponsesModel, targetHint) of
+                (Just runtime, Just target)
+                    | runtimeResponsesModelMatches
+                        runtime
+                        target.targetConnectionId
+                        target.targetModelId ->
+                            Just runtime
+                _ -> Nothing
         checkStartupUsageInBackground =
             not gatewayMode
                 && isJust fullscreen
@@ -1211,26 +1258,29 @@ runAgentInitializedWithLock
                     loadStartupAuth startup transition requestedProvider
                 pure (startupAuth, Nothing)
             Just (connectionId, responses) -> do
-                token <- case responses.responsesApiKeyEnv of
-                    Nothing
-                        | responses.responsesApiKeyOptional -> pure ""
-                        | otherwise ->
-                            startupDie startup $
-                                "custom connection "
-                                    <> Text.unpack connectionId
-                                    <> " requires api_key_env or api_key_optional=true"
-                    Just envName ->
-                        lookupEnv (Text.unpack envName) >>= \case
-                            Just value
-                                | not (null value) -> pure (Text.pack value)
-                            _
-                                | responses.responsesApiKeyOptional -> pure ""
-                                | otherwise ->
-                                    startupDie startup $
-                                        "custom connection "
-                                            <> Text.unpack connectionId
-                                            <> " requires environment variable "
-                                            <> Text.unpack envName
+                token <- case selectedRuntimeModel of
+                    Just runtime ->
+                        pure runtime.runtimeResponsesBearerToken
+                    _ -> case responses.responsesApiKeyEnv of
+                        Nothing
+                            | responses.responsesApiKeyOptional -> pure ""
+                            | otherwise ->
+                                startupDie startup $
+                                    "custom connection "
+                                        <> Text.unpack connectionId
+                                        <> " requires api_key_env or api_key_optional=true"
+                        Just envName ->
+                            lookupEnv (Text.unpack envName) >>= \case
+                                Just value
+                                    | not (null value) -> pure (Text.pack value)
+                                _
+                                    | responses.responsesApiKeyOptional -> pure ""
+                                    | otherwise ->
+                                        startupDie startup $
+                                            "custom connection "
+                                                <> Text.unpack connectionId
+                                                <> " requires environment variable "
+                                                <> Text.unpack envName
                 let credential = Credential
                         { accessToken = token
                         , accountId = connectionId
@@ -1579,6 +1629,12 @@ runAgentInitializedWithLock
                 }
         customGenericOptions = do
             (_, responses) <- customResponses
+            case selectedRuntimeModel of
+                Just runtime
+                    | runtime.runtimeResponsesTransport
+                        == RuntimeChatCompletionsTransport ->
+                            Nothing
+                _ -> pure ()
             pure GenericClientOptions
                 { baseUrl = Text.unpack responses.responsesBaseUrl
                 , model = inferredTarget.targetWireModelId
@@ -1586,6 +1642,57 @@ runAgentInitializedWithLock
                 , requestTimeoutSeconds =
                     responses.responsesRequestTimeoutSeconds
                 }
+        customChatOptions = do
+            (_, responses) <- customResponses
+            runtime <- selectedRuntimeModel
+            if runtime.runtimeResponsesTransport
+                == RuntimeChatCompletionsTransport
+                then pure ChatCompletions.ChatCompletionsOptions
+                    { ChatCompletions.chatBaseUrl =
+                        Text.unpack responses.responsesBaseUrl
+                    , ChatCompletions.chatModel =
+                        inferredTarget.targetWireModelId
+                    , ChatCompletions.chatBearerToken = customBearerToken
+                    , ChatCompletions.chatRequestTimeoutSeconds =
+                        responses.responsesRequestTimeoutSeconds
+                    }
+                else Nothing
+        customCreateResponseWithEvents =
+            case customChatOptions of
+                Just chatOptions ->
+                    Just \request onEvent ->
+                        ChatCompletions.createChatCompletionWithEvents
+                            chatOptions
+                            request
+                            onEvent
+                Nothing -> do
+                    genericOptions <- customGenericOptions
+                    pure \request onEvent ->
+                        GenericResponses.createResponseWithEvents
+                            genericOptions
+                                { GenericResponses.model =
+                                    transportModel
+                                        (fromMaybe model request.model)
+                                }
+                            request
+                            onEvent
+        customCreateResponse =
+            case customChatOptions of
+                Just chatOptions ->
+                    Just \request ->
+                        ChatCompletions.createChatCompletionWith
+                            chatOptions
+                            request
+                Nothing -> do
+                    genericOptions <- customGenericOptions
+                    pure \request ->
+                        GenericResponses.createResponseWith
+                            genericOptions
+                                { GenericResponses.model =
+                                    transportModel
+                                        (fromMaybe model request.model)
+                                }
+                            request
         persistedTarget = case fst <$> resumed of
             Just meta ->
                 Just
@@ -1988,27 +2095,38 @@ runAgentInitializedWithLock
             , provider == OpenAIProvider
             , os == "darwin"
             ]
+        runtimeToolNames =
+            selectedRuntimeModel >>= (.runtimeResponsesAllowedTools)
+        filterRuntimeTools candidates =
+            case runtimeToolNames of
+                Nothing -> candidates
+                Just allowed ->
+                    filter ((`elem` allowed) . (.appToolName)) candidates
         allTools =
-            coding.codingAppTools
-                ++ extraTools
-                ++ mcpTools
-                ++ sessionTools
-                ++ gatewayTools
-                ++ databaseAppTools
-                ++ learnedSkillAppTools
-                ++ nativeAppTools
-                ++ computerTools
+            filterRuntimeTools
+                ( coding.codingAppTools
+                    ++ extraTools
+                    ++ mcpTools
+                    ++ sessionTools
+                    ++ gatewayTools
+                    ++ databaseAppTools
+                    ++ learnedSkillAppTools
+                    ++ nativeAppTools
+                    ++ computerTools
+                )
         tools =
-            filterGhciTools options.optGhci
-                (filterBashTools options.optBash coding.codingAppTools)
-                ++ extraTools
-                ++ mcpTools
-                ++ sessionTools
-                ++ gatewayTools
-                ++ databaseAppTools
-                ++ learnedSkillAppTools
-                ++ nativeAppTools
-                ++ computerTools
+            filterRuntimeTools
+                ( filterGhciTools options.optGhci
+                    (filterBashTools options.optBash coding.codingAppTools)
+                    ++ extraTools
+                    ++ mcpTools
+                    ++ sessionTools
+                    ++ gatewayTools
+                    ++ databaseAppTools
+                    ++ learnedSkillAppTools
+                    ++ nativeAppTools
+                    ++ computerTools
+                )
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -2053,16 +2171,35 @@ runAgentInitializedWithLock
                         ("Failed to initialize MCP tools: " <> Text.unpack err)
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
-        let instructions =
-                systemPromptForTools
+        let projectToolSchemas = case selectedRuntimeModel of
+                Just runtime
+                    | runtime.runtimeResponsesTransport
+                        == RuntimeChatCompletionsTransport ->
+                            functionSchemasFromAppTools dialect
+                _ -> schemasFromAppTools dialect
+            projectTools candidates =
+                let schemas = projectToolSchemas candidates
+                in (responseToolNames schemas, schemas)
+            (promptToolNames, toolSchemas) = projectTools tools
+            instructions =
+                systemPromptForAvailableTools
                     dialect
-                    (map (.appToolName) tools)
+                    promptToolNames
                     cwd
                     (Just sessionTmp)
                     today
                     (isOneShot options)
-            params = requestParams provider model instructions
-                (schemasFromAppTools dialect tools) effort
+            finalizeRequestParams =
+                case selectedRuntimeModel of
+                    Just runtime
+                        | runtime.runtimeResponsesTransport
+                            == RuntimeChatCompletionsTransport ->
+                                ChatCompletions.reinforceFunctionSchemas
+                    _ -> id
+            params =
+                finalizeRequestParams
+                    (requestParams provider model instructions
+                        toolSchemas effort)
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             resumeNeedsFreshContext =
@@ -2193,6 +2330,8 @@ runAgentInitializedWithLock
                                 , dialect
                                 , policy
                                 , allTools
+                                , projectTools
+                                , finalizeRequestParams
                                 , suspendGhci = coding.codingSuspendGhci
                                 , grokRuntime = coding.codingGrokRuntime
                                 , mcpRegistrations =
@@ -2717,20 +2856,10 @@ runAgentInitializedWithLock
                                 pure result
                     OpenRouterProvider -> do
                         let makeBackend params =
-                                case customGenericOptions of
-                                    Just genericOptions ->
+                                case customCreateResponseWithEvents of
+                                    Just createResponse ->
                                         genericResponsesBackendWith
-                                            (\request onEvent ->
-                                                GenericResponses.createResponseWithEvents
-                                                    genericOptions
-                                                        { GenericResponses.model =
-                                                            transportModel
-                                                                (fromMaybe
-                                                                    model
-                                                                    request.model)
-                                                        }
-                                                    request
-                                                    onEvent)
+                                            createResponse
                                             params
                                     Nothing ->
                                         openRouterBackend openRouterOptions
@@ -2761,20 +2890,11 @@ runAgentInitializedWithLock
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
-                                    (case customGenericOptions of
-                                        Just genericOptions ->
+                                    (case customCreateResponse of
+                                        Just createResponse ->
                                             runResponsesCompactWithContextWindow
                                                 contextWindow
-                                                (\request ->
-                                                    GenericResponses.createResponseWith
-                                                        genericOptions
-                                                            { GenericResponses.model =
-                                                                transportModel
-                                                                    (fromMaybe
-                                                                        model
-                                                                        request.model)
-                                                            }
-                                                        request)
+                                                createResponse
                                                 recordCompactionUsage
                                                 paramsRef
                                                 historyRef

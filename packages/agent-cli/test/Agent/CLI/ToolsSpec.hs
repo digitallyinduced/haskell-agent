@@ -109,6 +109,16 @@ spec = describe "schemasFromAppTools" do
                 tagged.fields `shouldBe` KeyMap.empty
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
+    it "can project function-only schemas for local transports" do
+        let schemas =
+                functionSchemasFromAppTools
+                    codexDialect
+                    [jsonTool, computerUseTool]
+        schemas `shouldSatisfy` \case
+            [FunctionToolValue tool] -> tool.name == "read_file"
+            _ -> False
+        responseToolNames schemas `shouldBe` ["read_file"]
+
     it "builds a strict function tool for OpenAI JSON tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do
