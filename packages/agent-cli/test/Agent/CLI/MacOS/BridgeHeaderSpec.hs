@@ -17,6 +17,9 @@ foreign import ccall "ha_mcp_admin_abi_smoke"
 foreign import ccall "ha_session_continuity_abi_smoke"
     sessionContinuityAbiSmoke :: IO CInt
 
+foreign import ccall "ha_learned_skill_admin_abi_smoke"
+    learnedSkillAdminAbiSmoke :: IO CInt
+
 foreign import ccall "ha_interaction_option_abi_smoke"
     interactionOptionAbiSmoke :: IO CInt
 
@@ -32,6 +35,8 @@ spec = do
             gatewayAbiSmoke `shouldReturn` 0
         it "preserves the typed MCP argument and environment layouts" do
             mcpAdminAbiSmoke `shouldReturn` 0
+        it "compiles typed learned resource callbacks and stable enum values" do
+            learnedSkillAdminAbiSmoke `shouldReturn` 0
         it "preserves the documented interaction option layout" do
             interactionOptionAbiSmoke `shouldReturn` 0
         it "preserves typed data-browser callbacks and synchronous validation" do

@@ -195,8 +195,10 @@ typedef void (*ha_session_result_callback)(
 
 /*
  * Learned-skill list callbacks emit current rows from all applicable scopes,
- * including archived skills. Status is 0 for an item, 1 for end-of-list, and
- * -1 for an error. UTF-8 buffers are callback-scoped and must be copied.
+ * including archived skills, capped at 1000 rows for compatibility. Status is
+ * 0 for an item, 1 for end-of-list, and -1 for an error. UTF-8 buffers are
+ * callback-scoped and must be copied. New clients should use the typed,
+ * scope-filterable ha_learned_skill_list API below.
  */
 typedef void (*ha_learned_skills_list_callback)(
     void *context, int32_t status,
@@ -449,6 +451,182 @@ int32_t ha_data_rows_load(
     int64_t offset,
     int32_t limit,
     ha_data_rows_callback callback, void *context
+);
+
+/*
+ * Typed Skills / Memory administration.
+ *
+ * A learned skill is the durable, versioned memory resource used by future
+ * agent sessions. Scope values are 0 user, 1 repository, and 2 checkout.
+ * List also accepts -1 for all applicable scopes. Activation values are
+ * 0 always, 1 relevant, and 2 manual. "archived" is 0 or 1.
+ *
+ * Every input buffer is copied before the call returns. UTF-8 must be valid
+ * and contain no NUL. All input text pointers must be non-NULL with positive
+ * length except applies_when, which may be NULL only when its length is zero.
+ * context may be NULL. Callback text pointers may be NULL whenever their
+ * associated length is zero and must not be dereferenced in that case;
+ * fields omitted on errors/completion use NULL with zero length.
+ * Fields enforce the store's character limits: slug 80, title 200,
+ * description 1000, applies_when 2000, instructions 30000, and
+ * change_summary 1000. Lists are explicitly limited to 1...1000 items.
+ * expected_revision is exact, positive optimistic concurrency; it is never
+ * interpreted as "latest". Read revision 0 selects the current revision.
+ *
+ * Functions return 0 when accepted, 1 for a missing callback, and 2 for an
+ * invalid pointer, enum, UTF-8 buffer, bound, count, or revision. Accepted
+ * calls invoke callbacks on a dedicated Haskell worker thread, never the
+ * caller or main thread. Calls for different requests may overlap. Item and
+ * error buffers are valid only until that callback returns and must be copied.
+ * The callback function and context must remain valid through the terminal
+ * callback. Accepted operations deliver their documented terminal callback
+ * unless the process exits; there is no cancellation handle.
+ *
+ * Item/list status is 0 for an item, 1 for successful list completion, -1
+ * for invalid/store failure, -2 not found, -3 revision conflict, -4 already
+ * exists, and -5 revision not found. A conflict places the current revision
+ * in the revision field. A read has one item or one error callback; list and
+ * history have zero or more items followed by exactly one terminal callback.
+ *
+ * Mutation callbacks use status 0 for success and the same negative failures.
+ * Their revision is the new revision on success or current revision on
+ * conflict. The ABI never accepts credentials or caller-provided provenance
+ * and never returns source evidence/session identifiers. Skill content itself
+ * is not secret storage and callers must not place credentials in it.
+ *
+ * cwd selects the same canonical user/repository/checkout identities as the
+ * CLI. Slugs are lower-case ASCII words separated by single hyphens. Update
+ * is a full content replacement and preserves active/archive state; use the
+ * explicit archive and restore operations for state changes.
+ */
+#define HA_LEARNED_SKILL_SCOPE_ALL        INT32_C(-1)
+#define HA_LEARNED_SKILL_SCOPE_USER       INT32_C(0)
+#define HA_LEARNED_SKILL_SCOPE_REPOSITORY INT32_C(1)
+#define HA_LEARNED_SKILL_SCOPE_CHECKOUT   INT32_C(2)
+
+#define HA_LEARNED_SKILL_ACTIVATION_ALWAYS   INT32_C(0)
+#define HA_LEARNED_SKILL_ACTIVATION_RELEVANT INT32_C(1)
+#define HA_LEARNED_SKILL_ACTIVATION_MANUAL   INT32_C(2)
+
+#define HA_RESOURCE_STATUS_ITEM               INT32_C(0)
+#define HA_RESOURCE_STATUS_COMPLETE           INT32_C(1)
+#define HA_RESOURCE_STATUS_ERROR              INT32_C(-1)
+#define HA_RESOURCE_STATUS_NOT_FOUND          INT32_C(-2)
+#define HA_RESOURCE_STATUS_REVISION_CONFLICT  INT32_C(-3)
+#define HA_RESOURCE_STATUS_ALREADY_EXISTS     INT32_C(-4)
+#define HA_RESOURCE_STATUS_REVISION_NOT_FOUND INT32_C(-5)
+
+typedef void (*ha_learned_skill_callback)(
+    void *context,
+    int32_t status,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    int64_t revision,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *description, size_t description_length,
+    const uint8_t *applies_when, size_t applies_when_length,
+    const uint8_t *instructions, size_t instructions_length,
+    int32_t activation,
+    int32_t priority,
+    int32_t archived,
+    int64_t created_at_ms,
+    int64_t updated_at_ms,
+    const uint8_t *error, size_t error_length
+);
+
+typedef void (*ha_learned_skill_revision_callback)(
+    void *context,
+    int32_t status,
+    int64_t revision,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *description, size_t description_length,
+    const uint8_t *applies_when, size_t applies_when_length,
+    const uint8_t *instructions, size_t instructions_length,
+    int32_t activation,
+    int32_t priority,
+    int32_t archived,
+    const uint8_t *change_summary, size_t change_summary_length,
+    int64_t created_at_ms,
+    const uint8_t *error, size_t error_length
+);
+
+typedef void (*ha_resource_result_callback)(
+    void *context,
+    int32_t status,
+    int64_t revision,
+    const uint8_t *error, size_t error_length
+);
+
+int32_t ha_learned_skill_list(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope, size_t limit,
+    ha_learned_skill_callback callback, void *context
+);
+int32_t ha_learned_skill_read(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    uint64_t revision,
+    ha_learned_skill_callback callback, void *context
+);
+int32_t ha_learned_skill_create(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *description, size_t description_length,
+    const uint8_t *applies_when, size_t applies_when_length,
+    const uint8_t *instructions, size_t instructions_length,
+    int32_t activation,
+    int32_t priority,
+    const uint8_t *change_summary, size_t change_summary_length,
+    ha_resource_result_callback callback, void *context
+);
+int32_t ha_learned_skill_update(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    uint64_t expected_revision,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *description, size_t description_length,
+    const uint8_t *applies_when, size_t applies_when_length,
+    const uint8_t *instructions, size_t instructions_length,
+    int32_t activation,
+    int32_t priority,
+    const uint8_t *change_summary, size_t change_summary_length,
+    ha_resource_result_callback callback, void *context
+);
+int32_t ha_learned_skill_archive(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    uint64_t expected_revision,
+    const uint8_t *change_summary, size_t change_summary_length,
+    ha_resource_result_callback callback, void *context
+);
+int32_t ha_learned_skill_restore(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    uint64_t expected_revision,
+    const uint8_t *change_summary, size_t change_summary_length,
+    ha_resource_result_callback callback, void *context
+);
+int32_t ha_learned_skill_rollback(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    uint64_t expected_revision,
+    uint64_t target_revision,
+    const uint8_t *change_summary, size_t change_summary_length,
+    ha_resource_result_callback callback, void *context
+);
+int32_t ha_learned_skill_history(
+    const uint8_t *cwd, size_t cwd_length,
+    int32_t scope,
+    const uint8_t *slug, size_t slug_length,
+    size_t limit,
+    ha_learned_skill_revision_callback callback, void *context
 );
 
 /*

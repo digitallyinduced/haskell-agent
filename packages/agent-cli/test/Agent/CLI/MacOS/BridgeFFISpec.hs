@@ -43,6 +43,9 @@ foreign import ccall "ha_repository_review_abi_smoke"
 foreign import ccall "ha_task_supervisor_abi_smoke"
     taskSupervisorAbiSmoke :: IO CInt
 
+foreign import ccall "ha_learned_skill_admin_validation_smoke"
+    learnedSkillAdminValidationSmoke :: IO CInt
+
 foreign import ccall "ha_native_turn_options_stage_smoke"
     nativeTurnOptionsStageSmoke :: IO CInt
 
@@ -60,7 +63,6 @@ spec = describe "native bridge FFI" do
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif
-
     it "blocks new repository workers until cancel-all returns" do
         Bridge.repositoryCancelAllAdmissionSmoke `shouldReturn` True
 
@@ -91,6 +93,13 @@ spec = describe "native bridge FFI" do
     it "controls and snapshots native tasks through the exported bridge" do
 #ifdef darwin_HOST_OS
         taskSupervisorAbiSmoke `shouldReturn` 0
+#else
+        pendingWith "the native bridge smoke test only links on macOS"
+#endif
+
+    it "rejects invalid learned resource inputs through exported symbols" do
+#ifdef darwin_HOST_OS
+        learnedSkillAdminValidationSmoke `shouldReturn` 0
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif

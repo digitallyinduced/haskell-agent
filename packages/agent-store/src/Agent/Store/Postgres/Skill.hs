@@ -32,10 +32,13 @@ module Agent.Store.Postgres.Skill
     , archiveLearnedSkill
     , rollbackLearnedSkill
     , readLearnedSkill
+    , readLearnedSkillRevision
     , searchLearnedSkills
     , listApplicableLearnedSkills
     , listAllLearnedSkills
+    , listAllLearnedSkillsLimited
     , listLearnedSkillRevisions
+    , listLearnedSkillRevisionsLimited
     , listLearnedSkillSources
     ) where
 
@@ -474,6 +477,19 @@ readLearnedSkill pool scope slug =
         (HasqlSession.statement (scope, slug) readSkillStatement)
         >>= pure . decodeMaybeSkillResult
 
+readLearnedSkillRevision
+    :: StorePool
+    -> Scope
+    -> Text
+    -> Int64
+    -> IO (Either StoreError (Maybe LearnedSkillRevision))
+readLearnedSkillRevision pool scope slug revision =
+    withSession pool
+        (HasqlSession.statement
+            (scope, slug, revision)
+            readRevisionStatement)
+        >>= pure . decodeMaybeRevisionResult
+
 searchLearnedSkills
     :: StorePool
     -> [Scope]
@@ -519,6 +535,31 @@ listAllLearnedSkills pool scopes =
                 (HasqlSession.statement applicable listAllSkillsStatement)
                 >>= pure . decodeSkillListResult
 
+-- | List a bounded administration page, optionally restricted to one of the
+-- three applicable scope kinds. Unlike the model-context list this includes
+-- archived rows.
+listAllLearnedSkillsLimited
+    :: StorePool
+    -> [Scope]
+    -> Maybe ScopeKind
+    -> Int
+    -> IO (Either StoreError [LearnedSkill])
+listAllLearnedSkillsLimited pool scopes selectedKind limit =
+    case applicableScopes scopes of
+        Left err -> pure (Left (StoreDataError err))
+        Right applicable ->
+            withSession pool
+                (HasqlSession.statement
+                    SkillListParams
+                        { skillListScopes = applicable
+                        , skillListKind =
+                            scopeKindText <$> selectedKind
+                        , skillListLimit =
+                            fromIntegral (max 1 (min 1000 limit))
+                        }
+                    listAllSkillsLimitedStatement)
+                >>= pure . decodeSkillListResult
+
 listLearnedSkillRevisions
     :: StorePool
     -> Scope
@@ -527,6 +568,19 @@ listLearnedSkillRevisions
 listLearnedSkillRevisions pool scope slug =
     withSession pool
         (HasqlSession.statement (scope, slug) listRevisionsStatement)
+        >>= pure . decodeRevisionListResult
+
+listLearnedSkillRevisionsLimited
+    :: StorePool
+    -> Scope
+    -> Text
+    -> Int
+    -> IO (Either StoreError [LearnedSkillRevision])
+listLearnedSkillRevisionsLimited pool scope slug limit =
+    withSession pool
+        (HasqlSession.statement
+            (scope, slug, fromIntegral (max 1 (min 1000 limit)))
+            listRevisionsLimitedStatement)
         >>= pure . decodeRevisionListResult
 
 listLearnedSkillSources
@@ -772,6 +826,15 @@ decodeRevisionListResult = \case
     Right rows ->
         either (Left . StoreDataError) Right (traverse decodeRevisionRow rows)
 
+decodeMaybeRevisionResult
+    :: Either StoreError (Maybe RevisionRow)
+    -> Either StoreError (Maybe LearnedSkillRevision)
+decodeMaybeRevisionResult = \case
+    Left err -> Left err
+    Right Nothing -> Right Nothing
+    Right (Just row) ->
+        either (Left . StoreDataError) (Right . Just) (decodeRevisionRow row)
+
 decodeSearchResult
     :: Either StoreError [(SkillRow, Double)]
     -> Either StoreError [LearnedSkillSearchResult]
@@ -808,6 +871,12 @@ data SkillSearchParams = SkillSearchParams
     , skillSearchLimit :: !Int64
     }
 
+data SkillListParams = SkillListParams
+    { skillListScopes :: !ApplicableScopes
+    , skillListKind :: !(Maybe Text)
+    , skillListLimit :: !Int64
+    }
+
 insertSkillStatement :: Statement LearnedSkillCreate (Maybe Text)
 insertSkillStatement = mkStatement
     "INSERT INTO harness.skills\
@@ -831,6 +900,78 @@ insertSkillStatement = mkStatement
         <> ((.learnedSkillCreateAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
     (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
+    True
+
+readRevisionStatement
+    :: Statement (Scope, Text, Int64) (Maybe RevisionRow)
+readRevisionStatement = mkStatement
+    ("SELECT r.skill_revision_id::text, r.revision_number, r.title,\
+    \ r.description, r.applies_when, r.instructions_text,\
+    \ r.activation_mode, r.priority, r.status, r.change_summary, r.created_at\
+    \ FROM harness.skill_revisions r\
+    \ JOIN harness.skills s ON s.skill_id = r.skill_id\
+    \ WHERE s.scope_kind = $1 AND s.scope_id = $2::uuid AND s.slug = $3\
+    \   AND r.revision_number = $4")
+    ( (scopeKindText . (.scopeKind) . first4
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (scopeIdText . (.scopeId) . first4
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (second4
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (third4
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowMaybe revisionRowDecoder)
+    True
+  where
+    first4 (scope, _, _) = scope
+    second4 (_, slug, _) = slug
+    third4 (_, _, revision) = revision
+
+listRevisionsLimitedStatement
+    :: Statement (Scope, Text, Int64) [RevisionRow]
+listRevisionsLimitedStatement = mkStatement
+    ("SELECT r.skill_revision_id::text, r.revision_number, r.title,\
+    \ r.description, r.applies_when, r.instructions_text,\
+    \ r.activation_mode, r.priority, r.status, r.change_summary, r.created_at\
+    \ FROM harness.skill_revisions r\
+    \ JOIN harness.skills s ON s.skill_id = r.skill_id\
+    \ WHERE s.scope_kind = $1 AND s.scope_id = $2::uuid AND s.slug = $3\
+    \ ORDER BY r.revision_number DESC LIMIT $4")
+    ( (scopeKindText . (.scopeKind) . first3
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (scopeIdText . (.scopeId) . first3
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (second3
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (third3
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList revisionRowDecoder)
+    True
+  where
+    first3 (scope, _, _) = scope
+    second3 (_, slug, _) = slug
+    third3 (_, _, limit) = limit
+
+listAllSkillsLimitedStatement :: Statement SkillListParams [SkillRow]
+listAllSkillsLimitedStatement = mkStatement
+    (skillSelectSql
+        <> applicableWhereSql
+        <> " AND ($4::text IS NULL OR scope_kind = $4)\
+           \ ORDER BY scope_kind, title, slug LIMIT $5")
+    ( ((.applicableUserScopeId) . (.skillListScopes)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.applicableRepositoryScopeId) . (.skillListScopes)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.applicableCheckoutScopeId) . (.skillListScopes)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.skillListKind)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.skillListLimit)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList skillRowDecoder)
     True
 
 listAllSkillsStatement :: Statement ApplicableScopes [SkillRow]
