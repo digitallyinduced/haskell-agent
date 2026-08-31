@@ -24,14 +24,30 @@ jobs:
         experimental-features = nix-command flakes
         accept-flake-config = false
     steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 1
+      - name: Check out the triggering revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_dir="$RUNNER_TEMP/haskell-agent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+
+          git init "$source_dir"
+          git -C "$source_dir" remote add origin \
+            https://github.com/digitallyinduced/haskell-agent.git
+          git -C "$source_dir" fetch \
+            --depth=1 \
+            --no-tags \
+            origin \
+            "$GITHUB_SHA"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
 
       - name: Run Nix flake checks
         shell: bash
         run: |
           set -euo pipefail
+
+          cd "$SOURCE_DIR"
 
           nix_bin="$(command -v nix || true)"
           if [[ -z "$nix_bin" && -x /run/current-system/sw/bin/nix ]]; then
@@ -44,7 +60,7 @@ jobs:
 
           account_home=/var/lib/github-runner-haskell-agent
           credential_home="$(mktemp -d \
-            "$GITHUB_WORKSPACE/.agent-functional-credentials.XXXXXX")"
+            "$SOURCE_DIR/.agent-functional-credentials.XXXXXX")"
           chmod 700 "$credential_home"
           export AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME="$credential_home"
 
