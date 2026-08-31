@@ -8,7 +8,7 @@ import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
-    ( LoadedAuth(loadedOpenAiPool, loadedTokenProvider) )
+    ( LoadedAuth(loadedTokenProvider) )
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Claude (newClaudeSessionRuntimeSlot)
 import Agent.CLI.CodeModeRuntime
@@ -23,12 +23,13 @@ import Agent.CLI.Compaction
 import Agent.CLI.Config ()
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
-import Agent.CLI.Database.Store ()
-import Agent.CLI.Dialects ()
+import Agent.CLI.Database.Store (DatabaseScopes)
+import Agent.CLI.Dialects (CodingTools(..))
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
-import Agent.CLI.Interrupt ( catchUserInterrupt, withCtrlCHandler )
+import Agent.CLI.Interrupt
+    (InterruptState, catchUserInterrupt, withCtrlCHandler)
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
 import Agent.CLI.Login ()
@@ -36,13 +37,15 @@ import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
-import Agent.CLI.ModelConfig ( catalogContextWindowForTransport )
-import Agent.CLI.Models ()
+import Agent.CLI.ModelConfig
+    (ModelCatalog, catalogContextWindowForTransport)
+import Agent.CLI.Models (ModelTarget(targetConnectionId))
 import Agent.CLI.Options
-    ( isOneShot
-    , CliOptions(optCodeMode, optShowRawReasoning, optCompactThreshold)
+    ( ApprovalPolicy
+    , isOneShot
+    , CliOptions(optCodeMode)
     )
-import Agent.CLI.PendingInputs ()
+import Agent.CLI.PendingInputs (PendingInputs)
 import Agent.CLI.Plan ()
 import Agent.CLI.Project ( ModelSwitchScope(..) )
 import Agent.CLI.Prompt
@@ -56,7 +59,7 @@ import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch ()
 import Agent.CLI.ProviderAvailability ( probeLoadedAvailability )
 import Agent.CLI.ProviderFallback ( isProviderUnavailable )
-import Agent.CLI.ProviderTransition ()
+import Agent.CLI.ProviderTransition (PendingTurn, ProviderTransition)
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
@@ -89,8 +92,10 @@ import Agent.CLI.Session
       sessionUsageFromTurns,
       Persistence(..),
       PersistenceState(PersistenceActive, PersistencePending),
+      LegacySubagentTarget,
       SessionHandle(sessionMeta, sessionDir),
       SessionMeta(metaId, metaLastResponseId, metaPromptSnapshot, metaTitle),
+      SessionTurn,
       SessionPromptSnapshot(..) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
@@ -146,6 +151,8 @@ import Agent.CLI.Subagents.Runtime
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
                       subagentSpawnModelGuidance, subagentAllowedChildModels) )
+import Agent.CLI.Subagents.Runtime.Types
+    (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime, withFullscreenSuspended )
 import Agent.CLI.TUI.History ()
@@ -159,35 +166,39 @@ import Agent.CLI.WebFetch ()
 import Agent.CLI.Worktree ()
 import Agent.Cancel ()
 import Agent.Claude ()
-import Agent.Dialect (dialectId)
-import Agent.Error ()
+import Agent.Dialect (Dialect, dialectId)
+import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
-import Agent.GrokBuild.Dialect.Task ()
+import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.GrokBuild.Dialect.Workflow ()
-import Agent.Loop ( addTokenUsage, emptyTokenUsage )
+import Agent.Loop (ImageAttachment, addTokenUsage, emptyTokenUsage)
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.ImageGeneration ( imageGenerationToolName )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenAI.Models.Types ( resolvedContextWindow )
 import Agent.OpenRouter.LoopBackend ()
+import Agent.OpenRouter.Options (ClientOptions)
 import Agent.OsPath ()
-import Agent.Provider ( tokenProviderBillingMode )
+import Agent.Provider
+    (Credential, Provider, TokenProvider, tokenProviderBillingMode)
 import Agent.ReasoningEffort ()
 import Agent.Responses.GenericBackend ()
-import Agent.Responses.GenericClient ()
-import Agent.Responses.Types ( ResponseCreateParams(model) )
-import Agent.Skills ()
+import Agent.Responses.GenericClient (GenericClientOptions)
+import Agent.Responses.Types
+    (ResponseItem, ResponseCreateParams(model))
+import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Store.Postgres ( trustedPool )
 import Agent.Store.Types ()
-import Agent.Subagents ()
+import Agent.Subagents (SubagentRegistry)
+import Agent.Subagents.Types (RootTurnId, SubagentId)
 import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model ()
 import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents
-    ( MultiAgentContext(multiSendToRoot, multiRegistry) )
-import Agent.Tools.PlanMode ()
+    (MultiAgentContext, SubagentWorktree)
+import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
 import Agent.Tools.Secret ()
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.Types
@@ -206,22 +217,25 @@ import Control.Exception.Safe ( mask_, finally )
 import Control.Monad ( forM_, void, when )
 import Data.Functor ( (<&>) )
 import Data.IORef
-    ( modifyIORef',
+    ( IORef,
+      modifyIORef',
       newIORef,
       readIORef,
       writeIORef )
 import Data.List ()
+import Data.Map.Strict (Map)
 import Data.Maybe ( isNothing, fromMaybe )
-import Data.Text ()
+import Data.Set (Set)
+import Data.Text (Text)
 import Data.Time.Clock ( getCurrentTime, utctDay )
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
 import System.Directory.OsPath ()
 import System.Environment ( getProgName )
 import System.Exit ()
-import System.IO ( stderr )
+import System.IO (Handle, stderr)
 import System.Mem ( performMajorGC )
-import System.OsPath ()
+import System.OsPath (OsPath)
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
@@ -241,6 +255,88 @@ import qualified Agent.XAI.Client as XAIClient ()
 import qualified Agent.XAI.Request as XAIRequest ()
 import qualified Agent.XAI.Usage as XAIUsage ()
 
+runAgentSession
+    :: LoadedAuth
+    -> Bool
+    -> OsPath
+    -> IORef Text
+    -> IORef Text
+    -> IORef Text
+    -> GrokSubagentSpecs
+    -> [AppTool]
+    -> ([ImageAttachment] -> IO ())
+    -> IO ()
+    -> IORef Bool
+    -> ModelCatalog
+    -> Bool
+    -> (SessionHandle -> IO ())
+    -> Bool
+    -> IO closeResult
+    -> IORef (IO ())
+    -> CodingTools
+    -> (OsPath -> IO (Either Text SubagentWorktree))
+    -> Maybe GenericClientOptions
+    -> OsPath
+    -> [AppTool]
+    -> DatabaseScopes
+    -> Dialect
+    -> Text
+    -> IORef Bool
+    -> [AppTool]
+    -> Maybe FullscreenRuntime
+    -> [AppTool]
+    -> IORef Bool
+    -> Maybe [Text]
+    -> OsPath
+    -> ModelTarget
+    -> InterruptState
+    -> [AppTool]
+    -> Maybe LegacySubagentTarget
+    -> MCP.McpFleet
+    -> [(Text, Text)]
+    -> [AppTool]
+    -> Text
+    -> Maybe MultiAgentContext
+    -> (OsPath -> IO ())
+    -> ClientOptions
+    -> Maybe TokenProvider
+    -> CliOptions
+    -> PendingInputs
+    -> Maybe PendingTurn
+    -> Persistence
+    -> PlanModeHooks
+    -> PlanModeEnv
+    -> ApprovalPolicy
+    -> IORef (Maybe Text)
+    -> OsPath
+    -> Maybe ManagedTurnRequest
+    -> Provider
+    -> Bool
+    -> SubagentRegistry
+    -> (Credential -> IO Text)
+    -> Bool
+    -> Maybe (SessionMeta, [SessionTurn])
+    -> OsPath
+    -> IORef (Maybe RootTurnId)
+    -> (Text -> IO (Either ApiError Text))
+    -> TokenProvider
+    -> [AppTool]
+    -> (Text -> IO titleResult)
+    -> IORef [SkillInvocation]
+    -> IORef SkillCatalog
+    -> StartupRuntime
+    -> FilePath
+    -> Handle
+    -> IORef (Maybe (IO [ResponseItem]))
+    -> IORef (Map SubagentId SubagentSession)
+    -> SubagentStoreRoot
+    -> TokenProvider
+    -> ToolEnv
+    -> [AppTool]
+    -> Maybe ProviderTransition
+    -> (Text -> Text)
+    -> Set Provider
+    -> IO RunResult
 runAgentSession
     loaded
     learnAboutUserRequested
@@ -540,7 +636,7 @@ runAgentSession
                     fmap (\request -> sessionTitleFromPrompt request.managedTurnText)
                         promptRequest
             startupWindowTitle = cliWindowTitle cwd titleHint
-        setWindowTitle startupWindowTitle
+        _ <- setWindowTitle startupWindowTitle
         markStartupStage startup "Loading instructions…"
         let agentsContextNotice
                 | isNothing resumed && isNothing transition =

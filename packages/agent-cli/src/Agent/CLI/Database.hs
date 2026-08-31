@@ -57,18 +57,13 @@ data DatabaseToolsEnv = DatabaseToolsEnv
         :: !(Text -> Int -> IO (Either Text [ConversationSearchMatch]))
     }
 
-data SchemaArgs = SchemaArgs
-    { schemaScope :: !DatabaseScope
-    }
+data SchemaArgs = SchemaArgs !DatabaseScope
 
 schemaArgsDecoder :: Hermes.Decoder SchemaArgs
 schemaArgsDecoder = Hermes.object $
     SchemaArgs <$> Hermes.atKey "scope" databaseScopeDecoder
 
-data QueryArgs = QueryArgs
-    { queryScope :: !DatabaseScope
-    , querySql :: !Text
-    }
+data QueryArgs = QueryArgs !DatabaseScope !Text
 
 queryArgsDecoder :: Hermes.Decoder QueryArgs
 queryArgsDecoder = Hermes.object $
@@ -76,11 +71,7 @@ queryArgsDecoder = Hermes.object $
             <$> Hermes.atKey "scope" databaseScopeDecoder
             <*> Hermes.atKey "sql" Hermes.text
 
-data ExecuteArgs = ExecuteArgs
-    { executeScope :: !DatabaseScope
-    , executeSql :: !Text
-    , executePurpose :: !Text
-    }
+data ExecuteArgs = ExecuteArgs !DatabaseScope !Text !Text
 
 executeArgsDecoder :: Hermes.Decoder ExecuteArgs
 executeArgsDecoder = Hermes.object $
@@ -89,10 +80,7 @@ executeArgsDecoder = Hermes.object $
             <*> Hermes.atKey "sql" Hermes.text
             <*> Hermes.atKey "purpose" Hermes.text
 
-data ConversationSearchArgs = ConversationSearchArgs
-    { conversationSearchQuery :: !Text
-    , conversationSearchLimit :: !Int
-    }
+data ConversationSearchArgs = ConversationSearchArgs !Text !Int
 
 conversationSearchArgsDecoder :: Hermes.Decoder ConversationSearchArgs
 conversationSearchArgsDecoder = Hermes.object $

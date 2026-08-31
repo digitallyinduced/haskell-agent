@@ -31,7 +31,8 @@ import Agent.CLI.Config
       useProgressiveMcp )
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ( databaseTools )
-import Agent.CLI.Database.Store ( databaseToolsEnvForStore )
+import Agent.CLI.Database.Store
+    (DatabaseScopes, databaseToolsEnvForStore)
 import Agent.CLI.Dialects
     ( CodingTools(..),
       codingToolsForWithTypes,
@@ -40,7 +41,7 @@ import Agent.CLI.Dialects
 import Agent.CLI.Error ( formatException )
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.Input ()
-import Agent.CLI.Interrupt ()
+import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.LearnedSkills ( learnedSkillTools )
 import Agent.CLI.LearnedSkills.Store
     ( learnedSkillToolsEnvForStore )
@@ -56,14 +57,15 @@ import Agent.CLI.McpStatus
       formatMcpModelNoticeFor,
       formatMcpProgress,
       summarizeMcpStatuses )
-import Agent.CLI.ModelConfig ( builtinConnectionId )
+import Agent.CLI.ModelConfig
+    (ModelCatalog, ResponsesConnection(..), builtinConnectionId)
 import Agent.CLI.Models
     ( defaultModelFor,
       rawModelOption,
       resolveConfiguredModel,
       resolvePersistedDialect,
       ModelOption(modelTarget),
-      ModelTarget(targetConnectionId, targetModelId, targetDialect,
+      ModelTarget(targetProvider, targetConnectionId, targetModelId, targetDialect,
                   targetWireModelId) )
 import Agent.CLI.Options
     ( defaultEffortFor,
@@ -78,6 +80,7 @@ import Agent.CLI.PendingInputs
     , enqueuePendingNotice
     , newPendingInputs
     )
+import Agent.CLI.Project (ProjectModel(..), ProjectSettings(..))
 import Agent.CLI.Plan
     ( cliPlanHooks
     , resumedPlanNeedsApproval
@@ -92,7 +95,7 @@ import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch ()
 import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback ()
-import Agent.CLI.ProviderTransition ()
+import Agent.CLI.ProviderTransition (PendingTurn, ProviderTransition)
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ()
 import Agent.CLI.ReplMode ()
@@ -104,6 +107,8 @@ import Agent.CLI.Runtime.Orchestration.Background
     ( runInProcessSessionTurn )
 import Agent.CLI.Runtime.Orchestration.Concurrent
     ( concurrentlyAcquire )
+import Agent.CLI.Runtime.Orchestration.Types
+    (AgentProcessRuntime(..), AgentRunMode)
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Session ( runAgentSession )
 import Agent.CLI.Runtime.Orchestration.Startup
@@ -111,7 +116,7 @@ import Agent.CLI.Runtime.Orchestration.Startup
 import Agent.CLI.Runtime.Persistence ( preparePersistence )
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
-import Agent.CLI.Runtime.Types ()
+import Agent.CLI.Runtime.Types (DevResult, RunResult)
 import Agent.CLI.Secret ( promptSecretLine )
 import Agent.CLI.Session
     ( allocateSessionTemp,
@@ -143,7 +148,8 @@ import Agent.CLI.Session.Selection
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
 import Agent.CLI.SessionLock
-    ( acquireSessionLock,
+    ( SessionLock,
+      acquireSessionLock,
       releaseSessionLock,
       sessionLockFilePath,
       sessionLockPath )
@@ -160,7 +166,8 @@ import Agent.CLI.Subagents.Runtime
       prepareCollaborationSpawn,
       restoreAgentFromDisk )
 import Agent.CLI.TUI.App
-    ( clearFullscreenHistorySource,
+    ( FullscreenRuntime,
+      clearFullscreenHistorySource,
       emitUiEvent,
       setFullscreenHistorySource )
 import Agent.CLI.TUI.History
@@ -187,7 +194,7 @@ import Agent.Dialect
     ( dialectForId
     , DialectId(CodexDialect, GrokBuildDialect)
     )
-import Agent.Error ()
+import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task ( grokRootChildModels )
@@ -208,7 +215,8 @@ import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( unsafeToFilePath )
 import Agent.Provider
-    ( Provider(XAIProvider, OpenRouterProvider, OpenAIProvider)
+    ( Credential, TokenProvider,
+      Provider(XAIProvider, OpenRouterProvider, OpenAIProvider)
     , tokenProviderBillingMode
     )
 import Agent.ReasoningEffort
@@ -245,7 +253,7 @@ import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
 import Agent.Tools.ShowImage
     ( ImageDisplayHooks(..), ImageDisplayRequest(..) )
-import Agent.Tools.Types ( setToolSessionTmp )
+import Agent.Tools.Types (ToolEnv, setToolSessionTmp)
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( concurrently, concurrently_ )
@@ -258,22 +266,25 @@ import Control.Exception.Safe
 import Control.Monad ( forM_, join, unless, when )
 import Data.Functor ()
 import Data.IORef
-    ( atomicModifyIORef', newIORef, readIORef, writeIORef )
+    (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List ()
 import Data.Maybe ( isNothing, fromMaybe, isJust )
-import Data.Text ()
+import Data.Set (Set)
+import Data.Text (Text)
 import Data.Time.Clock ()
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
 import System.Directory.OsPath (getHomeDirectory)
 import System.Environment ()
 import System.Exit ()
-import System.IO ()
+import System.IO (Handle)
+import System.OsPath (OsPath)
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
 import qualified Agent.MCP as MCP
-    ( acquireMcpFleetProgressive,
+    ( McpSupervisor,
+      acquireMcpFleetProgressive,
       acquireMcpFleetWithProgress,
       mcpFleetGrokMetaTools,
       mcpFleetInstructions,
@@ -282,7 +293,7 @@ import qualified Agent.MCP as MCP
       mcpFleetStatuses,
       mcpFleetTools,
       releaseMcpFleetLease,
-      McpFleet(mcpFleetRegistrations, mcpFleetWarnings),
+      McpFleet(mcpFleetWarnings),
       McpFleetLease(mcpLeaseFleet),
       McpServerConfig(mcpServerRequestTimeoutSeconds, McpServerConfig,
                       mcpServerName, mcpServerUrl, mcpServerCommand, mcpServerArgs, mcpServerCwd,
@@ -304,6 +315,52 @@ import qualified Agent.XAI.Client as XAIClient ()
 import qualified Agent.XAI.Request as XAIRequest ()
 import qualified Agent.XAI.Usage as XAIUsage ()
 
+runAgentTools
+    :: (AgentRunMode -> CliOptions -> IO DevResult)
+    -> LoadedAuth
+    -> Bool
+    -> Maybe Text
+    -> IORef Text
+    -> IORef Text
+    -> IORef Text
+    -> ToolEnv
+    -> ModelCatalog
+    -> Bool
+    -> Maybe ModelTarget
+    -> Maybe (Text, ResponsesConnection)
+    -> OsPath
+    -> DatabaseScopes
+    -> IORef Bool
+    -> Maybe FullscreenRuntime
+    -> OsPath
+    -> InterruptState
+    -> Bool
+    -> MCP.McpSupervisor
+    -> CliOptions
+    -> Maybe PendingTurn
+    -> IORef (Maybe Text)
+    -> AgentProcessRuntime
+    -> OsPath
+    -> ProjectSettings
+    -> Maybe ModelTarget
+    -> (Credential -> IO Text)
+    -> Maybe SessionLock
+    -> Maybe (SessionMeta, [SessionTurn])
+    -> Maybe ModelTarget
+    -> OsPath
+    -> (Text -> IO (Either ApiError Text))
+    -> TokenProvider
+    -> (Text -> IO windowTitleResult)
+    -> StartupRuntime
+    -> FilePath
+    -> Handle
+    -> Maybe ModelTarget
+    -> TokenProvider
+    -> Maybe ProviderTransition
+    -> Maybe ModelTarget
+    -> IORef (Maybe FullscreenRuntime)
+    -> Set Provider
+    -> IO RunResult
 runAgentTools
     runAgentChild
     loaded

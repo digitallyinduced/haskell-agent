@@ -57,7 +57,7 @@ import Agent.Codex.Dialect.Subagent (codexSubagentSuffix)
 import Agent.Dialect
     (ChildAgentProtocol(..), Dialect, DialectId, codexDialect,
      dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel,
-     dialectSlug, providerSupportsDialect)
+     providerSupportsDialect)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
     (Backend(..), BackendSnapshot(..), BackendStateStore(..), LoopConfig(..),
@@ -76,7 +76,6 @@ import Agent.OpenAI.WebSocketClient
     , sendWsRequestWithEventsPreservingTurnState
     , withCodexWsRetryingUsingTurnState
     )
-import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.LoopBackend
@@ -86,7 +85,7 @@ import Agent.Responses.Types
     (ReasoningConfig(..), ResponseCreateParams(..), ResponseItem)
 import Agent.Subagents
     (RunSubagent, SubagentId(..), SubagentIdentity(..), SubagentRegistry,
-     SubagentSpawnEnv(..), SubagentStatus(..), getStatus, getSubagentCwd,
+     SubagentSpawnEnv(..), SubagentStatus(..), getStatus,
      getSubagentIdentity, getTaskPath, restoreSubagent, restoreSubagentAtStatus,
      restoreSubagentAtWithCwdStatus, restoreSubagentWithCwd,
      setPreviousResponseId)
@@ -96,9 +95,7 @@ import Agent.GrokBuild.Dialect.Prompt
 import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpec(..)
     , GrokSubagentSpecs
-    , canonicalizeGrokChildModel
     , defaultSubagentType
-    , isLunaSubagentModel
     , lookupAgentModel
     , lookupAgentReasoningEffort
     , lookupAgentType
@@ -106,8 +103,7 @@ import Agent.GrokBuild.Dialect.Task
     , recordAgentSpec
     )
 import Agent.Tools.MultiAgents
-    (CollaborationSpawnOptions(..), MultiAgentContext(..), SubagentWorktree)
-import Agent.Tools.PlanMode (PlanModeEnv(..))
+    (CollaborationSpawnOptions(..), MultiAgentContext(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
@@ -116,13 +112,13 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent.MVar
-    (modifyMVar, modifyMVar_, newMVar, withMVar)
+    (modifyMVar, modifyMVar_, newMVar)
 import Control.Exception.Safe (finally, throwIO)
-import Control.Monad (unless, void, when)
+import Control.Monad (unless)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime, utctDay)

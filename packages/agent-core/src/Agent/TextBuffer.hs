@@ -19,11 +19,7 @@ module Agent.TextBuffer
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-data TextBuffer = TextBuffer
-    { bufferLength :: !Int
-    , bufferChunkCount :: !Int
-    , bufferChunks :: ![Text]
-    }
+data TextBuffer = TextBuffer !Int !Int ![Text]
 
 instance Eq TextBuffer where
     left == right = textBufferToText left == textBufferToText right
@@ -59,11 +55,11 @@ textBufferNull (TextBuffer size _ _) =
 -- | Number of 'Text' code units retained by the buffer. This is constant time
 -- and is intended for queue/backpressure accounting.
 textBufferLength :: TextBuffer -> Int
-textBufferLength = (.bufferLength)
+textBufferLength (TextBuffer size _ _) = size
 
 -- | Number of append chunks retained by the buffer.
 textBufferChunkCount :: TextBuffer -> Int
-textBufferChunkCount = (.bufferChunkCount)
+textBufferChunkCount (TextBuffer _ count _) = count
 
 -- | Collapse accumulated chunks after streaming completes.
 compactTextBuffer :: TextBuffer -> TextBuffer

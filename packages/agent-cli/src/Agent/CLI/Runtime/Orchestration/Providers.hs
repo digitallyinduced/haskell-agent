@@ -11,12 +11,15 @@ import Agent.CLI.AgentSessions ()
 import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
-import Agent.CLI.Auth ()
+import Agent.CLI.Auth.Types (LoadedAuth(..))
 import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
 import Agent.CLI.Command ()
 import Agent.CLI.Compaction
-    ( autoCompactBackendWith,
+    ( CompactionInstall,
+      CompactOutcome,
+      OccupancySnapshot,
+      autoCompactBackendWith,
       boundCompletedToolContinuations,
       installLiveCompactOutcome,
       runProviderCompactWith,
@@ -31,7 +34,6 @@ import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
-import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
 import Agent.CLI.Login ()
@@ -39,12 +41,12 @@ import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
-import Agent.CLI.ModelConfig ()
+import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Models ()
-import Agent.CLI.Options ()
-import Agent.CLI.PendingInputs ( withPendingInputs )
+import Agent.CLI.Options (CliOptions(..))
+import Agent.CLI.PendingInputs (PendingInputs, withPendingInputs)
 import Agent.CLI.Plan ()
-import Agent.CLI.Project ()
+import Agent.CLI.Project (ModelSwitchScope)
 import Agent.CLI.Prompt ()
 import Agent.CLI.PromptHooks ()
 import Agent.CLI.Provider.OpenAI
@@ -66,7 +68,7 @@ import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
-    ( clearNativeProgress, finishStartup )
+    ( finishStartup )
 import Agent.CLI.Runtime.Orchestration.Types
     ( AccountSwitchRequest(..) )
 import Agent.CLI.Runtime.Persistence ()
@@ -81,21 +83,17 @@ import Agent.CLI.Runtime.Repl
 import Agent.CLI.Runtime.Types
     ( RunResult(RunSwitchProvider, RunProviderStartFailed) )
 import Agent.CLI.Secret ()
-import Agent.CLI.Session
-    ( resumeHint,
-      Persistence(..),
-      PersistenceState(PersistenceActive, PersistencePending),
-      SessionHandle(sessionMeta),
-      SessionMeta(metaId) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History
-    ( readLiveTranscript )
+    ( LiveConversation, readLiveTranscript )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( SessionBackend(..)
+    ( StartupRuntime,
+      SessionBackend(..)
     , SessionRequest(..)
     )
+import Agent.CLI.Session.Types (Persistence)
 import Agent.CLI.Session.Selection ()
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -105,14 +103,15 @@ import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth ( startupDie )
 import Agent.CLI.StartupContext ()
-import Agent.CLI.Style ( glyphWarn, roleMuted, roleWarn )
+import Agent.CLI.Style ( glyphWarn, roleWarn )
 import Agent.CLI.Subagents.Runtime
     ( freshOpenAiBackend,
       runCodexSubagent,
       runHttpSubagent,
       runXaiParentSubagent )
+import Agent.CLI.Subagents.Runtime.Types (SubagentRuntime)
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime, emitUiEvent, withFullscreenSuspended )
+    ( FullscreenRuntime, emitUiEvent )
 import Agent.CLI.TUI.History ()
 import Agent.CLI.TUI.SessionHistory ()
 import Agent.CLI.Terminal ( resolveColor )
@@ -136,8 +135,8 @@ import Agent.Claude.Control
     , ClaudeCodeMcpRequest(..)
     , defaultClaudeCodeHostHandlers
     )
-import Agent.Dialect ()
-import Agent.Error ( ApiError(..), ErrorType(..) )
+import Agent.Dialect (Dialect)
+import Agent.Error ( ApiError(..) )
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task ()
@@ -147,8 +146,11 @@ import Agent.Gemini.LoopBackend
 import Agent.Loop
     ( Backend(submitTurn, Backend)
     , BackendSnapshot(..)
+    , TokenUsage
+    , TurnInput
     , defaultLoopDispatch
     )
+import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient
@@ -161,11 +163,13 @@ import Agent.OpenAI.WebSocketClient
       withCodexWsCredentialOrHttpFallback,
       withCodexWsWithProviderOrHttpFallback )
 import Agent.OpenRouter.LoopBackend ( openRouterBackend )
-import Agent.OsPath ( unsafeToFilePath )
+import Agent.OpenRouter.Options (ClientOptions)
+import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider
     ( Provider(OpenRouterProvider, OpenAIProvider, XAIProvider,
                GeminiProvider, ClaudeCodeProvider),
       Credential(accountId, Credential, accessToken, leaseId, provider),
+      TokenProvider,
       runWithTokenProvider,
       tokenProviderBillingMode )
 import Agent.ReasoningEffort ()
@@ -181,6 +185,7 @@ import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model ( UiEvent(UiSystemMessage) )
 import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents ()
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
@@ -193,23 +198,26 @@ import Control.Concurrent.Chan
     ( Chan, newChan, readChan, writeChan )
 import Control.Concurrent.MVar
     ( withMVar, newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar )
-import Control.Concurrent.STM ()
+import Control.Concurrent.STM (STM)
 import Control.Exception ()
 import Control.Exception.Safe ( catchAny, finally, try )
 import Control.Monad ( when )
 import Data.Functor ()
 import Data.IORef
-    ( atomicModifyIORef', newIORef, readIORef, writeIORef )
+    ( IORef, atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
 import Data.Maybe ( fromMaybe, isJust )
+import Data.Set (Set)
 import Data.Text ()
+import Data.Text (Text)
 import Data.Time.Clock ( getCurrentTime )
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
 import System.Directory.OsPath ()
 import System.Environment ()
 import System.Exit ()
-import System.IO ( stderr )
+import System.IO (Handle)
+import System.OsPath (OsPath)
 import System.OsPath ()
 import qualified Data.ByteString as BS ()
 import qualified Data.Aeson as Aeson
@@ -230,7 +238,6 @@ import qualified Agent.CLI.Session.Runner as SessionRunner
     ( runSession, SessionRunnerContinuation(..) )
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, unpack )
-import qualified Data.Text.IO as Text ( hPutStr )
 import qualified Agent.XAI.Options as XAI ( clientOptionsFromEnv )
 import qualified Agent.XAI.Client as XAIClient
     ( createResponseWith )
@@ -241,6 +248,57 @@ import qualified Agent.Gemini.Client as GeminiClient
 import qualified Agent.Gemini.Options as Gemini
     ( clientOptionsFromEnv )
 
+runAgentProviders
+    :: ModelSwitchScope
+    -> LoadedAuth
+    -> (Maybe (STM ApiError)
+        -> Maybe TokenProvider
+        -> Maybe Pool
+        -> Maybe (Text -> IO (Either ApiError Text))
+        -> IO (Maybe Int)
+        -> (Maybe Text -> IO (Either Text CompactOutcome))
+        -> SessionRequest)
+    -> IORef Text
+    -> IORef Text
+    -> IORef Text
+    -> ModelCatalog
+    -> Bool
+    -> IORef (Maybe OccupancySnapshot)
+    -> ((Text -> Text) -> Int -> ResponseCreateParams -> Int)
+    -> IORef LiveConversation
+    -> ((Text -> Text) -> IO (Maybe Int))
+    -> Maybe GenericResponses.GenericClientOptions
+    -> OsPath
+    -> Dialect
+    -> Maybe FullscreenRuntime
+    -> IORef (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
+    -> OsPath
+    -> Maybe Text
+    -> Text
+    -> Maybe MultiAgentContext
+    -> ClientOptions
+    -> CliOptions
+    -> ResponseCreateParams
+    -> IORef ResponseCreateParams
+    -> PendingInputs
+    -> Persistence
+    -> IORef (Maybe Text)
+    -> OsPath
+    -> Provider
+    -> (TokenUsage -> IO ())
+    -> (Credential -> IO Text)
+    -> (Text -> IO (Either ApiError Text))
+    -> TokenProvider
+    -> Bool
+    -> StartupRuntime
+    -> Maybe (STM ApiError)
+    -> Handle
+    -> SubagentRuntime
+    -> TokenProvider
+    -> Maybe ProviderTransition
+    -> (Text -> Text)
+    -> Set Provider
+    -> IO RunResult
 runAgentProviders
     modelSwitchScope
     loaded
@@ -265,7 +323,7 @@ runAgentProviders
     multiCtx
     openRouterOptions
     options
-    params
+    _params
     paramsRef
     pendingNotices
     persist

@@ -6,89 +6,41 @@ module Agent.CLI.TUI.Render.Blocks
     ) where
 
 
-import Agent.CLI.AgentViewport
-    ( AgentEntry(..),
-      AgentStep(..),
-      AgentStepState(..),
-      AgentTarget(..),
-      agentDisplayName,
-      agentEntryTreeLabelWithGlyphModel,
-      agentStatusGlyph,
-      lookupAgentEntry )
+import Agent.CLI.AgentViewport ( AgentTarget(..) )
 import Agent.CLI.Artifact ()
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Command ()
 import Agent.CLI.Dictation ()
 import Agent.CLI.ImagePreview ()
-import Agent.CLI.Input ( terminalTextWidth, truncateDisplayText )
+import Agent.CLI.Input ()
 import Agent.CLI.Interrupt ()
 import Agent.CLI.Permission ()
 import Agent.CLI.Recap ()
-import Agent.CLI.Render ( formatElapsed )
-import Agent.CLI.Resume
-    ( ResumeBrowser(resumeBrowserSource, resumeBrowserQuery,
-                    resumeBrowserExpanded, resumeBrowserNow, resumeBrowserAppliedQuery,
-                    resumeBrowserNotice, resumeBrowserDeletePending,
-                    resumeBrowserSearching),
-      ResumeEntry(resumeId, resumeTitle, resumeCwd, resumeModel,
-                  resumeCreatedAt, resumeUpdatedAt, resumeProvider,
-                  resumeMessageCount, resumeTurnCount, resumeToolCount, resumeRecap,
-                  resumeLastTurnSummary, resumePrompt, resumeMatch),
-      visibleResumeBrowser,
-      selectedResumeBrowser,
-      resumeSourceLabel,
-      groupResumeEntries,
-      resumeRelativeAge )
+import Agent.CLI.Render ()
+import Agent.CLI.Resume ()
 import Agent.CLI.Secret ()
-import Agent.CLI.Status ( formatTokensPerSecond, formatUsageWithRate )
+import Agent.CLI.Status ()
 import Agent.CLI.Style ( motionGlyphSet )
-import Agent.CLI.TUI.History
-    ( HistoryWindow(historyWindowTurns, historyWindowTotalTurns,
-                    historyWindowGenerationStart, historyWindowHasNewer,
-                    historyWindowHasOlder, historyWindowPending),
-      HistoryTurn(historyTurnCursor, historyTurnBlocks),
-      HistoryDirection(..),
-      HistoryCursor(HistoryCursor) )
+import Agent.CLI.TUI.History ()
 import Agent.CLI.TUI.ImagePreview
     ( TuiImagePreview(previewBytes, previewMime, previewSourceWidth,
                       previewSourceHeight),
       previewCellSize,
-      renderTuiImagePreview,
-      previewCountForWidth )
-import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
+      renderTuiImagePreview )
+import Agent.CLI.TUI.LambdaArt ()
 import Agent.CLI.TUI.Motion
-    ( userActionPending,
-      hasBackgroundActivity,
-      isBackgroundAgentActive,
-      motionModeForTerminalFocus )
+    ( motionModeForTerminalFocus, userActionPending )
 import Agent.TUI.Accent ( accentRail, waveHeader )
 import Agent.CLI.TUI.Types
-    ( TextInputMode(..),
-      TextOverlay(textBody, textCursor, textInputMode, textDraft,
-                  textTitle),
-      ResumeOverlay(resumeOverlayBrowser),
-      ChoiceOverlay(choicePresentation, choiceIndex, choiceRows,
-                    choiceTitle, choiceBody),
-      ChoicePresentation(ChoiceOnboarding, ChoiceDialog),
-      AgentHover(agentHoverTarget, agentHoverPaneUpperLeft,
-                 agentHoverPaneWidth, agentHoverUpperLeft),
-      AppState(appRuntime, appHistorySelectedBlock, appSyntaxHighlighter,
-               appImagePreviews, appSubmittedImagePreviews, appResume,
-               appDictation, appTextPrompt, appChoice,
-               appMotionElapsedMillis, appCompletionFlashes, appHoveredControl,
-               appPressedControl, appAgentSelected, appConversationAnchor,
-               appAgentEntries, appUi, appHistoryWindow, appAgentHover,
-               appTerminalFocus),
-      FullscreenRuntime(runtimeMotionMode, runtimeNativeImagePreviews,
-                       runtimeColor, runtimeWaveTrough),
-      Name(ChoiceRow, ConversationViewport, ConversationViewportExtent,
-           ConversationImage, AgentRow, AgentPane,
-           AgentPopover, ConversationChunkCache, ConversationReserve,
-           QuickStartWorktree, QuickStartResume, QuickStartCommands,
-           QuickStartModel, CodeBlockCache, ConversationBlock,
-           ConversationBlockCache, ConversationBodyCache, CodeCopy, PermissionRow, ResumeViewport,
-           ResumeSearchCursor, ResumeRow, OverlayViewport, MarkdownLink,
-           OverlayCursor) )
+    ( AppState(appSubmittedImagePreviews, appTerminalFocus,
+               appHistorySelectedBlock, appUi, appAgentSelected,
+               appSyntaxHighlighter, appCompletionFlashes, appMotionElapsedMillis,
+               appHoveredControl, appPressedControl, appRuntime),
+      FullscreenRuntime(runtimeWaveTrough, runtimeMotionMode,
+                        runtimeNativeImagePreviews, runtimeColor),
+      Name(ConversationBodyCache, CodeBlockCache, ConversationBlock,
+           ConversationBlockCache, ConversationImage, CodeCopy,
+           MarkdownLink) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
 import Agent.Loop ()
@@ -99,39 +51,24 @@ import Agent.TUI.Markdown
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
     ( blockCodeLanguage,
-      conversationIsEmpty,
-      reduceUi,
-      visibleTodoList,
       BlockId,
       BlockKind(BlockUser, BlockAssistant, BlockThinking, BlockTool,
                 BlockTodo, BlockShell, BlockEdit, BlockSystem, BlockRecap,
                 BlockError),
       BlockState(BlockComplete, BlockFailed, BlockCancelled, BlockDenied,
                  BlockRunning, BlockStreaming),
-      Focus(FocusComposer, FocusPermission, FocusScrollback),
-      NoticeKind(..),
-      PermissionOverlay(permissionIndex, permissionSummary),
-      PromptState(promptUsage),
+      Focus(FocusScrollback),
       RetryCountdown(retryCountdownBlockId),
       UiBlock(blockId, blockTimestamp, blockTitle, blockKind, blockState,
               blockDetail, blockExpanded, blockBody),
-      UiEvent,
-      UiNotice(noticeKind, noticeText),
-      UiState(uiBlocks, uiAwaitingInput, uiActivity,
-              uiCompletionRemainingMillis, uiRunning, uiElapsedMillis, uiFocus,
-              uiSelectedBlock, uiPermission, uiFollow, uiRetryCountdown,
-              uiNotice, uiBranch, uiCwd, uiPrompt),
-      uiTokensPerSecond )
+      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus) )
 import Agent.TUI.Motion
-    ( backgroundIndicator,
-      foregroundIndicator,
+    ( foregroundIndicator,
       nativeProgressAnimationEnabled,
-      quietIndicator,
       waitingIndicator,
-      MotionMode(MotionOff, MotionFull, MotionReduced) )
+      MotionMode(MotionOff) )
 import Agent.TUI.Presentation
     ( TodoDisplayLine(todoLineText, todoLineStatus),
-      liveTodoPanelLines,
       parseTodoList,
       todoStatusGlyph,
       TodoDisplayStatus(..) )
@@ -141,49 +78,31 @@ import Brick
     ( getContext,
       cached,
       clickable,
-      emptyWidget,
-      raw,
       fill,
-      forceAttr,
       hBox,
       hLimit,
-      hLimitPercent,
       overrideAttr,
       padAll,
       padBottom,
       padLeft,
-      padLeftRight,
       padRight,
       padTop,
-      padTopBottom,
       reportExtent,
-      showCursor,
-      translateBy,
       txt,
       txtWrap,
       vBox,
       vLimit,
-      vLimitPercent,
-      viewport,
       withAttr,
       withBorderStyle,
-      withVScrollBarRenderer,
-      withVScrollBars,
       AttrName,
-      Location(Location),
-      Context(availHeight, availWidth),
-      CursorLocation(cursorLocation),
-      Result(cursors, image),
-      Size(Fixed, Greedy),
-      VScrollBarOrientation(OnRight),
-      VScrollbarRenderer(..),
-      ViewportType(Vertical),
+      Context(availWidth),
+      Size(Fixed),
       Widget(render, Widget),
       Padding(Pad, Max) )
 import Brick.BChan ()
-import Brick.Widgets.Border ( borderWithLabel )
+import Brick.Widgets.Border ()
 import Brick.Widgets.Border.Style ( unicodeRounded )
-import Brick.Widgets.Center ( center, centerLayer, hCenter )
+import Brick.Widgets.Center ()
 import Codec.Picture ()
 import Control.Applicative ()
 import Control.Concurrent ()
@@ -191,21 +110,20 @@ import Control.Concurrent.Async ()
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe ()
-import Control.Monad ( (>=>) )
+import Control.Monad ()
 import Control.Monad.IO.Class ()
 import Control.Monad.State.Strict ()
 import Data.Char ()
-import Data.Foldable ( toList )
+import Data.Foldable ()
 import Data.IORef ()
-import Data.List
-    ( findIndex, intersperse, nub, sort, sortOn )
+import Data.List ()
 import Data.List.NonEmpty ()
-import Data.Maybe ( fromMaybe, isJust, maybeToList )
-import Data.Sequence ( Seq )
+import Data.Maybe ( fromMaybe )
+import Data.Sequence ()
 import Data.Text ( Text )
-import Data.Time.Clock ( UTCTime )
+import Data.Time.Clock ()
 import Data.Time.Clock.POSIX ()
-import Data.Time.Format ( defaultTimeLocale, formatTime )
+import Data.Time.Format ()
 import Data.Word ()
 import GHC.Clock ()
 import System.Environment ()
@@ -213,57 +131,30 @@ import System.IO ()
 import System.Info ()
 import System.Posix.Process ()
 import System.Process ()
-import qualified Brick.Types as B
-    ( lookupAttrName,
-      getContext,
-      Result(cursors, image),
-      Size(Greedy),
-      Widget(render, Widget) )
+import qualified Brick.Types as B ()
 import qualified Brick.Widgets.Border as Border
-    ( border, borderAttr, hBorder )
+    ( border, borderAttr )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
-    ( draftCursorLocation,
-      drawSlashMenu,
-      drawQueuedInputs,
-      drawComposer,
-      controlAttr,
-      controlInteractionAttr )
+    ( controlAttr )
 import qualified Data.Map.Strict as Map ( findWithDefault, member )
-import qualified Agent.CLI.TUI.Scroll as Scroll
-    ( ConversationAnchor(anchorText, anchorReserveRows),
-      conversationAnchorSticky )
-import qualified Data.Sequence as Seq ( (!?), length, null )
-import qualified Data.Set as Set ( Set, member )
+import qualified Agent.CLI.TUI.Scroll as Scroll ()
+import qualified Data.Sequence as Seq ()
+import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( intercalate,
-      isPrefixOf,
-      justifyLeft,
-      length,
-      lines,
+    ( lines,
       null,
-      replicate,
       strip,
-      takeWhile,
-      uncons,
       unlines,
       pack )
 import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
     ( assistantAttr,
-      baseAttr,
       borderActiveAttr,
-      borderAttr,
       completionFlashAttr,
       controlLinkAttr,
-      controlLinkHoverAttr,
-      dimAttr,
       errorAttr,
-      footerAttr,
-      headerAttr,
-      headingAttr,
       mutedAttr,
-      strongAttr,
       successAttr,
       thinkingAttr,
       thinkingBodyAttr,
@@ -273,20 +164,9 @@ import qualified Agent.TUI.Theme as Theme
       todoPendingAttr,
       toolAttr,
       userAttr,
-      userMutedAttr,
-      waitingPulseAttr )
-import qualified Agent.CLI.TUI.Transcript as Transcript
-    ( transcriptChunks, transcriptChunkCacheKey )
-import qualified Graphics.Vty as V
-    ( Attr,
-      Image,
-      imageHeight,
-      imageWidth,
-      char,
-      charFill,
-      crop,
-      horizCat,
-      vertCat )
+      userMutedAttr )
+import qualified Agent.CLI.TUI.Transcript as Transcript ()
+import qualified Graphics.Vty as V ()
 import qualified Graphics.Vty.CrossPlatform as Vty ()
 
 

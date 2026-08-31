@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 -- | Typed terminal response assembly for Responses streams.
 module Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
@@ -168,11 +170,10 @@ applyStreamEvent state = \case
                 ]
                 (\progress -> progress
                     { itemValue = mapCustomCall streamItemId streamCallId
-                        (\call -> call
-                            { input = fromMaybe
+                        (setCustomToolInput
+                            (fromMaybe
                                 (materializedCustomInput progress)
-                                inputText
-                            })
+                                inputText))
                         progress.itemValue
                     , customInputChunks = Nothing
                     })
@@ -184,7 +185,7 @@ applyStreamEvent state = \case
                 [streamItemIdentity "reasoning" streamItemId]
                 (\progress -> progress
                     { itemValue = mapReasoning streamItemId index
-                        (\part -> part { text = Just value })
+                        (setReasoningPartText (Just value))
                         progress.itemValue
                     , reasoningTextChunks =
                         IntMap.delete index progress.reasoningTextChunks
@@ -419,18 +420,50 @@ mergeResponseItem :: ResponseItem -> ResponseItem -> ResponseItem
 mergeResponseItem old new =
     case (old, new) of
         (FunctionCallItem previous, FunctionCallItem next) ->
-            FunctionCallItem next
-                { itemId = next.itemId <|> previous.itemId
-                , namespace = next.namespace <|> previous.namespace
-                , status = next.status <|> previous.status
-                }
+            FunctionCallItem (mergeFunctionCall previous next)
         (CustomToolCallItem previous, CustomToolCallItem next) ->
-            CustomToolCallItem next
-                { itemId = next.itemId <|> previous.itemId
-                , namespace = next.namespace <|> previous.namespace
-                , status = next.status <|> previous.status
-                }
+            CustomToolCallItem (mergeCustomToolCall previous next)
         _ -> new
+
+mergeFunctionCall :: FunctionCall -> FunctionCall -> FunctionCall
+mergeFunctionCall previous next =
+    let FunctionCall {..} = next
+    in FunctionCall
+        { itemId = itemId <|> previous.itemId
+        , namespace = namespace <|> previous.namespace
+        , status = status <|> previous.status
+        , ..
+        }
+
+mergeCustomToolCall :: CustomToolCall -> CustomToolCall -> CustomToolCall
+mergeCustomToolCall previous next =
+    let CustomToolCall {..} = next
+    in CustomToolCall
+        { itemId = itemId <|> previous.itemId
+        , namespace = namespace <|> previous.namespace
+        , status = status <|> previous.status
+        , ..
+        }
+
+setFunctionArguments :: Text -> FunctionCall -> FunctionCall
+setFunctionArguments value call =
+    let FunctionCall {..} = call
+    in FunctionCall {arguments = value, ..}
+
+setCustomToolInput :: Text -> CustomToolCall -> CustomToolCall
+setCustomToolInput value call =
+    let CustomToolCall {..} = call
+    in CustomToolCall {input = value, ..}
+
+setReasoningSummary :: [ReasoningSummaryPart] -> ReasoningItem -> ReasoningItem
+setReasoningSummary value reasoning =
+    let ReasoningItem {..} = reasoning
+    in ReasoningItem {summary = value, ..}
+
+setReasoningPartText :: Maybe Text -> ReasoningSummaryPart -> ReasoningSummaryPart
+setReasoningPartText value part =
+    let ReasoningSummaryPart {..} = part
+    in ReasoningSummaryPart {text = value, ..}
 
 -- A sparse output-item.done is authoritative for normal item fields, but it
 -- must not erase deltas buffered since output-item.added. Only fields with
@@ -441,20 +474,23 @@ preserveBufferedProgress progress = \case
     FunctionCallItem call
         | Just _ <- progress.functionArgumentChunks
         , Text.null call.arguments ->
-            FunctionCallItem call
-                { arguments = materializedFunctionArguments progress }
+            FunctionCallItem
+                (setFunctionArguments
+                    (materializedFunctionArguments progress)
+                    call)
     CustomToolCallItem call
         | Just _ <- progress.customInputChunks
         , Text.null call.input ->
-            CustomToolCallItem call
-                { input = materializedCustomInput progress }
+            CustomToolCallItem
+                (setCustomToolInput (materializedCustomInput progress) call)
     ReasoningItemValue reasoning
         | not (IntMap.null progress.reasoningTextChunks) ->
-            ReasoningItemValue reasoning
-                { summary = mergeReasoningSummary
-                    (materializedReasoningSummary progress)
-                    reasoning.summary
-                }
+            ReasoningItemValue
+                (setReasoningSummary
+                    (mergeReasoningSummary
+                        (materializedReasoningSummary progress)
+                        reasoning.summary)
+                    reasoning)
     item -> item
 
 materializedReasoningSummary :: ItemProgress -> [ReasoningSummaryPart]
@@ -535,20 +571,23 @@ materializeItemProgress progress =
   where
     materializeFunction = case progress.functionArgumentChunks of
         Nothing -> id
-        Just chunks -> mapFunctionCall Nothing \call -> call
-            { arguments = call.arguments <> textBufferToText chunks }
+        Just chunks -> mapFunctionCall Nothing \call ->
+            setFunctionArguments
+                (call.arguments <> textBufferToText chunks)
+                call
     materializeCustom = case progress.customInputChunks of
         Nothing -> id
-        Just chunks -> mapCustomCall Nothing Nothing \call -> call
-            { input = call.input <> textBufferToText chunks }
+        Just chunks -> mapCustomCall Nothing Nothing \call ->
+            setCustomToolInput
+                (call.input <> textBufferToText chunks)
+                call
     materializeReasoning item =
         IntMap.foldlWithKey'
             (\current index chunks ->
                 mapReasoning Nothing index
-                    (\part -> part
-                        { text = Just
-                            (fromMaybe "" part.text <> textBufferToText chunks)
-                        })
+                    (\part -> setReasoningPartText
+                        (Just (fromMaybe "" part.text <> textBufferToText chunks))
+                        part)
                     current)
             item
             progress.reasoningTextChunks
@@ -710,8 +749,10 @@ mapReasoning
     -> ResponseItem
 mapReasoning itemId index update = \case
     ReasoningItemValue reasoning ->
-        ReasoningItemValue reasoning
-            { summary = updateAt index update reasoning.summary }
+        ReasoningItemValue
+            (setReasoningSummary
+                (updateAt index update reasoning.summary)
+                reasoning)
     item -> case itemId of
         Nothing -> item
         Just identifier -> ReasoningItemValue ReasoningItem
@@ -739,12 +780,15 @@ nonEmpty _ = Nothing
 
 setResponseStatus :: ResponseStatus -> Response -> Response
 setResponseStatus value response =
-    response { status = value }
+    let Response {..} = response
+    in Response {status = value, ..}
 
 setResponseModel :: Text -> Response -> Response
 setResponseModel value response =
-    response { model = value }
+    let Response {..} = response
+    in Response {model = value, ..}
 
 setResponseOutput :: [ResponseItem] -> Response -> Response
 setResponseOutput value response =
-    response { output = value }
+    let Response {..} = response
+    in Response {output = value, ..}

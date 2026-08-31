@@ -203,9 +203,6 @@ formatIndex index = index.indexName <> ": " <> index.indexDefinition
 indentBlock :: Text -> Text
 indentBlock = Text.intercalate "\n" . map ("  " <>) . Text.lines
 
-boolText :: Bool -> Text
-boolText True = "true"
-boolText False = "false"
 
 yesNo :: Bool -> Text
 yesNo True = "yes"

@@ -51,14 +51,11 @@ import Agent.CLI.Command
     , SlashMenu(..)
     , SlashSuggestion(..)
     , parseReplLine
-    , slashMenuForCatalog
     )
 import Agent.CLI.Input
     ( ReplLine(..)
     , appendReplHistory
-    , displayEditorText
     , submissionPromptText
-    , truncateDisplayText
     )
 import Agent.CLI.Interrupt (CtrlCDecision)
 import qualified Agent.CLI.TUI.Bridge as Bridge
@@ -66,29 +63,21 @@ import Agent.CLI.TUI.Composer.Buffer
 import Agent.CLI.TUI.Composer.Edit
 import Agent.CLI.TUI.Composer.Logic
 import Agent.CLI.TUI.Composer.Render
-import Agent.CLI.TUI.History (HistoryWindow, historyWindowHasBlocks)
 import Agent.CLI.TUI.Types
-import qualified Agent.TUI.Theme as Theme
 import Agent.TUI.Model
 import Agent.TUI.TextWidth
     ( nextGraphemeBoundary
     , previousGraphemeBoundary
-    , terminalTextImage
     )
 import Brick
-import qualified Brick.Types as B
-import qualified Brick.Widgets.Border as Border
-import Brick.Widgets.Border.Style (unicodeRounded)
-import qualified Brick.Widgets.Border.Style as BorderStyle
 import Control.Concurrent (newEmptyMVar, takeMVar, tryPutMVar)
 import Control.Concurrent.STM (atomically, writeTQueue)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Data.IORef (newIORef, writeIORef)
-import Data.List (elemIndex, intersperse)
+import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
-import Data.Sequence (ViewL(..))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -551,7 +540,7 @@ handleComposerKey
                         , appSlashDismissed = False
                         , appUndo = []
                         }
-                liftIO (state.appRuntime.runtimeBtw question)
+                _ <- liftIO (state.appRuntime.runtimeBtw question)
                 pure True
             Nothing ->
                 case steeringPrompt state.appUi text of

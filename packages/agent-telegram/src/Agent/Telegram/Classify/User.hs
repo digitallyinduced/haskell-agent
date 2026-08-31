@@ -12,7 +12,7 @@ module Agent.Telegram.Classify.User
 import Agent.Telegram.Types
 import Control.Applicative ((<|>))
 import Data.Char (isDigit)
-import Data.List (foldl', nubBy)
+import Data.List (nubBy)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
 import qualified Data.Set as Set
