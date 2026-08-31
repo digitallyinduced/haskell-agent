@@ -811,13 +811,14 @@ spec = do
             quickStartWideVisible 103 35 `shouldBe` False
             quickStartWideVisible 140 28 `shouldBe` False
 
-        it "surfaces the existing high-value startup commands" do
+        it "surfaces the high-value startup commands including changelog" do
             quickStartRows
                 `shouldBe`
                     [ (QuickStartWorktree, "New worktree", "/worktree")
                     , (QuickStartResume, "Resume session", "/resume")
                     , (QuickStartCommands, "Browse commands", "/")
                     , (QuickStartModel, "Manage models", "/model")
+                    , (QuickStartChangelog, "View changelog", "/changelog")
                     ]
 
         it "packs capability names into bounded startup rows" do

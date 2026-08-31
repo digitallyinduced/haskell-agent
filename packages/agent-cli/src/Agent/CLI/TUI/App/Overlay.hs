@@ -626,6 +626,8 @@ activateControl = \case
         Composer.handlePromptControlClick
             applyLocalUiEventWith
             ReplChooseModel
+    QuickStartChangelog ->
+        activateQuickStartCommand "/changelog"
     ChoiceRow index ->
         confirmChoiceAt index
     ResumeRow sessionId ->
@@ -654,6 +656,7 @@ isInteractiveControl = \case
     QuickStartResume -> True
     QuickStartCommands -> True
     QuickStartModel -> True
+    QuickStartChangelog -> True
     ChoiceRow _ -> True
     ResumeRow _ -> True
     CodeCopy _ _ _ -> True
@@ -665,6 +668,7 @@ isQuickStartControl = \case
     QuickStartResume -> True
     QuickStartCommands -> True
     QuickStartModel -> True
+    QuickStartChangelog -> True
     _ -> False
 
 openMarkdownLink :: Text -> EventM Name AppState ()

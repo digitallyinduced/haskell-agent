@@ -249,6 +249,11 @@ spec = do
             parseReplLine "/undo now"
                 `shouldBe` ReplCommandError "usage: /rewind"
 
+        it "opens the changelog without arguments" do
+            parseReplLine "/changelog" `shouldBe` ReplChangelog
+            parseReplLine "/changelog now"
+                `shouldBe` ReplCommandError "usage: /changelog"
+
         it "compacts with optional focus text" do
             parseReplLine "/compact" `shouldBe` ReplCompact Nothing
             parseReplLine "/compact focus auth"
@@ -526,6 +531,8 @@ spec = do
                 `shouldBe` Just "transcript"
             fmap (.slashName) (lookupSlashCommand "/welcome")
                 `shouldBe` Just "home"
+            fmap (.slashName) (lookupSlashCommand "/changelog")
+                `shouldBe` Just "changelog"
             fmap (.slashName) (lookupSlashCommand "/undo")
                 `shouldBe` Just "rewind"
 

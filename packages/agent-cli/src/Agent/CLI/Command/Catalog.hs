@@ -55,6 +55,7 @@ slashCommands =
     , cmd "copy-path" [] "/copy-path" "Copy the active worktree path" False
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
+    , cmd "changelog" [] "/changelog" "Show Haskell Agent release notes" False
     , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
     , cmd "mcp" ["mcps"] "/mcp [prompt <server> <name> [key=value…]]" "Manage MCP servers or run a server prompt" False
     , grokToolCmd "scheduler_create" "loop" [] "/loop [interval] <prompt>" "Run a prompt on a recurring interval" True

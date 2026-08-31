@@ -105,6 +105,7 @@ data Name
     | QuickStartResume
     | QuickStartCommands
     | QuickStartModel
+    | QuickStartChangelog
     | ChoiceRow !Int
     | ResumeViewport
     | ResumeRow !Text

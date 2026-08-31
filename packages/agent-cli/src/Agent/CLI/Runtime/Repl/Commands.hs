@@ -30,7 +30,8 @@ import Agent.CLI.Command
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopy,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplDesktop,
-                 ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
+                 ReplShowTerminal, ReplChangelog,
+                 ReplShowEffort, ReplSetEffort, ReplShowModel,
                  ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
                  ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplViewPlan, ReplQueue, ReplTranscript, ReplEditPrompt,
@@ -849,6 +850,12 @@ handleReplLine
                         let message = formatTerminalCapabilities terminal
                         displayInfo message $
                             Text.putStrLn (roleMuted color message)
+                        continue
+                    ReplChangelog -> do
+                        let message =
+                                "[View the Haskell Agent changelog]\
+                                \(https://github.com/digitallyinduced/haskell-agent/releases)"
+                        displayInfo message (Text.putStrLn message)
                         continue
                     action@ReplShowEffort -> handleSelectionAction env continue action
                     action@ReplSetEffort{} -> handleSelectionAction env continue action
