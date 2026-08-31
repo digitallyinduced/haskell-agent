@@ -178,6 +178,14 @@ spec = describe "fullscreen UI reducer" do
         after.uiDraft `shouldBe` "half typed prompt"
         after.uiCursor `shouldBe` 7
 
+    it "tracks current context occupancy independently of session totals" do
+        let state =
+                reduceUi
+                    (UiSetContextUsage (Just 197000) (Just 272000))
+                    initialUiState
+        state.uiContextTokens `shouldBe` Just 197000
+        state.uiContextWindow `shouldBe` Just 272000
+
     it "discards partial output and updates effort when restarting a turn" do
         let initialPrompt =
                 initialUiState.uiPrompt

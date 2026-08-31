@@ -160,6 +160,11 @@ reduceUi event state = case event of
             { uiPrompt =
                 state.uiPrompt { promptLimitStatus = limitStatus }
             }
+    UiSetContextUsage tokens contextWindow ->
+        state
+            { uiContextTokens = tokens
+            , uiContextWindow = contextWindow
+            }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
