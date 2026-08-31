@@ -167,7 +167,8 @@ createWorktreeWithFetchProgress report fetchLatest source root = runExceptT do
     let day = utctDay now
         start = posixMicros now
     lift (createDirectoryIfMissing True (root </> repoName))
-    addUnique repo root repoName day start base 0
+    withGitWorktreeLock repo $
+        addUnique repo root repoName day start base 0
 
 -- | Create a worktree using the machine-wide policy under the supplied home.
 -- Configuration is read for every creation so startup, slash-command, and
@@ -195,10 +196,11 @@ createManagedWorktreeWithProgress report home source =
 removeWorktree :: OsPath -> OsPath -> IO (Either Text ())
 removeWorktree source path = runExceptT do
     repo <- gitToplevel source
-    void $ ExceptT $
-        git repo ["worktree", "remove", "--force", unsafeToFilePath path]
-    void $ ExceptT $
-        git repo ["branch", "-D", unsafeToFilePath (takeFileName path)]
+    withGitWorktreeLock repo do
+        void $ ExceptT $
+            git repo ["worktree", "remove", "--force", unsafeToFilePath path]
+        void $ ExceptT $
+            git repo ["branch", "-D", unsafeToFilePath (takeFileName path)]
 
 -- | Take a shared lease when @path@ is inside one of our managed worktrees.
 -- Cleanup takes the corresponding exclusive lock, so multiple live sessions
@@ -368,33 +370,34 @@ cleanupCandidate root candidate = do
             Right Nothing ->
                 pure mempty
             Right (Just (commonDir, branch)) ->
-                git commonDir
-                    [ "worktree"
-                    , "remove"
-                    , unsafeToFilePath candidate
-                    ] >>= \case
-                        Left err ->
-                            pure mempty
-                                { cleanupFailures = [(candidate, err)]
-                                }
-                        Right _ -> do
-                            -- The worktree is the resource governed by the
-                            -- retention policy. Branch deletion is best
-                            -- effort: @-d@ can reject a branch that is known
-                            -- to be reachable from another ref but is not
-                            -- merged into the repository's current branch.
-                            -- Retaining it is safe and should not surface as
-                            -- a startup warning.
-                            _ <- git commonDir
-                                [ "branch"
-                                , "-d"
-                                , "--"
-                                , Text.unpack branch
-                                ]
-                            pure WorktreeCleanupReport
-                                { cleanupRemoved = [candidate]
-                                , cleanupFailures = []
-                                }
+                withGitWorktreeLockAt commonDir $
+                    git commonDir
+                        [ "worktree"
+                        , "remove"
+                        , unsafeToFilePath candidate
+                        ] >>= \case
+                            Left err ->
+                                pure mempty
+                                    { cleanupFailures = [(candidate, err)]
+                                    }
+                            Right _ -> do
+                                -- The worktree is the resource governed by the
+                                -- retention policy. Branch deletion is best
+                                -- effort: @-d@ can reject a branch that is known
+                                -- to be reachable from another ref but is not
+                                -- merged into the repository's current branch.
+                                -- Retaining it is safe and should not surface as
+                                -- a startup warning.
+                                _ <- git commonDir
+                                    [ "branch"
+                                    , "-d"
+                                    , "--"
+                                    , Text.unpack branch
+                                    ]
+                                pure WorktreeCleanupReport
+                                    { cleanupRemoved = [candidate]
+                                    , cleanupFailures = []
+                                    }
 
 inspectCleanupCandidate
     :: OsPath
@@ -610,13 +613,36 @@ gitToplevel source = do
 
 gitRepositoryName :: OsPath -> ExceptT Text IO OsPath
 gitRepositoryName repo = do
-    commonDir <- ExceptT $
-        git repo ["rev-parse", "--path-format=absolute", "--git-common-dir"]
-    let path = unsafeEncodeUtf (Text.unpack (Text.strip commonDir))
+    path <- gitCommonDir repo
     pure $
         if takeFileName path == unsafeEncodeUtf ".git"
             then takeFileName (takeDirectory path)
             else takeFileName path
+
+gitCommonDir :: OsPath -> ExceptT Text IO OsPath
+gitCommonDir repo = do
+    commonDir <- ExceptT $
+        git repo ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+    pure (unsafeEncodeUtf (Text.unpack (Text.strip commonDir)))
+
+-- | Serialize mutations of Git's shared worktree administration directory.
+-- Fetches use private refs and can remain concurrent, but 'git worktree add'
+-- and 'remove' update the common @.git/worktrees@ state.
+withGitWorktreeLock
+    :: OsPath
+    -> ExceptT Text IO a
+    -> ExceptT Text IO a
+withGitWorktreeLock repo action = do
+    commonDir <- gitCommonDir repo
+    ExceptT $ withGitWorktreeLockAt commonDir (runExceptT action)
+
+withGitWorktreeLockAt :: OsPath -> IO a -> IO a
+withGitWorktreeLockAt commonDir action =
+    FileLock.withFileLock
+        (unsafeToFilePath
+            (commonDir </> unsafeEncodeUtf "haskell-agent-worktree.lock"))
+        FileLock.Exclusive
+        (const action)
 
 -- | Fetch and return the commit at the selected remote's advertised default
 -- branch, or use the local @HEAD@ when the repository has no remotes. The
