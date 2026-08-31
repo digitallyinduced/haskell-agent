@@ -566,9 +566,28 @@
                         (old: {
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
-                                ++ [ pkgs.makeWrapper ];
+                                ++ [ pkgs.makeWrapper ]
+                                ++ pkgs.lib.optionals
+                                    (system == "aarch64-darwin")
+                                    [ pkgs.removeReferencesTo ];
                             postInstall =
                                 (old.postInstall or "")
+                                + pkgs.lib.optionalString
+                                    (system == "aarch64-darwin")
+                                    ''
+                                        # Darwin's linker leaves generated
+                                        # Paths_* store prefixes in otherwise
+                                        # dead constants. The packages' live
+                                        # data files use separate -data
+                                        # outputs, so remove only these package
+                                        # output references before fixup strips
+                                        # and signs the executable.
+                                        remove-references-to \
+                                            -t ${claudeAgentSdkHaskellPackage} \
+                                            -t ${agentOpenaiPackage} \
+                                            -t ${agentCorePackage} \
+                                            "$out/bin/agent-cli"
+                                    ''
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \

@@ -101,7 +101,7 @@ These are important product features, but not the core differentiation.
 2. **Copy this prompt to your coding agent to install:**
 
    ```text
-   Install haskell-agent by running `nix profile add --accept-flake-config github:digitallyinduced/haskell-agent`, then verify the installation by running `agent-cli --help`.
+   Install haskell-agent by running `nix profile add --accept-flake-config github:digitallyinduced/haskell-agent`. If Nix says `haskell-agent` is already added, update it with `nix profile upgrade --refresh --accept-flake-config haskell-agent` instead. Verify the packaged runtime by running `agent-cli storage start`, `agent-cli storage doctor`, and `agent-cli storage stop`.
    ```
 
    Or install it yourself:
@@ -112,6 +112,30 @@ These are important product features, but not the core differentiation.
 
    `--accept-flake-config` enables the public IHP binary cache declared by the
    flake.
+
+### Update
+
+`nix profile add` does not replace an existing profile entry. Update an
+existing installation with:
+
+```console
+nix profile upgrade --refresh --accept-flake-config haskell-agent
+```
+
+If the profile entry cannot be upgraded, remove and reinstall it:
+
+```console
+nix profile remove haskell-agent
+nix profile add --refresh --accept-flake-config github:digitallyinduced/haskell-agent
+```
+
+Verify that the packaged PostgreSQL runtime is available:
+
+```console
+agent-cli storage start
+agent-cli storage doctor
+agent-cli storage stop
+```
 
 ## Run
 
