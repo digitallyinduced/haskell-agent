@@ -10,6 +10,7 @@ module Agent.CLI.TUI.Types
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
     , ChoiceSelection(..)
+    , activeTheme
     , choiceVisibleRows
     , selectedChoice
     , selectedChoiceIndex
@@ -51,7 +52,7 @@ import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
 import Agent.Provider (Provider)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
-import Agent.TUI.Theme (ThemeKind)
+import Agent.TUI.Theme (ThemeKind, themeKindAt)
 import Agent.Syntax (SyntaxHighlighter)
 import Agent.TUI.Motion (MotionDemand, MotionMode)
 import Brick (Location)
@@ -460,6 +461,15 @@ selectedChoice choice = do
         | otherwise = case drop index values of
             value : _ -> Just value
             [] -> Nothing
+
+-- | The selected picker row previews its palette before it is persisted.
+activeTheme :: AppState -> ThemeKind
+activeTheme state =
+    case state.appChoice of
+        Just choice
+            | choice.choicePresentation == ChoiceTheme ->
+                themeKindAt choice.choiceIndex
+        _ -> state.appTheme
 
 data ResumeOverlay = ResumeOverlay
     { resumeOverlayBrowser :: !ResumeBrowser

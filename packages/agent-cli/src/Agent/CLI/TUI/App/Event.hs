@@ -193,13 +193,7 @@ fullscreenApp = App
     , appAttrMap = \state ->
         if state.appRuntime.runtimeColor
             then
-                Theme.themeAttrMap
-                    (case state.appChoice of
-                        Just choice
-                            | choice.choicePresentation == ChoiceTheme ->
-                                Theme.themeKindAt choice.choiceIndex
-                            | otherwise -> state.appTheme
-                        Nothing -> state.appTheme)
+                Theme.themeAttrMap (activeTheme state)
             else Theme.monochrome
     }
 

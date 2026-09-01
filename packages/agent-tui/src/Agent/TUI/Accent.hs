@@ -25,10 +25,11 @@ accentRail
     -> AttrName
     -> Bool
     -> V.Color
+    -> Theme.ThemeKind
     -> Maybe Int
     -> Widget n
     -> Widget n
-accentRail glyphs attrName colorEnabled trough waveElapsed content =
+accentRail glyphs attrName colorEnabled trough theme waveElapsed content =
     Widget Greedy Fixed do
         context <- getContext
         attr <- lookupAttrName attrName
@@ -37,14 +38,15 @@ accentRail glyphs attrName colorEnabled trough waveElapsed content =
         let
             height = max 1 (V.imageHeight inner.image)
             glyph = accentBarChar glyphs
-            peak = Theme.wavePeakFor attrName
+            peak = Theme.wavePeakForTheme theme attrName
             rows = waveRowsFor height
             rail = case waveElapsed of
                 Nothing ->
                     V.charFill attr glyph 1 height
                 Just elapsedMillis ->
                     V.vertCat
-                        [ Theme.waveCell
+                        [ Theme.waveCellForTheme
+                            theme
                             colorEnabled
                             trough
                             peak
@@ -57,17 +59,25 @@ accentRail glyphs attrName colorEnabled trough waveElapsed content =
 
 -- | Live header: the leading spinner rides the same wave as row 0 of the
 -- rail; the rest of the title stays muted so the rail is what moves.
-waveHeader :: AttrName -> Bool -> V.Color -> Int -> Text.Text -> Widget n
-waveHeader attrName colorEnabled trough elapsedMillis title =
+waveHeader
+    :: AttrName
+    -> Bool
+    -> V.Color
+    -> Theme.ThemeKind
+    -> Int
+    -> Text.Text
+    -> Widget n
+waveHeader attrName colorEnabled trough theme elapsedMillis title =
     case Text.uncons title of
         Nothing -> emptyWidget
         Just (glyph, rest) ->
             hBox
                 [ raw
-                    ( Theme.waveCell
+                    ( Theme.waveCellForTheme
+                        theme
                         colorEnabled
                         trough
-                        (Theme.wavePeakFor attrName)
+                        (Theme.wavePeakForTheme theme attrName)
                         (waveBrightness elapsedMillis 0 (waveRowsFor 1))
                         glyph
                     )

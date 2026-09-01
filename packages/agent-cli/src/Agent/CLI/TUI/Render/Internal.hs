@@ -65,6 +65,7 @@ import Agent.CLI.TUI.Types
     ( AppState(appMetaConsole, appMotionElapsedMillis, appTerminalFocus,
                appAgentEntries, appRuntime, appImagePreviews, appResume,
                appTextPrompt, appChoice, appUi),
+      activeTheme,
       FullscreenRuntime(runtimeNativeImagePreviews, runtimeWaveTrough,
                         runtimeColor, runtimeMotionMode),
       Name(ComposerImageRemove) )
@@ -174,7 +175,8 @@ import qualified Agent.TUI.Theme as Theme
       mutedAttr,
       successAttr,
       thinkingAttr,
-      waitingPulseAttr )
+      waitingPulseAttrForTheme,
+      waveTroughForTheme )
 import qualified Agent.CLI.TUI.Transcript as Transcript ()
 import qualified Graphics.Vty as V
     ( Attr,
@@ -473,7 +475,11 @@ drawPromptActivity state
     mode = state.appRuntime.runtimeMotionMode
     motionMillis = state.appMotionElapsedMillis
     colorEnabled = state.appRuntime.runtimeColor
-    trough = state.appRuntime.runtimeWaveTrough
+    theme = activeTheme state
+    trough =
+        Theme.waveTroughForTheme
+            theme
+            state.appRuntime.runtimeWaveTrough
     effectiveMode =
         motionModeForTerminalFocus state.appTerminalFocus mode
     busy =
@@ -484,7 +490,8 @@ drawPromptActivity state
     diamond =
         raw
             ( V.char
-                (Theme.waitingPulseAttr
+                (Theme.waitingPulseAttrForTheme
+                    theme
                     colorEnabled
                     effectiveMode
                     trough

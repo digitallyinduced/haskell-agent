@@ -60,6 +60,29 @@ spec = do
                     (Theme.themeAttrMap Theme.Daylight))
                 `shouldBe` V.SetTo (RGBColor 255 255 255)
 
+        it "sets a daylight background on semantic text attributes" do
+            map
+                ( V.attrBackColor
+                    . (\name ->
+                        attrMapLookup
+                            name
+                            (Theme.themeAttrMap Theme.Daylight))
+                )
+                [ Theme.baseAttr
+                , Theme.headerAttr
+                , Theme.footerAttr
+                , Theme.mutedAttr
+                , Theme.assistantAttr
+                , Theme.thinkingAttr
+                , Theme.toolAttr
+                , Theme.errorAttr
+                , Theme.successAttr
+                , Theme.codeAttr
+                , Theme.linkAttr
+                , Theme.syntaxKeywordAttr
+                ]
+                `shouldSatisfy` all (/= V.Default)
+
         it "leaves every syntax background to the terminal theme" do
             map
                 ( V.attrBackColor
@@ -164,6 +187,24 @@ spec = do
                 `shouldBe` V.SetTo (V.reverseVideo .|. V.dim)
 
     describe "live accent wave" do
+        it "derives daylight motion colors from its palette" do
+            Theme.waveTroughForTheme
+                Theme.Daylight
+                (RGBColor 0 0 0)
+                `shouldBe` RGBColor 250 247 242
+            Theme.wavePeakForTheme Theme.Daylight Theme.toolAttr
+                `shouldBe` RGBColor 144 80 150
+            Theme.wavePeakForTheme Theme.Daylight Theme.thinkingAttr
+                `shouldBe` RGBColor 110 105 100
+            V.attrBackColor
+                (Theme.waitingPulseAttrForTheme
+                    Theme.Daylight
+                    True
+                    MotionOff
+                    (RGBColor 250 247 242)
+                    0)
+                `shouldBe` V.SetTo (RGBColor 250 247 242)
+
         it "fades a named accent through distinct RGB values" do
             let tool = attrMapLookup Theme.toolAttr Theme.terminalDefault
                 samples =
