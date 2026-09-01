@@ -1427,6 +1427,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnError = Nothing
                         , turnResponseId = response
                         , turnItems = []
+                        , turnDisplayItems = []
                         , turnUsage = usage
                         , turnProviderTelemetry = []
                         , turnEffect = effect
