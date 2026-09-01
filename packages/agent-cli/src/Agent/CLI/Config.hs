@@ -28,6 +28,11 @@ import Agent.Json (RawJson, rawJsonDecoder)
 import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
+import Agent.TUI.Theme
+    ( ThemeKind(..)
+    , parseThemeKind
+    , themeKindText
+    )
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (forM_, unless, when)
@@ -298,6 +303,7 @@ instance Aeson.ToJSON WorktreeConfig where
 
 data HarnessConfig = HarnessConfig
     { configVersion :: !Int
+    , configTheme :: !ThemeKind
     , configMcpInitStrategy :: !McpInitStrategy
     , configMcpServers :: !(Map Text McpServerConfig)
     , configWebFetch :: !WebFetchConfig
@@ -311,6 +317,7 @@ instance Aeson.ToJSON HarnessConfig where
     toJSON config =
         Aeson.object
             [ "version" Aeson..= config.configVersion
+            , "theme" Aeson..= themeKindText config.configTheme
             , "mcpInitStrategy" Aeson..= config.configMcpInitStrategy
             , "mcpServers" Aeson..= config.configMcpServers
             , "webFetch" Aeson..= config.configWebFetch
@@ -322,6 +329,7 @@ instance Aeson.ToJSON HarnessConfig where
 defaultHarnessConfig :: HarnessConfig
 defaultHarnessConfig = HarnessConfig
     { configVersion = harnessConfigSchemaVersion
+    , configTheme = Midnight
     , configMcpInitStrategy = McpInitAuto
     , configMcpServers = Map.empty
     , configWebFetch = WebFetchConfig
@@ -448,6 +456,7 @@ harnessConfigDecoder =
     Hermes.object $
         HarnessConfig
             <$> defaultKey harnessConfigSchemaVersion "version" Hermes.int
+            <*> defaultKey Midnight "theme" themeKindDecoder
             <*> defaultKey McpInitAuto
                 "mcpInitStrategy" mcpInitStrategyDecoder
             <*> defaultKey Map.empty "mcpServers"
@@ -463,6 +472,17 @@ harnessConfigDecoder =
 textMapDecoder :: Hermes.Decoder (Map Text Text)
 textMapDecoder =
     Hermes.objectAsMap pure Hermes.text
+
+themeKindDecoder :: Hermes.Decoder ThemeKind
+themeKindDecoder =
+    Hermes.text >>= \value ->
+        maybe
+            (fail
+                ("unknown theme "
+                    <> Text.unpack value
+                    <> " (expected auto, midnight, daylight, tokyonight, rosepine-moon, or oscura-midnight)"))
+            pure
+            (parseThemeKind value)
 
 -- | @~/.haskell-agent/config.json@ for a supplied home directory.
 harnessConfigPath :: OsPath -> OsPath

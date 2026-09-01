@@ -29,7 +29,10 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
-import Agent.CLI.GatewayClient ( cachedGatewayModels )
+import Agent.CLI.GatewayClient
+    ( cachedGatewayModels
+    , gatewayModelIds
+    )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
     ( readReplLineWithCatalog
@@ -275,7 +278,8 @@ replWithDraft env@SessionEnv
     gatewayAccess <- readIORef gatewayModelsRef
     modelIds <- case gatewayAccess of
         Nothing -> pure (catalogModelIds catalog)
-        Just access -> fromMaybe [] <$> cachedGatewayModels access
+        Just access ->
+            maybe [] gatewayModelIds <$> cachedGatewayModels access
     let slashCatalog =
             mkSlashCatalog
                 (maybe False (\info ->

@@ -426,6 +426,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appNextHistoryBlockId = -1
         , appPermissionReply = Nothing
         , appRuntime = runtime
+        , appTheme = runtime.runtimeTheme
         , appSlashIndex = 0
         , appChoice = Nothing
         , appChoiceReply = Nothing

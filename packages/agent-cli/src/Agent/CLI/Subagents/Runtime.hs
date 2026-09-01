@@ -44,7 +44,6 @@ import Agent.CLI.Subagents.Runtime.Target
      validatePersistedSubagentTarget)
 import Agent.CLI.Subagents.Runtime.OpenAI
     (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
-import Agent.CLI.ModelConfig (connectionSupportsDialect)
 import Agent.CLI.SteeringInputs
     ( commitSteeringInputs
     , dismissBackgroundCompletion
@@ -52,6 +51,7 @@ import Agent.CLI.SteeringInputs
     , newSteeringInputs
     , readSteeringInputs
     )
+import Agent.CLI.ModelConfig (connectionSupportsDialect)
 import Agent.CLI.Tools
     (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects

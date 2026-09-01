@@ -65,10 +65,12 @@ import Agent.CLI.TUI.Types
                     choiceAdjustments, choiceAdjustmentIndices),
       choiceVisibleRows,
       selectedChoiceIndex,
-      ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument),
+      ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument,
+                         ChoiceTheme),
       AppState(appRuntime,
                appDictation, appTextPrompt, appChoice, appMetaConsole,
                appMotionElapsedMillis, appUi, appTerminalFocus),
+      activeTheme,
       FullscreenRuntime(runtimeMotionMode, runtimeColor, runtimeWaveTrough),
       Name(ChoiceRow, PermissionRow, ResumeViewport,
            ResumeSearchCursor, ResumeRow, OverlayViewport, MarkdownLink,
@@ -191,7 +193,8 @@ import qualified Agent.TUI.Theme as Theme
       strongAttr,
       successAttr,
       thinkingAttr,
-      waitingPulseAttr )
+      waitingPulseAttrForTheme,
+      waveTroughForTheme )
 import qualified Agent.CLI.TUI.Transcript as Transcript ()
 import qualified Graphics.Vty as V
     ( char )
@@ -526,6 +529,7 @@ drawChoice appState choice
         ChoiceDialog -> drawDialogChoice appState choice
         ChoiceDocument -> drawDialogChoice appState choice
         ChoiceOnboarding -> drawOnboardingChoice appState choice
+        ChoiceTheme -> drawDialogChoice appState choice
 
 drawFilterChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawFilterChoice appState choice =
@@ -842,12 +846,15 @@ waitingOverlayLabel state label =
         [ txt " "
         , raw
             ( V.char
-                (Theme.waitingPulseAttr
+                (Theme.waitingPulseAttrForTheme
+                    (activeTheme state)
                     state.appRuntime.runtimeColor
                     (motionModeForTerminalFocus
                         state.appTerminalFocus
                         state.appRuntime.runtimeMotionMode)
-                    state.appRuntime.runtimeWaveTrough
+                    (Theme.waveTroughForTheme
+                        (activeTheme state)
+                        state.appRuntime.runtimeWaveTrough)
                     state.appMotionElapsedMillis)
                 ( case Text.uncons
                     (waitingIndicator

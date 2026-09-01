@@ -63,11 +63,21 @@ module Agent.TUI.Theme
     , thinkingWavePeak
     , waitingAccentPeak
     , waveCell
+    , waveCellForTheme
     , waveForeground
     , waveForegroundFrom
     , wavePeakFor
+    , wavePeakForTheme
+    , waveTroughForTheme
     , waveTrough
     , waveTroughFromColorFgBg
+    , waitingPulseAttrForTheme
+    , ThemeKind(..)
+    , parseThemeKind
+    , themeKindText
+    , themeKindRows
+    , themeKindAt
+    , themeAttrMap
     ) where
 
 import Agent.Syntax (SyntaxClass(..))
@@ -77,9 +87,97 @@ import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
 import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Text.Read (readMaybe)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Attributes.Color (Color(..))
+
+-- | Built-in fullscreen color schemes.  'Auto' delegates to the terminal's
+-- configured palette, preserving the pre-theme behavior.
+data ThemeKind
+    = Auto
+    | Midnight
+    | Daylight
+    | TokyoNight
+    | RosePineMoon
+    | OscuraMidnight
+    deriving (Eq, Ord, Show, Read, Enum, Bounded)
+
+data ThemePalette = ThemePalette
+    { themePaletteBackground :: !V.Color
+    , themePaletteForeground :: !V.Color
+    , themePaletteMuted :: !V.Color
+    , themePaletteAccent :: !V.Color
+    , themePaletteLink :: !V.Color
+    }
+
+themeKindText :: ThemeKind -> Text
+themeKindText = \case
+    Auto -> "Auto"
+    Midnight -> "Midnight"
+    Daylight -> "Daylight"
+    TokyoNight -> "Tokyo Night"
+    RosePineMoon -> "Rose Pine Moon"
+    OscuraMidnight -> "Oscura Midnight"
+
+parseThemeKind :: Text -> Maybe ThemeKind
+parseThemeKind raw =
+    case Text.toCaseFold (Text.strip raw) of
+        "auto" -> Just Auto
+        "system" -> Just Auto
+        "midnight" -> Just Midnight
+        "night" -> Just Midnight
+        "daylight" -> Just Daylight
+        "day" -> Just Daylight
+        "tokyonight" -> Just TokyoNight
+        "tokyo-night" -> Just TokyoNight
+        "tokyo night" -> Just TokyoNight
+        "rosepine-moon" -> Just RosePineMoon
+        "rose pine moon" -> Just RosePineMoon
+        "rosé pine moon" -> Just RosePineMoon
+        "oscuramidnight" -> Just OscuraMidnight
+        "oscura-midnight" -> Just OscuraMidnight
+        "oscura midnight" -> Just OscuraMidnight
+        _ -> Nothing
+
+themeKindRows :: [(Text, Text)]
+themeKindRows =
+    [ (themeKindText kind, themeDescription kind)
+    | kind <- [Auto, Midnight, Daylight, TokyoNight, RosePineMoon, OscuraMidnight]
+    ]
+  where
+    themeDescription = \case
+        Auto -> "Use the terminal's native colors"
+        Midnight -> "Dark blue-violet"
+        Daylight -> "Light warm paper"
+        TokyoNight -> "Dark indigo"
+        RosePineMoon -> "Dark rose and lavender"
+        OscuraMidnight -> "Deep black with cyan accents"
+
+themeKindAt :: Int -> ThemeKind
+themeKindAt index =
+    [Auto, Midnight, Daylight, TokyoNight, RosePineMoon, OscuraMidnight]
+        !! max 0 (min 5 index)
+
+fixedThemePalette :: ThemeKind -> Maybe ThemePalette
+fixedThemePalette = \case
+    Auto -> Nothing
+    Midnight -> Just (ThemePalette
+        (RGBColor 26 27 38) (RGBColor 220 220 230) (RGBColor 120 125 145)
+        (RGBColor 187 154 247) (RGBColor 122 162 247))
+    Daylight -> Just (ThemePalette
+        (RGBColor 250 247 242) (RGBColor 45 42 46) (RGBColor 110 105 100)
+        (RGBColor 144 80 150) (RGBColor 45 100 170))
+    TokyoNight -> Just (ThemePalette
+        (RGBColor 26 27 38) (RGBColor 192 202 245) (RGBColor 86 95 137)
+        (RGBColor 187 154 247) (RGBColor 122 162 247))
+    RosePineMoon -> Just (ThemePalette
+        (RGBColor 25 23 36) (RGBColor 224 222 244) (RGBColor 144 140 170)
+        (RGBColor 235 188 186) (RGBColor 196 167 231))
+    OscuraMidnight -> Just (ThemePalette
+        (RGBColor 8 12 18) (RGBColor 220 235 245) (RGBColor 105 130 145)
+        (RGBColor 65 210 190) (RGBColor 80 170 255))
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr :: AttrName
@@ -306,6 +404,133 @@ monochrome =
             `V.withStyle` (V.bold .|. V.reverseVideo))
         ]
 
+-- | Resolve a selectable theme to a Brick attribute map.  The semantic
+-- attribute names intentionally stay identical across themes so renderers do
+-- not need to know which palette is active.
+themeAttrMap :: ThemeKind -> AttrMap
+themeAttrMap theme =
+    maybe terminalDefault themePaletteAttrMap (fixedThemePalette theme)
+
+themePaletteAttrMap :: ThemePalette -> AttrMap
+themePaletteAttrMap palette =
+    mkTheme
+        palette.themePaletteBackground
+        palette.themePaletteForeground
+        palette.themePaletteMuted
+        palette.themePaletteAccent
+        palette.themePaletteLink
+
+mkTheme :: V.Color -> V.Color -> V.Color -> V.Color -> V.Color -> AttrMap
+mkTheme background foreground muted accent link =
+    attrMap (V.defAttr `V.withBackColor` background)
+        [ (baseAttr, base)
+        , (headerAttr, base `V.withStyle` V.bold)
+        , (footerAttr, mutedA)
+        , (mutedAttr, mutedA)
+        , (userAttr, panel `V.withStyle` V.bold)
+        , (userMutedAttr, panelMuted)
+        , (assistantAttr, base)
+        , (thinkingAttr, accentA)
+        , (thinkingBodyAttr, mutedA `V.withStyle` (V.dim .|. V.italic))
+        , (waitingDimAttr, mutedA)
+        , (waitingMidAttr, accentA)
+        , (toolAttr, linkA)
+        , (todoPendingAttr, base)
+        , (todoInProgressAttr, accentA `V.withStyle` V.bold)
+        , (todoCompletedAttr, mutedA)
+        , (todoCancelledAttr, mutedA `V.withStyle` V.strikethrough)
+        , (errorAttr, redA `V.withStyle` V.bold)
+        , (successAttr, greenA)
+        , (completionFlashAttr, greenA `V.withStyle` V.bold)
+        , (selectedAttr, panel `V.withStyle` V.bold)
+        , (selectedMutedAttr, panelMuted)
+        , (borderAttr, mutedA `V.withStyle` V.dim)
+        , (borderActiveAttr, mutedA)
+        , (headingAttr, accentA `V.withStyle` V.bold)
+        , (codeAttr, linkA)
+        -- Overlay dimming uses 'forceAttr', so it must preserve the page
+        -- background instead of falling back to the terminal's colors.
+        , (dimAttr, mutedA `V.withBackColor` background)
+        , (emphasisAttr, base `V.withStyle` V.italic)
+        , (inlineCodeAttr, linkA `V.withStyle` V.reverseVideo)
+        , (lambdaDimAttr, mutedA)
+        , (lambdaTrailAttr, mutedA)
+        , (lambdaGlowAttr, base `V.withStyle` V.bold)
+        , (lambdaSparkAttr, base `V.withStyle` V.bold)
+        , (linkAttr, linkA `V.withStyle` V.underline)
+        , (strongAttr, base `V.withStyle` V.bold)
+        , (controlLinkAttr, mutedA `V.withBackColor` background)
+        , (controlLinkHoverAttr,
+            panel `V.withStyle` V.underline)
+        , (controlLinkActiveAttr, panel `V.withStyle` V.bold)
+        , (syntaxNormalAttr, base)
+        , (syntaxKeywordAttr, accentA)
+        , (syntaxTypeAttr, yellowA)
+        , (syntaxFunctionAttr, linkA)
+        , (syntaxVariableAttr, cyanA)
+        , (syntaxStringAttr, greenA)
+        , (syntaxNumberAttr, accentA)
+        , (syntaxCommentAttr, mutedA `V.withStyle` V.italic)
+        , (syntaxOperatorAttr, yellowA)
+        , (syntaxAnnotationAttr, greenA)
+        , (syntaxPreprocessorAttr, yellowA)
+        , (syntaxWarningAttr, yellowA `V.withStyle` V.bold)
+        , (syntaxErrorAttr, redA `V.withStyle` V.bold)
+        ]
+  where
+    base =
+        V.defAttr
+            `V.withForeColor` foreground
+            `V.withBackColor` background
+    panel =
+        V.defAttr
+            `V.withForeColor` foreground
+            `V.withBackColor` lighten background
+    panelMuted =
+        V.defAttr
+            `V.withForeColor` muted
+            `V.withBackColor` lighten background
+    mutedA =
+        V.defAttr
+            `V.withForeColor` muted
+            `V.withBackColor` background
+    accentA =
+        V.defAttr
+            `V.withForeColor` accent
+            `V.withBackColor` background
+    linkA =
+        V.defAttr
+            `V.withForeColor` link
+            `V.withBackColor` background
+    redA =
+        V.defAttr
+            `V.withForeColor` (RGBColor 220 100 120)
+            `V.withBackColor` background
+    greenA =
+        V.defAttr
+            `V.withForeColor` (RGBColor 100 210 150)
+            `V.withBackColor` background
+    yellowA =
+        V.defAttr
+            `V.withForeColor` (RGBColor 230 190 100)
+            `V.withBackColor` background
+    cyanA =
+        V.defAttr
+            `V.withForeColor` (RGBColor 90 200 220)
+            `V.withBackColor` background
+
+    lighten (RGBColor r g b) =
+        RGBColor
+            (lightenChannel r)
+            (lightenChannel g)
+            (lightenChannel b)
+    lighten color = color
+
+    lightenChannel :: Word8 -> Word8
+    lightenChannel channel =
+        fromIntegral
+            (min (255 :: Int) (fromIntegral channel + 14))
+
 palette :: V.Color -> V.Attr
 palette = V.withForeColor V.defAttr
 
@@ -347,6 +572,15 @@ waveTroughFromColorFgBg :: Maybe String -> V.Color
 waveTroughFromColorFgBg env =
     maybe waveTrough ansiIndexRgb (env >>= colorFgBgBackground)
 
+-- | A fixed theme owns the page background; automatic mode keeps the
+-- terminal-derived trough so rails disappear into the surrounding terminal.
+waveTroughForTheme :: ThemeKind -> V.Color -> V.Color
+waveTroughForTheme theme terminalTrough =
+    maybe
+        terminalTrough
+        (\palette -> palette.themePaletteBackground)
+        (fixedThemePalette theme)
+
 colorFgBgBackground :: String -> Maybe Word8
 colorFgBgBackground spec =
     case break (== ';') spec of
@@ -363,17 +597,28 @@ ansiIndexRgb index =
     in RGBColor red green blue
 
 waitingPulseAttr :: Bool -> MotionMode -> V.Color -> Int -> V.Attr
-waitingPulseAttr False _ _ _ =
+waitingPulseAttr =
+    waitingPulseAttrForTheme Auto
+
+waitingPulseAttrForTheme
+    :: ThemeKind
+    -> Bool
+    -> MotionMode
+    -> V.Color
+    -> Int
+    -> V.Attr
+waitingPulseAttrForTheme _ False _ _ _ =
     V.defAttr
-waitingPulseAttr True mode trough elapsedMillis
-    | mode /= MotionFull =
-        V.defAttr `V.withForeColor` waitingAccentPeak
-    | otherwise =
-        waveForegroundFrom
-            True
-            trough
-            waitingAccentPeak
-            (0.3 + 0.7 * pulseBrightness elapsedMillis)
+waitingPulseAttrForTheme theme True mode trough elapsedMillis =
+    themeBackground theme trough
+        (if mode /= MotionFull
+            then V.defAttr `V.withForeColor` (waitingPeakForTheme theme)
+            else
+                waveForegroundFrom
+                    True
+                    trough
+                    (waitingPeakForTheme theme)
+                    (0.3 + 0.7 * pulseBrightness elapsedMillis))
 
 -- | Paint a rail cell. Near-zero brightness uses a default-attr space so the
 -- bar disappears into the real page even when the trough RGB is approximate.
@@ -387,10 +632,50 @@ waveCell True trough peak brightness glyph
     | otherwise =
         V.char (waveForegroundFrom True trough peak brightness) glyph
 
+waveCellForTheme
+    :: ThemeKind
+    -> Bool
+    -> V.Color
+    -> V.Color
+    -> Double
+    -> Char
+    -> V.Image
+waveCellForTheme _ False _ _ _ glyph =
+    V.char V.defAttr glyph
+waveCellForTheme theme True trough peak brightness glyph
+    | brightness <= 0.04 =
+        V.char (themeBackground theme trough V.defAttr) ' '
+    | otherwise =
+        V.char
+            (themeBackground theme trough
+                (waveForegroundFrom True trough peak brightness))
+            glyph
+
 wavePeakFor :: AttrName -> V.Color
 wavePeakFor attr
     | attr == thinkingAttr = thinkingWavePeak
     | otherwise = runningWavePeak
+
+wavePeakForTheme :: ThemeKind -> AttrName -> V.Color
+wavePeakForTheme theme attr =
+    case fixedThemePalette theme of
+        Nothing -> wavePeakFor attr
+        Just palette
+            | attr == thinkingAttr -> palette.themePaletteMuted
+            | otherwise -> palette.themePaletteAccent
+
+waitingPeakForTheme :: ThemeKind -> V.Color
+waitingPeakForTheme theme =
+    maybe
+        waitingAccentPeak
+        (\palette -> palette.themePaletteLink)
+        (fixedThemePalette theme)
+
+themeBackground :: ThemeKind -> V.Color -> V.Attr -> V.Attr
+themeBackground theme background attr =
+    case fixedThemePalette theme of
+        Nothing -> attr
+        Just _ -> attr `V.withBackColor` background
 
 -- | Paint a live accent cell at the given traveling-wave brightness.
 --

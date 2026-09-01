@@ -54,15 +54,30 @@ spec = describe "gateway device authorization" do
         same `shouldNotSatisfy`
             Text.isInfixOf first.gatewayAccessToken
 
-    it "decodes, trims, and deduplicates gateway model ids" do
+    it "decodes, trims, and deduplicates the typed gateway catalog" do
         Hermes.decodeEither
             gatewayModelsDecoder
-            "{\"object\":\"list\",\"data\":[{\"id\":\" gpt-5.6-sol \"},{\"id\":\"\"},{\"id\":\"gpt-5.6-sol\"},{\"id\":\"gpt-5.6-terra\"},\"gpt-5.6-terra\",\"bad id\",\"bad\\nid\",\"\\u001b[31m\",\"  \"]}"
-            `shouldBe` Right ["gpt-5.6-sol", "gpt-5.6-terra"]
+            "{\"object\":\"list\",\"data\":[{\"id\":\" gpt-5.6-sol \",\"protocol\":\"responses\"},{\"id\":\"\",\"protocol\":\"responses\"},{\"id\":\"gpt-5.6-sol\",\"protocol\":\"responses\"},{\"id\":\"sonnet\",\"protocol\":\"anthropic\"},{\"id\":\"bad id\",\"protocol\":\"responses\"}]}"
+            `shouldBe`
+                Right
+                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    ]
+
+    it "rejects unknown gateway model protocols" do
+        Hermes.decodeEither
+            gatewayModelsDecoder
+            "{\"object\":\"list\",\"data\":[{\"id\":\"model\",\"protocol\":\"router\"}]}"
+            `shouldSatisfy` isLeft
 
     it "clears cached gateway models when refresh fails" do
         results <- newIORef
-            [ Right [" gpt-5.6-sol ", "", "gpt-5.6-sol", "gpt-5.6-terra"]
+            [ Right
+                [ GatewayModel " gpt-5.6-sol " GatewayResponsesProtocol
+                , GatewayModel "" GatewayResponsesProtocol
+                , GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
+                , GatewayModel "sonnet" GatewayAnthropicProtocol
+                ]
             , Left "gateway unavailable"
             ]
         access <-
@@ -71,9 +86,17 @@ spec = describe "gateway device authorization" do
                     result : remaining -> (remaining, result)
                     [] -> ([], Left "unexpected refresh")
         refreshGatewayModels access
-            `shouldReturn` Right ["gpt-5.6-sol", "gpt-5.6-terra"]
+            `shouldReturn`
+                Right
+                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    ]
         cachedGatewayModels access
-            `shouldReturn` Just ["gpt-5.6-sol", "gpt-5.6-terra"]
+            `shouldReturn`
+                Just
+                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    ]
         refreshGatewayModels access
             `shouldReturn` Left "gateway unavailable"
         cachedGatewayModels access `shouldReturn` Nothing
@@ -85,10 +108,18 @@ spec = describe "gateway device authorization" do
                 call <- atomicModifyIORef' calls \count ->
                     (count + 1, count)
                 if call == 0
-                    then pure (Right ["company-model"])
+                    then
+                        pure
+                            (Right
+                                [ GatewayModel
+                                    "company-model"
+                                    GatewayResponsesProtocol
+                                ])
                     else throwString "transport details"
         refreshGatewayModels access
-            `shouldReturn` Right ["company-model"]
+            `shouldReturn`
+                Right
+                    [GatewayModel "company-model" GatewayResponsesProtocol]
         refreshGatewayModels access
             `shouldReturn`
                 Left "Could not refresh organization gateway models."

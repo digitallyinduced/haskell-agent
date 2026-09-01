@@ -28,7 +28,7 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))
 import Agent.CLI.Error ()
-import Agent.CLI.GatewayClient (GatewayModelAccess)
+import Agent.CLI.GatewayClient (GatewayCredential, GatewayModelAccess)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
@@ -268,6 +268,7 @@ import qualified Agent.XAI.Usage as XAIUsage ()
 
 runAgentSession
     :: LoadedAuth
+    -> Maybe GatewayCredential
     -> Bool
     -> OsPath
     -> IORef Text
@@ -353,6 +354,7 @@ runAgentSession
     -> IO RunResult
 runAgentSession
     loaded
+    connectedGateway
     learnAboutUserRequested
     sessionTmp
     activeAccountIdRef
@@ -846,6 +848,7 @@ runAgentSession
                             then SessionLocalSwitch
                             else TopLevelSwitch)
                         loaded
+                        connectedGateway
                         sessionRequest
                         activeAccountIdRef
                         activeAccountRef

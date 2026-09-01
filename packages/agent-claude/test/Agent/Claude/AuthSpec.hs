@@ -160,7 +160,7 @@ spec = do
                                 , transport = ClaudeCodeLocalSubscription
                                 }
 
-        it "uses gateway credentials without requiring a local Claude login" $
+        it "uses explicit gateway credentials without requiring a local Claude login" $
             withScratchDirectory "agent-claude-gateway-auth" \root -> do
                 let executable = root </> "fake-claude"
                 writeFile executable "#!/bin/sh\nexit 77\n"
@@ -169,12 +169,14 @@ spec = do
                         `unionFileModes` ownerWriteMode
                         `unionFileModes` ownerExecuteMode
                 withEnvironmentVariables
-                    [ ("CLAUDE_CODE_EXECUTABLE", Just executable)
-                    , ("HASKELL_AGENT_GATEWAY_URL", Just "https://gateway.example/")
-                    , ("HASKELL_AGENT_GATEWAY_TOKEN", Just "gateway-secret")
-                    ]
+                    [("CLAUDE_CODE_EXECUTABLE", Just executable)]
                     do
-                        result <- loadClaudeCodeAuth
+                        result <-
+                            loadClaudeCodeGatewayAuth
+                                ClaudeCodeGateway
+                                    { gatewayBaseUrl = "https://gateway.example/"
+                                    , gatewayToken = "gateway-secret"
+                                    }
                         result `shouldBe`
                             Right ClaudeCodeAuth
                                 { executable
@@ -188,15 +190,28 @@ spec = do
                                 }
                         show result `shouldNotContain` "gateway-secret"
 
-        it "rejects partially configured gateway credentials" $
-            withEnvironmentVariables
-                [ ("HASKELL_AGENT_GATEWAY_URL", Just "https://gateway.example")
-                , ("HASKELL_AGENT_GATEWAY_TOKEN", Nothing)
-                ]
-                do
-                    loadClaudeCodeAuth `shouldReturn`
-                        Left
-                            "Claude gateway mode requires both HASKELL_AGENT_GATEWAY_URL and HASKELL_AGENT_GATEWAY_TOKEN."
+        it "does not activate gateway mode from ambient credentials" $
+            withScratchDirectory "agent-claude-local-auth" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable fakeAuthScript
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [ ("CLAUDE_CODE_EXECUTABLE", Just executable)
+                    , ("CLAUDE_TEST_PRESERVED", Just "yes")
+                    , ("HASKELL_AGENT_GATEWAY_URL", Just "https://gateway.example")
+                    , ("HASKELL_AGENT_GATEWAY_TOKEN", Just "must-not-leak")
+                    ]
+                    do
+                        loadClaudeCodeAuth `shouldReturn`
+                            Right ClaudeCodeAuth
+                                { executable
+                                , accountLabel = "auth@example.com"
+                                , subscriptionType = Just "max"
+                                , transport = ClaudeCodeLocalSubscription
+                                }
 
 isLeftContaining :: Text.Text -> Either Text.Text a -> Bool
 isLeftContaining needle = \case

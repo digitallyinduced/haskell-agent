@@ -582,9 +582,11 @@ spec = describe "Codex dialect" do
                     notice <- waitForBackgroundNotice
                         notices
                         ("codex-shell:" <> Text.pack (show commandId))
-                    notice.noticeBody `shouldSatisfy`
+                    let (_, resultSection) =
+                            Text.breakOn "\nResult:\n" notice.noticeBody
+                    resultSection `shouldSatisfy`
                         Text.isInfixOf "late-output"
-                    notice.noticeBody `shouldNotSatisfy`
+                    resultSection `shouldNotSatisfy`
                         Text.isInfixOf "early-output"
 
     it "retracts a retained-command notice when explicitly collected" do

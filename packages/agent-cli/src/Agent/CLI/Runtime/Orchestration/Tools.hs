@@ -42,9 +42,12 @@ import Agent.CLI.Dialects
       filterGhciTools )
 import Agent.CLI.Error ( formatException )
 import Agent.CLI.GatewayClient
-    ( GatewayModelAccess
+    ( GatewayCredential
+    , GatewayModelAccess
     , cachedGatewayModels
+    , gatewayCredentialIdentity
     )
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt (InterruptState)
@@ -339,6 +342,7 @@ import qualified Agent.XAI.Usage as XAIUsage ()
 runAgentTools
     :: (AgentRunMode -> CliOptions -> IO DevResult)
     -> LoadedAuth
+    -> Maybe GatewayCredential
     -> Bool
     -> Maybe Text
     -> IORef Text
@@ -387,6 +391,7 @@ runAgentTools
 runAgentTools
     runAgentChild
     loaded
+    connectedGateway
     learnAboutUserRequested
     customBearerToken
     activeAccountIdRef
@@ -437,6 +442,9 @@ runAgentTools
     when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
         startupDie startup
             "gateway session binding and loaded credentials disagree"
+    when ((gatewayCredentialIdentity <$> connectedGateway) /= gatewayIdentity) $
+        startupDie startup
+            "gateway credential snapshot and session binding disagree"
     harnessConfig <-
         loadHarnessConfig home >>= \case
             Left err -> startupDie startup (Text.unpack err)
@@ -455,12 +463,9 @@ runAgentTools
                     Nothing ->
                         startupDie startup
                             "The organization gateway model catalog is unavailable."
-                    Just modelIds ->
+                    Just models ->
                         case
-                            gatewayModelOptions
-                                catalog
-                                OpenAIProvider
-                                modelIds
+                            modelOptionsForGatewayModels catalog models
                             of
                             [] ->
                                 startupDie startup
@@ -752,13 +757,11 @@ runAgentTools
                         Just access ->
                             cachedGatewayModels access >>= \case
                                 Nothing -> pure Nothing
-                                Just modelIds ->
+                                Just models ->
                                     pure
                                         (resolveModelOptionById
-                                            (gatewayModelOptions
-                                                catalog
-                                                OpenAIProvider
-                                                modelIds)
+                                            (modelOptionsForGatewayModels
+                                                catalog models)
                                             (Text.strip requested))
         sendToRoot message = do
             enqueuePendingInput pendingNotices (AgentMessage message) >>= \case
@@ -1266,6 +1269,7 @@ runAgentTools
             writeIORef planMode.planStateRef PlanPending
     runAgentSession
         loaded
+        connectedGateway
         learnAboutUserRequested
         sessionTmp
         activeAccountIdRef

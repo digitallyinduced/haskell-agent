@@ -1,10 +1,14 @@
 module Agent.CLI.GatewayModelsSpec (spec) where
 
 import Agent.CLI.GatewayModels
+import Agent.CLI.GatewayClient
+    ( GatewayModel(..)
+    , GatewayModelProtocol(..)
+    )
 import Agent.CLI.ModelConfig
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.Dialect (DialectId(..))
-import Agent.Provider (Provider(OpenAIProvider))
+import Agent.Provider (Provider(ClaudeCodeProvider, OpenAIProvider))
 import Data.Map.Strict qualified as Map
 import Test.Hspec
 
@@ -32,6 +36,23 @@ spec = describe "Agent.CLI.GatewayModels" do
             `shouldBe` ["router-default"]
         map (.modelTarget.targetConnectionId) options
             `shouldBe` ["openai"]
+
+    it "maps the unified catalog to Responses and Claude transports" do
+        let options =
+                modelOptionsForGatewayModels
+                    testCatalog
+                    [ GatewayModel "company-a" GatewayResponsesProtocol
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    , GatewayModel "router-default" GatewayResponsesProtocol
+                    ]
+        map (.modelTarget.targetProvider) options
+            `shouldBe` [OpenAIProvider, ClaudeCodeProvider]
+        map (.modelTarget.targetModelId) options
+            `shouldBe` ["company-a", "sonnet"]
+        map (.modelTarget.targetConnectionId) options
+            `shouldBe` replicate 2 organizationGatewayConnectionId
+        map (.modelTarget.targetDialect) options
+            `shouldBe` [GenericResponsesDialect, ClaudeCodeDialect]
 
 testCatalog :: ModelCatalog
 testCatalog =

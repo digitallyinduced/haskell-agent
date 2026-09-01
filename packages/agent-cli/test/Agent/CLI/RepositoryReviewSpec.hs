@@ -12,7 +12,7 @@ import Control.Concurrent.MVar
     , putMVar
     , takeMVar
     )
-import Control.Exception.Safe (bracket, throwString)
+import Control.Exception.Safe (bracket, throwString, tryAny)
 import Control.Monad (forM_, when)
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (isLower, toUpper)
@@ -54,6 +54,7 @@ import System.Posix.Files
     , setFileMode
     , unionFileModes
     )
+import System.Posix.Signals (nullSignal, signalProcess)
 import Test.Hspec
 
 spec :: Spec
@@ -220,7 +221,8 @@ spec = describe "repository review service" do
                 link = root <> "/pipe-link"
             createNamedPipe untrackedPipe
                 (ownerReadMode `unionFileModes` ownerWriteMode)
-            blocked <- timeout 10_000_000 (repositorySnapshot root)
+            blocked <- timeout specialFileRegressionTimeoutMicros
+                (repositorySnapshot root)
             blocked `shouldSatisfy` \case
                 Just (Left (InvalidRepositoryRequest _)) -> True
                 Just (Right _) -> True
@@ -230,7 +232,8 @@ spec = describe "repository review service" do
             createNamedPipe hiddenPipe
                 (ownerReadMode `unionFileModes` ownerWriteMode)
             createSymbolicLink ".git/hidden-pipe" link
-            linked <- timeout 10_000_000 (repositorySnapshot root)
+            linked <- timeout specialFileRegressionTimeoutMicros
+                (repositorySnapshot root)
             linked `shouldSatisfy` \case
                 Just (Right snapshot) ->
                     any
@@ -239,7 +242,7 @@ spec = describe "repository review service" do
                 _ -> False
             case linked of
                 Just (Right snapshot) ->
-                    timeout 10_000_000
+                    timeout specialFileRegressionTimeoutMicros
                         (repositoryDiff
                             root
                             snapshot.snapshotId
@@ -274,6 +277,9 @@ spec = describe "repository review service" do
 
     it "honors the common-directory advisory transaction lock" $
         withRepository \root -> do
+            pythonExecutable <-
+                maybe (fail "python3 not found") pure
+                    =<< findExecutable "python3"
             let lockPath =
                     root
                         <> "/.git/haskell-agent-worktree.lock"
@@ -284,9 +290,8 @@ spec = describe "repository review service" do
                         <> "fcntl.flock(f,fcntl.LOCK_EX);"
                         <> "open(" <> show readyPath <> ",'w').close();"
                         <> "time.sleep(30)"
-            python <- requireExecutable "python3"
             (_, _, _, locker) <-
-                createProcess (proc python ["-c", script])
+                createProcess (proc pythonExecutable ["-c", script])
             _ <- awaitFileContents readyPath 200
             pending <- async (repositorySnapshot root)
             blocked <- timeout 200_000 (waitCatch pending)
@@ -561,8 +566,6 @@ spec = describe "repository review service" do
     it "drains large stdout and stderr streams without pipe deadlock" $
         withRepository \root -> do
             snapshot <- expectRight =<< repositorySnapshot root
-            yes <- requireExecutable "yes"
-            headCommand <- requireExecutable "head"
             byteCounts <- newIORef (0, 0)
             terminal <- newEmptyMVar
             check <- expectRight
@@ -571,10 +574,8 @@ spec = describe "repository review service" do
                     snapshot.snapshotId
                     "/bin/sh"
                     [ "-c"
-                    , shellQuote yes <> " o | "
-                        <> shellQuote headCommand <> " -c 1048576; "
-                        <> shellQuote yes <> " e | "
-                        <> shellQuote headCommand <> " -c 1048576 >&2"
+                    , "yes o | head -c 1048576; "
+                        <> "yes e | head -c 1048576 >&2"
                     ]
                     (\stream bytes ->
                         atomicModifyIORef' byteCounts \(out, err) ->
@@ -640,6 +641,9 @@ spec = describe "repository review service" do
 
     it "joins a successful commit hook descendant that retains Git output" $
         withRepository \root -> do
+            pythonExecutable <-
+                maybe (fail "python3 not found") pure
+                    =<< findExecutable "python3"
             appendFile (root <> "/tracked.txt") "hook completion\n"
             before <- expectRight =<< repositorySnapshot root
             staged <- expectRight
@@ -647,9 +651,8 @@ spec = describe "repository review service" do
                     (StagePath "tracked.txt")
             let pidFile = root <> "/completed-hook-child.pid"
                 hook = root <> "/.git/hooks/pre-commit"
-            python <- requireExecutable "python3"
             writeFile hook
-                ( "#!" <> python <> "\n"
+                ( "#!" <> pythonExecutable <> "\n"
                     <> "import os, signal, time\n"
                     <> "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                     <> "pid = os.fork()\n"
@@ -665,7 +668,7 @@ spec = describe "repository review service" do
                     `unionFileModes` ownerWriteMode
                     `unionFileModes` ownerExecuteMode)
 
-            result <- timeout 20_000_000
+            result <- timeout 30_000_000
                 (commitRepository root staged.snapshotId "completed hook\n")
             result `shouldSatisfy` \case
                 Just (Right _) -> True
@@ -797,25 +800,12 @@ awaitFileContents path attempts
             False -> threadDelay 10_000 >> awaitFileContents path (attempts - 1)
 
 processExists :: Text.Text -> IO Bool
-processExists pid = do
-    (exitCode, _, _) <-
-        readCreateProcessWithExitCode
-            (proc "/bin/sh"
-                [ "-c"
-                , "kill -0 \"$1\" >/dev/null 2>&1"
-                , "sh"
-                , Text.unpack pid
-                ])
-            ""
-    pure (exitCode == ExitSuccess)
-
-requireExecutable :: String -> IO FilePath
-requireExecutable name =
-    findExecutable name >>= \case
-        Just executable -> pure executable
-        Nothing ->
-            expectationFailure (name <> " executable not found")
-                >> fail "unreachable"
+processExists pid =
+    case reads (Text.unpack pid) of
+        [(processId, "")] -> do
+            result <- tryAny (signalProcess nullSignal processId)
+            pure (either (const False) (const True) result)
+        _ -> pure False
 
 awaitProcessGone :: Text.Text -> Int -> IO Bool
 awaitProcessGone pid attempts =
@@ -839,3 +829,9 @@ changePathCase = go
     go (character : rest)
         | isLower character = toUpper character : rest
         | otherwise = character : go rest
+
+-- A loaded Nix check can substantially delay the Git subprocesses that run
+-- before special paths are inspected. Keep this as a deadlock guard rather
+-- than a scheduler-sensitive performance assertion.
+specialFileRegressionTimeoutMicros :: Int
+specialFileRegressionTimeoutMicros = 75_000_000

@@ -15,7 +15,10 @@ import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
 import Agent.CLI.Command ()
 import Agent.CLI.Compaction ()
-import Agent.CLI.Config ()
+import Agent.CLI.Config
+    ( HarnessConfig(configTheme)
+    , loadHarnessConfig
+    )
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
@@ -152,7 +155,7 @@ import Agent.CLI.TUI.App
       clearFullscreenHistorySource,
       emitUiEvent,
       newFullscreenInputBuffer,
-      newFullscreenRuntime,
+      newFullscreenRuntimeWithTheme,
       queuedFullscreenInputDisplays,
       runFullscreen,
       setFullscreenHistorySource,
@@ -702,6 +705,10 @@ prepareAgentIterationTracked
     syntaxLoadDurationRef <- newIORef Nothing
     startupFinishedRef <- newIORef False
     home <- getHomeDirectory
+    configuredTheme <-
+        loadHarnessConfig home >>= \case
+            Left err -> failPreparation (Text.unpack err)
+            Right config -> pure config.configTheme
     let root = sessionsRoot home
     databaseConfig <- managedPostgresConfigForHome home
     databaseStore <- openStore databaseConfig >>= \case
@@ -798,7 +805,8 @@ prepareAgentIterationTracked
         Just runtime -> pure (Just runtime)
         Nothing
             | fullscreenEnabled ->
-                Just <$> newFullscreenRuntime
+                Just <$> newFullscreenRuntimeWithTheme
+                    configuredTheme
                     fullscreenInputs
                     (readIORef cancelToolRef >>= id)
                     (\level ->

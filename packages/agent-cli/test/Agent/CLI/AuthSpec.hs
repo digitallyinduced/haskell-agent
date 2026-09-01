@@ -381,6 +381,14 @@ spec = do
                 Right _ ->
                     expectationFailure
                         "expected exact gateway auth to block direct xAI"
+            case gatewayLoadedAuthForProvider
+                    (Just ClaudeCodeProvider)
+                    testGatewayCredential of
+                Right loaded ->
+                    loaded.loadedProvider `shouldBe` ClaudeCodeProvider
+                Left err ->
+                    expectationFailure
+                        ("expected gateway Claude auth, got " <> Text.unpack err)
 
     describe "loadOpenAiDictationAuth" do
         it "loads ChatGPT OAuth as subscription-billed OpenAI auth" $

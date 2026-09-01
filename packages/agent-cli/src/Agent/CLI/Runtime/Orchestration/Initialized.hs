@@ -849,6 +849,7 @@ runAgentInitializedWithLock
     runAgentTools
         runAgentChild
         loaded
+        connectedGateway
         learnAboutUserRequested
         customBearerToken
         activeAccountIdRef

@@ -38,6 +38,7 @@ import Agent.CLI.TUI.Types
                appHoveredControl, appPressedControl, appRuntime),
       FullscreenRuntime(runtimeWaveTrough, runtimeMotionMode,
                         runtimeNativeImagePreviews, runtimeColor),
+      activeTheme,
       Name(ConversationBodyCache, CodeBlockCache, ConversationBlock,
            ConversationBlockCache, ConversationImage, CodeCopy,
            MarkdownLink) )
@@ -174,7 +175,8 @@ import qualified Agent.TUI.Theme as Theme
       toolAttr,
       userAttr,
       userMutedAttr,
-      waitingDimAttr )
+      waitingDimAttr,
+      waveTroughForTheme )
 import qualified Agent.CLI.TUI.Transcript as Transcript ()
 import qualified Graphics.Vty as V ()
 import qualified Graphics.Vty.CrossPlatform as Vty ()
@@ -698,11 +700,17 @@ accentBlockWithSections
         motionGlyphSet
         accent
         state.appRuntime.runtimeColor
-        state.appRuntime.runtimeWaveTrough
+        trough
+        theme
         waveElapsed $
         padLeft (Pad 2) $
             vBox (titleWidget : bodyWidgets)
   where
+    theme = activeTheme state
+    trough =
+        Theme.waveTroughForTheme
+            theme
+            state.appRuntime.runtimeWaveTrough
     titleWidget = case waveElapsed of
         Nothing ->
             withAttr accent (terminalTxtWrap title)
@@ -710,7 +718,8 @@ accentBlockWithSections
             waveHeader
                 accent
                 state.appRuntime.runtimeColor
-                state.appRuntime.runtimeWaveTrough
+                trough
+                theme
                 elapsedMillis
                 title
     paddedBody = map (padTop (Pad 1)) sections

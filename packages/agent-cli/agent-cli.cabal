@@ -145,6 +145,7 @@ library
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Claude
+                    , Agent.CLI.ClaudeGatewayProxy
                     , Agent.CLI.CodeModeRuntime
                     , Agent.CLI.Compaction
                     , Agent.CLI.Context
@@ -312,6 +313,8 @@ library
                     , vector
                     , vty >= 6.4 && < 7
                     , vty-crossplatform >= 0.4 && < 0.5
+                    , wai
+                    , warp
 
 executable agent-cli
     import:           common-options
@@ -466,6 +469,7 @@ test-suite agent-cli-test
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
+                    , Agent.CLI.ClaudeGatewayProxySpec
                     , Agent.CLI.ClaudeSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.ComputerUseSpec
@@ -567,6 +571,8 @@ test-suite agent-cli-test
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
+                    , http-client
+                    , http-types
                     , JuicyPixels
                     , process
                     , QuickCheck >= 2.14 && < 2.16
@@ -577,6 +583,8 @@ test-suite agent-cli-test
                     , transformers
                     , unix
                     , vty >= 6.4 && < 7
+                    , wai
+                    , warp
     if os(darwin)
         c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
                     , test/cbits/HaskellAgentBridgeImageSmoke.c

@@ -43,6 +43,7 @@ module Agent.CLI.TUI.App
     , nextMotionSchedule
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , newFullscreenRuntimeWithTheme
     , newFullscreenRuntimeWithSyntaxLoader
     , selectedAgentConversation
     , loadSyntaxHighlighterForRuntime
@@ -64,6 +65,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
     , requestFullscreenDocument
+    , requestFullscreenThemeChoice
     , requestFullscreenFilterChoice
     , requestFullscreenAdjustableFilterChoice
     , requestFullscreenOnboarding

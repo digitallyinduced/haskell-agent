@@ -24,15 +24,19 @@ import Agent.CLI.Command
     ( currentEffort,
       currentModel,
       ReplAction(ReplSetModel, ReplShowEffort, ReplSetEffort, ReplToggleFast,
-                 ReplShowModel) )
+                 ReplShowModel, ReplShowTheme, ReplSetTheme) )
 import Agent.CLI.Compaction ()
-import Agent.CLI.Config ()
+import Agent.CLI.Config
+    ( HarnessConfig(configTheme)
+    , updateHarnessConfig
+    )
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorInlineAt )
 import Agent.CLI.GatewayClient ( refreshGatewayModels )
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
     ( ReplLine(ReplChooseAccount, ReplChooseModel, ReplChooseEffort) )
@@ -111,10 +115,15 @@ import Agent.CLI.Style
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( emitUiEvent,
+      enqueueAppEvent,
+      requestFullscreenThemeChoice,
       requestFullscreenChoiceWithBody,
       withFullscreenSuspended )
 import Agent.CLI.TUI.SessionHistory ()
-import Agent.CLI.TUI.Types ()
+import Agent.CLI.TUI.Types
+    ( AppEvent(AppSetTheme)
+    , FullscreenRuntime(runtimeThemeRef)
+    )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
@@ -152,6 +161,12 @@ import Agent.TUI.Model
     ( progressNotice,
       UiEvent(UiSetNotice, UiSystemMessage, UiErrorMessage) )
 import Agent.TUI.Motion ()
+import Agent.TUI.Theme
+    ( parseThemeKind
+    , themeKindAt
+    , themeKindRows
+    , themeKindText
+    )
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode ()
@@ -191,7 +206,7 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
-import qualified Data.Text as Text ( stripPrefix )
+import qualified Data.Text as Text
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -474,6 +489,21 @@ handleSelection
                             Text.putStrLn
                                 (roleMuted color (glyphOk <> message))
                         continue
+    Right ReplShowTheme ->
+        chooseTheme continue
+    Right (ReplSetTheme name) ->
+        case parseThemeKind name of
+            Nothing -> do
+                color <- resolveColor stderr
+                let message =
+                        "unknown theme '"
+                            <> Text.strip name
+                            <> "' (try /theme for the picker)"
+                displayError message $
+                    Text.hPutStrLn stderr (roleError color message)
+                continue
+            Just theme ->
+                setTheme theme continue
     _ -> error "handleSelection: unsupported input"
   where
     displayInfo message minimalAction = case fullscreen of
@@ -576,13 +606,10 @@ handleSelection
             Just access ->
                 refreshGatewayModels access >>= \case
                     Left err -> pure (Left err)
-                    Right modelIds ->
+                    Right models ->
                         case
                             resolveModelOptionById
-                                (gatewayModelOptions
-                                    catalog
-                                    OpenAIProvider
-                                    modelIds)
+                                (modelOptionsForGatewayModels catalog models)
                                 name
                         of
                             Nothing ->
@@ -606,6 +633,48 @@ handleSelection
                                 })
                             (resolveConfiguredModel catalog name)
                 Right <$> resolveModelOptionDialect choice
+    chooseTheme next =
+        case fullscreen of
+            Nothing -> do
+                color <- resolveColor stderr
+                let message = "theme selection requires fullscreen mode"
+                Text.hPutStrLn stderr (roleError color message)
+                next
+            Just runtime -> do
+                current <- readIORef runtime.runtimeThemeRef
+                let initial =
+                        fromMaybe 0 $
+                            findIndex
+                                (== current)
+                                (map themeKindAt [0 .. length themeKindRows - 1])
+                requestFullscreenThemeChoice
+                    runtime
+                    initial
+                    themeKindRows >>= \case
+                    Nothing -> next
+                    Just index -> setTheme (themeKindAt index) next
+    setTheme theme next =
+        case fullscreen of
+            Nothing -> do
+                color <- resolveColor stderr
+                let message = "theme selection requires fullscreen mode"
+                Text.hPutStrLn stderr (roleError color message)
+                next
+            Just runtime -> do
+                updateHarnessConfig
+                    env.sessionHome
+                    (\config -> Right config { configTheme = theme })
+                    >>= \case
+                    Left err -> do
+                        color <- resolveColor stderr
+                        Text.hPutStrLn stderr (roleError color err)
+                        next
+                    Right _ -> do
+                        enqueueAppEvent runtime (AppSetTheme theme)
+                        emitUiEvent runtime
+                            (UiSystemMessage
+                                ("theme set to " <> themeKindText theme))
+                        next
     switchModelTarget color choice selectedEffort next =
         requestModelTargetSwitch fullscreen choice persist >>= \case
             Left err
