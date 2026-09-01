@@ -93,6 +93,7 @@ import Brick
       vBox,
       vLimit,
       withAttr,
+      withDefAttr,
       withBorderStyle,
       AttrName,
       Context(availWidth),
@@ -152,20 +153,28 @@ import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
     ( assistantAttr,
       borderActiveAttr,
+      borderAttr,
       completionFlashAttr,
       controlLinkAttr,
+      dimAttr,
       errorAttr,
       mutedAttr,
       successAttr,
+      syntaxCommentAttr,
       thinkingAttr,
       thinkingBodyAttr,
+      transcriptHoverAttr,
+      transcriptHoverMutedAttr,
+      transcriptHoverMutedCancelledAttr,
+      transcriptHoverMutedItalicAttr,
       todoCancelledAttr,
       todoCompletedAttr,
       todoInProgressAttr,
       todoPendingAttr,
       toolAttr,
       userAttr,
-      userMutedAttr )
+      userMutedAttr,
+      waitingDimAttr )
 import qualified Agent.CLI.TUI.Transcript as Transcript ()
 import qualified Graphics.Vty as V ()
 import qualified Graphics.Vty.CrossPlatform as Vty ()
@@ -179,10 +188,8 @@ terminalTxtWrap = txtWrap . displayTerminalText
 
 drawBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Widget Name
 drawBlock state target ui block =
-    let selected =
-            ui.uiSelectedBlock == Just block.blockId
-                || (target == AgentRoot
-                    && state.appHistorySelectedBlock == Just block.blockId)
+    let selected = blockSelected state target ui block
+        hovered = conversationBlockHovered state target ui block
         highlighted =
             selected
                 && state.appUi.uiFocus == FocusScrollback
@@ -318,20 +325,30 @@ drawBlock state target ui block =
                         overrideAttr Border.borderAttr Theme.borderActiveAttr $
                             Border.border content
                 else content
+        blockRow =
+            case block.blockKind of
+                BlockUser -> framed
+                _ ->
+                    hBox
+                        [ withAttr
+                            (if highlighted
+                                then Theme.borderActiveAttr
+                                else Theme.mutedAttr)
+                            marker
+                        , framed
+                        ]
+        hoveredRow =
+            (if hovered
+                then
+                    withDefAttr Theme.transcriptHoverAttr
+                        . hoverReadableAttrs
+                else id) $
+                padRight Max blockRow
         rendered =
-            clickable (ConversationBlock target block.blockId) $
-                padBottom (Pad 1) $
-                    case block.blockKind of
-                        BlockUser -> framed
-                        _ ->
-                            hBox
-                                [ withAttr
-                                    (if highlighted
-                                        then Theme.borderActiveAttr
-                                        else Theme.mutedAttr)
-                                    marker
-                                , framed
-                                ]
+            padBottom (Pad 1) $
+                clickable
+                    (ConversationBlock target block.blockId)
+                    hoveredRow
     in if cacheableBlock state target ui block
         then cached
             (ConversationBlockCache
@@ -342,6 +359,28 @@ drawBlock state target ui block =
                 (codeCopyCacheState state target block.blockId))
             rendered
         else rendered
+
+-- The hover band occupies palette bright-black, so semantic gray foregrounds
+-- inherit dimmed terminal text instead of disappearing into the background.
+hoverReadableAttrs :: Widget Name -> Widget Name
+hoverReadableAttrs =
+    overrideAttr Theme.mutedAttr Theme.transcriptHoverMutedAttr
+        . overrideAttr
+            Theme.thinkingBodyAttr
+            Theme.transcriptHoverMutedItalicAttr
+        . overrideAttr
+            Theme.todoCompletedAttr
+            Theme.transcriptHoverMutedAttr
+        . overrideAttr
+            Theme.todoCancelledAttr
+            Theme.transcriptHoverMutedCancelledAttr
+        . overrideAttr
+            Theme.syntaxCommentAttr
+            Theme.transcriptHoverMutedItalicAttr
+        . overrideAttr Theme.dimAttr Theme.transcriptHoverMutedAttr
+        . overrideAttr Theme.waitingDimAttr Theme.transcriptHoverMutedAttr
+        . overrideAttr Theme.borderAttr Theme.transcriptHoverMutedAttr
+        . overrideAttr Theme.controlLinkAttr Theme.transcriptHoverMutedAttr
 
 submittedUserMessage
     :: AppState
@@ -499,6 +538,33 @@ cacheableBlock state target ui block =
             ((/= block.blockId) . (.retryCountdownBlockId))
             ui.uiRetryCountdown
         && not (blockFlashing state target block)
+        && not (conversationBlockHovered state target ui block)
+
+blockSelected :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool
+blockSelected state target ui block =
+    ui.uiSelectedBlock == Just block.blockId
+        || (target == AgentRoot
+            && state.appHistorySelectedBlock == Just block.blockId)
+
+conversationBlockHovered
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Bool
+conversationBlockHovered state target ui block =
+    state.appHoveredControl
+        == Just (ConversationBlock target block.blockId)
+        && not (blockSelected state target ui block)
+        && not block.blockExpanded
+        && block.blockKind
+            `elem` [ BlockThinking
+                   , BlockTool
+                   , BlockInspect
+                   , BlockTodo
+                   , BlockShell
+                   , BlockEdit
+                   ]
 
 blockStateGlyph :: AppState -> AgentTarget -> UiBlock -> Text
 blockStateGlyph state target block = case block.blockState of

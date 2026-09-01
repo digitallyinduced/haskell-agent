@@ -747,6 +747,50 @@ spec = do
             V.shutdown wrapped
             readIORef events `shouldReturn` [Left reset, Right ()]
 
+    describe "fullscreen transcript hover" do
+        it "tracks pointer motion without selecting the transcript row" do
+            runtime <- newScriptRuntime initialUiState
+            let blockId = BlockId 42
+                name = ConversationBlock AgentRoot blockId
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, hovered) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name
+                    , FullscreenScriptHalt
+                    ]
+            hovered.appHoveredControl `shouldBe` Just name
+            hovered.appUi.uiSelectedBlock `shouldBe` Nothing
+
+        it "clears the hovered transcript row after the pointer leaves" do
+            runtime <- newScriptRuntime initialUiState
+            let name = ConversationBlock AgentRoot (BlockId 42)
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name
+                    , FullscreenScriptMouseUp ConversationViewport
+                    , FullscreenScriptHalt
+                    ]
+            finalState.appHoveredControl `shouldBe` Nothing
+
+        it "clears the hovered transcript row when terminal focus is lost" do
+            runtime <- newScriptRuntime initialUiState
+            let name = ConversationBlock AgentRoot (BlockId 42)
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name
+                    , FullscreenScriptVty V.EvLostFocus
+                    , FullscreenScriptHalt
+                    ]
+            finalState.appHoveredControl `shouldBe` Nothing
+
     describe "fullscreen window title" do
         it "replays the stored session title as UTF-8 OSC bytes" do
             titles <- newIORef ([] :: [ByteString.ByteString])
@@ -1552,6 +1596,7 @@ spec = do
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
     | FullscreenScriptVty !V.Event
+    | FullscreenScriptMouseUp !Name
     | FullscreenScriptHalt
 
 data ReplacementScenario
@@ -2125,6 +2170,9 @@ runFullscreenScriptWithState initialState script = do
                     fullscreenApp.appHandleEvent (AppEvent event)
                 AppEvent (FullscreenScriptVty event) ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
+                AppEvent (FullscreenScriptMouseUp name) ->
+                    fullscreenApp.appHandleEvent
+                        (MouseUp name Nothing (B.Location (0, 0)))
                 AppEvent FullscreenScriptHalt ->
                     halt
                 VtyEvent event ->

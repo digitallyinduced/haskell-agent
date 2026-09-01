@@ -939,14 +939,20 @@ handleEventInner' event = case event of
                             _ -> pure ()
     -- The patched vty-unix backend represents no-button pointer motion as
     -- MouseUp Nothing so Brick can route it through clickable extents.
-    MouseUp (AgentRow target) Nothing _ ->
+    MouseUp (AgentRow target) Nothing _ -> do
+        setHoveredControl Nothing
         rememberAgentHover target
-    MouseUp (AgentPopover target) Nothing _ ->
+    MouseUp (AgentPopover target) Nothing _ -> do
+        setHoveredControl Nothing
         keepAgentHover target
     MouseUp AgentPane Nothing _ ->
-        pure ()
+        setHoveredControl Nothing
+    MouseUp name@(ConversationBlock _ _) Nothing _ -> do
+        clearAgentHover
+        setHoveredControl (Just name)
     MouseUp MarkdownLink{} Nothing _ -> do
         clearAgentHover
+        setHoveredControl Nothing
         setMarkdownLinkCursor True
     MouseUp link@MarkdownLink{} (Just V.BLeft) _ -> do
         clearAgentHover
@@ -983,6 +989,7 @@ handleEventInner' event = case event of
             >> queueConversationReflow
     VtyEvent V.EvResize{} -> do
         clearAgentHover
+        setHoveredControl Nothing
         invalidateCache
         -- A focused resize can leave cells from the previous geometry. Hidden
         -- terminals defer the reset until their focus-gained refresh.
@@ -1042,6 +1049,10 @@ eventClearsMarkdownLinkCursor = \case
 -- prevents its normal Command-hover OSC 8 detection; the app still receives
 -- pointer motion, so it can set the cursor precisely for the clickable link
 -- extent.
+setHoveredControl :: Maybe Name -> EventM Name AppState ()
+setHoveredControl hovered =
+    modify' \state -> state{appHoveredControl = hovered}
+
 setMarkdownLinkCursor :: Bool -> EventM Name AppState ()
 setMarkdownLinkCursor hovered = do
     state <- get
