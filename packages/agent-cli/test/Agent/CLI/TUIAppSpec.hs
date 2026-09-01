@@ -8,6 +8,10 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Command
+    ( SlashCatalog(slashCatalogToolNames)
+    , defaultSlashCatalog
+    )
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
     , applyMetaConsoleEdit
@@ -46,6 +50,8 @@ import Agent.CLI.TUI.App
     , quickStartRows
     , quickStartVisible
     , quickStartWideVisible
+    , quickStartCardWidth
+    , drawQuickStartCard
     , startupCapabilityLines
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
@@ -135,6 +141,7 @@ import Control.Concurrent.STM
     , newEmptyTMVarIO
     , newTChanIO
     , retry
+    , tryReadTMVar
     )
 import Control.Monad (replicateM_)
 import qualified Data.ByteString as ByteString
@@ -455,6 +462,34 @@ spec = do
                 `shouldBe` Composer.fullscreenInputCountLimit
 
     describe "choice overlay lifecycle" do
+        it "renders and dismisses changelog release notes without choice rows" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let marker = "Bundled release note"
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+                script =
+                    [ FullscreenScriptApp
+                        (AppAskChoice
+                            ChoiceDocument
+                            "Release Notes"
+                            marker
+                            0
+                            []
+                            reply)
+                    , FullscreenScriptVty (V.EvKey V.KDown [])
+                    , FullscreenScriptVty (V.EvKey V.KEsc [])
+                    , FullscreenScriptHalt
+                    ]
+            (rendered, finalState) <-
+                runFullscreenScriptWithState initialState script
+            rendered
+                `shouldSatisfy`
+                    ByteString.isInfixOf (encoded marker)
+            finalState.appChoice `shouldBe` Nothing
+            atomically (tryReadTMVar reply)
+                `shouldReturn` Just Nothing
+
         it "closes a running-turn choice on success or cancellation" do
             let running =
                     reduceUi (UiLoop TurnStarted) initialUiState
@@ -712,6 +747,50 @@ spec = do
             V.shutdown wrapped
             readIORef events `shouldReturn` [Left reset, Right ()]
 
+    describe "fullscreen transcript hover" do
+        it "tracks pointer motion without selecting the transcript row" do
+            runtime <- newScriptRuntime initialUiState
+            let blockId = BlockId 42
+                name = ConversationBlock AgentRoot blockId
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, hovered) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name
+                    , FullscreenScriptHalt
+                    ]
+            hovered.appHoveredControl `shouldBe` Just name
+            hovered.appUi.uiSelectedBlock `shouldBe` Nothing
+
+        it "clears the hovered transcript row after the pointer leaves" do
+            runtime <- newScriptRuntime initialUiState
+            let name = ConversationBlock AgentRoot (BlockId 42)
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name
+                    , FullscreenScriptMouseUp ConversationViewport
+                    , FullscreenScriptHalt
+                    ]
+            finalState.appHoveredControl `shouldBe` Nothing
+
+        it "clears the hovered transcript row when terminal focus is lost" do
+            runtime <- newScriptRuntime initialUiState
+            let name = ConversationBlock AgentRoot (BlockId 42)
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name
+                    , FullscreenScriptVty V.EvLostFocus
+                    , FullscreenScriptHalt
+                    ]
+            finalState.appHoveredControl `shouldBe` Nothing
+
     describe "fullscreen window title" do
         it "replays the stored session title as UTF-8 OSC bytes" do
             titles <- newIORef ([] :: [ByteString.ByteString])
@@ -805,20 +884,47 @@ spec = do
         it "shows quick-start actions only when the empty pane has room" do
             quickStartVisible 100 30 `shouldBe` True
             quickStartVisible 47 30 `shouldBe` False
-            quickStartVisible 100 21 `shouldBe` False
+            quickStartVisible 100 12 `shouldBe` False
 
-        it "uses the two-column dashboard only in wide render contexts" do
-            quickStartWideVisible 140 35 `shouldBe` True
-            quickStartWideVisible 103 35 `shouldBe` False
-            quickStartWideVisible 140 28 `shouldBe` False
+        it "adds the quiet logo only in wide render contexts" do
+            quickStartWideVisible 88 14 `shouldBe` True
+            quickStartWideVisible 87 14 `shouldBe` False
+            quickStartWideVisible 88 13 `shouldBe` False
 
-        it "surfaces the existing high-value startup commands" do
+        it "caps the quick-start card instead of filling wide terminals" do
+            quickStartCardWidth 48 `shouldBe` 44
+            quickStartCardWidth 100 `shouldBe` 96
+            quickStartCardWidth 200 `shouldBe` 112
+
+        it "keeps wrapped capability rows vertically fixed" do
+            runtime <- newScriptRuntime initialUiState
+            let catalog =
+                    defaultSlashCatalog
+                        { slashCatalogToolNames =
+                            Set.fromList
+                                [ "analyze_tool_output"
+                                , "apply_patch"
+                                , "ask_secret"
+                                , "ask_user_question"
+                                , "collaboration"
+                                , "conversation_search"
+                                , "create_agent_session"
+                                ]
+                        }
+                state =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appSlashCatalog = catalog }
+            B.vSize (drawQuickStartCard state 96 True)
+                `shouldBe` B.Fixed
+
+        it "surfaces the high-value startup commands including changelog" do
             quickStartRows
                 `shouldBe`
                     [ (QuickStartWorktree, "New worktree", "/worktree")
                     , (QuickStartResume, "Resume session", "/resume")
                     , (QuickStartCommands, "Browse commands", "/")
                     , (QuickStartModel, "Manage models", "/model")
+                    , (QuickStartChangelog, "View changelog", "/changelog")
                     ]
 
         it "packs capability names into bounded startup rows" do
@@ -1490,6 +1596,7 @@ spec = do
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
     | FullscreenScriptVty !V.Event
+    | FullscreenScriptMouseUp !Name
     | FullscreenScriptHalt
 
 data ReplacementScenario
@@ -2063,6 +2170,9 @@ runFullscreenScriptWithState initialState script = do
                     fullscreenApp.appHandleEvent (AppEvent event)
                 AppEvent (FullscreenScriptVty event) ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
+                AppEvent (FullscreenScriptMouseUp name) ->
+                    fullscreenApp.appHandleEvent
+                        (MouseUp name Nothing (B.Location (0, 0)))
                 AppEvent FullscreenScriptHalt ->
                     halt
                 VtyEvent event ->

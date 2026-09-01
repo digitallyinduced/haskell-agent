@@ -35,6 +35,8 @@ module Agent.CLI.TUI.App
     , quickStartRows
     , quickStartVisible
     , quickStartWideVisible
+    , quickStartCardWidth
+    , drawQuickStartCard
     , startupCapabilityLines
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
@@ -60,6 +62,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenDocument
     , requestFullscreenFilterChoice
     , requestFullscreenAdjustableFilterChoice
     , requestFullscreenOnboarding

@@ -90,6 +90,7 @@ data ReplAction
     | ReplCopyPath
     | ReplCopySession
     | ReplShowTerminal
+    | ReplChangelog
     | ReplAgents
     | ReplShowAgentLimit
     | ReplSetAgentLimit Int

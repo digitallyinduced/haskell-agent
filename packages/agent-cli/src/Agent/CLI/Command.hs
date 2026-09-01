@@ -410,6 +410,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplShowTerminal
                     else ReplCommandError "usage: /terminal"
+            "changelog" ->
+                if null args
+                    then ReplChangelog
+                    else ReplCommandError "usage: /changelog"
             "agents" -> parseAgentsCommand args
             "mcp" -> case args of
                 [] -> ReplMcp
