@@ -33,6 +33,7 @@ module Agent.CLI.TUI.Types
 
 import Agent.CLI.AgentViewport (AgentEntry, AgentTarget)
 import Agent.CLI.Command (SkillCommand, SlashCatalog)
+import Agent.CLI.Dictation (DictationTarget)
 import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
@@ -50,7 +51,6 @@ import Agent.CLI.TUI.History
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
-import Agent.Provider (Provider)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
 import Agent.TUI.Theme (ThemeKind, themeKindAt)
 import Agent.Syntax (SyntaxHighlighter)
@@ -300,7 +300,7 @@ data DictationSession = DictationSession
 -- Replacing the record atomically prevents the retained UI from calling into
 -- resources belonging to a backend that has already shut down.
 data FullscreenSessionActions = FullscreenSessionActions
-    { sessionProvider :: !(Maybe Provider)
+    { sessionDictationTarget :: !(Maybe DictationTarget)
     , sessionCancel :: !(IO ())
     , sessionSteer :: !(Bool -> Text -> IO (Either Text ()))
     , sessionBtw :: !(Text -> IO ())

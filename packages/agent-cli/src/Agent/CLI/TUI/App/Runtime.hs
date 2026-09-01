@@ -7,10 +7,10 @@ import Agent.CLI.TUI.App.Mailbox
     , enqueueAppEvent
     )
 
-import Agent.Provider (Provider)
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
+    , DictationTarget
     , dictateWith
     , insertDictation
     )
@@ -314,7 +314,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         themeRef <- newIORef theme
         windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
-            { sessionProvider = Nothing
+            { sessionDictationTarget = Nothing
             , sessionCancel = cancelAction
             , sessionSteer = \_ _ -> pure (Right ())
             , sessionBtw = const (pure ())
@@ -382,7 +382,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
 
 setFullscreenSessionActions
     :: FullscreenRuntime
-    -> Maybe Provider
+    -> Maybe DictationTarget
     -> IO ()
     -> (Bool -> Text -> IO (Either Text ()))
     -> (Text -> IO ())
@@ -394,7 +394,7 @@ setFullscreenSessionActions
     -> IO ()
 setFullscreenSessionActions
     runtime
-    provider
+    dictationTarget
     cancelAction
     steerAction
     btwAction
@@ -404,7 +404,7 @@ setFullscreenSessionActions
     agentSnapshot
     agentSelect =
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
-            { sessionProvider = provider
+            { sessionDictationTarget = dictationTarget
             , sessionCancel = cancelAction
             , sessionSteer = steerAction
             , sessionBtw = btwAction

@@ -2,9 +2,12 @@ module Agent.CLI.TUIComposerSpec (spec) where
 
 import Agent.CLI.Dictation
     ( DictationBackend(..)
+    , DictationTarget(..)
     , dictationBackendForProvider
+    , dictationTargetForSession
     , insertDictation
     )
+import Agent.CLI.GatewayClient (newGatewayModelAccessWith)
 import Agent.Provider (Provider(..))
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -245,6 +248,18 @@ spec = describe "fullscreen composer" do
         dictationBackendForProvider ClaudeCodeProvider
             `shouldBe` Left
                 "Dictation is not supported for claude-code models"
+
+    it "keeps organization-gateway dictation inside the gateway boundary" do
+        case dictationTargetForSession XAIProvider Nothing of
+            DirectDictation provider ->
+                provider `shouldBe` XAIProvider
+            GatewayDictation _ ->
+                expectationFailure "expected direct dictation"
+        gateway <- newGatewayModelAccessWith (pure (Right []))
+        case dictationTargetForSession XAIProvider (Just gateway) of
+            GatewayDictation _ -> pure ()
+            DirectDictation _ ->
+                expectationFailure "expected gateway dictation"
 
     it "keeps dictation stop keys inside the composer" do
         dictationKeyAction (V.EvKey V.KEnter [])
