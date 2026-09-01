@@ -3,7 +3,9 @@ module Agent.CLI.GatewayClientSpec (spec) where
 import Agent.CLI.GatewayClient
 import Agent.Json.Decode qualified as Hermes
 import Control.Exception.Safe (bracket, throwString)
+import Data.Aeson qualified as Aeson
 import Data.Bits ((.&.))
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Either (isLeft)
 import Data.IORef (atomicModifyIORef', newIORef)
@@ -20,6 +22,13 @@ import System.IO (hClose, openTempFile)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
+
+decodeGatewayModels :: BS.ByteString -> Either String [GatewayModel]
+decodeGatewayModels bytes =
+    (.gatewayModelCatalogData)
+        <$> ( Aeson.eitherDecodeStrict' bytes
+                :: Either String GatewayModelCatalogResponse
+            )
 
 spec :: Spec
 spec = describe "gateway device authorization" do
@@ -55,8 +64,7 @@ spec = describe "gateway device authorization" do
             Text.isInfixOf first.gatewayAccessToken
 
     it "decodes, trims, and deduplicates the typed gateway catalog" do
-        Hermes.decodeEither
-            gatewayModelsDecoder
+        decodeGatewayModels
             "{\"object\":\"list\",\"data\":[{\"id\":\" gpt-5.6-sol \",\"protocol\":\"responses\"},{\"id\":\"\",\"protocol\":\"responses\"},{\"id\":\"gpt-5.6-sol\",\"protocol\":\"responses\"},{\"id\":\"sonnet\",\"protocol\":\"anthropic\"},{\"id\":\"bad id\",\"protocol\":\"responses\"}]}"
             `shouldBe`
                 Right
@@ -65,8 +73,7 @@ spec = describe "gateway device authorization" do
                     ]
 
     it "rejects unknown gateway model protocols" do
-        Hermes.decodeEither
-            gatewayModelsDecoder
+        decodeGatewayModels
             "{\"object\":\"list\",\"data\":[{\"id\":\"model\",\"protocol\":\"router\"}]}"
             `shouldSatisfy` isLeft
 
