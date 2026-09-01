@@ -4,8 +4,10 @@ module Agent.CLI.ModelsSpec (spec) where
 
 import Agent.CLI.Models
 import Agent.CLI.ModelConfig
-    ( ModelCatalog
+    ( CatalogModel(catalogModelDefaultReasoningEffort)
+    , ModelCatalog
     , catalogContextWindowFor
+    , catalogModelById
     , decodeModelConfig
     , mergeModelConfigs
     , organizationGatewayConnectionId
@@ -71,7 +73,7 @@ spec = do
                     , "gemini-3.5-flash-lite"
                     ]
             modelIdsFor ClaudeCodeProvider
-                `shouldBe` ["sonnet", "opus", "fable"]
+                `shouldBe` ["sonnet", "opus", "claude-fable-5-1"]
 
         it "tags every option with its provider" do
             all ((== OpenAIProvider) . (.modelTarget.targetProvider))
@@ -99,6 +101,19 @@ spec = do
                         ((== "grok-4.6") . (.modelTarget.targetModelId))
                         (modelsForProvider catalog XAIProvider)
             fmap (.modelContextWindow) grok `shouldBe` Just (Just 500000)
+
+        it "includes Fable 5.1 with its Claude Code wire model id" do
+            let fable =
+                    find
+                        ((== "claude-fable-5-1") . (.modelTarget.targetModelId))
+                        (modelsForProvider catalog ClaudeCodeProvider)
+            fmap (.modelTarget.targetWireModelId) fable
+                `shouldBe` Just "claude-fable-5-1"
+            fmap (.modelContextWindow) fable
+                `shouldBe` Just (Just 1048576)
+            fmap (.catalogModelDefaultReasoningEffort)
+                (catalogModelById catalog "claude-fable-5-1")
+                `shouldBe` Just (Just "high")
 
         it "keeps every catalog dialect consistent with model inference" do
             all
