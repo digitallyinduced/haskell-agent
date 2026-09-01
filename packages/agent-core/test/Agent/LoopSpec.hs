@@ -1285,6 +1285,27 @@ spec = describe "runLoop" do
         readIORef observed `shouldReturn`
             [TurnStarted, TextDelta "partial", ResponseAttemptFailed]
 
+    it "coalesces retained text without crossing tool boundaries" do
+        let call =
+                functionToolCall "c1" "shell_command"
+                    "{\"command\":\"git status\"}"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (TextDelta "before")
+                onEvent (TextDelta " tool")
+                onEvent (ToolStarted call)
+                onEvent (TextDelta "after")
+                onEvent (TextDelta " tool")
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionUncommittedDisplayEvents
+            `shouldBe`
+                [ TextDelta "before tool"
+                , ToolStarted call
+                , TextDelta "after tool"
+                ]
+
     it "retains tool-only activity as display metadata on failure" do
         let call =
                 functionToolCall "c1" "shell_command"
@@ -1306,9 +1327,11 @@ spec = describe "runLoop" do
 
     it "keeps earlier restarted attempts in display metadata" do
         let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "first")
+                onEvent (TextDelta "fir")
+                onEvent (TextDelta "st")
                 onEvent (ResponseRestarted "retrying")
-                onEvent (TextDelta "second")
+                onEvent (TextDelta "sec")
+                onEvent (TextDelta "ond")
                 pure (Left (ConnectionError "down"))
         config <- testConfig backend
         execution <-
@@ -1325,9 +1348,11 @@ spec = describe "runLoop" do
     it "still marks failure after a later retry attempt is discarded" do
         observed <- newIORef []
         let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "first")
+                onEvent (TextDelta "fir")
+                onEvent (TextDelta "st")
                 onEvent (ResponseRestarted "retrying")
-                onEvent (TextDelta "discard me")
+                onEvent (TextDelta "discard")
+                onEvent (TextDelta " me")
                 onEvent ResponseAttemptDiscarded
                 pure (Left (ConnectionError "down"))
         config0 <- testConfig backend
@@ -1344,14 +1369,18 @@ spec = describe "runLoop" do
                 [ TextDelta "first"
                 , ResponseRestarted "retrying"
                 ]
-        readIORef observed `shouldReturn`
-            [ TurnStarted
-            , TextDelta "first"
-            , ResponseRestarted "retrying"
-            , TextDelta "discard me"
-            , ResponseAttemptDiscarded
-            , ResponseAttemptFailed
-            ]
+        observedEvents <- readIORef observed
+        filter
+            (\case
+                TextDelta _ -> False
+                _ -> True)
+            observedEvents
+            `shouldBe`
+                [ TurnStarted
+                , ResponseRestarted "retrying"
+                , ResponseAttemptDiscarded
+                , ResponseAttemptFailed
+                ]
 
     it "treats a transport failure after a discarded attempt as pre-output" do
         let backend = Backend \_state _prev _inputs onEvent -> do

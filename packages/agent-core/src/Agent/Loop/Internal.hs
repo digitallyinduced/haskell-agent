@@ -598,7 +598,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     ResponseRestarted _ ->
                         modifyIORef'
                             uncommittedDisplayEventsRef
-                            (event :)
+                            (recordDisplayEvent event)
                     ResponseAttemptDiscarded ->
                         modifyIORef'
                             uncommittedDisplayEventsRef
@@ -629,7 +629,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 pending <- readIORef pendingRef
                 (finishedChunks, currentChunks) <- readIORef uncommittedTextRef
                 displayEvents <-
-                    reverse <$> readIORef uncommittedDisplayEventsRef
+                    displayEventsFromJournal
+                        <$> readIORef uncommittedDisplayEventsRef
                 providerTelemetry <-
                     reverse <$> readIORef providerTelemetryRef
                 let uncommittedText = Text.intercalate "\n\n" $
@@ -904,69 +905,101 @@ replayableDisplayEvent = \case
     ToolRetracted _ -> True
     _ -> False
 
--- The journal is stored newest-first. A restart is the boundary between the
--- current provider attempt and older attempts that remain visible.
-recordDisplayEvent :: LoopEvent -> [LoopEvent] -> [LoopEvent]
+-- The journal and each text chunk list are stored newest-first. Keeping
+-- adjacent deltas as chunks avoids repeatedly copying the accumulated prefix.
+-- A restart is the boundary between the current provider attempt and older
+-- attempts that remain visible.
+data DisplayJournalEntry
+    = DisplayTextChunks ![Text]
+    | DisplayEvent !LoopEvent
+
+recordDisplayEvent
+    :: LoopEvent
+    -> [DisplayJournalEntry]
+    -> [DisplayJournalEntry]
 recordDisplayEvent event events = case event of
     TextDelta delta ->
         case events of
-            TextDelta previous : rest ->
-                TextDelta (previous <> delta) : rest
-            _ -> event : events
+            DisplayTextChunks chunks : rest ->
+                DisplayTextChunks (delta : chunks) : rest
+            _ -> DisplayTextChunks [delta] : events
     ToolUpdated call ->
-        event : removeCurrentToolUpdates call.callId events
+        DisplayEvent event : removeCurrentToolUpdates call.callId events
     ToolArgumentsUpdated call ->
-        event : removeCurrentToolUpdates call.callId events
+        DisplayEvent event : removeCurrentToolUpdates call.callId events
     ToolOutputUpdated callId output ->
-        ToolOutputUpdated callId (boundLoopToolOutput output)
+        DisplayEvent (ToolOutputUpdated callId (boundLoopToolOutput output))
             : removeCurrentToolOutput callId events
     ToolFinished result ->
-        ToolFinished
-            result
-                { output = boundLoopToolOutput result.output
-                }
+        DisplayEvent
+            (ToolFinished
+                result
+                    { output = boundLoopToolOutput result.output
+                    })
             : removeCurrentToolOutput result.callId events
     ToolRetracted callId ->
         removeCurrentToolEvents callId events
-    _ -> event : events
+    _ -> DisplayEvent event : events
 
-discardCurrentDisplayAttempt :: [LoopEvent] -> [LoopEvent]
+displayEventsFromJournal :: [DisplayJournalEntry] -> [LoopEvent]
+displayEventsFromJournal =
+    map entryToEvent . reverse
+  where
+    entryToEvent = \case
+        DisplayTextChunks chunks ->
+            TextDelta (Text.concat (reverse chunks))
+        DisplayEvent event -> event
+
+discardCurrentDisplayAttempt
+    :: [DisplayJournalEntry]
+    -> [DisplayJournalEntry]
 discardCurrentDisplayAttempt =
     dropWhile \case
-        ResponseRestarted _ -> False
+        DisplayEvent (ResponseRestarted _) -> False
         _ -> True
 
-removeCurrentToolUpdates :: Text -> [LoopEvent] -> [LoopEvent]
+removeCurrentToolUpdates
+    :: Text
+    -> [DisplayJournalEntry]
+    -> [DisplayJournalEntry]
 removeCurrentToolUpdates callId =
     filterCurrentAttempt \case
-        ToolUpdated call -> call.callId /= callId
-        ToolArgumentsUpdated call -> call.callId /= callId
+        DisplayEvent (ToolUpdated call) -> call.callId /= callId
+        DisplayEvent (ToolArgumentsUpdated call) -> call.callId /= callId
         _ -> True
 
-removeCurrentToolOutput :: Text -> [LoopEvent] -> [LoopEvent]
+removeCurrentToolOutput
+    :: Text
+    -> [DisplayJournalEntry]
+    -> [DisplayJournalEntry]
 removeCurrentToolOutput callId =
     filterCurrentAttempt \case
-        ToolOutputUpdated identifier _ -> identifier /= callId
+        DisplayEvent (ToolOutputUpdated identifier _) ->
+            identifier /= callId
         _ -> True
 
-removeCurrentToolEvents :: Text -> [LoopEvent] -> [LoopEvent]
+removeCurrentToolEvents
+    :: Text
+    -> [DisplayJournalEntry]
+    -> [DisplayJournalEntry]
 removeCurrentToolEvents callId =
     filterCurrentAttempt \case
-        ToolStarted call -> call.callId /= callId
-        ToolUpdated call -> call.callId /= callId
-        ToolArgumentsUpdated call -> call.callId /= callId
-        ToolOutputUpdated identifier _ -> identifier /= callId
-        ToolFinished result -> result.callId /= callId
+        DisplayEvent (ToolStarted call) -> call.callId /= callId
+        DisplayEvent (ToolUpdated call) -> call.callId /= callId
+        DisplayEvent (ToolArgumentsUpdated call) -> call.callId /= callId
+        DisplayEvent (ToolOutputUpdated identifier _) ->
+            identifier /= callId
+        DisplayEvent (ToolFinished result) -> result.callId /= callId
         _ -> True
 
 filterCurrentAttempt
-    :: (LoopEvent -> Bool)
-    -> [LoopEvent]
-    -> [LoopEvent]
+    :: (DisplayJournalEntry -> Bool)
+    -> [DisplayJournalEntry]
+    -> [DisplayJournalEntry]
 filterCurrentAttempt keep = go
   where
     go [] = []
-    go allEvents@(ResponseRestarted _ : _) = allEvents
+    go allEvents@(DisplayEvent (ResponseRestarted _) : _) = allEvents
     go (event : rest)
         | keep event = event : go rest
         | otherwise = go rest
