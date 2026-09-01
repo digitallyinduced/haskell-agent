@@ -16,12 +16,14 @@ module Agent.CLI.MacOS.Bridge
     , repositoryTerminalThrowSmoke
     , TurnStart(..)
     , nativeExceptionMessage
+    , nativeSessionRouteMatchesBoundary
     , nativeTurnArguments
     , NativeInteractionResolution(..)
     , PendingInteraction(..)
     , cancelPendingInteractions
     , discardStagedTurn
     , discardStagedTurnById
+    , emitBoundaryChecked
     , resolvePendingInteraction
     , turnStartCleanupId
     ) where
@@ -136,7 +138,8 @@ import Agent.CLI.ModelConfig
     , catalogModelForConnection
     , organizationGatewayConnectionId
     )
-import Agent.CLI.GatewayModels (loadGatewayModelOptionsAt)
+import Agent.CLI.GatewayModels
+    ( loadGatewayModelOptionsWithCredentialAt )
 import Agent.CLI.Database (DatabaseScope(..))
 import Agent.CLI.Database.Store
     ( DatabaseBrowsePage(..)
@@ -158,6 +161,7 @@ import Agent.CLI.Models
     , resolveModelOptionById
     , resolveModelOptionDialect
     , selectedOption
+    , validateResumedGatewayBoundary
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Project
@@ -173,7 +177,8 @@ import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
-    , SessionTransferEnvelope
+    , SessionTransfer(..)
+    , SessionTransferEnvelope(..)
     , TranscriptEffect(..)
     , deleteSession
     , forkSessionAtTurn
@@ -2773,19 +2778,37 @@ ha_session_load_around sessionBytes (CSize sessionLength) center radius
             Right (Right sessionId) -> do
                 _ <- forkIO do
                     result <- tryAny $ withNativeSessionStore \pool root ->
-                        loadSessionHistoryTurnsAround
-                            pool root sessionId center (fromIntegral radius)
+                        withNativeGatewayBoundary \gatewayIdentity ->
+                            validateNativeSessionBoundary
+                                pool root gatewayIdentity sessionId >>= \case
+                                    Left err -> pure (Left err)
+                                    Right _ ->
+                                        loadSessionHistoryTurnsAround
+                                            pool
+                                            root
+                                            sessionId
+                                            center
+                                            (fromIntegral radius) >>= \case
+                                                Left err -> pure (Left err)
+                                                Right page ->
+                                                    pure
+                                                        (Right
+                                                            ( gatewayIdentity
+                                                            , page
+                                                            ))
                     case result of
                         Left exception ->
                             sessionTurnFailure callback context
                                 (Text.pack (show exception))
                         Right (Left err) ->
                             sessionTurnFailure callback context err
-                        Right (Right page) -> do
-                            forM_ page.pageTurns \(turnIndex, turn) ->
-                                emitSessionTurn callback context turnIndex turn
-                            sessionTurnTerminal callback context
-                                page.pageHasOlder page.pageHasNewer
+                        Right (Right (gatewayIdentity, page)) ->
+                            emitSessionPageForBoundary
+                                gatewayIdentity callback context page >>= \case
+                                    Left err ->
+                                        sessionTurnFailure
+                                            callback context err
+                                    Right () -> pure ()
                 pure 0
 
 ha_session_fork
@@ -2803,7 +2826,10 @@ ha_session_fork sessionBytes (CSize sessionLength) throughIndex callback context
             Right (Right sessionId) -> do
                 _ <- forkIO do
                     result <- tryAny $ withNativeSessionStore \pool root ->
-                        forkSessionAtTurn pool root sessionId throughIndex
+                        withNativeSessionBoundary
+                            pool root sessionId \_ _ ->
+                                forkSessionAtTurn
+                                    pool root sessionId throughIndex
                     completeSessionResult callback context result
                 pure 0
 
@@ -2822,8 +2848,16 @@ ha_session_export sessionBytes (CSize sessionLength) callback context
             Right (Right sessionId) -> do
                 _ <- forkIO do
                     result <- tryAny $ withNativeSessionStore \pool root ->
-                        streamSessionTransfer pool root sessionId
-                            (emitSessionExportChunk callback context)
+                        withNativeGatewayBoundary \gatewayIdentity ->
+                            validateNativeSessionBoundary
+                                pool root gatewayIdentity sessionId >>= \case
+                                    Left err -> pure (Left err)
+                                    Right _ ->
+                                        streamSessionTransfer pool root sessionId
+                                            (emitSessionExportChunkForBoundary
+                                                gatewayIdentity
+                                                callback
+                                                context)
                     case result of
                         Left exception ->
                             sessionExportFailure callback context
@@ -2861,10 +2895,21 @@ ha_session_import bytes (CSize length) callback context
                                     (Left
                                         ("invalid session transfer: "
                                             <> Text.pack err))
-                            Right envelope ->
-                                withNativeSessionStore \pool root ->
-                                    importSessionTransferRemapped
-                                        pool root Nothing envelope
+                            Right envelope -> do
+                                let meta =
+                                        envelope.transferSession.transferMeta
+                                withNativeGatewayBoundary \gatewayIdentity ->
+                                    case
+                                        validateResumedGatewayBoundary
+                                            gatewayIdentity
+                                            meta.metaConnection
+                                            meta.metaGatewayIdentity
+                                    of
+                                        Left err -> pure (Left err)
+                                        Right () ->
+                                            withNativeSessionStore \pool root ->
+                                                importSessionTransferRemapped
+                                                    pool root Nothing envelope
             completeSessionResult callback context result
         pure 0
 
@@ -2879,6 +2924,127 @@ withNativeSessionStore action = do
         Right opened ->
             bracket (pure opened) closeStore \store ->
                 action (trustedPool store) (sessionsRoot home)
+
+loadNativeGatewaySnapshot
+    :: IO (Either Text (Maybe GatewayCredential))
+loadNativeGatewaySnapshot =
+    loadGatewayCredential >>= \case
+        Left err ->
+            pure (Left ("Could not load gateway credentials: " <> err))
+        Right credential -> pure (Right credential)
+
+loadNativeGatewayIdentity :: IO (Either Text (Maybe Text))
+loadNativeGatewayIdentity =
+    fmap (fmap (fmap gatewayCredentialIdentity)) loadNativeGatewaySnapshot
+
+withNativeGatewayBoundary
+    :: (Maybe Text -> IO (Either Text a))
+    -> IO (Either Text a)
+withNativeGatewayBoundary action =
+    withNativeGatewayCredentialBoundary
+        (\_ gatewayIdentity -> action gatewayIdentity)
+
+withNativeGatewayCredentialBoundary
+    :: (Maybe GatewayCredential -> Maybe Text -> IO (Either Text a))
+    -> IO (Either Text a)
+withNativeGatewayCredentialBoundary action =
+    loadNativeGatewaySnapshot >>= \case
+        Left err -> pure (Left err)
+        Right credential ->
+            let gatewayIdentity =
+                    gatewayCredentialIdentity <$> credential
+            in action credential gatewayIdentity >>= \case
+                Left err -> pure (Left err)
+                Right value ->
+                    loadNativeGatewayIdentity >>= \case
+                        Left err -> pure (Left err)
+                        Right currentIdentity
+                            | currentIdentity == gatewayIdentity ->
+                                pure (Right value)
+                            | otherwise ->
+                                pure
+                                    (Left
+                                        "Gateway credentials changed during \
+                                        \the session operation.")
+
+ensureNativeGatewayIdentity :: Maybe Text -> IO (Either Text ())
+ensureNativeGatewayIdentity expected =
+    loadNativeGatewayIdentity >>= \case
+        Left err -> pure (Left err)
+        Right current
+            | current == expected -> pure (Right ())
+            | otherwise ->
+                pure
+                    (Left
+                        "Gateway credentials changed during the session \
+                        \operation.")
+
+-- | Revalidate immediately before every asynchronous item and terminal
+-- callback. If the boundary changes, no later item is emitted.
+emitBoundaryChecked
+    :: IO (Either Text ())
+    -> (item -> IO ())
+    -> IO ()
+    -> [item]
+    -> IO (Either Text ())
+emitBoundaryChecked check emit terminal = go
+  where
+    go [] =
+        check >>= \case
+            Left err -> pure (Left err)
+            Right () -> terminal >> pure (Right ())
+    go (item : remaining) =
+        check >>= \case
+            Left err -> pure (Left err)
+            Right () -> emit item >> go remaining
+
+validateNativeSessionBoundary
+    :: StorePool
+    -> OsPath
+    -> Maybe Text
+    -> Text
+    -> IO (Either Text SessionMeta)
+validateNativeSessionBoundary pool root gatewayIdentity sessionId =
+    loadSessionMeta pool root sessionId >>= \loaded ->
+        pure do
+            meta <- loaded
+            validateResumedGatewayBoundary
+                gatewayIdentity
+                meta.metaConnection
+                meta.metaGatewayIdentity
+            pure meta
+
+withNativeSessionBoundary
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> (Maybe Text -> SessionMeta -> IO (Either Text a))
+    -> IO (Either Text a)
+withNativeSessionBoundary pool root sessionId action =
+    withNativeGatewayBoundary \gatewayIdentity ->
+        validateNativeSessionBoundary
+            pool root gatewayIdentity sessionId >>= \case
+                Left err -> pure (Left err)
+                Right meta -> action gatewayIdentity meta
+
+nativeSessionMatchesBoundary :: Maybe Text -> SessionMeta -> Bool
+nativeSessionMatchesBoundary gatewayIdentity meta =
+    nativeSessionRouteMatchesBoundary
+        gatewayIdentity
+        meta.metaConnection
+        meta.metaGatewayIdentity
+
+nativeSessionRouteMatchesBoundary
+    :: Maybe Text
+    -> Text
+    -> Maybe Text
+    -> Bool
+nativeSessionRouteMatchesBoundary gatewayIdentity connection persistedIdentity =
+    isRight
+        (validateResumedGatewayBoundary
+            gatewayIdentity
+            connection
+            persistedIdentity)
 
 emitSessionTurn
     :: FunPtr SessionTurnCallback
@@ -2914,6 +3080,21 @@ emitSessionTurn callback context turnIndex turn =
                 items (fromIntegral itemsLength)
                 inputTokens' outputTokens' cachedTokens'
                 0 0 nullPtr 0
+
+emitSessionPageForBoundary
+    :: Maybe Text
+    -> FunPtr SessionTurnCallback
+    -> Ptr ()
+    -> SessionTurnPage
+    -> IO (Either Text ())
+emitSessionPageForBoundary gatewayIdentity callback context page =
+    emitBoundaryChecked
+        (ensureNativeGatewayIdentity gatewayIdentity)
+        (\(turnIndex, turn) ->
+            emitSessionTurn callback context turnIndex turn)
+        (sessionTurnTerminal callback context
+            page.pageHasOlder page.pageHasNewer)
+        page.pageTurns
 
 sessionTurnTerminal
     :: FunPtr SessionTurnCallback -> Ptr () -> Bool -> Bool -> IO ()
@@ -2972,6 +3153,23 @@ emitSessionExportChunk callback context chunk =
     BS.useAsCStringLen chunk \(pointer, length) ->
         invokeSessionExportCallback callback context 0
             (castPtr pointer) (fromIntegral length) nullPtr 0
+
+emitSessionExportChunkForBoundary
+    :: Maybe Text
+    -> FunPtr SessionExportCallback
+    -> Ptr ()
+    -> BS.ByteString
+    -> IO ()
+emitSessionExportChunkForBoundary
+        gatewayIdentity callback context chunk =
+    loadNativeGatewayIdentity >>= \case
+        Left err -> throwString (Text.unpack err)
+        Right currentIdentity
+            | currentIdentity == gatewayIdentity ->
+                emitSessionExportChunk callback context chunk
+            | otherwise ->
+                throwString
+                    "Gateway credentials changed during session export."
 
 sessionExportFailure
     :: FunPtr SessionExportCallback -> Ptr () -> Text -> IO ()
@@ -4756,14 +4954,19 @@ runSessionMutation config store root mutation callback context = do
     outcome <- tryAny do
         activeStore <- acquireStore config store
         let pool = trustedPool activeStore
-        case mutation of
-            SessionRename sessionId title -> do
-                result <- renameSession pool root sessionId title
-                pure (() <$ result)
-            SessionDelete sessionId ->
-                deleteSession pool root sessionId
-            SessionArchive sessionId archived ->
-                setSessionArchived pool root sessionId archived
+            sessionId = case mutation of
+                SessionRename identifier _ -> identifier
+                SessionDelete identifier -> identifier
+                SessionArchive identifier _ -> identifier
+        withNativeSessionBoundary pool root sessionId \_ _ ->
+            case mutation of
+                SessionRename _ title -> do
+                    result <- renameSession pool root sessionId title
+                    pure (() <$ result)
+                SessionDelete _ ->
+                    deleteSession pool root sessionId
+                SessionArchive _ archived ->
+                    setSessionArchived pool root sessionId archived
     case outcome of
         Left exception ->
             sendSessionMutationFailure
@@ -4804,20 +5007,24 @@ runConversationSearch
         Right (Left err) ->
             sendSearchFailure callback context (renderStoreError err)
         Right (Right results) ->
-            loadGatewayCredential >>= \case
-                Left err ->
-                    sendSearchFailure callback context
-                        ("Could not reload gateway credentials: " <> err)
-                Right current
-                    | (gatewayCredentialIdentity <$> current)
-                        /= gatewayIdentity ->
-                            sendSearchFailure callback context
-                                "Gateway credentials changed during search."
-                    | otherwise -> do
-                        forM_ results (sendSearchResult callback context)
-                        invokeSearchCallback callback context
-                            1 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                            0 0 (-1) 0 0 nullPtr 0 nullPtr 0 0 nullPtr 0
+            emitSearchResultsForBoundary
+                gatewayIdentity callback context results >>= \case
+                    Left err -> sendSearchFailure callback context err
+                    Right () -> pure ()
+
+emitSearchResultsForBoundary
+    :: Maybe Text
+    -> FunPtr SearchCallback
+    -> Ptr ()
+    -> [NativeConversationSearchResult]
+    -> IO (Either Text ())
+emitSearchResultsForBoundary gatewayIdentity callback context =
+    emitBoundaryChecked
+        (ensureNativeGatewayIdentity gatewayIdentity)
+        (sendSearchResult callback context)
+        (invokeSearchCallback callback context
+            1 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+            0 0 (-1) 0 0 nullPtr 0 nullPtr 0 0 nullPtr 0)
 
 sendSearchFailure :: FunPtr SearchCallback -> Ptr () -> Text -> IO ()
 sendSearchFailure callback context message =
@@ -5635,18 +5842,29 @@ handleRequest config store root request = do
             "sessions.list" -> do
                 activeStore <- acquireStore config store
                 let pool = trustedPool activeStore
-                (sessions, _warnings) <- listSessions pool root
-                archivedIds <- listArchivedSessionIds pool
-                    >>= either (fail . Text.unpack) pure
-                let archived = Set.fromList archivedIds
-                summaries <- mapM
-                    (\session -> sessionSummaryWithStatusJSON
-                        root
-                        (Set.member session.metaId archived)
-                        session)
-                    sessions
-                pure $ successEvent current.requestId
-                    summaries
+                visible <- withNativeGatewayBoundary \gatewayIdentity -> do
+                    (sessions, _warnings) <- listSessions pool root
+                    archivedIds <- listArchivedSessionIds pool
+                    case archivedIds of
+                        Left err -> pure (Left err)
+                        Right identifiers -> do
+                            let archived = Set.fromList identifiers
+                                allowed =
+                                    filter
+                                        (nativeSessionMatchesBoundary
+                                            gatewayIdentity)
+                                        sessions
+                            summaries <- mapM
+                                (\session -> sessionSummaryWithStatusJSON
+                                    root
+                                    (Set.member session.metaId archived)
+                                    session)
+                                allowed
+                            pure (Right summaries)
+                pure $ either
+                    (failureEvent current.requestId)
+                    (successEvent current.requestId)
+                    visible
             "sessions.show" ->
                 case (parseParams current
                     :: Either Text SessionPageRequest) of
@@ -5654,12 +5872,27 @@ handleRequest config store root request = do
                         pure (failureEvent current.requestId err)
                     Right page -> do
                         activeStore <- acquireStore config store
-                        snapshot <- loadSessionPageJSON
-                            (trustedPool activeStore)
-                            root
-                            page.sessionPageId
-                            page.sessionPageBefore
-                            (max 1 (min 200 (maybe 50 id page.sessionPageLimit)))
+                        let pool = trustedPool activeStore
+                        snapshot <- withNativeGatewayBoundary
+                            \gatewayIdentity ->
+                                validateNativeSessionBoundary
+                                    pool
+                                    root
+                                    gatewayIdentity
+                                    page.sessionPageId >>= \case
+                                        Left err -> pure (Left err)
+                                        Right _ ->
+                                            loadSessionPageJSON
+                                                pool
+                                                root
+                                                page.sessionPageId
+                                                page.sessionPageBefore
+                                                (max 1
+                                                    (min 200
+                                                        (maybe
+                                                            50
+                                                            id
+                                                            page.sessionPageLimit)))
                         pure $ either
                             (failureEvent current.requestId)
                             (successEvent current.requestId)
@@ -5673,10 +5906,15 @@ handleRequest config store root request = do
                         pure (failureEvent current.requestId err)
                     Right parameters -> do
                         activeStore <- acquireStore config store
-                        catalogResult <- loadNativeModelCatalog
-                            activeStore
-                            root
-                            parameters
+                        catalogResult <-
+                            withNativeGatewayCredentialBoundary
+                            \credential gatewayIdentity ->
+                                loadNativeModelCatalog
+                                    activeStore
+                                    root
+                                    credential
+                                    gatewayIdentity
+                                    parameters
                         pure $ either
                             (failureEvent current.requestId)
                             (successEvent current.requestId)
@@ -5688,20 +5926,25 @@ handleRequest config store root request = do
 loadNativeModelCatalog
     :: Store
     -> OsPath
+    -> Maybe GatewayCredential
+    -> Maybe Text
     -> ModelsListRequest
     -> IO (Either Text Aeson.Value)
-loadNativeModelCatalog store root request = do
+loadNativeModelCatalog
+        store root gatewayCredential gatewayIdentity request = do
     let home = takeDirectory (takeDirectory root)
         requestedCwd = unsafeEncodeUtf request.modelsListCwd
     contextResult <- currentModelContext
         store
         root
         requestedCwd
+        gatewayIdentity
         request.modelsListSessionId
     case contextResult of
         Left err -> pure (Left err)
         Right (cwd, maybeTarget) ->
-            loadGatewayModelOptionsAt home cwd >>= \case
+            loadGatewayModelOptionsWithCredentialAt
+                home cwd gatewayCredential >>= \case
                 Left err -> pure (Left err)
                 Right (catalog, Just gatewayOptions) ->
                     case gatewayOptions of
@@ -5770,12 +6013,22 @@ currentModelContext
     -> OsPath
     -> OsPath
     -> Maybe Text
+    -> Maybe Text
     -> IO (Either Text (OsPath, Maybe ModelTarget))
-currentModelContext store root cwd = \case
+currentModelContext store root cwd gatewayIdentity = \case
     Just sessionId ->
-        fmap (fmap (\meta ->
-            (meta.metaCwd, Just (sessionModelTarget meta)))) $
-            loadSessionMeta (trustedPool store) root sessionId
+        validateNativeSessionBoundary
+            (trustedPool store)
+            root
+            gatewayIdentity
+            sessionId >>= \case
+                Left err -> pure (Left err)
+                Right meta ->
+                    pure
+                        (Right
+                            ( meta.metaCwd
+                            , Just (sessionModelTarget meta)
+                            ))
     Nothing -> do
         projectRoot <- resolveProjectRoot cwd
         settings <- loadProjectSettings projectRoot
