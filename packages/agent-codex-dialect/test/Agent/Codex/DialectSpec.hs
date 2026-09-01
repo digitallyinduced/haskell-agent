@@ -565,7 +565,7 @@ spec = describe "Codex dialect" do
                     started <- startCodexShellCommand
                         session
                         env.toolCwd
-                        "printf early-output; sleep 0.1; printf late-output"
+                        "printf 'early-%s' output; sleep 0.1; printf 'late-%s' output"
                         50
                         (\_ _ -> pure ())
                     commandId <- case started of
