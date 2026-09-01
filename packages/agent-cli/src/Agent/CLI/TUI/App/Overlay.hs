@@ -455,29 +455,40 @@ handleChoiceKey event = do
         _ -> handleStaticChoiceKey event
 
 handleStaticChoiceKey :: V.Event -> EventM Name AppState ()
-handleStaticChoiceKey = \case
-    V.EvKey V.KUp [] -> moveChoice (-1)
-    V.EvKey V.KDown [] -> moveChoice 1
-    V.EvKey V.KBackTab [] -> moveChoice (-1)
-    V.EvKey (V.KChar '\t') [] -> moveChoice 1
-    V.EvKey V.KPageUp [] ->
-        vScrollPage (viewportScroll OverlayViewport) Up
-    V.EvKey V.KPageDown [] ->
-        vScrollPage (viewportScroll OverlayViewport) Down
-    V.EvMouseDown _ _ V.BScrollUp _ ->
-        vScrollBy (viewportScroll OverlayViewport) (-mouseScrollLines)
-    V.EvMouseDown _ _ V.BScrollDown _ ->
-        vScrollBy (viewportScroll OverlayViewport) mouseScrollLines
-    V.EvKey V.KEnter [] -> resolveChoice True
-    V.EvKey V.KEsc [] -> resolveChoice False
-    V.EvKey (V.KChar 'q') [] -> resolveChoice False
-    V.EvKey (V.KChar 'c') modifiers
-        | V.MCtrl `elem` modifiers -> do
-            state <- get
-            _ <- handleCtrlC
-            when state.appUi.uiRunning (resolveChoice False)
-    _ -> pure ()
+handleStaticChoiceKey event = do
+    choice <- gets (.appChoice)
+    case (choice, event) of
+        (Just current, V.EvKey V.KUp [])
+            | current.choicePresentation == ChoiceDocument ->
+                scrollNotes (-1)
+        (Just current, V.EvKey V.KDown [])
+            | current.choicePresentation == ChoiceDocument ->
+                scrollNotes 1
+        (_, V.EvKey V.KUp []) -> moveChoice (-1)
+        (_, V.EvKey V.KDown []) -> moveChoice 1
+        (_, V.EvKey V.KBackTab []) -> moveChoice (-1)
+        (_, V.EvKey (V.KChar '\t') []) -> moveChoice 1
+        (_, V.EvKey V.KPageUp []) ->
+            vScrollPage (viewportScroll OverlayViewport) Up
+        (_, V.EvKey V.KPageDown []) ->
+            vScrollPage (viewportScroll OverlayViewport) Down
+        (_, V.EvMouseDown _ _ V.BScrollUp _) ->
+            scrollNotes (-mouseScrollLines)
+        (_, V.EvMouseDown _ _ V.BScrollDown _) ->
+            scrollNotes mouseScrollLines
+        (_, V.EvKey V.KEnter []) -> resolveChoice True
+        (_, V.EvKey V.KEsc []) -> resolveChoice False
+        (_, V.EvKey (V.KChar 'q') []) -> resolveChoice False
+        (_, V.EvKey (V.KChar 'c') modifiers)
+            | V.MCtrl `elem` modifiers -> do
+                state <- get
+                _ <- handleCtrlC
+                when state.appUi.uiRunning (resolveChoice False)
+        _ -> pure ()
   where
+    scrollNotes =
+        vScrollBy (viewportScroll OverlayViewport)
+
     moveChoice delta =
         modify' \state ->
             state
@@ -626,6 +637,8 @@ activateControl = \case
         Composer.handlePromptControlClick
             applyLocalUiEventWith
             ReplChooseModel
+    QuickStartChangelog ->
+        activateQuickStartCommand "/changelog"
     ChoiceRow index ->
         confirmChoiceAt index
     ResumeRow sessionId ->
@@ -654,6 +667,7 @@ isInteractiveControl = \case
     QuickStartResume -> True
     QuickStartCommands -> True
     QuickStartModel -> True
+    QuickStartChangelog -> True
     ChoiceRow _ -> True
     ResumeRow _ -> True
     CodeCopy _ _ _ -> True
@@ -665,6 +679,7 @@ isQuickStartControl = \case
     QuickStartResume -> True
     QuickStartCommands -> True
     QuickStartModel -> True
+    QuickStartChangelog -> True
     _ -> False
 
 openMarkdownLink :: Text -> EventM Name AppState ()

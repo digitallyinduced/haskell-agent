@@ -899,6 +899,19 @@ requestFullscreenChoiceWithBody runtime title body initial rows = do
         (AppAskChoice ChoiceDialog title body initial rows reply)
     atomically (readTMVar reply)
 
+-- | Open a read-only, scrollable Markdown document and wait for dismissal.
+requestFullscreenDocument
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> IO ()
+requestFullscreenDocument runtime title body = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskChoice ChoiceDocument title body 0 [] reply)
+    _ <- atomically (readTMVar reply)
+    pure ()
+
 -- | Open a choice overlay whose rows can be narrowed by typing. The returned
 -- index always refers to the original row list, even while the visible rows
 -- are filtered.

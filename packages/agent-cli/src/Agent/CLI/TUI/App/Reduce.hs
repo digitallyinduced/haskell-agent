@@ -439,6 +439,9 @@ noteTerminalFocusLost = do
             , appLastAutoRecapAttemptAt = Nothing
             , appSyntaxHighlighter = Nothing
             , appSyntaxRequested = Set.empty
+            , appHoveredControl = Nothing
+            , appPressedControl = Nothing
+            , appAgentHover = Nothing
             }
     invalidateCache
 

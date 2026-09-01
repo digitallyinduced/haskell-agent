@@ -65,7 +65,7 @@ import Agent.CLI.TUI.Types
                     choiceAdjustments, choiceAdjustmentIndices),
       choiceVisibleRows,
       selectedChoiceIndex,
-      ChoicePresentation(ChoiceOnboarding, ChoiceDialog),
+      ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument),
       AppState(appRuntime,
                appDictation, appTextPrompt, appChoice, appMetaConsole,
                appMotionElapsedMillis, appUi, appTerminalFocus),
@@ -129,7 +129,7 @@ import Brick
 import Brick.BChan ()
 import Brick.Widgets.Border ( borderWithLabel )
 import Brick.Widgets.Border.Style ( unicodeRounded )
-import Brick.Widgets.Center ( centerLayer )
+import Brick.Widgets.Center ( centerLayer, hCenter )
 import Codec.Picture ()
 import Control.Applicative ()
 import Control.Concurrent ()
@@ -264,6 +264,8 @@ drawFooter state =
                 ""
             | choice.choiceSearch ->
                 "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
+            | choice.choicePresentation == ChoiceDocument ->
+                "↑↓ scroll  │  PgUp/PgDn pages  │  Esc back"
         (_, Nothing, Just _, _, _, _) ->
             if state.appUi.uiRunning
                 then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
@@ -522,6 +524,7 @@ drawChoice appState choice
     | choice.choiceSearch = drawFilterChoice appState choice
     | otherwise = case choice.choicePresentation of
         ChoiceDialog -> drawDialogChoice appState choice
+        ChoiceDocument -> drawDialogChoice appState choice
         ChoiceOnboarding -> drawOnboardingChoice appState choice
 
 drawFilterChoice :: AppState -> ChoiceOverlay -> Widget Name
@@ -688,7 +691,13 @@ drawDialogChoice appState choice =
                 overrideAttr Border.borderAttr Theme.borderActiveAttr $
                     withBorderStyle unicodeRounded $
                         borderWithLabel
-                            (waitingOverlayLabel appState choice.choiceTitle) $
+                            ( if choice.choicePresentation == ChoiceDocument
+                                then terminalTxt
+                                    (" " <> choice.choiceTitle <> " ")
+                                else waitingOverlayLabel
+                                    appState
+                                    choice.choiceTitle
+                            ) $
                             padAll 1 $
                                 vBox
                                     [ if Text.null (Text.strip choice.choiceBody)
@@ -710,6 +719,10 @@ drawDialogChoice appState choice =
                                         | (visibleIndex, (originalIndex, row)) <-
                                             zip [start ..] rows
                                         ]
+                                    , if choice.choicePresentation == ChoiceDocument
+                                        then withAttr Theme.footerAttr $
+                                            hCenter (txt "↑/↓ scroll  │  Esc back")
+                                        else emptyWidget
                                     ]
   where
     visible = choiceVisibleRows choice
