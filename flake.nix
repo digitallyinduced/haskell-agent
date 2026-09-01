@@ -608,9 +608,12 @@
                                         [ "lib/libhaskell-agent-bridge.dylib" ];
                             }))
                             [
+                                pkgs.bash
+                                pkgs.coreutils
                                 pkgs.git
                                 bun_1_4
                                 pkgs.postgresql_18
+                                pkgs.python3
                             ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
