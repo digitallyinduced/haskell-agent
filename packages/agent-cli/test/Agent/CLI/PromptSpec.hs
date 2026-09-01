@@ -414,6 +414,10 @@ spec = describe "systemPrompt" do
             maybe False (Text.isInfixOf "Do not use Luna as a blanket default")
         subscriptionGuidance `shouldSatisfy`
             maybe False (Text.isInfixOf "Honor an explicitly requested model")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False
+                (Text.isInfixOf
+                    "Full-history forks (`fork_turns` omitted or `\"all\"`)")
         subscriptionSubagentModelGuidance OpenAIProvider ApiBilled
             `shouldBe` Nothing
         subscriptionSubagentModelGuidance XAIProvider SubscriptionBilled

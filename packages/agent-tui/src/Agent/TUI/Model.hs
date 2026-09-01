@@ -44,6 +44,7 @@ module Agent.TUI.Model
 import Agent.TUI.Presentation
     ( formatToolDiffRelative
     , formatToolOutputRelative
+    , isInspectionTool
     , todoListFromToolArguments
     , todoListFromToolOutput
     , toolCallInput
@@ -158,6 +159,11 @@ reduceUi event state = case event of
         state
             { uiPrompt =
                 state.uiPrompt { promptLimitStatus = limitStatus }
+            }
+    UiSetContextUsage tokens contextWindow ->
+        state
+            { uiContextTokens = tokens
+            , uiContextWindow = contextWindow
             }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
@@ -667,16 +673,22 @@ timestampNewMessageBlocks firstNewIndex timestamp state
                     state.uiBlocks
             }
 
-completeTool :: Int -> ToolCallResult -> UiState -> UiState
-completeTool blockIndex result state =
-    state
+completeTool :: Int -> ToolCall -> ToolCallResult -> UiState -> UiState
+completeTool blockIndex call result state =
+    let resultState = toolResultState result.output
+        diff = formatToolDiffRelative state.uiWorkspaceRoot call
+        body
+            | resultState == BlockComplete
+            , not (Text.null (Text.strip diff)) = diff
+            | otherwise = result.output
+    in state
         { uiBlocks =
             Seq.adjust
                 (\block ->
                     if block.blockCallId == Just result.callId
                         then block
-                            { blockBody = result.output
-                            , blockState = toolResultState result.output
+                            { blockBody = body
+                            , blockState = resultState
                             }
                         else block)
                 blockIndex
@@ -730,7 +742,7 @@ finishVisibleTool result state =
                 reconcileVisibleShellContinuation
                     call
                     result
-                    (completeTool blockIndex displayed next)
+                    (completeTool blockIndex call displayed next)
             | blockIndex < Seq.length state.uiBlocks
             , isShellProcessTool call.name
             , Just (sessionId, output) <-
@@ -738,7 +750,7 @@ finishVisibleTool result state =
             , Map.notMember sessionId next.uiShellProcesses ->
                 retainRunningShell blockIndex sessionId output next
             | blockIndex < Seq.length state.uiBlocks ->
-                completeTool blockIndex displayed next
+                completeTool blockIndex call displayed next
         Just _ -> next
 
 trackedShellOwner :: ToolCall -> UiState -> Maybe BlockId
@@ -1301,6 +1313,7 @@ toolBlockKind rawName
         BlockEdit
     | name `elem` ["todo_write", "update_plan"] =
         BlockTodo
+    | isInspectionTool rawName = BlockInspect
     | otherwise = BlockTool
   where
     name = canonicalToolName rawName

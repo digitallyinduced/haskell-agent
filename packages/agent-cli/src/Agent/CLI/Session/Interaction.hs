@@ -4,6 +4,7 @@ module Agent.CLI.Session.Interaction
     , runBtwQuestion
     , setSessionEffort
     , setSessionEffortText
+    , syncFullscreenContext
     , syncFullscreenPrompt
     ) where
 
@@ -17,6 +18,7 @@ import Agent.CLI.Command
     , currentModel
     , setReasoningEffort
     )
+import Agent.CLI.Context (contextUsageTokens)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -81,7 +83,8 @@ import qualified Data.Text as Text
 -- | Publish the current session prompt metadata to a retained fullscreen
 -- runtime before replaying a pending turn after a provider rebuild.
 syncFullscreenPrompt :: SessionEnv -> IO ()
-syncFullscreenPrompt env =
+syncFullscreenPrompt env = do
+    syncFullscreenContext env
     forM_ env.sessionFullscreen \runtime -> do
         planState <- readIORef env.sessionPlanMode.planStateRef
         params <- readIORef env.sessionParams
@@ -99,6 +102,20 @@ syncFullscreenPrompt env =
                 (isJust env.sessionSelectAccount)
                 usage
                 (length attachments)
+
+-- | Publish the live context occupancy used by compaction together with the
+-- active model's context capacity.
+syncFullscreenContext :: SessionEnv -> IO ()
+syncFullscreenContext env =
+    forM_ env.sessionFullscreen \runtime -> do
+        occupancy <- readIORef env.sessionContextOccupancy
+        params <- readIORef env.sessionParams
+        history <- readLiveTranscript env.sessionConversation
+        contextWindow <- env.sessionContextWindow
+        emitUiEvent runtime $
+            UiSetContextUsage
+                (Just (contextUsageTokens occupancy params history))
+                contextWindow
 
 buildPromptState
     :: DialectId

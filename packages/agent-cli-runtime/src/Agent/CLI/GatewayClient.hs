@@ -38,7 +38,7 @@ module Agent.CLI.GatewayClient
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.CLI.Options (GatewayCommand (..))
+import Agent.CLI.Runtime.Options (GatewayCommand (..))
 import Agent.Json.Decode qualified as Hermes
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)

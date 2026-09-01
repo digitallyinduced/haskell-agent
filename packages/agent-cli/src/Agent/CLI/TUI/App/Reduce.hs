@@ -549,6 +549,7 @@ uiEventMayExposeSyntax = \case
     UiSetPromptTarget _ _ -> False
     UiSetPromptEffort _ -> False
     UiSetPromptLimitStatus _ -> False
+    UiSetContextUsage _ _ -> False
     UiSetAwaitingInput _ -> False
     UiSetRepository _ _ _ -> False
     UiSetNotice _ -> False
@@ -687,7 +688,7 @@ toolImageBlockId callId ui =
             | (active, _) <- Map.toList ui.uiToolCalls
             , Just block <- [blockForCall active]
             , block.blockState == BlockRunning
-            , block.blockKind `elem` [BlockTool, BlockShell]
+            , block.blockKind `elem` [BlockTool, BlockInspect, BlockShell]
             ]
         of
             [] -> Nothing

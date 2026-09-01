@@ -30,6 +30,7 @@ data BlockKind
     | BlockAssistant
     | BlockThinking
     | BlockTool
+    | BlockInspect
     | BlockTodo
     | BlockShell
     | BlockEdit
@@ -133,6 +134,8 @@ data UiState = UiState
     , uiBranch :: !Text
     , uiCwd :: !Text
     , uiWorkspaceRoot :: !Text
+    , uiContextTokens :: !(Maybe Int)
+    , uiContextWindow :: !(Maybe Int)
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe UiNotice)
     , uiRetryCountdown :: !(Maybe RetryCountdown)
@@ -171,6 +174,7 @@ data UiEvent
     | UiSetPromptTarget !Text !Text
     | UiSetPromptEffort !Text
     | UiSetPromptLimitStatus !(Maybe PromptLimitStatus)
+    | UiSetContextUsage !(Maybe Int) !(Maybe Int)
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text !Text
     | UiSetNotice !(Maybe UiNotice)

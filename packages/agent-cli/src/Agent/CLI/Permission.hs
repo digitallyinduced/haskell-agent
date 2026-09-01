@@ -26,6 +26,7 @@ import Agent.CLI.Notification
     )
 import Agent.CLI.Options (ApprovalAnswer(..), parseApprovalAnswer)
 import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.CLI.Permission.Types (PermissionChoice(..))
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (glyphWarn, roleMuted, roleSuccess, roleWarn)
 import Agent.TUI.Presentation (permissionToolCallPromptRelative)
@@ -36,13 +37,6 @@ import qualified Data.Text as Text
 import System.IO (hIsTerminalDevice, stderr, stdin)
 import System.OsPath (OsPath)
 import Agent.OsPath (toText)
-
-data PermissionChoice
-    = PermissionAllowOnce
-    | PermissionAllowAll
-    | PermissionAllowTool
-    | PermissionDeny
-    deriving (Eq, Show)
 
 data ApprovalPolicyDecision
     = ApprovalPolicySelected !ApprovalPolicy

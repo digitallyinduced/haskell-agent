@@ -3,7 +3,8 @@
 
 -- | Pure formatting and conservative accounting for the /context command.
 module Agent.CLI.Context
-    ( formatContextReport
+    ( contextUsageTokens
+    , formatContextReport
     ) where
 
 import Agent.CLI.Compaction
@@ -21,6 +22,20 @@ import Agent.Responses.Types
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
+
+-- | Prefer a provider-reported occupancy while it still describes the
+-- committed history. Otherwise estimate the complete serialized request.
+contextUsageTokens
+    :: Maybe OccupancySnapshot
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+contextUsageTokens occupancy params history =
+    case occupancy of
+        Just snapshot
+            | validReportedOccupancy history snapshot ->
+                snapshot.occupancyTokens
+        _ -> estimateRequestTokensWithItems params history
 
 -- | Format a context snapshot. Provider-reported occupancy is used only when
 -- it still describes the supplied history; otherwise the complete serialized
@@ -53,15 +68,12 @@ formatContextReport model contextWindow occupancy params history activeTools =
         )
   where
     estimatedTotal = estimateRequestTokensWithItems params history
-    validReported snapshot =
-        snapshot.occupancyKind == ReportedOccupancy
-            && snapshot.occupancyTokens > 0
-            && snapshot.occupancyLength == length history
-    (used, source) = case occupancy of
+    used = contextUsageTokens occupancy params history
+    source = case occupancy of
         Just snapshot
-            | validReported snapshot ->
-                (snapshot.occupancyTokens, "provider reported")
-        _ -> (estimatedTotal, "estimated")
+            | validReportedOccupancy history snapshot ->
+                "provider reported"
+        _ -> "estimated"
 
     -- Use the dialect-aware setters because Responses Lite stores instructions
     -- and tool schemas in an input prefix instead of the ordinary fields.
@@ -119,3 +131,12 @@ progressBar used window
                 min width
                     ((scaled + window `div` 2) `div` window)
         in "[" <> Text.replicate filled "#" <> Text.replicate (width - filled) "-" <> "]"
+
+validReportedOccupancy
+    :: [ResponseItem]
+    -> OccupancySnapshot
+    -> Bool
+validReportedOccupancy history snapshot =
+    snapshot.occupancyKind == ReportedOccupancy
+        && snapshot.occupancyTokens > 0
+        && snapshot.occupancyLength == length history

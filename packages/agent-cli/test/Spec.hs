@@ -23,16 +23,11 @@ import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ContextSpec as ContextSpec
 import qualified Agent.CLI.ConversationStoreSpec as ConversationStoreSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
-import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.DesktopSpec as DesktopSpec
-import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
-import qualified Agent.CLI.ErrorSpec as ErrorSpec
 import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
-import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
-import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
 import qualified Agent.CLI.GatewayModelsSpec as GatewayModelsSpec
 import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
@@ -40,16 +35,13 @@ import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.LearnedSkillsSpec as LearnedSkillsSpec
-import qualified Agent.CLI.ManagedTurnSpec as ManagedTurnSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
 import qualified Agent.CLI.MetaConsoleRuntimeSpec as MetaConsoleRuntimeSpec
-import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
-import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.PendingInputsSpec as PendingInputsSpec
@@ -72,7 +64,6 @@ import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
 import qualified Agent.CLI.ReviewSpec as ReviewSpec
 import qualified Agent.CLI.SecretSpec as SecretSpec
-import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SessionHistorySpec as SessionHistorySpec
 import qualified Agent.CLI.SessionStateSpec as SessionStateSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
@@ -134,16 +125,11 @@ main = hspec do
     ContextSpec.spec
     ConversationStoreSpec.spec
     ConnectivitySpec.spec
-    CredentialStoreSpec.spec
     DialectsSpec.spec
     DatabaseSpec.spec
     DesktopSpec.spec
-    EnvironmentSpec.spec
-    ErrorSpec.spec
     ExternalProgramSpec.spec
     FileUriSpec.spec
-    GatewayBridgeSpec.spec
-    GatewayClientSpec.spec
     GatewayModelsSpec.spec
     GitDiffSpec.spec
     ImagePreviewSpec.spec
@@ -151,16 +137,13 @@ main = hspec do
     InterruptSpec.spec
     LoginSpec.spec
     LearnedSkillsSpec.spec
-    ManagedTurnSpec.spec
     MarkdownSpec.spec
     McpAdminSpec.spec
     McpManagerSpec.spec
     MetaConsoleSpec.spec
     MetaConsoleRuntimeSpec.spec
-    ModelConfigSpec.spec
     ModelPickerSpec.spec
     NativeAgentsSpec.spec
-    ModelsSpec.spec
     NotificationSpec.spec
     OptionsSpec.spec
     PendingInputsSpec.spec
@@ -191,7 +174,6 @@ main = hspec do
     TurnSpec.spec
     TerminalSpec.spec
     TextLayoutSpec.spec
-    SessionSpec.spec
     SessionStateSpec.spec
     SessionTitleSpec.spec
     SkillsSpec.spec

@@ -2,11 +2,11 @@ module Agent.Telegram.Internal.Poll
     ( pollForever, dispatchForever, scheduleTelegramWorkForever ) where
 
 
-import Agent.CLI.AgentSessions ()
+import Agent.CLI.AgentSessions.Process ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models ()
-import Agent.CLI.Options ()
+import Agent.CLI.Runtime.Options ()
 import Agent.CLI.Session ()
 import Agent.Concurrent ()
 import Agent.FileRetry ()

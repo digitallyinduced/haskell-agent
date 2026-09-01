@@ -262,12 +262,28 @@
                     ];
                 };
 
-                agentCliSource = nix-filter.lib {
+                # Production derivations intentionally exclude tests. The
+                # checking package set selects the complete sources below.
+                agentCliProductionSource = nix-filter.lib {
                     root = ./packages/agent-cli;
                     include = [
                         "app"
                         "cbits"
-                        "config"
+                        "eval"
+                        "ffi"
+                        "include"
+                        "skills"
+                        "src"
+                        "agent-cli.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentCliCheckSource = nix-filter.lib {
+                    root = ./packages/agent-cli;
+                    include = [
+                        "app"
+                        "cbits"
                         "eval"
                         "ffi"
                         "include"
@@ -279,7 +295,38 @@
                     ];
                 };
 
-                agentTelegramSource = nix-filter.lib {
+                agentCliRuntimeProductionSource = nix-filter.lib {
+                    root = ./packages/agent-cli-runtime;
+                    include = [
+                        "config"
+                        "src"
+                        "agent-cli-runtime.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentCliRuntimeCheckSource = nix-filter.lib {
+                    root = ./packages/agent-cli-runtime;
+                    include = [
+                        "config"
+                        "src"
+                        "test"
+                        "agent-cli-runtime.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentTelegramProductionSource = nix-filter.lib {
+                    root = ./packages/agent-telegram;
+                    include = [
+                        "app"
+                        "src"
+                        "agent-telegram.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentTelegramCheckSource = nix-filter.lib {
                     root = ./packages/agent-telegram;
                     include = [
                         "app"
@@ -526,9 +573,25 @@
                                     src = agentStoreSource;
                                 })
                             [ pkgs.postgresql_18 ]);
+                        agent-cli-runtime = localPackage
+                            (pkgs.haskell.lib.addTestToolDepends
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-cli-runtime/package.nix
+                                    { })
+                                {
+                                    src =
+                                        if checkLocalPackages
+                                            then agentCliRuntimeCheckSource
+                                            else agentCliRuntimeProductionSource;
+                                })
+                            [ pkgs.postgresql_18 ]);
                         agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
                             ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
-                                src = agentCliSource;
+                                src =
+                                    if checkLocalPackages
+                                        then agentCliCheckSource
+                                        else agentCliProductionSource;
                             }).overrideAttrs (old: {
                                 configureFlags = (old.configureFlags or [ ]) ++ [
                                     "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
@@ -551,7 +614,10 @@
                             ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
-                                src = agentTelegramSource;
+                                src =
+                                    if checkLocalPackages
+                                        then agentTelegramCheckSource
+                                        else agentTelegramProductionSource;
                             })
                             [ pkgs.postgresql_18 ]);
                     }
@@ -584,6 +650,8 @@
                 agentClaudePackage = productionHaskellPackages.agent-claude;
                 agentTuiPackage = productionHaskellPackages.agent-tui;
                 agentStorePackage = productionHaskellPackages.agent-store;
+                agentCliRuntimePackage =
+                    productionHaskellPackages.agent-cli-runtime;
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
                 # Both installable CLI variants expose the same advertised
@@ -862,6 +930,7 @@
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
+                packages.agent-cli-runtime = agentCliRuntimePackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
                 packages.agent-json = agentJsonPackage;
@@ -903,6 +972,7 @@
                 devShells.default = haskellPackages.shellFor {
                     packages = packages: [
                         packages.agent-cli
+                        packages.agent-cli-runtime
                         packages.agent-telegram
                         packages.agent-core
                         packages.agent-mcp
@@ -958,6 +1028,7 @@
                     # The package check does not exercise the wrapped
                     # justStaticExecutables output or its requisite assertions.
                     agent-cli-executable = agentCliExecutable;
+                    agent-cli-runtime = haskellPackages.agent-cli-runtime;
                     agent-cli = haskellPackages.agent-cli;
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;

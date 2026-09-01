@@ -42,7 +42,7 @@ import Agent.CLI.Resume ()
 import Agent.CLI.Secret ()
 import Agent.CLI.Status
     ( formatEstimatedTokensPerSecond
-    , formatTokenUsage
+    , formatContextUsage
     )
 import Agent.CLI.Style ( motionGlyphSet )
 import Agent.CLI.TUI.History ()
@@ -75,9 +75,9 @@ import Agent.TUI.Model
     ( visibleTodoList,
       uiTokensPerSecond,
       uiTokensPerSecondEstimated,
-      PromptState(promptUsage),
       UiState(uiPermission, uiElapsedMillis, uiActivity, uiRunning,
-              uiCompletionRemainingMillis, uiBranch, uiCwd, uiPrompt) )
+              uiCompletionRemainingMillis, uiCwd,
+              uiContextTokens, uiContextWindow) )
 import Agent.TUI.Motion
     ( backgroundIndicator,
       foregroundIndicator,
@@ -97,6 +97,7 @@ import Brick
       hLimit,
       hLimitPercent,
       padLeftRight,
+      padTop,
       txt,
       vBox,
       vLimit,
@@ -106,7 +107,8 @@ import Brick
       CursorLocation(cursorLocation),
       Result(cursors, image),
       Size(Fixed),
-      Widget(render, Widget) )
+      Widget(render, Widget),
+      Padding(Pad) )
 import Brick.BChan ()
 import Brick.Widgets.Border ()
 import Brick.Widgets.Border.Style ()
@@ -390,36 +392,36 @@ viewportPreviewSize available =
 
 drawHeader :: AppState -> Widget Name
 drawHeader state =
-    withAttr Theme.headerAttr $
-        padLeftRight 2 $
-            hBox
-                [ hLimitPercent 68 (drawRepositoryHeader state.appUi)
-                , vLimit 1 (fill ' ')
-                , drawHeaderRight state
-                ]
+    padTop (Pad 1) $
+        withAttr Theme.headerAttr $
+            padLeftRight 2 $
+                hBox
+                    [ hLimitPercent 68 (drawRepositoryHeader state.appUi)
+                    , vLimit 1 (fill ' ')
+                    , drawHeaderRight state
+                    ]
 
 drawRepositoryHeader :: UiState -> Widget Name
 drawRepositoryHeader state
-    | Text.null state.uiBranch =
-        withAttr Theme.mutedAttr (terminalTxt state.uiCwd)
+    | Text.null state.uiCwd = txt "worktree"
     | otherwise =
         hBox
-            [ txt "\xE0A0 "
-            , withAttr Theme.mutedAttr $
-                terminalTxt
-                    (repositoryHeaderText state.uiBranch state.uiCwd)
+            [ txt "worktree"
+            , txt "  "
+            , withAttr Theme.mutedAttr (terminalTxt state.uiCwd)
             ]
 
 repositoryHeaderText :: Text -> Text -> Text
-repositoryHeaderText branch cwd =
+repositoryHeaderText _branch cwd =
     Text.intercalate "  " $
-        filter (not . Text.null) [branch, cwd]
+        filter (not . Text.null) ["worktree", cwd]
 
 drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
-    withAttr Theme.mutedAttr $
-        terminalTxt
-            (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+    terminalTxt $
+        formatContextUsage
+            state.appUi.uiContextTokens
+            state.appUi.uiContextWindow
 
 drawLiveTodos :: UiState -> Widget Name
 drawLiveTodos ui =

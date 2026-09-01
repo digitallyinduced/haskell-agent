@@ -22,6 +22,7 @@ data AttentionRequest
     = InputRequested
     | PermissionRequested
     | PlanModeRequested
+    | SecretRequested
     deriving (Eq, Show)
 
 attentionNotificationSequence :: AttentionRequest -> Text
@@ -33,6 +34,7 @@ notificationTitle = \case
     InputRequested -> "Haskell Agent: input requested"
     PermissionRequested -> "Haskell Agent: permission required"
     PlanModeRequested -> "Haskell Agent: plan mode requested"
+    SecretRequested -> "Haskell Agent: secret requested"
 
 -- | Notify only when the destination is a TTY, keeping pipes and redirected
 -- stderr free of terminal control sequences. Notification failures must never

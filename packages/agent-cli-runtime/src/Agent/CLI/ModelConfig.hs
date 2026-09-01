@@ -48,7 +48,7 @@ import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Paths_agent_cli (getDataFileName)
+import Paths_agent_cli_runtime (getDataFileName)
 import qualified System.Directory as Directory
 import System.Directory.OsPath (doesFileExist)
 import qualified System.Environment as Environment
@@ -276,7 +276,8 @@ packagedModelCatalogPathAt cwd = do
                 <> take 8
                     (iterate FilePath.takeDirectory (unsafeToFilePath cwd))
         sourceCandidates =
-            [ root FilePath.</> "packages/agent-cli/config/models.default.json"
+            [ root
+                FilePath.</> "packages/agent-cli-runtime/config/models.default.json"
             | root <- roots
             ]
     firstExisting

@@ -776,16 +776,16 @@ spec = do
                 `shouldReturn` ["initial", "resumed"]
 
     describe "repositoryHeaderText" do
-        it "puts the git state before the full checkout path" do
+        it "labels the checkout path without noisy git state" do
             repositoryHeaderText
                 "detached"
                 "~/digitallyinduced/haskell-agent"
                 `shouldBe`
-                    "detached  ~/digitallyinduced/haskell-agent"
+                    "worktree  ~/digitallyinduced/haskell-agent"
 
-        it "still renders a path when git state is unavailable" do
+        it "uses the same quiet label when git state is unavailable" do
             repositoryHeaderText "" "~/scratch"
-                `shouldBe` "~/scratch"
+                `shouldBe` "worktree  ~/scratch"
 
     describe "bounded custom rendering" do
         it "crops the empty-conversation art to tiny render contexts" do

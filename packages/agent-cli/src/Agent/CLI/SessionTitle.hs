@@ -16,6 +16,7 @@ module Agent.CLI.SessionTitle
 
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Error (formatApiErrorInline)
+import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -154,12 +155,6 @@ invalidateSessionTitles manager sessionId =
             (Map.insertWith (+) sessionId 1)
         modifyTVar' manager.titleRequested
             (Set.filter (\(sid, _, _) -> sid /= sessionId))
-
-titleRefreshIndex :: Int -> Int
-titleRefreshIndex milestone
-    | milestone >= 6 = 2
-    | milestone >= 3 = 1
-    | otherwise = 0
 
 shouldRequestSessionTitle :: Int -> Int -> Bool
 shouldRequestSessionTitle milestone refreshIndex

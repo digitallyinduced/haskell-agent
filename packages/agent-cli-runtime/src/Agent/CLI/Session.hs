@@ -92,6 +92,7 @@ module Agent.CLI.Session
     , writeSessionMeta
     , compatibleSessionPromptSnapshot
     , ensureSession
+    , ensurePersistenceSessionId
     , ensureSessionWithPromptSnapshot
     , resumeHint
     , sessionUsageFromTurns
@@ -138,7 +139,7 @@ import Agent.CLI.Session.Codec
     , validateSessionMeta
     )
 import Agent.CLI.Models (ModelTarget(..))
-import Agent.CLI.SessionTitle (titleRefreshIndex)
+import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import Agent.Dialect (DialectId)
 import Agent.Loop (TokenUsage(..))
 import Agent.OpenAI.Compaction (rewindSessionUserText)
@@ -798,6 +799,13 @@ ensureSession slotRef = do
             handle <- createReservedSession spec sessionId tempDir Nothing
             writeIORef slotRef (PersistenceActive handle)
             pure handle
+
+-- | Return a durable, resumable session ID, materializing pending persistence.
+ensurePersistenceSessionId :: Persistence -> IO (Maybe Text)
+ensurePersistenceSessionId PersistenceDisabled = pure Nothing
+ensurePersistenceSessionId (PersistenceEnabled slotRef) = do
+    handle <- ensureSession slotRef
+    pure (Just handle.sessionMeta.metaId)
 
 -- | Ensure the durable session exists and atomically persist the
 -- provider-visible request prefix before it can be sent. Subsequent calls only

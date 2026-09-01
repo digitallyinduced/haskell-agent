@@ -2,7 +2,7 @@ module Agent.CLI.GatewayBridgeSpec (spec) where
 
 import Agent.CLI.GatewayBridge
 import Agent.CLI.ManagedTurn
-import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Permission.Types (PermissionChoice(..))
 import Agent.Loop (LoopEvent(..), defaultLoopDispatch)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)

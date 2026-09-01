@@ -88,6 +88,7 @@ import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( addSessionUsage,
       ensureSession,
+      ensurePersistenceSessionId,
       compatibleSessionPromptSnapshot,
       resumeHint,
       sessionTitleFromPrompt,
@@ -95,7 +96,7 @@ import Agent.CLI.Session
       Persistence(..),
       PersistenceState(PersistenceActive, PersistencePending),
       LegacySubagentTarget,
-      SessionHandle(sessionMeta, sessionDir),
+      SessionHandle(sessionDir),
       SessionMeta(metaId, metaLastResponseId, metaPromptSnapshot, metaTitle),
       SessionTurn,
       SessionPromptSnapshot(..) )
@@ -895,16 +896,13 @@ printResumeHint
     :: String
     -> Persistence
     -> IO ()
-printResumeHint progName = \case
-    PersistenceDisabled -> pure ()
-    PersistenceEnabled slotRef -> do
-        slot <- readIORef slotRef
-        case slot of
-            PersistencePending _ _ _ -> pure ()
-            PersistenceActive handle -> do
-                -- Drop an in-place "Thinking…" status so the hint is its own line.
-                Text.hPutStr stderr "\r\ESC[K"
-                clearNativeProgress stderr
-                color <- resolveColor stderr
-                putTextLn stderr
-                    (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
+printResumeHint progName persist =
+    ensurePersistenceSessionId persist >>= \case
+        Nothing -> pure ()
+        Just sessionId -> do
+            -- Drop an in-place "Thinking…" status so the hint is its own line.
+            Text.hPutStr stderr "\r\ESC[K"
+            clearNativeProgress stderr
+            color <- resolveColor stderr
+            putTextLn stderr
+                (roleMuted color (resumeHint progName sessionId))

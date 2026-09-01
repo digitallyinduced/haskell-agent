@@ -84,6 +84,7 @@ import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
     , glyphErr
+    , glyphInspect
     , glyphTool
     , glyphToolAccent
     , glyphToolOut
@@ -119,8 +120,9 @@ import Agent.TUI.Presentation
     , SearchReplaceLine(..)
     , formatToolOutput
     , formatToolOutputRelative
+    , isInspectionTool
     , parseSearchReplaceDiff
-    , toolCallDiff
+    , toolCallDiffs
     , toolDetail
     , toolVerb
     , workspaceRelativeDisplayPath
@@ -783,7 +785,10 @@ formatToolStarted color = formatToolStartedRelative color ""
 
 formatToolStartedRelative :: Bool -> Text -> ToolCall -> Text
 formatToolStartedRelative color workspace call =
-    let arrow = roleToolArrow color glyphTool
+    let marker
+            | isInspectionTool call.name = glyphInspect
+            | otherwise = glyphTool
+        arrow = roleToolArrow color marker
         detail = toolDetail call
     in case toolChrome call.name of
         ToolChromeShell ->
@@ -878,7 +883,9 @@ formatToolBody color = formatToolBodyRelative color ""
 formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
 formatToolBodyRelative color workspace call = case canonicalToolName call.name of
     "exec" -> roleToolCommand color call.arguments
-    _ -> maybe "" (paintDiffRelative color workspace) (toolCallDiff call)
+    _ ->
+        Text.intercalate "\n" $
+            map (paintDiffRelative color workspace) (toolCallDiffs call)
 
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text
@@ -902,6 +909,14 @@ paintDiffRelative color workspace diff =
             Just SearchReplaceWrite ->
                 roleMuted color "  write "
                     <> renderToolPath color workspace diffPath
+            Just SearchReplaceUpdate ->
+                roleMuted color "  update "
+                    <> renderToolPath color workspace diffPath
+            Just (SearchReplaceMove destination) ->
+                roleMuted color "  move "
+                    <> renderToolPath color workspace diffPath
+                    <> roleMuted color " → "
+                    <> renderToolPath color workspace destination
             Nothing -> ""
         shown = map paintLine diffLines
         more =

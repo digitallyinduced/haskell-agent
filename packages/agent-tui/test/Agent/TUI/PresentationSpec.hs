@@ -10,6 +10,36 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "distinguishes inspection tools from actions after canonicalization" do
+        map isInspectionTool
+            [ "read_file"
+            , "list_dir"
+            , "grep"
+            , "Read"
+            , "Grep"
+            , "Glob"
+            , "WebFetch"
+            , "ToolSearch"
+            , "read_tool_output"
+            , "mcp_search"
+            , "search_tool"
+            , "database_query"
+            , "conversation_search"
+            , "view_skill"
+            , "read_agent_session"
+            , "list_agents"
+            ]
+            `shouldBe` replicate 16 True
+        map isInspectionTool
+            [ "run_terminal_cmd"
+            , "search_replace"
+            , "apply_patch"
+            , "task"
+            , "mcp_call"
+            , "mcp__playwright__browser_click"
+            ]
+            `shouldBe` replicate 6 False
+
     it "shows filesystem paths relative to the workspace" do
         let workspace =
                 "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
@@ -266,6 +296,46 @@ spec = describe "tool presentation" do
         parsed.diffAction `shouldBe` Nothing
         length parsed.diffLines `shouldBe` 20
         parsed.diffHiddenLines `shouldBe` 10
+
+    it "formats compact multi-file apply_patch diffs" do
+        let workspace = "/workspace"
+            patch =
+                Text.unlines
+                    [ "*** Begin Patch"
+                    , "*** Update File: /workspace/src/A.hs"
+                    , "@@"
+                    , " *** Add File: this-is-context"
+                    , "-old"
+                    , "+new"
+                    , "*** Add File: /workspace/src/B.hs"
+                    , "+one"
+                    , "*** Update File: /workspace/src/Old.hs"
+                    , "*** Move to: /workspace/src/New.hs"
+                    , "@@"
+                    , "-before"
+                    , "+after"
+                    , "*** Delete File: /workspace/src/C.hs"
+                    , "*** End Patch"
+                    ]
+            call = customToolCall "patch" "apply_patch" patch
+            parsed = parseApplyPatchDiffs patch
+        map (.diffAction) parsed
+            `shouldBe`
+                [ Nothing
+                , Just SearchReplaceCreate
+                , Just (SearchReplaceMove "/workspace/src/New.hs")
+                , Just SearchReplaceDelete
+                ]
+        formatToolDiffRelative workspace call
+            `shouldBe`
+                "  -old\n\
+                \  +new\n\
+                \  create src/B.hs\n\
+                \  +one\n\
+                \  move src/Old.hs → src/New.hs\n\
+                \  -before\n\
+                \  +after\n\
+                \  delete src/C.hs"
 
     it "formats structured collaboration output" do
         let call = functionToolCall

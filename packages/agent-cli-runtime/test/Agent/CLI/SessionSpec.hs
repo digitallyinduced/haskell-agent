@@ -1506,21 +1506,23 @@ spec = describe "Agent.CLI.Session" do
                                             , fifth
                                             ]
 
-        it "keeps pending persistence lazy" $
+        it "materializes pending persistence into a resumable session ID" $
             withTempStore \store root -> do
                 let pool = trustedPool store
-                PersistenceEnabled slot <-
+                persist@(PersistenceEnabled slot) <-
                     newPendingPersistence (testCreate pool root)
                 listDirectory root `shouldReturn` []
                 PersistencePending _ reservedId tempDir <- readIORef slot
                 doesDirectoryExist tempDir `shouldReturn` True
                 modeOf tempDir `shouldReturn` 0o700
-                handle <- ensureSession slot
+                ensurePersistenceSessionId persist
+                    `shouldReturn` Just reservedId
+                PersistenceActive handle <- readIORef slot
                 doesDirectoryExist handle.sessionDir `shouldReturn` True
                 handle.sessionMeta.metaId `shouldBe` reservedId
                 handle.sessionTempDir `shouldBe` tempDir
-                PersistenceActive again <- readIORef slot
-                again.sessionMeta.metaId `shouldBe` handle.sessionMeta.metaId
+                loadSession pool root reservedId
+                    `shouldReturn` Right (handle.sessionMeta, [])
 
         it "creates and advances immutable prompt epochs before first use" $
             withTempStore \store root -> do

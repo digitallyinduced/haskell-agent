@@ -143,6 +143,9 @@ generatedUiEvent = frequency
     , (3, UiInputPromoted <$> generatedText)
     , (3, UiSetPromptTarget <$> generatedText <*> generatedText)
     , (3, UiSetPromptEffort <$> generatedText)
+    , (3, UiSetContextUsage
+        <$> generatedMaybeInt
+        <*> generatedMaybeInt)
     , (3, UiSetRepository <$> generatedText <*> generatedText <*> generatedText)
     , (3, UiSetNotice <$> generatedNotice)
     , (3, UiMoveSelection <$> chooseInt (-20, 20))
@@ -166,6 +169,13 @@ generatedUiEvent = frequency
     , (2, pure UiQueuedInputStarted)
     , (2, UiLoop <$> generatedLoopEvent)
     ]
+
+generatedMaybeInt :: Gen (Maybe Int)
+generatedMaybeInt =
+    frequency
+        [ (1, pure Nothing)
+        , (3, Just <$> chooseInt (-1000, 1000000))
+        ]
 
 generatedLoopEvent :: Gen LoopEvent
 generatedLoopEvent = frequency

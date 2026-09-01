@@ -2,6 +2,7 @@
 module Agent.CLI.Status
     ( applyReplMode
     , cycleReplInteraction
+    , formatContextUsage
     , formatReplStatusLine
     , formatTokenUsage
     , formatTokenUsageOrZero
@@ -98,6 +99,26 @@ cycleReplInteraction :: PlanModeState -> ApprovalPolicy -> ReplMode
 cycleReplInteraction planState policy =
     cycleReplMode (replModeFromState planState policy)
 
+-- | Current context occupancy and capacity for compact header chrome:
+-- @197K / 272K@. A known window renders a fresh context as zero.
+formatContextUsage :: Maybe Int -> Maybe Int -> Text
+formatContextUsage used contextWindow =
+    case (used, contextWindow >>= positive) of
+        (Just tokens, Just capacity) ->
+            formatContextTokenCount tokens
+                <> " / "
+                <> formatContextTokenCount capacity
+        (Nothing, Just capacity) ->
+            "0K / " <> formatContextTokenCount capacity
+        (Just tokens, Nothing) ->
+            formatContextTokenCount tokens
+        (Nothing, Nothing) ->
+            ""
+  where
+    positive value
+        | value > 0 = Just value
+        | otherwise = Nothing
+
 -- | Compact session totals: @1.2k ↓ · 340 ↑@. Cached tokens are shown
 -- only when the provider reported a non-zero cache hit.
 formatTokenUsage :: TokenUsage -> Text
@@ -167,3 +188,18 @@ formatTokenCount n
         in Text.pack (show whole <> "." <> show frac <> "M")
     | otherwise =
         Text.pack (show ((n + 500000) `div` 1000000) <> "M")
+
+formatContextTokenCount :: Int -> Text
+formatContextTokenCount raw
+    | tokens < 1000000 =
+        Text.pack (show ((tokens + 500) `div` 1000) <> "K")
+    | otherwise =
+        let tenths = (tokens + 50000) `div` 100000
+            whole = tenths `div` 10
+            fraction = tenths `mod` 10
+        in Text.pack $
+            show whole
+                <> (if fraction == 0 then "" else "." <> show fraction)
+                <> "M"
+  where
+    tokens = max 0 raw

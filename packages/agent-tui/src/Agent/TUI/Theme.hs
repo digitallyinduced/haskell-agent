@@ -22,6 +22,7 @@ module Agent.TUI.Theme
     , linkAttr
     , mutedAttr
     , selectedAttr
+    , selectedMutedAttr
     , strongAttr
     , successAttr
     , syntaxAnnotationAttr
@@ -79,7 +80,7 @@ import Graphics.Vty.Attributes.Color (Color(..))
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr :: AttrName
 todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
-errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
+errorAttr, successAttr, selectedAttr, selectedMutedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
 lambdaDimAttr, lambdaTrailAttr, lambdaGlowAttr, lambdaSparkAttr :: AttrName
@@ -105,6 +106,7 @@ todoCancelledAttr = attrName "todo-cancelled"
 errorAttr = attrName "error"
 successAttr = attrName "success"
 selectedAttr = attrName "selected"
+selectedMutedAttr = attrName "selected-muted"
 borderAttr = attrName "border"
 borderActiveAttr = attrName "border-active"
 headingAttr = attrName "markdown-heading"
@@ -164,8 +166,8 @@ terminalDefault =
         , (headerAttr, V.defAttr `V.withStyle` V.bold)
         , (footerAttr, palette V.brightBlack)
         , (mutedAttr, palette V.brightBlack)
-        , (userAttr, userPanelAttr `V.withStyle` V.bold)
-        , (userMutedAttr, userPanelAttr `V.withStyle` V.dim)
+        , (userAttr, raisedPanelAttr `V.withStyle` V.bold)
+        , (userMutedAttr, raisedPanelMutedAttr)
         , (assistantAttr, V.defAttr)
         , (thinkingAttr, palette V.yellow)
         , (thinkingBodyAttr, palette V.brightBlack `V.withStyle` (V.dim .|. V.italic))
@@ -180,9 +182,10 @@ terminalDefault =
         , (successAttr, palette V.green)
         , (completionFlashAttr,
             palette V.brightGreen `V.withStyle` V.bold)
-        , (selectedAttr, V.defAttr `V.withStyle` V.reverseVideo)
-        , (borderAttr, palette V.brightBlack)
-        , (borderActiveAttr, V.defAttr)
+        , (selectedAttr, raisedPanelAttr `V.withStyle` V.bold)
+        , (selectedMutedAttr, raisedPanelMutedAttr)
+        , (borderAttr, palette V.brightBlack `V.withStyle` V.dim)
+        , (borderActiveAttr, palette V.brightBlack)
         , (headingAttr, palette V.magenta `V.withStyle` V.bold)
         , (codeAttr, palette V.cyan)
         , (dimAttr, palette V.brightBlack)
@@ -197,7 +200,8 @@ terminalDefault =
         , (strongAttr, V.defAttr `V.withStyle` V.bold)
         , (controlLinkAttr, palette V.brightBlack)
         , (controlLinkHoverAttr, V.defAttr `V.withStyle` V.underline)
-        , (controlLinkActiveAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (controlLinkActiveAttr,
+            raisedPanelAttr `V.withStyle` V.bold)
         , (syntaxNormalAttr, palette V.cyan)
         , (syntaxKeywordAttr, palette V.magenta)
         , (syntaxTypeAttr, palette V.yellow)
@@ -238,9 +242,11 @@ monochrome =
         , (errorAttr, V.defAttr `V.withStyle` V.bold)
         , (successAttr, V.defAttr)
         , (completionFlashAttr, V.defAttr `V.withStyle` V.bold)
-        , (selectedAttr, V.defAttr `V.withStyle` V.reverseVideo)
-        , (borderAttr, V.defAttr)
-        , (borderActiveAttr, V.defAttr `V.withStyle` V.bold)
+        , (selectedAttr, V.defAttr
+            `V.withStyle` (V.bold .|. V.reverseVideo))
+        , (selectedMutedAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (borderAttr, V.defAttr `V.withStyle` V.dim)
+        , (borderActiveAttr, V.defAttr)
         , (headingAttr, V.defAttr `V.withStyle` V.bold)
         , (codeAttr, V.defAttr)
         , (dimAttr, V.defAttr)
@@ -276,11 +282,20 @@ monochrome =
 palette :: V.Color -> V.Attr
 palette = V.withForeColor V.defAttr
 
--- | User-prompt panel: a full-width wash one step off the page background.
--- Bright black is the ANSI gray slot, so Ghostty light/dark palettes keep
--- the card readable without fixing an RGB background.
-userPanelAttr :: V.Attr
-userPanelAttr = V.withBackColor V.defAttr V.brightBlack
+-- | A raised neutral surface made entirely from terminal palette slots.
+-- Bright black supplies the surface, while the white slots stay readable on
+-- themes whose default foreground is itself a muted gray.
+raisedPanelAttr :: V.Attr
+raisedPanelAttr =
+    V.defAttr
+        `V.withForeColor` V.brightWhite
+        `V.withBackColor` V.brightBlack
+
+raisedPanelMutedAttr :: V.Attr
+raisedPanelMutedAttr =
+    V.defAttr
+        `V.withForeColor` V.white
+        `V.withBackColor` V.brightBlack
 
 -- | Default dark-page trough (#24283b). Live rails blend toward this so the
 -- bar nearly vanishes when @COLORFGBG@ is unavailable.

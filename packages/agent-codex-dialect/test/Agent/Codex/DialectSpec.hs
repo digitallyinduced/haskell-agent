@@ -117,6 +117,69 @@ spec = describe "Codex dialect" do
                     result.output
                         `shouldSatisfy` Text.isInfixOf "cwd-defaulted"
 
+    it "retains commands after the default ten-second yield" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    let handlers = appToolHandlers coding.codexAppTools
+                    started <- dispatchToolCall
+                        testDispatchConfig
+                        handlers
+                        (functionToolCall
+                            "shell-default-yield"
+                            "shell_command"
+                            "{\"command\":\"printf started; trap 'exit 0' INT; while :; do sleep 1; done\"}")
+                    started.output `shouldSatisfy`
+                        Text.isPrefixOf "Process still running."
+                    started.output `shouldSatisfy` Text.isInfixOf "started"
+                    started.output `shouldNotSatisfy`
+                        Text.isInfixOf "timed out"
+                    sessionId <- expectShellSessionId started.output
+
+                    interrupted <- dispatchToolCall
+                        testDispatchConfig
+                        handlers
+                        (functionToolCall
+                            "shell-default-yield-interrupt"
+                            "write_stdin"
+                            ("{\"session_id\":" <> sessionId
+                                <> ",\"chars\":\"\\u0003\","
+                                <> "\"yield_time_ms\":5000}"))
+                    interrupted.output `shouldSatisfy`
+                        Text.isPrefixOf "Exit code:"
+
+                    stale <- dispatchToolCall
+                        testDispatchConfig
+                        handlers
+                        (functionToolCall
+                            "shell-default-yield-stale"
+                            "write_stdin"
+                            ("{\"session_id\":" <> sessionId <> "}"))
+                    stale.output `shouldSatisfy`
+                        Text.isInfixOf "Unknown session_id"
+
+    it "keeps timeout_ms as an explicit hard timeout" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexCodingTools env Nothing Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall
+                            "shell-explicit-timeout"
+                            "shell_command"
+                            "{\"command\":\"sleep 1\",\"timeout_ms\":10}")
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf "timed out after 10ms"
+                    result.output `shouldNotSatisfy`
+                        Text.isInfixOf "session_id:"
+
     it "rejects literal system temp paths in shell commands" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
@@ -413,19 +476,7 @@ spec = describe "Codex dialect" do
                             "{\"command\":\"sleep 0.2; printf done\",\"yield_time_ms\":1}")
                     started.output `shouldSatisfy`
                         Text.isPrefixOf "Process still running."
-                    sessionId <-
-                        case
-                            [ ident
-                            | line <- Text.lines started.output
-                            , Just ident <-
-                                [Text.stripPrefix "session_id: " line]
-                            ]
-                        of
-                            [ident] -> pure ident
-                            _ ->
-                                expectationFailure
-                                    "expected one retained shell session id"
-                                    >> pure "0"
+                    sessionId <- expectShellSessionId started.output
                     continued <- dispatchToolCall
                         testDispatchConfig
                         handlers
@@ -500,6 +551,19 @@ waitForFile path = go (100 :: Int)
         doesFileExist path >>= \case
             True -> pure True
             False -> threadDelay 10000 >> go (remaining - 1)
+
+expectShellSessionId :: Text.Text -> IO Text.Text
+expectShellSessionId output =
+    case
+        [ ident
+        | line <- Text.lines output
+        , Just ident <- [Text.stripPrefix "session_id: " line]
+        ]
+    of
+        [ident] -> pure ident
+        _ ->
+            expectationFailure "expected one retained shell session id"
+                >> pure "0"
 
 testDispatchConfig :: ToolDispatchConfig
 testDispatchConfig = ToolDispatchConfig

@@ -66,8 +66,11 @@ subscriptionSubagentModelGuidance provider billing
             , "judgment. Do not use Luna as a blanket default; when uncertain,"
             , "prefer the stronger tier. Honor an explicitly requested model."
             , "Omit the override when the parent model already matches the chosen"
-            , "tier. Do not spawn a subagent when doing the work directly would"
-            , "be faster."
+            , "tier. Full-history forks (`fork_turns` omitted or `\"all\"`)"
+            , "inherit the parent model and reasoning effort and do not accept"
+            , "overrides. When setting `model` or `reasoning_effort`, set"
+            , "`fork_turns` to `\"none\"` or a positive integer string. Do not"
+            , "spawn a subagent when doing the work directly would be faster."
             ]
     | otherwise = Nothing
 

@@ -659,6 +659,7 @@ runAgentTools
                     inferredTarget.targetConnectionId
                     transportModel
                     inferredTarget.targetWireModelId
+                    effortText
                     dialectId
                     legacySubagentTarget
                     subagentSessions subagentStoreRoot agentTypesRef

@@ -27,6 +27,7 @@ module Agent.CLI.Style
     , roleSuccess
     , roleSelected
     , glyphTool
+    , glyphInspect
     , glyphToolOut
     , glyphToolAccent
     , glyphOk
@@ -236,9 +237,10 @@ pickGlyph fancy ascii
     | supportsUnicodeChrome = fancy
     | otherwise = ascii
 
-glyphTool, glyphToolOut, glyphToolAccent, glyphOk, glyphErr :: Text
+glyphTool, glyphInspect, glyphToolOut, glyphToolAccent, glyphOk, glyphErr :: Text
 glyphWarn, glyphCancel, glyphSession, glyphThink :: Text
 glyphTool = pickGlyph "◆ " "* "
+glyphInspect = pickGlyph "◇ " "o "
 glyphToolOut = pickGlyph "┊ " "| "
 glyphToolAccent = pickGlyph "❙ " "| "
 glyphOk = pickGlyph "✓ " "+ "

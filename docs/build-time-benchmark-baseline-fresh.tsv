@@ -1,0 +1,14 @@
+scenario	sample	real-seconds	user-seconds	sys-seconds	compiled-lines
+# revision	d0df7e20249aca5ee86f91a1e9aac145e1dce949
+# stage	baseline
+# jobs	8
+# ghc	9.10.3
+# cabal	3.16.1.0
+cold-agent-cli	1	327.700	377.110	39.240	504
+cold-agent-cli	2	306.520	370.250	38.730	504
+cold-agent-cli	3	341.290	380.970	41.500	504
+# median cold-agent-cli	327.700	377.110	39.240
+cold-agent-telegram	1	364.650	407.520	44.380	526
+cold-agent-telegram	2	328.310	404.240	43.800	526
+cold-agent-telegram	3	327.390	417.020	48.120	526
+# median cold-agent-telegram	328.310	407.520	44.380

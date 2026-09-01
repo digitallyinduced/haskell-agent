@@ -150,7 +150,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Notification
-    ( AttentionRequest(PermissionRequested)
+    ( AttentionRequest(PermissionRequested, SecretRequested)
     , notifyAttention
     )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
@@ -962,6 +962,7 @@ requestFullscreenSecret
     -> IO (Maybe Text)
 requestFullscreenSecret runtime title body = do
     reply <- newEmptyTMVarIO
+    notifyAttention stderr SecretRequested
     enqueueAppEvent runtime
         (AppAskText
             TextInputSecret
