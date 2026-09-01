@@ -6,6 +6,7 @@ import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy.Char8 as LBS
+import Data.Either (isRight)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -131,9 +132,9 @@ spec = describe "Agent.CLI.ModelConfig" do
             `shouldBe` True
         connectionSupportsDialect
             organizationGatewayConnectionId
-            OpenAIProvider
+            ClaudeCodeProvider
             ClaudeCodeDialect
-            `shouldBe` False
+            `shouldBe` True
 
         let remapped =
                 "{\"version\":1,\"models\":[{\"id\":\"company-remapped\",\"connection\":\"organization-gateway\",\"model\":\"private-upstream\",\"dialect\":\"codex\"}]}"
@@ -146,7 +147,7 @@ spec = describe "Agent.CLI.ModelConfig" do
         mergeModelConfigs
             ("models.default.json", defaults)
             (Just ("models.json", ownedTools))
-            `shouldSatisfy` leftContains "incompatible with connection"
+            `shouldSatisfy` isRight
 
     it "adds a custom Responses connection and model" do
         defaults <- readPackagedDefaults

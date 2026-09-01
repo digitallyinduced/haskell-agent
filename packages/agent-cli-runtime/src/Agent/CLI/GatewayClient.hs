@@ -313,7 +313,7 @@ fetchGatewayModels credential =
                         (Text.unpack
                             (Text.dropWhileEnd (== '/')
                                 (Text.strip credential.gatewayBaseUrl)
-                                <> "/v1/model-catalog"))
+                                <> "/v1/models"))
                 HTTP.httpLbs
                     initial
                         { HTTP.method = "GET"
