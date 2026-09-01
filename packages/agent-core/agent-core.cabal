@@ -67,6 +67,7 @@ library
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
+                    , Agent.Tools.Background
                     , Agent.Tools.CodeMode
                     , Agent.Tools.CodeMode.Client
                     , Agent.Tools.CodeMode.Host

@@ -4,6 +4,7 @@ import Agent.CLI.Interrupt
 import qualified Control.Exception as Base
 import Control.Exception (AsyncException(ThreadKilled, UserInterrupt))
 import Control.Exception.Safe (finally, throwIO, toSyncException)
+import Data.IORef
 import Test.Hspec
 
 spec :: Spec
@@ -54,3 +55,26 @@ spec = do
                 (Base.throwIO ThreadKilled)
                 (pure ())
                 `shouldThrow` anyException
+
+    describe "retryUserInterruptOnce" do
+        it "recovers from one UserInterrupt" do
+            attempts <- newIORef (0 :: Int)
+            retryUserInterruptOnce
+                (do
+                    attempt <- atomicModifyIORef' attempts \count ->
+                        let next = count + 1
+                        in (next, next)
+                    if attempt == 1
+                        then Base.throwIO UserInterrupt
+                        else pure ("recovered" :: String))
+                `shouldReturn` "recovered"
+            readIORef attempts `shouldReturn` 2
+
+        it "propagates a UserInterrupt from the recovery attempt" do
+            attempts <- newIORef (0 :: Int)
+            retryUserInterruptOnce
+                (atomicModifyIORef' attempts
+                    (\count -> (count + 1, ()))
+                    >> Base.throwIO UserInterrupt)
+                `shouldThrow` (== UserInterrupt)
+            readIORef attempts `shouldReturn` 2

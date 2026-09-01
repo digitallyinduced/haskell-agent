@@ -78,6 +78,7 @@ getTaskOutputDescription =
     \Usage notes:\n\
     \- Pass task_ids with one or more ids returned by a background command or subagent; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
     \- Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at 600000 (~10 min)\n\
+    \- Background command completion is reported automatically. Use this for a snapshot or one bounded wait, never repeated polling or sleep-wait loops.\n\
     \- Returns current output and status."
 
 runGetTaskOutput

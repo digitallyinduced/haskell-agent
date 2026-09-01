@@ -1,8 +1,8 @@
 -- | Managed shell processes for the OpenAI/Codex tool surface.
 --
 -- Each command still starts in a fresh shell. Commands that outlive their
--- initial yield can be retained under a numeric session id and later polled or
--- written to with @write_stdin@.
+-- initial yield are retained under a numeric session id, report completion
+-- automatically, and may still receive input through @write_stdin@.
 module Agent.Codex.Dialect.Shell
     ( CodexShellSession
     , CodexShellResult(..)
@@ -14,31 +14,48 @@ module Agent.Codex.Dialect.Shell
     ) where
 
 import Agent.Cancel (waitCancel)
+import Agent.Tools.Background
+    ( CompletionGate
+    , consumeCompletion
+    , dismissBackgroundTaskNotice
+    , newCompletionGate
+    , publishBackgroundTaskNotice
+    , publishCompletion
+    , suppressCompletion
+    , systemReminder
+    )
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
     , RunningOutputCursor
+    , formatCommandResult
     , initialRunningOutputCursor
     , interruptShellCommand
     , runningLiveOutput
     , runningOutputSince
-    , startShellCommandWithInput
+    , startShellCommandWithInputAndCompletion
     , stopShellCommand
     , writeShellCommandInput
     )
-import Agent.Tools.Types (ToolEnv(..))
+import Agent.Tools.Types
+    ( BackgroundTaskNotice(..)
+    , ToolEnv(..)
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race, withAsync)
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
+    , newEmptyMVar
     , newMVar
+    , putMVar
     , readMVar
     , tryReadMVar
+    , tryPutMVar
     , withMVar
     )
 import Control.Exception.Safe (SomeException, mask, onException, try)
-import Control.Monad (void, when)
+import Control.Monad (forM, void, when)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -54,9 +71,12 @@ data CodexShellResult
         }
 
 data ManagedCommand = ManagedCommand
-    { managedRunning :: !RunningCommand
+    { managedId :: !Int
+    , managedRunning :: !RunningCommand
     , managedLock :: !(MVar ())
     , managedCursor :: !(MVar RunningOutputCursor)
+    , managedCompletion :: !CompletionGate
+    , managedYielded :: !(MVar Bool)
     }
 
 data SessionStore = SessionStore
@@ -71,6 +91,9 @@ data CodexShellSession = CodexShellSession
 
 maxManagedCommands :: Int
 maxManagedCommands = 64
+
+maxRetainedCompletedCommands :: Int
+maxRetainedCompletedCommands = 64
 
 newCodexShellSession :: ToolEnv -> IO CodexShellSession
 newCodexShellSession env = do
@@ -89,7 +112,7 @@ closeCodexShellSession session = do
     commands <- modifyMVar session.sessionCommands \case
         Nothing -> pure (Nothing, [])
         Just current -> pure (Nothing, Map.elems current.storeCommands)
-    stopManagedCommands commands
+    stopManagedCommands session commands
 
 -- | Stop and forget retained commands while keeping the shell session open.
 -- Preserve the id counter so a stale id from the previous conversation can
@@ -103,14 +126,14 @@ resetCodexShellSession session = do
                 ( Just current { storeCommands = Map.empty }
                 , Map.elems current.storeCommands
                 )
-    stopManagedCommands commands
+    stopManagedCommands session commands
 
-stopManagedCommands :: [ManagedCommand] -> IO ()
-stopManagedCommands commands =
+stopManagedCommands :: CodexShellSession -> [ManagedCommand] -> IO ()
+stopManagedCommands session commands =
     mapConcurrently_
         (\task ->
             void $ try @_ @SomeException $
-                stopShellCommand task.managedRunning)
+                stopManagedCommand session task)
         commands
 
 -- | Start a fresh shell command and wait up to the requested yield. If the
@@ -133,7 +156,7 @@ startCodexShellCommand session workdir command yieldMs onSnapshot =
                         session commandId task yieldMs onSnapshot)
                     `onException` do
                         removeCommand session commandId
-                        stopShellCommand task.managedRunning
+                        stopManagedCommand session task
 
 continueCodexShellCommand
     :: CodexShellSession
@@ -196,11 +219,15 @@ waitForInitialYield session commandId task yieldMs onSnapshot =
         case stopped of
             Left () ->
                 removeCommand session commandId
-                    >> stopShellCommand task.managedRunning
+                    >> stopManagedCommand session task
                     >> pure (Left "Error: Command cancelled")
             Right (Left ()) ->
-                runningResult commandId task
-            Right (Right result) ->
+                do
+                    running <- runningResult commandId task
+                    void $ tryPutMVar task.managedYielded True
+                    pure running
+            Right (Right result) -> do
+                void $ tryPutMVar task.managedYielded False
                 finishCommand session commandId task result
   where
     sampleSnapshots = go Nothing
@@ -226,7 +253,7 @@ waitForContinuation session commandId task yieldMs = do
     case stopped of
         Left () ->
             pure $ Left $
-                "Error: Poll cancelled; session "
+                "Error: Wait cancelled; session "
                     <> Text.pack (show commandId)
                     <> " is still running"
         Right (Left ()) ->
@@ -242,6 +269,7 @@ finishCommand
     -> IO (Either Text CodexShellResult)
 finishCommand session commandId task result = do
     (out, err) <- takeRunningOutput task
+    consumeManagedCompletion session task
     removeCommand session commandId
     stopShellCommand task.managedRunning
     pure $ Right $ CodexShellFinished result
@@ -270,45 +298,183 @@ startManagedCommand
     -> String
     -> IO (Either Text (Int, ManagedCommand))
 startManagedCommand session workdir command =
-    modifyMVar session.sessionCommands \case
-        Nothing ->
-            pure
-                ( Nothing
-                , Left "Cannot start command: managed shell session is closed."
-                )
-        Just store
-            | Map.size store.storeCommands >= maxManagedCommands ->
-                pure
-                    ( Just store
-                    , Left "Cannot start command: managed shell session is full."
-                    )
-            | otherwise ->
-                startShellCommandWithInput
-                    session.sessionEnv
-                    workdir
-                    command >>= \case
-                        Left err -> pure (Just store, Left err)
-                        Right running -> do
-                            prepared <-
-                                (do
-                                    let commandId = store.storeNextId + 1
-                                    task <- ManagedCommand running
-                                        <$> newMVar ()
-                                        <*> newMVar initialRunningOutputCursor
-                                    pure (commandId, task))
-                                    `onException` stopShellCommand running
-                            let (commandId, task) = prepared
+    do
+        (stale, result) <-
+            modifyMVar session.sessionCommands \case
+                Nothing ->
+                    pure
+                        ( Nothing
+                        , ( []
+                          , Left
+                                "Cannot start command: managed shell session is closed."
+                          )
+                        )
+                Just current -> do
+                    (store, completedToRelease, activeCount) <-
+                        compactSessionStore current
+                    if activeCount >= maxManagedCommands
+                        then
                             pure
                                 ( Just store
-                                    { storeNextId = commandId
-                                    , storeCommands =
-                                        Map.insert
-                                            commandId
-                                            task
-                                            store.storeCommands
-                                    }
-                                , Right (commandId, task)
+                                , ( completedToRelease
+                                  , Left
+                                        "Cannot start command: managed shell session is full."
+                                  )
                                 )
+                        else do
+                            let commandId = store.storeNextId + 1
+                                key = codexCompletionKey commandId
+                            completion <- newCompletionGate
+                            cursor <- newMVar initialRunningOutputCursor
+                            yielded <- newEmptyMVar
+                            runningVar <- newEmptyMVar
+                            let publish result = do
+                                    didYield <- readMVar yielded
+                                    when didYield $
+                                      publishCompletion completion do
+                                        running <- readMVar runningVar
+                                        cursorAtYield <- readMVar cursor
+                                        ((out, err), _) <-
+                                            runningOutputSince
+                                                running
+                                                cursorAtYield
+                                        publishBackgroundTaskNotice
+                                            session.sessionEnv
+                                            (codexCompletionNotice
+                                                commandId
+                                                (Text.pack command)
+                                                result
+                                                    { commandStdout = out
+                                                    , commandStderr = err
+                                                    })
+                            startShellCommandWithInputAndCompletion
+                                session.sessionEnv
+                                workdir
+                                command
+                                publish >>= \case
+                                Left err ->
+                                    pure
+                                        ( Just store
+                                        , (completedToRelease, Left err)
+                                        )
+                                Right running -> do
+                                    putMVar runningVar running
+                                    prepared <-
+                                        (do
+                                            task <-
+                                                ManagedCommand commandId running
+                                                    <$> newMVar ()
+                                                    <*> pure cursor
+                                                    <*> pure completion
+                                                    <*> pure yielded
+                                            pure (commandId, task))
+                                            `onException` do
+                                                void $ tryPutMVar yielded False
+                                                suppressCompletion completion $
+                                                    dismissBackgroundTaskNotice
+                                                        session.sessionEnv
+                                                        key
+                                                stopShellCommand running
+                                    let (commandId, task) = prepared
+                                    pure
+                                        ( Just store
+                                            { storeNextId = commandId
+                                            , storeCommands =
+                                                Map.insert
+                                                    commandId
+                                                    task
+                                                    store.storeCommands
+                                            }
+                                        , ( completedToRelease
+                                          , Right (commandId, task)
+                                          )
+                                        )
+        mapM_
+            (\task ->
+                void $ try @_ @SomeException $
+                    stopShellCommand task.managedRunning)
+            stale
+        pure result
+
+-- | Completed commands remain queryable for a bounded window but do not
+-- consume the live-process quota. Older completed entries are reaped when a
+-- later command starts; their already-queued completion reminders remain.
+compactSessionStore
+    :: SessionStore
+    -> IO (SessionStore, [ManagedCommand], Int)
+compactSessionStore store = do
+    classified <- forM (Map.toAscList store.storeCommands) \entry@(_, task) -> do
+        completed <- maybe False (const True)
+            <$> tryReadMVar task.managedRunning.runningResult
+        pure (completed, entry)
+    let running =
+            [entry | (False, entry) <- classified]
+        completed =
+            [entry | (True, entry) <- classified]
+        evictedCount =
+            max 0 (length completed - maxRetainedCompletedCommands)
+        (evicted, retainedCompleted) =
+            splitAt evictedCount completed
+        retained = Map.fromList (running <> retainedCompleted)
+    pure
+        ( store { storeCommands = retained }
+        , map snd evicted
+        , length running
+        )
+
+stopManagedCommand :: CodexShellSession -> ManagedCommand -> IO ()
+stopManagedCommand session task = do
+    void $ tryPutMVar task.managedYielded False
+    suppressManagedCompletion session task
+    stopShellCommand task.managedRunning
+
+consumeManagedCompletion :: CodexShellSession -> ManagedCommand -> IO ()
+consumeManagedCompletion session task =
+    consumeCompletion task.managedCompletion $
+        dismissBackgroundTaskNotice
+            session.sessionEnv
+            (codexCompletionKey task.managedId)
+
+suppressManagedCompletion :: CodexShellSession -> ManagedCommand -> IO ()
+suppressManagedCompletion session task =
+    suppressCompletion task.managedCompletion $
+        dismissBackgroundTaskNotice
+            session.sessionEnv
+            (codexCompletionKey task.managedId)
+
+codexCompletionKey :: Int -> Text
+codexCompletionKey commandId =
+    "codex-shell:" <> Text.pack (show commandId)
+
+codexCompletionNotice
+    :: Int
+    -> Text
+    -> CommandResult
+    -> BackgroundTaskNotice
+codexCompletionNotice commandId command result =
+    BackgroundTaskNotice
+        { noticeKey = codexCompletionKey commandId
+        , noticeBody = systemReminder $
+            "Background shell session "
+                <> Text.pack (show commandId)
+                <> " completed.\n\
+                \The result is delivered automatically; do not call \
+                \write_stdin merely to poll this session.\n\
+                \Command:\n"
+                <> boundedCompletionText 2048 command
+                <> "\nResult:\n"
+                <> boundedCompletionText
+                    (32 * 1024)
+                    (formatCommandResult result)
+        }
+
+boundedCompletionText :: Int -> Text -> Text
+boundedCompletionText limit text
+    | Text.length text <= limit = text
+    | otherwise =
+        let marker = "\n[...truncated...]\n"
+            side = max 0 ((limit - Text.length marker) `div` 2)
+        in Text.take side text <> marker <> Text.takeEnd side text
 
 lookupCommand :: CodexShellSession -> Int -> IO (Maybe ManagedCommand)
 lookupCommand session commandId =

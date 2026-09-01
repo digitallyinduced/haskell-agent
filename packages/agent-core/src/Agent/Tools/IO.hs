@@ -19,7 +19,9 @@ module Agent.Tools.IO
     , runShellCommand
     , runShellCommandStreaming
     , startShellCommand
+    , startShellCommandWithCompletion
     , startShellCommandWithInput
+    , startShellCommandWithInputAndCompletion
     , configuredProcess
     , configuredProcessEnv
     , sessionTempProcessEnv
@@ -82,6 +84,7 @@ import Control.Exception.Safe
     , mask
     , onException
     , try
+    , tryAny
     )
 import Control.Monad (unless, void, when)
 import Data.IORef
@@ -395,7 +398,19 @@ startShellCommand
     -> OsPath
     -> String
     -> IO (Either Text RunningCommand)
-startShellCommand = startShellCommandWithStdin False
+startShellCommand env workdir command =
+    startShellCommandWithStdin False env workdir command (\_ -> pure ())
+
+-- | Start a command and invoke a non-blocking owner callback exactly once
+-- after its final result has been published.
+startShellCommandWithCompletion
+    :: ToolEnv
+    -> OsPath
+    -> String
+    -> (CommandResult -> IO ())
+    -> IO (Either Text RunningCommand)
+startShellCommandWithCompletion =
+    startShellCommandWithStdin False
 
 -- | Start a command without waiting and retain stdin for later writes.
 -- Call 'stopShellCommand' when its owner is closed or the task is explicitly
@@ -405,15 +420,26 @@ startShellCommandWithInput
     -> OsPath
     -> String
     -> IO (Either Text RunningCommand)
-startShellCommandWithInput = startShellCommandWithStdin True
+startShellCommandWithInput env workdir command =
+    startShellCommandWithStdin True env workdir command (\_ -> pure ())
+
+startShellCommandWithInputAndCompletion
+    :: ToolEnv
+    -> OsPath
+    -> String
+    -> (CommandResult -> IO ())
+    -> IO (Either Text RunningCommand)
+startShellCommandWithInputAndCompletion =
+    startShellCommandWithStdin True
 
 startShellCommandWithStdin
     :: Bool
     -> ToolEnv
     -> OsPath
     -> String
+    -> (CommandResult -> IO ())
     -> IO (Either Text RunningCommand)
-startShellCommandWithStdin keepStdin env workdir command = do
+startShellCommandWithStdin keepStdin env workdir command onComplete = do
     let baseSpec = (shell command)
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
@@ -423,7 +449,7 @@ startShellCommandWithStdin keepStdin env workdir command = do
             }
     try @_ @SomeException
         (configuredProcess env baseSpec >>= \spec ->
-            acquireRunningCommand env spec keepStdin) >>= \case
+            acquireRunningCommand env spec keepStdin onComplete) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
         Right running -> pure (Right running)
 
@@ -534,8 +560,13 @@ sessionTempProcessEnv temp inherited =
                     && name /= "HASKELL_AGENT_HOST_TMPDIR")
             inherited
 
-acquireRunningCommand :: ToolEnv -> CreateProcess -> Bool -> IO RunningCommand
-acquireRunningCommand env spec keepStdin = mask \restore -> do
+acquireRunningCommand
+    :: ToolEnv
+    -> CreateProcess
+    -> Bool
+    -> (CommandResult -> IO ())
+    -> IO RunningCommand
+acquireRunningCommand env spec keepStdin onComplete = mask \restore -> do
     created@(_, _, _, processHandle) <- createProcess spec
     groupId <- getPid processHandle
     case created of
@@ -588,7 +619,9 @@ acquireRunningCommand env spec keepStdin = mask \restore -> do
                                 , commandTimedOut = False
                                 , commandCancelled = False
                                 }
-                    void $ tryPutMVar resultVar commandResult)
+                    published <- tryPutMVar resultVar commandResult
+                    when published $
+                        void $ tryAny (onComplete commandResult))
                 `finally` do
                     void $ tryPutMVar resultVar cancelledResult
                     closeRunningStdinVar stdinVar
@@ -646,7 +679,7 @@ stopShellCommand running = do
     finished <- tryReadMVar running.runningResult
     case finished of
         Just _ ->
-            void (waitCatch running.runningSupervisor)
+            joinRunningSupervisor running
         Nothing -> do
             terminateProcessGroup running.runningGroupId running.runningHandle
             joined <- race
@@ -654,13 +687,24 @@ stopShellCommand running = do
                 (readMVar running.runningResult)
             case joined of
                 Right _ ->
-                    void (waitCatch running.runningSupervisor)
+                    joinRunningSupervisor running
                 Left () -> do
                     closeRunningPipes running
                     cancel running.runningSupervisor
                     void (waitCatch running.runningSupervisor)
                     void $ tryPutMVar running.runningResult cancelledResult
     closeRunningPipes running
+
+joinRunningSupervisor :: RunningCommand -> IO ()
+joinRunningSupervisor running = do
+    joined <- race
+        (threadDelay 1000000)
+        (waitCatch running.runningSupervisor)
+    case joined of
+        Right _ -> pure ()
+        Left () -> do
+            cancel running.runningSupervisor
+            void (waitCatch running.runningSupervisor)
 
 closeRunningPipes :: RunningCommand -> IO ()
 closeRunningPipes running =

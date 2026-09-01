@@ -29,7 +29,9 @@ import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar)
-import Control.Concurrent.Async (concurrently, mapConcurrently)
+import Control.Concurrent.Async
+    ( cancelWith, concurrently, mapConcurrently, waitCatch, withAsync )
+import Control.Exception (AsyncException(UserInterrupt), fromException)
 import Control.Exception.Safe (bracket)
 import Control.Monad (replicateM)
 import qualified Data.Aeson as Aeson
@@ -1523,6 +1525,100 @@ spec = describe "Agent.CLI.Session" do
                 handle.sessionTempDir `shouldBe` tempDir
                 loadSession pool root reservedId
                     `shouldReturn` Right (handle.sessionMeta, [])
+
+        it "keeps committed materialization retryable across interrupts" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                persist@(PersistenceEnabled slot) <-
+                    newPendingPersistence (testCreate pool root)
+                PersistencePending _ reservedId tempDir <- readIORef slot
+                let
+                    sessionDir =
+                        root </> unsafeEncodeUtf (Text.unpack reservedId)
+                stored <- newEmptyMVar
+                release <- newEmptyMVar
+                let afterStored = putMVar stored () >> takeMVar release
+                    interruptMaterialization =
+                        withAsync
+                            (ensurePersistenceSessionIdWithMaterializationHook
+                                afterStored
+                                persist)
+                            \worker -> do
+                                takeMVar stored
+                                cancelWith worker UserInterrupt
+                                waitCatch worker >>= \case
+                                    Left exception ->
+                                        (fromException exception
+                                            :: Maybe AsyncException)
+                                            `shouldBe` Just UserInterrupt
+                                    Right sessionId ->
+                                        expectationFailure
+                                            ("interrupted materialization returned: "
+                                                <> show sessionId)
+                interruptMaterialization
+                interruptMaterialization
+                readIORef slot >>= \case
+                    PersistencePending _ actualId _ ->
+                        actualId `shouldBe` reservedId
+                    PersistenceActive handle ->
+                        expectationFailure
+                            ("interrupted session published before retry: "
+                                <> Text.unpack handle.sessionMeta.metaId)
+                let recoveryPath =
+                        sessionTempsRoot root
+                            </> unsafeEncodeUtf
+                                (".materialization-"
+                                    <> Text.unpack reservedId
+                                    <> ".json")
+                doesFileExist recoveryPath `shouldReturn` True
+                ensurePersistenceSessionId persist
+                    `shouldReturn` Just reservedId
+                readIORef slot >>= \case
+                    PersistenceActive handle -> do
+                        handle.sessionMeta.metaId `shouldBe` reservedId
+                        handle.sessionTempDir `shouldBe` tempDir
+                        loadSession pool root reservedId
+                            `shouldReturn` Right (handle.sessionMeta, [])
+                    PersistencePending _ actualId _ ->
+                        expectationFailure
+                            ("committed session remained pending: "
+                                <> Text.unpack actualId)
+                doesDirectoryExist sessionDir `shouldReturn` True
+                doesDirectoryExist tempDir `shouldReturn` True
+                doesFileExist recoveryPath `shouldReturn` False
+
+        it "persists a prompt snapshot after interrupted materialization" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                persist@(PersistenceEnabled slot) <-
+                    newPendingPersistence (testCreate pool root)
+                PersistencePending _ reservedId _ <- readIORef slot
+                stored <- newEmptyMVar
+                release <- newEmptyMVar
+                let afterStored = putMVar stored () >> takeMVar release
+                withAsync
+                    (ensurePersistenceSessionIdWithMaterializationHook
+                        afterStored
+                        persist)
+                    \worker -> do
+                        takeMVar stored
+                        cancelWith worker UserInterrupt
+                        waitCatch worker >>= \case
+                            Left exception ->
+                                (fromException exception :: Maybe AsyncException)
+                                    `shouldBe` Just UserInterrupt
+                            Right sessionId ->
+                                expectationFailure
+                                    ("interrupted materialization returned: "
+                                        <> show sessionId)
+                let candidate = testPromptSnapshot reservedId
+                handle <- ensureSessionWithPromptSnapshot slot candidate
+                handle.sessionMeta.metaPromptSnapshot
+                    `shouldBe` Just candidate
+                promptEpoch <-
+                    Store.loadLatestSessionPromptEpoch pool reservedId
+                fmap (fmap (.sessionPromptEpochIndex)) promptEpoch
+                    `shouldBe` Right (Just 0)
 
         it "creates and advances immutable prompt epochs before first use" $
             withTempStore \store root -> do

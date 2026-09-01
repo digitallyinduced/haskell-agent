@@ -37,6 +37,7 @@ import Agent.CLI.Session.Interaction
     )
 import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SteeringInputs (hasBackgroundCompletionWake)
 import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
@@ -55,6 +56,7 @@ import Data.IORef
     ( readIORef
     , writeIORef
     )
+import Data.Maybe (isNothing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -254,7 +256,13 @@ continueAfterTurn continuation env = do
     queued <- case env.sessionFullscreen of
         Nothing -> pure False
         Just runtime -> hasQueuedFullscreenInput runtime
-    when (not queued && not env.sessionBackground) $
+    backgroundCompletion <-
+        hasBackgroundCompletionWake env.sessionSteeringInputs
+    failedTurn <- readIORef env.sessionLastFailedTurn
+    let willWake = case env.sessionFullscreen of
+            Just _ -> backgroundCompletion && isNothing failedTurn
+            Nothing -> False
+    when (not queued && not willWake && not env.sessionBackground) $
         notifyAttention env.sessionRender.renderStderr InputRequested
     continuation.resumeSession env
 

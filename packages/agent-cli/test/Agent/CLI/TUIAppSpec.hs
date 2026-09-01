@@ -88,6 +88,7 @@ import Agent.CLI.TUI.History
     , HistoryPage(..)
     , HistoryRequest(..)
     , HistoryTurn(..)
+    , HistoryWindow(..)
     , applyHistoryPage
     , emptyHistoryWindow
     )
@@ -1063,6 +1064,31 @@ spec = do
                 `shouldBe` V.char V.defAttr '┃'
 
     describe "history replacement viewport" do
+        it "keeps startup system messages ahead of the first committed turn" do
+            timeout 2_000_000 startupMessagesPrecedeFirstCommittedTurn
+                `shouldReturn`
+                    Just
+                        [ "agents.md: loaded 2 files"
+                        , "first prompt"
+                        , "first response"
+                        ]
+
+        it "keeps inter-turn system messages ahead of the next turn" do
+            timeout 2_000_000 interTurnMessagesPrecedeNextCommittedTurn
+                `shouldReturn`
+                    Just
+                        [ "first prompt"
+                        , "first response"
+                        , "background notice"
+                        , "second prompt"
+                        , "second response"
+                        ]
+
+        it "does not carry a pre-reset system message into new history" do
+            timeout 2_000_000 resetDoesNotRetainPriorSystemMessages
+                `shouldReturn`
+                    Just ["new prompt", "new response"]
+
         it "shows the new durable tail immediately while focused" do
             timeout 2_000_000
                 (fst <$> replacementAfterHistoryReplacement ReplaceWhileFocused)
@@ -1131,6 +1157,10 @@ spec = do
 
         it "keeps high-frequency streaming redraws throttled" do
             timeout 2_000_000 unfocusedStreamingRemainsThrottled
+                `shouldReturn` Just True
+
+        it "renders accumulated streaming output on the bounded refresh tick" do
+            timeout 2_000_000 unfocusedStreamingRefreshesOnMotionTick
                 `shouldReturn` Just True
 
     describe "motion demand" do
@@ -1600,6 +1630,106 @@ replacementPreservesFollow follow = do
     (_, finalState) <- runFullscreenScriptWithState initialState script
     pure (finalState.appUi.uiFollow == follow)
 
+startupMessagesPrecedeFirstCommittedTurn :: IO [Text]
+startupMessagesPrecedeFirstCommittedTurn = do
+    runtime <- newScriptRuntime initialUiState
+    let startupMessage = "agents.md: loaded 2 files"
+        durableUi =
+            reduceUi (UiAssistantHistory "first response") $
+                reduceUi (UiUserSubmitted "first prompt") initialUiState
+        durableTurn = HistoryTurn
+            { historyTurnCursor = HistoryCursor 0
+            , historyTurnBlocks = durableUi.uiBlocks
+            }
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            initialState
+            [ FullscreenScriptApp (AppUi (UiSystemMessage startupMessage))
+            , FullscreenScriptApp (AppUi (UiUserSubmitted "first prompt"))
+            , FullscreenScriptApp
+                (AppHistoryCommitted
+                    (HistoryGeneration 0)
+                    durableTurn
+                    HistoryCommitAppend)
+            , FullscreenScriptHalt
+            ]
+    pure $
+        map (.blockBody) $
+            concatMap
+                (toList . (.historyTurnBlocks))
+                (toList finalState.appHistoryWindow.historyWindowTurns)
+                <> toList finalState.appUi.uiBlocks
+
+interTurnMessagesPrecedeNextCommittedTurn :: IO [Text]
+interTurnMessagesPrecedeNextCommittedTurn = do
+    runtime <- newScriptRuntime initialUiState
+    let turn cursor prompt response =
+            let durableUi =
+                    reduceUi (UiAssistantHistory response) $
+                        reduceUi (UiUserSubmitted prompt) initialUiState
+            in HistoryTurn
+                { historyTurnCursor = HistoryCursor cursor
+                , historyTurnBlocks = durableUi.uiBlocks
+                }
+        commit cursor prompt response =
+            FullscreenScriptApp
+                (AppHistoryCommitted
+                    (HistoryGeneration 0)
+                    (turn cursor prompt response)
+                    HistoryCommitAppend)
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            initialState
+            [ FullscreenScriptApp (AppUi (UiUserSubmitted "first prompt"))
+            , commit 0 "first prompt" "first response"
+            , FullscreenScriptApp (AppUi (UiSystemMessage "background notice"))
+            , FullscreenScriptApp (AppUi (UiUserSubmitted "second prompt"))
+            , commit 1 "second prompt" "second response"
+            , FullscreenScriptHalt
+            ]
+    pure $
+        map (.blockBody) $
+            concatMap
+                (toList . (.historyTurnBlocks))
+                (toList finalState.appHistoryWindow.historyWindowTurns)
+                <> toList finalState.appUi.uiBlocks
+
+resetDoesNotRetainPriorSystemMessages :: IO [Text]
+resetDoesNotRetainPriorSystemMessages = do
+    runtime <- newScriptRuntime initialUiState
+    let durableUi =
+            reduceUi (UiAssistantHistory "new response") $
+                reduceUi (UiUserSubmitted "new prompt") initialUiState
+        durableTurn = HistoryTurn
+            { historyTurnCursor = HistoryCursor 0
+            , historyTurnBlocks = durableUi.uiBlocks
+            }
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            initialState
+            [ FullscreenScriptApp
+                (AppUi (UiSystemMessage "old-session startup message"))
+            , FullscreenScriptApp (AppUi (UiUserSubmitted "new prompt"))
+            , FullscreenScriptApp
+                (AppHistoryCommitted
+                    (HistoryGeneration 1)
+                    durableTurn
+                    HistoryCommitReset)
+            , FullscreenScriptHalt
+            ]
+    pure $
+        map (.blockBody) $
+            concatMap
+                (toList . (.historyTurnBlocks))
+                (toList finalState.appHistoryWindow.historyWindowTurns)
+                <> toList finalState.appUi.uiBlocks
+
 committedPreviewKeys :: IO [BlockId]
 committedPreviewKeys = do
     runtime <- newScriptRuntime initialUiState
@@ -1870,12 +2000,29 @@ unfocusedStreamingRemainsThrottled = do
         initialState =
             initialFullscreenAppState runtime [] AgentRoot [] 0
         script =
-            [ FullscreenScriptVty V.EvLostFocus
+            [ FullscreenScriptApp (AppUi (UiLoop TurnStarted))
+            , FullscreenScriptVty V.EvLostFocus
             , FullscreenScriptApp (AppUi (UiLoop (TextDelta marker)))
             , FullscreenScriptHalt
             ]
     rendered <- runFullscreenScript initialState script
     pure $ not (encoded marker `ByteString.isInfixOf` rendered)
+
+unfocusedStreamingRefreshesOnMotionTick :: IO Bool
+unfocusedStreamingRefreshesOnMotionTick = do
+    runtime <- newScriptRuntime initialUiState
+    let marker = "BOUNDED_STREAMING_REFRESH"
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        script =
+            [ FullscreenScriptApp (AppUi (UiLoop TurnStarted))
+            , FullscreenScriptVty V.EvLostFocus
+            , FullscreenScriptApp (AppUi (UiLoop (TextDelta marker)))
+            , FullscreenScriptApp AppMotionTick
+            , FullscreenScriptHalt
+            ]
+    rendered <- runFullscreenScript initialState script
+    pure $ encoded marker `ByteString.isInfixOf` rendered
 
 newScriptRuntime :: UiState -> IO FullscreenRuntime
 newScriptRuntime ui = do

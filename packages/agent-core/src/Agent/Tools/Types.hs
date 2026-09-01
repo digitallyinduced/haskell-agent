@@ -1,5 +1,7 @@
 module Agent.Tools.Types
     ( AppTool(..)
+    , BackgroundTaskHooks(..)
+    , BackgroundTaskNotice(..)
     , ToolSchema(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
@@ -120,6 +122,22 @@ data ToolRegistry = ToolRegistry
     , registryByName :: !(Map.Map Text AppTool)
     }
 
+data BackgroundTaskNotice = BackgroundTaskNotice
+    { noticeKey :: !Text
+    , noticeBody :: !Text
+    } deriving (Eq, Show)
+
+data BackgroundTaskHooks = BackgroundTaskHooks
+    { backgroundTaskCompleted :: !(BackgroundTaskNotice -> IO Bool)
+    , backgroundTaskDismissed :: !(Text -> IO ())
+    }
+
+noBackgroundTaskHooks :: BackgroundTaskHooks
+noBackgroundTaskHooks = BackgroundTaskHooks
+    { backgroundTaskCompleted = \_ -> pure False
+    , backgroundTaskDismissed = \_ -> pure ()
+    }
+
 data ToolEnv = ToolEnv
     { toolCwd :: !OsPath
     , toolAllowedRoots :: !(IORef [OsPath])
@@ -139,6 +157,10 @@ data ToolEnv = ToolEnv
     , toolOutputPreviewCap :: !Int
     , toolOutputArtifactCap :: !Int
     , toolStdoutCap :: !Int
+      -- | Session-local delivery hooks for managed background commands.
+      -- Stored behind an IORef because the CLI runner is installed after the
+      -- provider-native tool runtimes are constructed.
+    , toolBackgroundTaskHooks :: !(IORef BackgroundTaskHooks)
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
     }
@@ -150,6 +172,7 @@ defaultToolEnv cwd = do
     rootAccessRequest <- newIORef Nothing
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
+    backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
         , toolAllowedRoots = allowedRoots
@@ -160,6 +183,7 @@ defaultToolEnv cwd = do
         , toolOutputPreviewCap = 8 * 1024
         , toolOutputArtifactCap = 64 * 1024 * 1024
         , toolStdoutCap = 16 * 1024
+        , toolBackgroundTaskHooks = backgroundTaskHooks
         , toolCancel = cancel
         }
 

@@ -65,14 +65,26 @@ loadResponseItemsWith adaptiveBatching turnId = do
             adaptiveBatching && shouldBatch "function_call" rows
         functionOutputsBatched =
             adaptiveBatching && shouldBatch "function_call_output" rows
+        customCallsBatched =
+            adaptiveBatching && shouldBatch "custom_tool_call" rows
+        customOutputsBatched =
+            adaptiveBatching && shouldBatch "custom_tool_call_output" rows
         reasoningBatched =
             adaptiveBatching && shouldBatch "reasoning" rows
+        referencesBatched =
+            adaptiveBatching && shouldBatch "item_reference" rows
+        taggedItemsBatched =
+            adaptiveBatching && shouldBatch "tagged" rows
     messages <- loadIf messagesBatched loadMessagesStatement
     functionCalls <- loadIf functionCallsBatched loadFunctionCallsStatement
     functionOutputs <- loadIf
         functionOutputsBatched
         loadFunctionOutputsStatement
+    customCalls <- loadIf customCallsBatched loadCustomCallsStatement
+    customOutputs <- loadIf customOutputsBatched loadCustomOutputsStatement
     reasoningItems <- loadIf reasoningBatched loadReasoningItemsStatement
+    references <- loadIf referencesBatched loadReferencesStatement
+    taggedItems <- loadIf taggedItemsBatched loadTaggedItemsStatement
     contentParts <- loadIf
         ( (messagesBatched
                 && any ((== "parts") . (.messageRowContentKind) . snd) messages)
@@ -88,11 +100,19 @@ loadResponseItemsWith adaptiveBatching turnId = do
             messagesBatched
             functionCallsBatched
             functionOutputsBatched
+            customCallsBatched
+            customOutputsBatched
             reasoningBatched
+            referencesBatched
+            taggedItemsBatched
             (Map.fromList messages)
             (Map.fromList functionCalls)
             (Map.fromList functionOutputs)
+            (Map.fromList customCalls)
+            (Map.fromList customOutputs)
             (Map.fromList reasoningItems)
+            (Map.fromList references)
+            (Map.fromList taggedItems)
             (groupChildren contentParts)
             (groupChildren summaries))
   where
@@ -133,10 +153,18 @@ loadResponseItem
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
+    -> Bool
+    -> Bool
+    -> Bool
     -> Map.Map Text MessageRow
     -> Map.Map Text FunctionCallRow
     -> Map.Map Text FunctionOutputRow
+    -> Map.Map Text CustomCallRow
+    -> Map.Map Text CustomOutputRow
     -> Map.Map Text ReasoningRow
+    -> Map.Map Text ReferenceRow
+    -> Map.Map Text TaggedRow
     -> Map.Map Text [ContentPartRow]
     -> Map.Map Text [SummaryRow]
     -> BaseRow
@@ -145,11 +173,19 @@ loadResponseItem
         messagesBatched
         functionCallsBatched
         functionOutputsBatched
+        customCallsBatched
+        customOutputsBatched
         reasoningBatched
+        referencesBatched
+        taggedItemsBatched
         messages
         functionCalls
         functionOutputs
+        customCalls
+        customOutputs
         reasoningItems
+        references
+        taggedItems
         contentParts
         summaries
         base =
@@ -176,8 +212,20 @@ loadResponseItem
                         (Map.lookup base.baseRowId functionOutputs)
                         base
                 else loadFunctionOutput base
-        "custom_tool_call" -> loadCustomCall base
-        "custom_tool_call_output" -> loadCustomOutput base
+        "custom_tool_call" ->
+            if customCallsBatched
+                then pure $
+                    loadCustomCallValue
+                        (Map.lookup base.baseRowId customCalls)
+                        base
+                else loadCustomCall base
+        "custom_tool_call_output" ->
+            if customOutputsBatched
+                then pure $
+                    loadCustomOutputValue
+                        (Map.lookup base.baseRowId customOutputs)
+                        base
+                else loadCustomOutput base
         "reasoning" ->
             if reasoningBatched
                 then pure $
@@ -187,8 +235,20 @@ loadResponseItem
                         (Map.findWithDefault [] base.baseRowId summaries)
                         base
                 else loadReasoning base
-        "item_reference" -> loadItemReference base
-        "tagged" -> loadTagged base
+        "item_reference" ->
+            if referencesBatched
+                then pure $
+                    loadItemReferenceValue
+                        (Map.lookup base.baseRowId references)
+                        base
+                else loadItemReference base
+        "tagged" ->
+            if taggedItemsBatched
+                then pure $
+                    loadTaggedValue
+                        (Map.lookup base.baseRowId taggedItems)
+                        base
+                else loadTagged base
         value ->
             pure (Left ("unknown response item storage kind: " <> value))
 
@@ -329,6 +389,48 @@ loadCustomCall base =
         loadCustomCallStatement
         (StoredCustomToolCallItem . customCallFromRow)
 
+loadCustomCallValue
+    :: Maybe CustomCallRow
+    -> BaseRow
+    -> Either Text StoredResponseItem
+loadCustomCallValue stored base =
+    loadCoreChildValue
+        "custom_tool_call"
+        base
+        stored
+        (StoredCustomToolCallItem . customCallFromRow)
+
+loadCustomOutputValue
+    :: Maybe CustomOutputRow
+    -> BaseRow
+    -> Either Text StoredResponseItem
+loadCustomOutputValue stored base =
+    case validateCoreBase "custom_tool_call_output" base of
+        Left err -> Left err
+        Right () -> do
+            row <- maybe
+                (missingChild "custom_tool_call_output" base)
+                Right
+                stored
+            kind <- toolOutputKindFromText row.customOutputRowKind
+            Right $
+                StoredCustomToolCallOutputItem StoredCustomToolCallOutput
+                    { storedCustomToolCallOutputProviderItemId =
+                        row.customOutputRowProviderItemId
+                    , storedCustomToolCallOutputCallId =
+                        row.customOutputRowCallId
+                    , storedCustomToolCallOutputName =
+                        row.customOutputRowName
+                    , storedCustomToolCallOutputValue = StoredToolOutput
+                        { storedToolOutputKind = kind
+                        , storedToolOutputText = row.customOutputRowText
+                        }
+                    , storedCustomToolCallOutputStatus =
+                        row.customOutputRowStatus
+                    , storedCustomToolCallOutputExtraFields =
+                        StoredOpaqueObject row.customOutputRowExtraFields
+                    }
+
 loadCustomOutput
     :: BaseRow
     -> Transaction.Transaction (Either Text StoredResponseItem)
@@ -339,29 +441,7 @@ loadCustomOutput base =
             stored <- Transaction.statement
                 base.baseRowId
                 loadCustomOutputStatement
-            pure do
-                row <- maybe
-                    (missingChild "custom_tool_call_output" base)
-                    Right
-                    stored
-                kind <- toolOutputKindFromText row.customOutputRowKind
-                Right $
-                    StoredCustomToolCallOutputItem StoredCustomToolCallOutput
-                        { storedCustomToolCallOutputProviderItemId =
-                            row.customOutputRowProviderItemId
-                        , storedCustomToolCallOutputCallId =
-                            row.customOutputRowCallId
-                        , storedCustomToolCallOutputName =
-                            row.customOutputRowName
-                        , storedCustomToolCallOutputValue = StoredToolOutput
-                            { storedToolOutputKind = kind
-                            , storedToolOutputText = row.customOutputRowText
-                            }
-                        , storedCustomToolCallOutputStatus =
-                            row.customOutputRowStatus
-                        , storedCustomToolCallOutputExtraFields =
-                            StoredOpaqueObject row.customOutputRowExtraFields
-                        }
+            pure (loadCustomOutputValue stored base)
 
 loadReasoningValue
     :: Maybe ReasoningRow
@@ -436,26 +516,43 @@ loadItemReference base =
         loadReferenceStatement
         (StoredItemReferenceItem . referenceFromRow)
 
+loadItemReferenceValue
+    :: Maybe ReferenceRow
+    -> BaseRow
+    -> Either Text StoredResponseItem
+loadItemReferenceValue stored base =
+    loadCoreChildValue
+        "item_reference"
+        base
+        stored
+        (StoredItemReferenceItem . referenceFromRow)
+
+loadTaggedValue
+    :: Maybe TaggedRow
+    -> BaseRow
+    -> Either Text StoredResponseItem
+loadTaggedValue stored base = do
+    representation <-
+        representationFromText base.baseRowRepresentation
+    case representation of
+        StoredCoreRepresentation ->
+            Left "tagged response item has a core representation"
+        StoredKnownRepresentation -> Right ()
+        StoredUnknownRepresentation -> Right ()
+    row <- maybe (missingChild "tagged" base) Right stored
+    Right $ StoredTaggedResponseItem StoredTaggedItem
+        { storedTaggedItemRepresentation = representation
+        , storedTaggedItemWireTag = row.taggedRowWireTag
+        , storedTaggedItemFields =
+            StoredOpaqueObject row.taggedRowFields
+        }
+
 loadTagged
     :: BaseRow
     -> Transaction.Transaction (Either Text StoredResponseItem)
 loadTagged base = do
     stored <- Transaction.statement base.baseRowId loadTaggedStatement
-    pure do
-        representation <-
-            representationFromText base.baseRowRepresentation
-        case representation of
-            StoredCoreRepresentation ->
-                Left "tagged response item has a core representation"
-            StoredKnownRepresentation -> Right ()
-            StoredUnknownRepresentation -> Right ()
-        row <- maybe (missingChild "tagged" base) Right stored
-        Right $ StoredTaggedResponseItem StoredTaggedItem
-            { storedTaggedItemRepresentation = representation
-            , storedTaggedItemWireTag = row.taggedRowWireTag
-            , storedTaggedItemFields =
-                StoredOpaqueObject row.taggedRowFields
-            }
+    pure (loadTaggedValue stored base)
 
 loadCoreChild
     :: Text
