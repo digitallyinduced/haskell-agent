@@ -5,6 +5,7 @@ module Agent.CLI.TUI.Render.Transcript
     , stickyPromptLayers
     , drawEmptyConversation
     , drawConversationBlocks
+    , quickStartCardHeight
     , quickStartVisible
     , quickStartWideVisible
     , quickStartCardWidth
@@ -379,13 +380,24 @@ quickStartCardWidth :: Int -> Int
 quickStartCardWidth width =
     max 1 (min 112 (width - 4))
 
+quickStartCardHeight :: Bool -> Int
+quickStartCardHeight showLogo =
+    cardChromeRows
+        + contentFixedRows
+        + length quickStartRows
+        + toolRows
+  where
+    cardChromeRows = 4
+    contentFixedRows = 4
+    toolRows = if showLogo then 2 else 1
+
 quickStartVisible :: Int -> Int -> Bool
 quickStartVisible width height =
-    width >= 48 && height >= 13
+    width >= 48 && height >= quickStartCardHeight False
 
 quickStartWideVisible :: Int -> Int -> Bool
 quickStartWideVisible width height =
-    width >= 88 && height >= 14
+    width >= 88 && height >= quickStartCardHeight True
 
 quickStartRows :: [(Name, Text, Text)]
 quickStartRows =
