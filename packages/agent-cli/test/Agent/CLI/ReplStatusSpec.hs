@@ -283,6 +283,14 @@ spec = do
                 ReplModePlan "" emptyTokenUsage Nothing
                 `shouldBe` "  gpt-5.1 · low · plan"
 
+        it "does not show endpoint URLs used as account identifiers" do
+            formatReplStatusLine False Nothing "fable" "medium"
+                ReplModeAlwaysApprove
+                "https://platform.example.com"
+                emptyTokenUsage
+                Nothing
+                `shouldBe` "  fable · medium · yolo"
+
         it "appends session usage when no width is known" do
             formatReplStatusLine False Nothing "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
@@ -321,6 +329,19 @@ spec = do
             line `shouldBe` "  模型模型 · hi…"
 
     describe "buildPromptState" do
+        it "keeps endpoint URLs out of the fullscreen composer footer" do
+            let prompt =
+                    buildPromptState
+                        CodexDialect
+                        defaultResponseCreateParams
+                        PlanInactive
+                        ApproveAll
+                        "Gateway · https://platform.example.com"
+                        True
+                        emptyTokenUsage
+                        0
+            prompt.promptAccount `shouldBe` ""
+
         it "replaces stale Grok metadata before a fallback turn starts" do
             let stalePrompt =
                     initialUiState.uiPrompt
