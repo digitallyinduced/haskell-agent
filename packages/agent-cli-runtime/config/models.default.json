@@ -136,10 +136,12 @@
     {
       "id": "fable",
       "connection": "claude-code",
+      "model": "claude-fable-5-1",
       "dialect": "claude-code",
-      "label": "frontier · subscription",
+      "context_window": 1048576,
+      "label": "5.1 · frontier · subscription · 1M context",
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
-      "default_reasoning_effort": "xhigh"
+      "default_reasoning_effort": "high"
     }
   ]
 }

@@ -6,6 +6,7 @@ import Agent.CLI.Models
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , catalogContextWindowFor
+    , catalogModelById
     , decodeModelConfig
     , mergeModelConfigs
     , organizationGatewayConnectionId
@@ -99,6 +100,19 @@ spec = do
                         ((== "grok-4.6") . (.modelTarget.targetModelId))
                         (modelsForProvider catalog XAIProvider)
             fmap (.modelContextWindow) grok `shouldBe` Just (Just 500000)
+
+        it "routes the stable fable option to Fable 5.1" do
+            let fable =
+                    find
+                        ((== "fable") . (.modelTarget.targetModelId))
+                        (modelsForProvider catalog ClaudeCodeProvider)
+            fmap (.modelTarget.targetWireModelId) fable
+                `shouldBe` Just "claude-fable-5-1"
+            fmap (.modelContextWindow) fable
+                `shouldBe` Just (Just 1048576)
+            fmap (.catalogModelDefaultReasoningEffort)
+                (catalogModelById catalog "fable")
+                `shouldBe` Just (Just "high")
 
         it "keeps every catalog dialect consistent with model inference" do
             all
