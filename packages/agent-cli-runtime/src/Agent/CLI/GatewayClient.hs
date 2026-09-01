@@ -32,6 +32,8 @@ module Agent.CLI.GatewayClient
     , connectGateway
     , disconnectGateway
     , gatewayCredentialPath
+    , withGatewayCredentialLock
+    , withGatewayCredentialLockAt
     , gatewayDeviceDecoder
     , gatewayPollDecoder
     , loadGatewayCredential
@@ -51,6 +53,7 @@ module Agent.CLI.GatewayClient
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.CLI.Runtime.Options (GatewayCommand (..))
+import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
@@ -107,6 +110,7 @@ import Network.Socket.ByteString qualified as Socket
 import System.Directory.OsPath qualified as Directory
 import System.Entropy (getEntropy)
 import System.Exit (ExitCode (..))
+import System.IO.Unsafe (unsafePerformIO)
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import System.Process (rawSystem)
@@ -563,6 +567,30 @@ gatewayCredentialPath home =
         </> unsafeEncodeUtf "credentials"
         </> unsafeEncodeUtf "gateway.json"
 
+gatewayCredentialLockPath :: OsPath -> OsPath
+gatewayCredentialLockPath home =
+    takeDirectory (gatewayCredentialPath home)
+        </> unsafeEncodeUtf "gateway.lock"
+
+-- | Serialize gateway credential changes with operations whose authorization
+-- depends on one exact credential snapshot. The process lock is required
+-- because advisory file-lock behavior between threads in one process is
+-- platform-dependent; the private file lock extends the boundary to CLI and
+-- native application processes.
+withGatewayCredentialLock :: IO value -> IO value
+withGatewayCredentialLock action = do
+    home <- Directory.getHomeDirectory
+    withGatewayCredentialLockAt home action
+
+withGatewayCredentialLockAt :: OsPath -> IO value -> IO value
+withGatewayCredentialLockAt home action =
+    withMVar gatewayCredentialProcessLock \_ ->
+        withPrivateFileLock (gatewayCredentialLockPath home) action
+
+gatewayCredentialProcessLock :: MVar ()
+gatewayCredentialProcessLock = unsafePerformIO (newMVar ())
+{-# NOINLINE gatewayCredentialProcessLock #-}
+
 loadGatewayCredential :: IO (Either Text (Maybe GatewayCredential))
 loadGatewayCredential = do
     home <- Directory.getHomeDirectory
@@ -595,12 +623,14 @@ saveGatewayCredentialAt home credential =
     case validateGatewayCredential credential of
         Left err -> pure (Left err)
         Right () -> do
-            let path = gatewayCredentialPath home
-                directory = takeDirectory path
-            result <- tryAny do
-                Directory.createDirectoryIfMissing True directory
-                setFileMode (unsafeToFilePath directory) 0o700
-                writeLazyFileAtomically path 0o600 (Aeson.encode credential)
+            result <- tryAny $
+                withGatewayCredentialLockAt home do
+                    let path = gatewayCredentialPath home
+                        directory = takeDirectory path
+                    Directory.createDirectoryIfMissing True directory
+                    setFileMode (unsafeToFilePath directory) 0o700
+                    writeLazyFileAtomically
+                        path 0o600 (Aeson.encode credential)
             pure case result of
                 Left exception -> Left (Text.pack (show exception))
                 Right () -> Right ()
@@ -1000,9 +1030,10 @@ removeGatewayCredential :: IO (Either Text ())
 removeGatewayCredential = do
     result <- tryAny do
         home <- Directory.getHomeDirectory
-        let path = gatewayCredentialPath home
-        exists <- Directory.doesFileExist path
-        when exists (Directory.removeFile path)
+        withGatewayCredentialLockAt home do
+            let path = gatewayCredentialPath home
+            exists <- Directory.doesFileExist path
+            when exists (Directory.removeFile path)
     pure case result of
         Left exception -> Left (Text.pack (show exception))
         Right () -> Right ()

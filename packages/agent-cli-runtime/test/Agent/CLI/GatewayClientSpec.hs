@@ -2,25 +2,32 @@ module Agent.CLI.GatewayClientSpec (spec) where
 
 import Agent.CLI.GatewayClient
 import Agent.Json.Decode qualified as Hermes
-import Control.Exception.Safe (bracket, throwString)
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent.Async (poll, wait, withAsync)
+import Control.Exception.Safe (bracket, throwString, tryAny)
+import Control.Monad (void)
 import Data.Aeson qualified as Aeson
 import Data.Bits ((.&.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Either (isLeft)
 import Data.IORef (atomicModifyIORef', newIORef)
+import Data.Maybe (isNothing)
 import Data.Text qualified as Text
 import System.Directory
     ( createDirectory
     , createDirectoryIfMissing
+    , doesFileExist
     , getTemporaryDirectory
     , removeFile
     , removePathForcibly
     )
-import System.FilePath (takeDirectory)
+import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose, openTempFile)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
+import System.Posix.Process (forkProcess, getProcessStatus)
+import System.Posix.Signals (sigKILL, signalProcess)
 import Test.Hspec
 
 decodeGatewayModels :: BS.ByteString -> Either String [GatewayModel]
@@ -423,6 +430,80 @@ spec = describe "gateway device authorization" do
                     (decodeUtf (gatewayCredentialPath home)))
             fileMode status .&. 0o777 `shouldBe` 0o600
 
+    it "serializes credential writes with boundary-critical actions" $
+        withTempHome \home -> do
+            let initial =
+                    GatewayCredential
+                        "https://gateway"
+                        "wss://gateway/v1/responses"
+                        "initial-secret"
+                replacement =
+                    initial { gatewayAccessToken = "replacement-secret" }
+            saveGatewayCredentialAt home initial `shouldReturn` Right ()
+            locked <- newEmptyMVar
+            release <- newEmptyMVar
+            writerStarted <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialLockAt home do
+                    putMVar locked ()
+                    takeMVar release)
+                \holder -> do
+                    takeMVar locked
+                    withAsync
+                        (putMVar writerStarted ()
+                            >> saveGatewayCredentialAt home replacement)
+                        \writer -> do
+                            takeMVar writerStarted
+                            threadDelay 100000
+                            writerState <- poll writer
+                            writerState `shouldSatisfy` isNothing
+                            loadGatewayCredentialAt home
+                                `shouldReturn` Right (Just initial)
+                            putMVar release ()
+                            wait holder
+                            wait writer `shouldReturn` Right ()
+            loadGatewayCredentialAt home
+                `shouldReturn` Right (Just replacement)
+
+    it "serializes credential writes across processes" $
+        withTempHome \home -> do
+            let homePath =
+                    either (error . show) id (decodeUtf home)
+                locked = homePath </> "child-locked"
+                release = homePath </> "release-child"
+                credential =
+                    GatewayCredential
+                        "https://gateway"
+                        "wss://gateway/v1/responses"
+                        "cross-process-secret"
+            bracket
+                (forkProcess $
+                    withGatewayCredentialLockAt home do
+                        writeFile locked ""
+                        waitForFile release)
+                (\pid -> do
+                    writeFile release ""
+                    void (tryAny (signalProcess sigKILL pid))
+                    void (tryAny (getProcessStatus False False pid)))
+                \pid -> do
+                    waitForFile locked
+                    writerStarted <- newEmptyMVar
+                    withAsync
+                        (putMVar writerStarted ()
+                            >> saveGatewayCredentialAt home credential)
+                        \writer -> do
+                            takeMVar writerStarted
+                            threadDelay 100000
+                            writerState <- poll writer
+                            writerState `shouldSatisfy` isNothing
+                            loadGatewayCredentialAt home
+                                `shouldReturn` Right Nothing
+                            writeFile release ""
+                            _ <- getProcessStatus True False pid
+                            wait writer `shouldReturn` Right ()
+            loadGatewayCredentialAt home
+                `shouldReturn` Right (Just credential)
+
     it "rejects invalid gateway endpoints before persisting them" $
         withTempHome \home -> do
             saveGatewayCredentialAt
@@ -477,3 +558,14 @@ withTempHome =
         removeFile path
         createDirectory path
         pure (unsafeEncodeUtf path)
+
+waitForFile :: FilePath -> IO ()
+waitForFile path = go (100 :: Int)
+  where
+    go remaining
+        | remaining <= 0 =
+            expectationFailure ("timed out waiting for " <> path)
+        | otherwise =
+            doesFileExist path >>= \case
+                True -> pure ()
+                False -> threadDelay 10000 >> go (remaining - 1)

@@ -126,6 +126,7 @@ import Agent.CLI.GatewayClient
     , pollNativeGatewayAuthorizationAndSave
     , removeGatewayCredential
     , startNativeGatewayAuthorization
+    , withGatewayCredentialLock
     )
 import qualified Agent.OpenAI.Login as OpenAILogin
 import qualified Agent.OpenAI.Auth as OpenAIAuth
@@ -2826,10 +2827,11 @@ ha_session_fork sessionBytes (CSize sessionLength) throughIndex callback context
             Right (Right sessionId) -> do
                 _ <- forkIO do
                     result <- tryAny $ withNativeSessionStore \pool root ->
-                        withNativeSessionBoundary
-                            pool root sessionId \_ _ ->
-                                forkSessionAtTurn
-                                    pool root sessionId throughIndex
+                        withGatewayCredentialLock $
+                            withNativeSessionBoundary
+                                pool root sessionId \_ _ ->
+                                    forkSessionAtTurn
+                                        pool root sessionId throughIndex
                     completeSessionResult callback context result
                 pure 0
 
@@ -2898,18 +2900,23 @@ ha_session_import bytes (CSize length) callback context
                             Right envelope -> do
                                 let meta =
                                         envelope.transferSession.transferMeta
-                                withNativeGatewayBoundary \gatewayIdentity ->
-                                    case
-                                        validateResumedGatewayBoundary
-                                            gatewayIdentity
-                                            meta.metaConnection
-                                            meta.metaGatewayIdentity
-                                    of
-                                        Left err -> pure (Left err)
-                                        Right () ->
-                                            withNativeSessionStore \pool root ->
-                                                importSessionTransferRemapped
-                                                    pool root Nothing envelope
+                                withNativeSessionStore \pool root ->
+                                    withGatewayCredentialLock $
+                                        withNativeGatewayBoundary
+                                            \gatewayIdentity ->
+                                                case
+                                                    validateResumedGatewayBoundary
+                                                        gatewayIdentity
+                                                        meta.metaConnection
+                                                        meta.metaGatewayIdentity
+                                                of
+                                                    Left err -> pure (Left err)
+                                                    Right () ->
+                                                        importSessionTransferRemapped
+                                                            pool
+                                                            root
+                                                            Nothing
+                                                            envelope
             completeSessionResult callback context result
         pure 0
 
@@ -4958,15 +4965,16 @@ runSessionMutation config store root mutation callback context = do
                 SessionRename identifier _ -> identifier
                 SessionDelete identifier -> identifier
                 SessionArchive identifier _ -> identifier
-        withNativeSessionBoundary pool root sessionId \_ _ ->
-            case mutation of
-                SessionRename _ title -> do
-                    result <- renameSession pool root sessionId title
-                    pure (() <$ result)
-                SessionDelete _ ->
-                    deleteSession pool root sessionId
-                SessionArchive _ archived ->
-                    setSessionArchived pool root sessionId archived
+        withGatewayCredentialLock $
+            withNativeSessionBoundary pool root sessionId \_ _ ->
+                case mutation of
+                    SessionRename _ title -> do
+                        result <- renameSession pool root sessionId title
+                        pure (() <$ result)
+                    SessionDelete _ ->
+                        deleteSession pool root sessionId
+                    SessionArchive _ archived ->
+                        setSessionArchived pool root sessionId archived
     case outcome of
         Left exception ->
             sendSessionMutationFailure
