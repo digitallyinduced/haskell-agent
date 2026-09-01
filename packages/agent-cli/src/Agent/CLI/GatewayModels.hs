@@ -13,7 +13,9 @@ module Agent.CLI.GatewayModels
     ) where
 
 import Agent.CLI.GatewayClient
-    ( GatewayModelCatalog(..)
+    ( GatewayModel(..)
+    , GatewayModelCatalog(..)
+    , GatewayModelProtocol(..)
     , fetchGatewayModelCatalog
     , loadGatewayCredentialAt
     )
@@ -78,8 +80,11 @@ catalogForGatewayState connected catalog
     | connected =
         catalogForGatewayModels
             GatewayModelCatalog
-                { gatewayResponsesModels = gatewayModelIds
-                , gatewayAnthropicModels = []
+                { gatewayModels =
+                    fmap
+                        (\modelId ->
+                            GatewayModel modelId GatewayResponsesProtocol)
+                        gatewayModelIds
                 }
             catalog
     | otherwise = disconnectedCatalog catalog
@@ -110,10 +115,19 @@ catalogForGatewayModels discovered catalog =
                         (defaultFlags responseIds anthropicIds))
         }
   where
-    responseIds = sanitize discovered.gatewayResponsesModels
+    responseIds =
+        sanitize
+            [ model.gatewayModelId
+            | model <- discovered.gatewayModels
+            , model.gatewayModelProtocol == GatewayResponsesProtocol
+            ]
     anthropicIds =
         filter (`notElem` responseIds) $
-            sanitize discovered.gatewayAnthropicModels
+            sanitize
+                [ model.gatewayModelId
+                | model <- discovered.gatewayModels
+                , model.gatewayModelProtocol == GatewayAnthropicProtocol
+                ]
     sanitize =
         nub
             . filter

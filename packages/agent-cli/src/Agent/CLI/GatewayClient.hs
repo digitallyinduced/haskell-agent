@@ -1,7 +1,9 @@
 -- | HTTPS device authorization and restricted gateway credential storage.
 module Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , GatewayModel(..)
     , GatewayModelCatalog(..)
+    , GatewayModelProtocol(..)
     , GatewayAuthorizationCodeResponse(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
@@ -67,15 +69,24 @@ data GatewayCredential = GatewayCredential
     }
     deriving (Eq)
 
--- | Public aliases accepted by the two gateway wire surfaces.
-data GatewayModelCatalog = GatewayModelCatalog
-    { gatewayResponsesModels :: ![Text]
-    , gatewayAnthropicModels :: ![Text]
+data GatewayModelProtocol
+    = GatewayResponsesProtocol
+    | GatewayAnthropicProtocol
+    deriving (Eq, Show)
+
+data GatewayModel = GatewayModel
+    { gatewayModelId :: !Text
+    , gatewayModelProtocol :: !GatewayModelProtocol
     }
     deriving (Eq, Show)
 
--- | Read the current user-scoped alias catalog. Both surfaces are required:
--- a partial result could silently widen or change the configured boundary.
+-- | Public aliases accepted by the gateway and their required wire protocol.
+newtype GatewayModelCatalog = GatewayModelCatalog
+    { gatewayModels :: [GatewayModel]
+    }
+    deriving (Eq, Show)
+
+-- | Read the current user-scoped alias catalog in one authenticated request.
 fetchGatewayModelCatalog
     :: GatewayCredential
     -> IO (Either Text GatewayModelCatalog)
@@ -84,33 +95,26 @@ fetchGatewayModelCatalog rawCredential =
         Left _ -> pure (Left modelDiscoveryError)
         Right credential -> do
             manager <- newTlsManager
-            responses <- fetchModelIds manager credential "/v1/models"
-            anthropic <- fetchModelIds manager credential "/anthropic/v1/models"
+            fetched <- fetchModels manager credential
             pure do
-                responseIds <- responses
-                anthropicIds <- anthropic
-                if null responseIds && null anthropicIds
+                models <- fetched
+                if null models
                     then Left "The connected gateway returned an empty model catalog."
-                    else
-                        Right GatewayModelCatalog
-                            { gatewayResponsesModels = responseIds
-                            , gatewayAnthropicModels = anthropicIds
-                            }
+                    else Right (GatewayModelCatalog models)
 
 modelDiscoveryError :: Text
 modelDiscoveryError =
     "Unable to load the connected gateway model catalog."
 
-fetchModelIds
+fetchModels
     :: HTTP.Manager
     -> GatewayCredential
-    -> Text
-    -> IO (Either Text [Text])
-fetchModelIds manager credential path = do
+    -> IO (Either Text [GatewayModel])
+fetchModels manager credential = do
     parsed <-
         tryAny $
             HTTP.parseRequest $
-                Text.unpack credential.gatewayBaseUrl <> Text.unpack path
+                Text.unpack credential.gatewayBaseUrl <> "/v1/model-catalog"
     case parsed of
         Left _ -> pure (Left modelDiscoveryError)
         Right initial -> do
@@ -134,7 +138,7 @@ fetchModelIds manager credential path = do
                                 then pure (Left modelDiscoveryError)
                                 else do
                                     body <- readBoundedBody 1_048_576 response.responseBody
-                                    pure (body >>= decodeModelIds)
+                                    pure (body >>= decodeModels)
             pure $ either (const (Left modelDiscoveryError)) id result
 
 readBoundedBody
@@ -153,8 +157,8 @@ readBoundedBody limit reader = go 0 []
                         then pure (Left modelDiscoveryError)
                         else go next (chunk : chunks)
 
-decodeModelIds :: BS.ByteString -> Either Text [Text]
-decodeModelIds bytes =
+decodeModels :: BS.ByteString -> Either Text [GatewayModel]
+decodeModels bytes =
     case Aeson.eitherDecodeStrict' bytes of
         Right (Aeson.Object object)
             | Just (Aeson.String "list") <- KeyMap.lookup "object" object
@@ -164,9 +168,14 @@ decodeModelIds bytes =
   where
     decodeModel (Aeson.Object model)
         | Just (Aeson.String modelId) <- KeyMap.lookup "id" model
-        , not (Text.null (Text.strip modelId)) =
-            Right modelId
+        , not (Text.null (Text.strip modelId))
+        , Just (Aeson.String protocol) <- KeyMap.lookup "protocol" model =
+            GatewayModel modelId <$> decodeProtocol protocol
     decodeModel _ = Left modelDiscoveryError
+
+    decodeProtocol "responses" = Right GatewayResponsesProtocol
+    decodeProtocol "anthropic" = Right GatewayAnthropicProtocol
+    decodeProtocol _ = Left modelDiscoveryError
 
 instance Show GatewayCredential where
     show credential =

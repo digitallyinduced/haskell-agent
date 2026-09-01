@@ -1,7 +1,11 @@
 module Agent.CLI.GatewayModelsSpec (spec) where
 
 import Agent.CLI.GatewayModels
-import Agent.CLI.GatewayClient (GatewayModelCatalog(..))
+import Agent.CLI.GatewayClient
+    ( GatewayModel(..)
+    , GatewayModelCatalog(..)
+    , GatewayModelProtocol(..)
+    )
 import Agent.CLI.ModelConfig
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelsForProvider)
 import Agent.Dialect (DialectId (ClaudeCodeDialect, CodexDialect))
@@ -45,10 +49,13 @@ spec = describe "Agent.CLI.GatewayModels" do
         let active =
                 catalogForGatewayModels
                     GatewayModelCatalog
-                        { gatewayResponsesModels =
-                            ["custom-gpt", "router-default"]
-                        , gatewayAnthropicModels =
-                            ["sonnet", "custom-gpt", "fable"]
+                        { gatewayModels =
+                            [ GatewayModel "custom-gpt" GatewayResponsesProtocol
+                            , GatewayModel "router-default" GatewayResponsesProtocol
+                            , GatewayModel "sonnet" GatewayAnthropicProtocol
+                            , GatewayModel "custom-gpt" GatewayAnthropicProtocol
+                            , GatewayModel "fable" GatewayAnthropicProtocol
+                            ]
                         }
                     directCatalog
         map (.catalogModelId) active.catalogModels

@@ -29,18 +29,21 @@ catalogApplication
 catalogApplication seen request respond = do
     modifyIORef' seen
         (<> [(request.pathInfo, lookup hAuthorization request.requestHeaders)])
-    let ids :: [Text.Text]
-        ids
-            | request.pathInfo == ["v1", "models"] = ["gpt-5.6-sol"]
-            | otherwise = ["sonnet", "opus"]
     respond $
         responseLBS status200 [(hContentType, "application/json")] $
             Aeson.encode $
                 Aeson.object
                     [ "object" Aeson..= ("list" :: Text.Text)
                     , "data" Aeson..=
-                        [ Aeson.object ["id" Aeson..= modelId]
-                        | modelId <- ids
+                        [ Aeson.object
+                            [ "id" Aeson..= modelId
+                            , "protocol" Aeson..= protocol
+                            ]
+                        | (modelId, protocol) <-
+                            [ ("gpt-5.6-sol" :: Text.Text, "responses" :: Text.Text)
+                            , ("sonnet", "anthropic")
+                            , ("opus", "anthropic")
+                            ]
                         ]
                     ]
 
@@ -60,9 +63,15 @@ leakApplication leaked request respond = do
         (writeIORef leaked True)
     respond (responseLBS status200 [] "{}")
 
+invalidCatalogApplication :: Application
+invalidCatalogApplication _request respond =
+    respond $
+        responseLBS status200 [(hContentType, "application/json")] $
+            "{\"object\":\"list\",\"data\":[{\"id\":\"unknown\",\"protocol\":\"other\"}]}"
+
 spec :: Spec
 spec = describe "gateway device authorization" do
-    it "discovers both authenticated alias catalogs" do
+    it "discovers one authenticated typed alias catalog" do
         seen <- newIORef []
         Warp.testWithApplication (pure (catalogApplication seen)) \port -> do
             let origin = "http://127.0.0.1:" <> Text.pack (show port)
@@ -75,14 +84,15 @@ spec = describe "gateway device authorization" do
                     }
                 `shouldReturn`
                     Right GatewayModelCatalog
-                        { gatewayResponsesModels = ["gpt-5.6-sol"]
-                        , gatewayAnthropicModels = ["sonnet", "opus"]
+                        { gatewayModels =
+                            [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
+                            , GatewayModel "sonnet" GatewayAnthropicProtocol
+                            , GatewayModel "opus" GatewayAnthropicProtocol
+                            ]
                         }
             readIORef seen
                 `shouldReturn`
-                    [ (["v1", "models"], Just "Bearer catalog-secret")
-                    , (["anthropic", "v1", "models"], Just "Bearer catalog-secret")
-                    ]
+                    [(["v1", "model-catalog"], Just "Bearer catalog-secret")]
 
     it "does not follow model-catalog redirects with the bearer" do
         leaked <- newIORef False
@@ -105,6 +115,19 @@ spec = describe "gateway device authorization" do
                     result `shouldBe`
                         Left "Unable to load the connected gateway model catalog."
                     readIORef leaked `shouldReturn` False
+
+    it "fails closed on an unknown catalog protocol" do
+        Warp.testWithApplication (pure invalidCatalogApplication) \port -> do
+            let origin = "http://127.0.0.1:" <> Text.pack (show port)
+            fetchGatewayModelCatalog
+                GatewayCredential
+                    { gatewayBaseUrl = origin
+                    , gatewayWebSocketUrl =
+                        "ws://127.0.0.1:" <> Text.pack (show port)
+                    , gatewayAccessToken = "catalog-secret"
+                    }
+                `shouldReturn`
+                    Left "Unable to load the connected gateway model catalog."
 
     it "decodes the device response contract" do
         let payload =
