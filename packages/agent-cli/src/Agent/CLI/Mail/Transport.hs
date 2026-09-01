@@ -14,6 +14,13 @@ module Agent.CLI.Mail.Transport
     , parseGmailMessageValue
     , encodeImapDraftId
     , decodeImapDraftId
+    , parseGmailDraftValue
+    , parseGraphDraftValue
+    , parseImapAppendUid
+    , parseImapMailboxListLine
+    , parseMailReplyRecipient
+    , imapUidHasFlag
+    , validateMailReplyRecipient
     ) where
 
 import Agent.CLI.Mail.Imap (withMailImapConnection)
@@ -41,8 +48,8 @@ import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Base64.URL as Base64URL
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isControl, isDigit)
-import Data.List (find)
+import Data.Char (isControl, isDigit, isSpace)
+import Data.List (find, nub)
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -135,29 +142,63 @@ downloadAttachment credential request requestedMaximum =
 createDraft
     :: MailCredential -> MailCreateDraftRequest -> IO (Either Text MailDraft)
 createDraft credential request =
-    dispatchOAuth credential
-        (\token -> gmailCreateDraft token request.mailCreateDraftContent Nothing Nothing)
-        (\token -> graphCreateDraft token request.mailCreateDraftContent)
-        (\settings password ->
-            imapCreateDraft settings password request.mailCreateDraftContent)
+    case validateMailDraftContent defaultMailToolLimits
+            request.mailCreateDraftContent of
+        Left err -> pure (Left err)
+        Right content ->
+            dispatchOAuth credential
+                (\token -> gmailCreateDraft token sender content Nothing Nothing)
+                (\token -> graphCreateDraft token content)
+                (\settings password ->
+                    imapCreateDraft settings password sender content)
+  where
+    sender = credential.mailCredentialAccount.mailAccountEmail
 
 updateDraft
     :: MailCredential -> MailUpdateDraftRequest -> IO (Either Text MailDraft)
 updateDraft credential request =
-    dispatchOAuth credential
-        (\token -> gmailUpdateDraft token request.mailUpdateDraftId
-            request.mailUpdateDraftContent)
-        (\token -> graphUpdateDraft token request.mailUpdateDraftId
-            request.mailUpdateDraftContent)
-        (\settings password -> imapUpdateDraft settings password request)
+    case validateMailDraftContent defaultMailToolLimits
+            request.mailUpdateDraftContent of
+        Left err -> pure (Left err)
+        Right content ->
+            let checked = request { mailUpdateDraftContent = content }
+            in dispatchOAuth credential
+                (\token -> gmailUpdateDraft token sender
+                    checked.mailUpdateDraftId checked.mailUpdateDraftContent)
+                (\token -> graphUpdateDraft token checked.mailUpdateDraftId
+                    checked.mailUpdateDraftContent)
+                (\settings password ->
+                    imapUpdateDraft settings password sender checked)
+  where
+    sender = credential.mailCredentialAccount.mailAccountEmail
 
 replyDraft
     :: MailCredential -> MailReplyDraftRequest -> IO (Either Text MailDraft)
 replyDraft credential request =
-    dispatchOAuth credential
-        (\token -> gmailReplyDraft token request)
-        (\token -> graphReplyDraft token request)
-        (\settings password -> imapReplyDraft settings password request)
+    case validateMailDraftContent defaultMailToolLimits MailDraftContent
+            { mailDraftTo = request.mailReplyDraftTo
+            , mailDraftCc = []
+            , mailDraftBcc = []
+            , mailDraftSubject = ""
+            , mailDraftBody = request.mailReplyDraftBody
+            } of
+        Left err -> pure (Left err)
+        Right checked
+            | length checked.mailDraftTo /= 1 ->
+                pure (Left "A reply draft requires exactly one recipient.")
+            | otherwise ->
+            let checkedRequest =
+                    request
+                        { mailReplyDraftTo = checked.mailDraftTo
+                        , mailReplyDraftBody = checked.mailDraftBody
+                        }
+            in dispatchOAuth credential
+                (\token -> gmailReplyDraft token sender checkedRequest)
+                (\token -> graphReplyDraft token checkedRequest)
+                (\settings password ->
+                    imapReplyDraft settings password sender checkedRequest)
+  where
+    sender = credential.mailCredentialAccount.mailAccountEmail
 
 dispatchOAuth
     :: MailCredential
@@ -354,6 +395,37 @@ component :: Text -> Text
 component =
     TextEncoding.decodeUtf8 . urlEncode True . TextEncoding.encodeUtf8
 
+encodeProviderDraftId :: Text -> Text -> Text
+encodeProviderDraftId prefix =
+    (prefix <>)
+        . TextEncoding.decodeUtf8
+        . Base64URL.encodeUnpadded
+        . TextEncoding.encodeUtf8
+
+decodeProviderDraftId :: Text -> Text -> Either Text Text
+decodeProviderDraftId prefix value = do
+    encoded <- maybe
+        (Left "The email draft reference is invalid.")
+        Right
+        (Text.stripPrefix prefix value)
+    bytes <- either
+        (const (Left "The email draft reference is invalid."))
+        Right
+        (Base64URL.decodeUnpadded (TextEncoding.encodeUtf8 encoded))
+    decoded <- either
+        (const (Left "The email draft reference is invalid."))
+        Right
+        (TextEncoding.decodeUtf8' bytes)
+    if validProviderIdentifier decoded
+        then Right decoded
+        else Left "The email draft reference is invalid."
+
+validProviderIdentifier :: Text -> Bool
+validProviderIdentifier value =
+    not (Text.null value)
+        && utf8Length value <= maximumProviderIdentifierBytes
+        && not (Text.any isControl value)
+
 -- Gmail ---------------------------------------------------------------------
 
 gmailBase :: Text
@@ -461,41 +533,66 @@ graphCreateDraft token content =
         >>= pure . (>>= parseGraphDraft)
 
 graphUpdateDraft :: Text -> Text -> MailDraftContent -> IO (Either Text MailDraft)
-graphUpdateDraft token draftId content =
-    providerJson token (graphBase <> "/messages/" <> component draftId)
-        [("$select", Just "id,isDraft,conversationId")] []
-        jsonResponseMaximum >>= \case
-            Left err -> pure (Left err)
-            Right existing ->
-                case parseProvider "Microsoft returned invalid draft data."
-                        parseIsDraft existing of
+graphUpdateDraft token encodedDraftId content =
+    case decodeProviderDraftId "graph-draft:" encodedDraftId of
+        Left err -> pure (Left err)
+        Right draftId ->
+            providerJson token (graphBase <> "/messages/" <> component draftId)
+                [("$select", Just "id,isDraft,conversationId")] []
+                jsonResponseMaximum >>= \case
                     Left err -> pure (Left err)
-                    Right False -> pure (Left
-                        "That message is not a draft and cannot be changed.")
-                    Right True ->
-                        providerJsonWrite "PATCH" token
-                            (graphBase <> "/messages/" <> component draftId) []
-                            (graphDraftPayload content) jsonResponseMaximum
-                            >>= pure . (>>= parseGraphDraft)
+                    Right existing ->
+                        case parseProvider "Microsoft returned invalid draft data."
+                                parseIsDraft existing of
+                            Left err -> pure (Left err)
+                            Right False -> pure (Left
+                                "That message is not a draft and cannot be changed.")
+                            Right True ->
+                                providerJsonWrite "PATCH" token
+                                    (graphBase <> "/messages/" <> component draftId) []
+                                    (graphDraftPayload content) jsonResponseMaximum
+                                    >>= pure . (>>= parseGraphDraft)
 
 graphReplyDraft :: Text -> MailReplyDraftRequest -> IO (Either Text MailDraft)
 graphReplyDraft token request =
-    providerJsonWrite "POST" token
-        (graphBase <> "/messages/" <> component request.mailReplyDraftMessageId
-            <> "/createReply")
-        [] (Aeson.object []) jsonResponseMaximum >>= \case
-            Left err -> pure (Left err)
-            Right value ->
-                case parseGraphDraft value of
-                    Left err -> pure (Left err)
-                    Right draft ->
-                        providerJsonWrite "PATCH" token
-                            (graphBase <> "/messages/" <> component draft.mailDraftId)
-                            [] (graphReplyPayload request)
-                            jsonResponseMaximum >>= \case
-                                Left err -> pure (Left err)
-                                Right updated ->
-                                    pure (parseGraphDraft updated)
+    graphReplyRecipient token request.mailReplyDraftMessageId >>= \case
+        Left err -> pure (Left err)
+        Right recipient ->
+            case ensureExpectedReplyRecipient request.mailReplyDraftTo recipient of
+                Left err -> pure (Left err)
+                Right () ->
+                    providerJsonWrite "POST" token
+                        (graphBase <> "/messages/"
+                            <> component request.mailReplyDraftMessageId
+                            <> "/createReply")
+                        [] (Aeson.object
+                            ["comment" Aeson..= request.mailReplyDraftBody])
+                        jsonResponseMaximum
+                        >>= pure . (>>= parseGraphDraft)
+
+graphReplyRecipient :: Text -> Text -> IO (Either Text Text)
+graphReplyRecipient token messageId =
+    providerJson token (graphBase <> "/messages/" <> component messageId)
+        [("$select", Just "replyTo,from")] [] jsonResponseMaximum
+        >>= pure . (>>= parseProvider
+            "Microsoft returned invalid reply metadata."
+            (Aeson.withObject "Graph reply metadata" \object -> do
+                replyTo <- object .:? "replyTo" Aeson..!= []
+                from <- object .:? "from"
+                addresses <- traverse parseGraphRecipient replyTo
+                raw <- case addresses of
+                    [address] -> pure address
+                    [] -> maybe
+                        (fail "missing reply recipient")
+                        parseGraphRecipient
+                        from
+                    _ -> fail "ambiguous reply recipient"
+                either (const (fail "invalid reply recipient")) pure
+                    (normalizeMailEmail raw)))
+  where
+    parseGraphRecipient = Aeson.withObject "Graph recipient" \recipient -> do
+        emailAddress <- recipient .: "emailAddress"
+        Aeson.withObject "Graph email address" (.: "address") emailAddress
 
 graphDraftPayload :: MailDraftContent -> Aeson.Value
 graphDraftPayload content = Aeson.object
@@ -513,51 +610,57 @@ graphRecipientValue :: Text -> Aeson.Value
 graphRecipientValue address = Aeson.object
     ["emailAddress" Aeson..= Aeson.object ["address" Aeson..= address]]
 
-graphReplyPayload :: MailReplyDraftRequest -> Aeson.Value
-graphReplyPayload request = Aeson.object
-    [ "toRecipients" Aeson..= map graphRecipientValue request.mailReplyDraftTo
-    , "ccRecipients" Aeson..= map graphRecipientValue request.mailReplyDraftCc
-    , "bccRecipients" Aeson..= map graphRecipientValue request.mailReplyDraftBcc
-    , "body" Aeson..= Aeson.object
-        [ "contentType" Aeson..= ("text" :: Text)
-        , "content" Aeson..= request.mailReplyDraftBody
-        ]
-    ]
-
 parseIsDraft :: Aeson.Value -> Parser Bool
 parseIsDraft = Aeson.withObject "Graph message" \object ->
     object .:? "isDraft" Aeson..!= False
 
 parseGraphDraft :: Aeson.Value -> Either Text MailDraft
 parseGraphDraft = parseProvider "Microsoft returned invalid draft data."
-    (Aeson.withObject "Graph draft" \object ->
+    (Aeson.withObject "Graph draft" \object -> do
+        draftId <- object .: "id"
+        unless (validProviderIdentifier draftId) (fail "invalid draft id")
+        isDraft <- object .:? "isDraft" Aeson..!= False
+        unless isDraft (fail "message is not a draft")
         MailDraft
-            <$> object .: "id"
-            <*> pure Nothing
+            <$> pure (encodeProviderDraftId "graph-draft:" draftId)
+            <*> pure (Just draftId)
             <*> object .:? "conversationId"
             <*> pure Nothing)
 
+parseGraphDraftValue :: Aeson.Value -> Either Text MailDraft
+parseGraphDraftValue = parseGraphDraft
+
 gmailCreateDraft
-    :: Text -> MailDraftContent -> Maybe Text -> Maybe (Text, Maybe Text)
+    :: Text -> Text -> MailDraftContent -> Maybe Text
+    -> Maybe (Text, Maybe Text)
     -> IO (Either Text MailDraft)
-gmailCreateDraft token content threadId replyHeaders =
+gmailCreateDraft token sender content threadId replyHeaders =
     providerJsonWrite "POST" token (gmailBase <> "/drafts") [] payload
         jsonResponseMaximum >>= pure . (>>= parseGmailDraft)
   where
     payload = Aeson.object
         [ "message" Aeson..= Aeson.object
             ([ "raw" Aeson..= TextEncoding.decodeUtf8
-                (Base64URL.encodeUnpadded (renderMailDraftMime content replyHeaders))
+                (Base64URL.encodeUnpadded
+                    (renderMailDraftMime sender content replyHeaders))
              ] <> maybe [] (\value -> ["threadId" Aeson..= value]) threadId)
         ]
 
-gmailUpdateDraft :: Text -> Text -> MailDraftContent -> IO (Either Text MailDraft)
-gmailUpdateDraft token draftId content =
+gmailUpdateDraft
+    :: Text -> Text -> Text -> MailDraftContent -> IO (Either Text MailDraft)
+gmailUpdateDraft token sender encodedDraftId content =
+    case decodeProviderDraftId "gmail-draft:" encodedDraftId of
+        Left err -> pure (Left err)
+        Right draftId -> gmailUpdateRawDraft token sender draftId content
+
+gmailUpdateRawDraft
+    :: Text -> Text -> Text -> MailDraftContent -> IO (Either Text MailDraft)
+gmailUpdateRawDraft token sender draftId content =
     -- Preserve Gmail's thread association when replacing a reply draft. A
     -- user-supplied draft id is never accepted as a send-capable message id.
     providerJson token (gmailBase <> "/drafts/" <> component draftId)
         [("format", Just "metadata"),
-         ("metadataHeaders", Just "Message-ID"),
+         ("metadataHeaders", Just "In-Reply-To"),
          ("metadataHeaders", Just "References")]
         [] gmailMetadataMaximum >>= \case
             Left err -> pure (Left err)
@@ -572,37 +675,46 @@ gmailUpdateDraft token draftId content =
                                 ["message" Aeson..= Aeson.object
                                     ([ "raw" Aeson..= TextEncoding.decodeUtf8
                                         (Base64URL.encodeUnpadded
-                                            (renderMailDraftMime content replyHeaders))
+                                            (renderMailDraftMime
+                                                sender content replyHeaders))
                                      ] <> maybe [] (\value ->
                                         ["threadId" Aeson..= value]) threadId)])
                             jsonResponseMaximum >>= pure . (>>= parseGmailDraft)
 
-gmailReplyDraft :: Text -> MailReplyDraftRequest -> IO (Either Text MailDraft)
-gmailReplyDraft token request =
+gmailReplyDraft
+    :: Text -> Text -> MailReplyDraftRequest -> IO (Either Text MailDraft)
+gmailReplyDraft token sender request =
     providerJson token
         (gmailBase <> "/messages/" <> component request.mailReplyDraftMessageId)
         [("format", Just "metadata"),
          ("metadataHeaders", Just "Subject"),
          ("metadataHeaders", Just "Message-ID"),
-         ("metadataHeaders", Just "References")]
+         ("metadataHeaders", Just "References"),
+         ("metadataHeaders", Just "Reply-To"),
+         ("metadataHeaders", Just "From")]
         [] gmailMetadataMaximum >>= \case
             Left err -> pure (Left err)
             Right value ->
                 pure (parseProvider "Gmail returned invalid reply metadata."
                     parseReplyMetadata value) >>= \case
                     Left err -> pure (Left err)
-                    Right (threadId, subject, messageId, references) ->
-                        gmailCreateDraft token MailDraftContent
-                            { mailDraftTo = request.mailReplyDraftTo
-                            , mailDraftCc = request.mailReplyDraftCc
-                            , mailDraftBcc = request.mailReplyDraftBcc
-                            , mailDraftSubject = safeReplySubject subject
-                            , mailDraftBody = request.mailReplyDraftBody
-                            }
-                            (Just threadId)
-                            (Just (messageId,
-                                Just (maybe messageId (<> " " <> messageId)
-                                    references)))
+                    Right (threadId, subject, messageId, references, recipient) ->
+                        case ensureExpectedReplyRecipient
+                                request.mailReplyDraftTo recipient of
+                            Left err -> pure (Left err)
+                            Right () ->
+                                gmailCreateDraft token sender MailDraftContent
+                                    { mailDraftTo = [recipient]
+                                    , mailDraftCc = []
+                                    , mailDraftBcc = []
+                                    , mailDraftSubject = safeReplySubject subject
+                                    , mailDraftBody = request.mailReplyDraftBody
+                                    }
+                                    (Just threadId)
+                                    (Just
+                                        ( messageId
+                                        , appendReference references messageId
+                                        ))
   where
     parseReplyMetadata = Aeson.withObject "Gmail reply message" \object -> do
         threadId <- object .: "threadId"
@@ -616,22 +728,81 @@ gmailReplyDraft token request =
                             (,) <$> h .: "name" <*> h .: "value") header]
                     , Text.toCaseFold name == Text.toCaseFold wanted]
         messageId <- maybe (fail "missing Message-ID") pure (lookupValue "Message-ID")
-        pure (threadId, fromMaybe "" (lookupValue "Subject"), messageId,
-            lookupValue "References")
+        checkedMessageId <- either (const (fail "invalid Message-ID")) pure
+            (validateMessageIdHeader messageId)
+        recipient <- either (const (fail "invalid reply recipient")) pure
+            (replyRecipientFromHeaders
+                (lookupValue "Reply-To")
+                (lookupValue "From"))
+        pure
+            ( threadId
+            , fromMaybe "" (lookupValue "Subject")
+            , checkedMessageId
+            , validateReferencesHeader =<< lookupValue "References"
+            , recipient
+            )
 
 parseGmailDraft :: Aeson.Value -> Either Text MailDraft
 parseGmailDraft = parseProvider "Gmail returned invalid draft data."
     (Aeson.withObject "Gmail draft" \object -> do
         draftId <- object .: "id"
+        unless (validProviderIdentifier draftId) (fail "invalid draft id")
         message <- object .: "message"
         messageId <- Aeson.withObject "Gmail draft message" (.:? "id") message
         threadId <- Aeson.withObject "Gmail draft message" (.:? "threadId") message
         pure MailDraft
-            { mailDraftId = draftId
+            { mailDraftId = encodeProviderDraftId "gmail-draft:" draftId
             , mailDraftMessageId = messageId
             , mailDraftThreadId = threadId
             , mailDraftWarning = Nothing
             })
+
+parseGmailDraftValue :: Aeson.Value -> Either Text MailDraft
+parseGmailDraftValue = parseGmailDraft
+
+imapAwaitContinuation :: Connection -> Text -> IO ()
+imapAwaitContinuation connection tag =
+    go maximumImapResponseLines 0
+  where
+    go remaining totalBytes
+        | remaining <= 0 =
+            failText "The IMAP response exceeded the safe limit."
+        | otherwise = do
+            line <- imapReadLine connection
+            let totalBytes' = totalBytes + utf8Length line
+            when (totalBytes' > maximumImapResponseBytes) $
+                failText "The IMAP response exceeded the safe size limit."
+            if "+" `Text.isPrefixOf` line
+                then pure ()
+                else if (Text.toCaseFold tag <> " ") `Text.isPrefixOf`
+                        Text.toCaseFold line
+                    then do
+                        ensureTaggedOk tag line
+                        failText "The IMAP server omitted the APPEND continuation."
+                    else case imapLiteralLength line of
+                        Just _ -> failText
+                            "The IMAP server returned an unexpected literal."
+                        Nothing -> go (remaining - 1) totalBytes'
+
+imapReadTaggedCompletion :: Connection -> Text -> IO Text
+imapReadTaggedCompletion connection tag =
+    go maximumImapResponseLines 0
+  where
+    go remaining totalBytes
+        | remaining <= 0 =
+            failText "The IMAP response exceeded the safe limit."
+        | otherwise = do
+            line <- imapReadLine connection
+            let totalBytes' = totalBytes + utf8Length line
+            when (totalBytes' > maximumImapResponseBytes) $
+                failText "The IMAP response exceeded the safe size limit."
+            if (Text.toCaseFold tag <> " ") `Text.isPrefixOf`
+                    Text.toCaseFold line
+                then ensureTaggedOk tag line >> pure line
+                else case imapLiteralLength line of
+                    Just _ -> failText
+                        "The IMAP server returned an unexpected literal."
+                    Nothing -> go (remaining - 1) totalBytes'
 
 parseGmailDraftThread
     :: Aeson.Value -> Parser (Maybe Text, Maybe (Text, Maybe Text))
@@ -648,8 +819,21 @@ parseGmailDraftThread = Aeson.withObject "Gmail draft" \object -> do
                     (Aeson.withObject "Gmail header" \h ->
                         (,) <$> h .: "name" <*> h .: "value") header]
                 , Text.toCaseFold name == Text.toCaseFold wanted]
-    pure (threadId, (\messageId ->
-        (messageId, lookupValue "References")) <$> lookupValue "Message-ID")
+    replyHeaders <- case
+        (lookupValue "In-Reply-To", lookupValue "References") of
+        (Nothing, Nothing) -> pure Nothing
+        (Nothing, Just _) -> fail "References without In-Reply-To"
+        (Just rawInReplyTo, rawReferences) -> do
+            inReplyTo <- either (const (fail "invalid In-Reply-To")) pure
+                (validateMessageIdHeader rawInReplyTo)
+            references <- case rawReferences of
+                Nothing -> pure Nothing
+                Just rawReferences -> maybe
+                    (fail "invalid References")
+                    (pure . Just)
+                    (validateReferencesHeader rawReferences)
+            pure (Just (inReplyTo, references))
+    pure (threadId, replyHeaders)
 
 replySubject :: Text -> Text
 replySubject subject
@@ -663,6 +847,91 @@ safeReplySubject =
     truncateTextBytes maximumReplySubjectBytes
         . replySubject
         . Text.filter (not . isControl)
+
+replyRecipientFromHeaders :: Maybe Text -> Maybe Text -> Either Text Text
+replyRecipientFromHeaders replyTo from =
+    case replyTo of
+        Just value -> parseSingleMailbox value
+        Nothing -> maybe
+            (Left "The source email has no reply recipient.")
+            parseSingleMailbox
+            from
+
+parseMailReplyRecipient :: Maybe Text -> Maybe Text -> Either Text Text
+parseMailReplyRecipient = replyRecipientFromHeaders
+
+ensureExpectedReplyRecipient :: [Text] -> Text -> Either Text ()
+ensureExpectedReplyRecipient expected actual = do
+    checkedExpected <- case expected of
+        [recipient] -> normalizeMailEmail recipient
+        _ -> Left "A reply draft requires exactly one approved recipient."
+    checkedActual <- normalizeMailEmail actual
+    unlessEither
+        (checkedExpected == checkedActual)
+        "The approved recipient does not match the source message's reply address."
+
+validateMailReplyRecipient :: [Text] -> Text -> Either Text ()
+validateMailReplyRecipient = ensureExpectedReplyRecipient
+
+parseSingleMailbox :: Text -> Either Text Text
+parseSingleMailbox raw
+    | Text.null stripped
+        || utf8Length stripped > maximumMailboxHeaderBytes
+        || Text.any isControl stripped =
+            Left "The source email has an invalid reply recipient."
+    | Text.null angleSuffix =
+        normalizeMailEmail stripped
+    | otherwise = do
+        let afterOpen = Text.drop 1 angleSuffix
+            (candidate, afterClose) = Text.breakOn ">" afterOpen
+        unlessEither
+            ( not (Text.null afterClose)
+                && Text.null (Text.strip (Text.drop 1 afterClose))
+                && not (Text.any (`elem` ['<', '>']) display)
+                && not (Text.any (`elem` ['<', '>']) candidate)
+            )
+            "The source email has an ambiguous reply recipient."
+        normalizeMailEmail candidate
+  where
+    stripped = Text.strip raw
+    (display, angleSuffix) = Text.breakOn "<" stripped
+
+validateMessageIdHeader :: Text -> Either Text Text
+validateMessageIdHeader raw =
+    case Text.stripPrefix "<" stripped >>= Text.stripSuffix ">" of
+        Just inner
+            | not (Text.null inner)
+            , utf8Length stripped <= maximumReplyHeaderBytes
+            , Text.all valid inner ->
+                Right stripped
+        _ -> Left "The source email has invalid reply metadata."
+  where
+    stripped = Text.strip raw
+    valid character =
+        not (isControl character || isSpace character
+            || character == '<' || character == '>')
+
+validateReferencesHeader :: Text -> Maybe Text
+validateReferencesHeader value = do
+    checked <- traverse (eitherToMaybe . validateMessageIdHeader)
+        (Text.words value)
+    let joined = Text.unwords checked
+    if not (null checked) && utf8Length joined <= maximumReplyHeaderBytes
+        then Just joined
+        else Nothing
+
+appendReference :: Maybe Text -> Text -> Maybe Text
+appendReference references messageId =
+    let joined = maybe messageId (<> " " <> messageId) references
+    in validateReferencesHeader joined <|> Just messageId
+
+eitherToMaybe :: Either left value -> Maybe value
+eitherToMaybe = either (const Nothing) Just
+
+unlessEither :: Bool -> Text -> Either Text ()
+unlessEither condition message
+    | condition = Right ()
+    | otherwise = Left message
 
 gmailQuery :: MailSearchRequest -> Text
 gmailQuery request = Text.unwords . catMaybes $
@@ -695,6 +964,7 @@ parseGmailSummary = Aeson.withObject "Gmail message" \object -> do
         , mailMessageSummaryThreadId = threadId
         , mailMessageSummarySubject = headerValue "subject" headers
         , mailMessageSummaryFrom = headerValue "from" headers
+        , mailMessageSummaryReplyTo = effectiveReplyRecipient headers
         , mailMessageSummaryTo = headerValue "to" headers
         , mailMessageSummaryReceivedAt = headerValue "date" headers
         , mailMessageSummarySnippet = snippet
@@ -717,6 +987,7 @@ parseGmailMessage bodyMaximum value =
             , mailMessageThreadId = threadId
             , mailMessageSubject = headerValue "subject" headers
             , mailMessageFrom = headerValue "from" headers
+            , mailMessageReplyTo = effectiveReplyRecipient headers
             , mailMessageTo = headerValue "to" headers
             , mailMessageCc = headerValue "cc" headers
             , mailMessageReceivedAt = headerValue "date" headers
@@ -746,6 +1017,12 @@ gmailHeaders value =
 headerValue :: Text -> [(Text, Text)] -> Maybe Text
 headerValue name =
     fmap snd . find ((== Text.toCaseFold name) . Text.toCaseFold . fst)
+
+effectiveReplyRecipient :: [(Text, Text)] -> Maybe Text
+effectiveReplyRecipient headers =
+    eitherToMaybe (replyRecipientFromHeaders
+        (headerValue "reply-to" headers)
+        (headerValue "from" headers))
 
 gmailAttachments :: Aeson.Value -> [MailAttachment]
 gmailAttachments value =
@@ -975,6 +1252,7 @@ parseGraphSummary = Aeson.withObject "Graph message" \object -> do
     conversationId <- object .:? "conversationId"
     subject <- object .:? "subject"
     sender <- object .:? "from" >>= traverse parseGraphRecipient
+    replyTo <- object .:? "replyTo" Aeson..!= []
     recipients <- object .:? "toRecipients" Aeson..!= []
     received <- object .:? "receivedDateTime"
     preview <- object .:? "bodyPreview"
@@ -984,6 +1262,8 @@ parseGraphSummary = Aeson.withObject "Graph message" \object -> do
         , mailMessageSummaryThreadId = conversationId
         , mailMessageSummarySubject = subject
         , mailMessageSummaryFrom = sender
+        , mailMessageSummaryReplyTo =
+            graphEffectiveReplyRecipient replyTo sender
         , mailMessageSummaryTo =
             nonEmptyText (Text.intercalate ", " (mapMaybe graphRecipient recipients))
         , mailMessageSummaryReceivedAt = received
@@ -1000,6 +1280,7 @@ parseGraphMessage maximum attachments =
         conversationId <- object .:? "conversationId"
         subject <- object .:? "subject"
         sender <- object .:? "from" >>= traverse parseGraphRecipient
+        replyTo <- object .:? "replyTo" Aeson..!= []
         toRecipients <- object .:? "toRecipients" Aeson..!= []
         ccRecipients <- object .:? "ccRecipients" Aeson..!= []
         received <- object .:? "receivedDateTime"
@@ -1014,6 +1295,8 @@ parseGraphMessage maximum attachments =
             , mailMessageThreadId = conversationId
             , mailMessageSubject = subject
             , mailMessageFrom = sender
+            , mailMessageReplyTo =
+                graphEffectiveReplyRecipient replyTo sender
             , mailMessageTo = recipientsText toRecipients
             , mailMessageCc = recipientsText ccRecipients
             , mailMessageReceivedAt = received
@@ -1052,6 +1335,15 @@ graphRecipient =
                 Just value ->
                     Aeson.withObject "Graph address" (.:? "address") value)
 
+graphEffectiveReplyRecipient :: [Aeson.Value] -> Maybe Text -> Maybe Text
+graphEffectiveReplyRecipient replyTo sender =
+    case replyTo of
+        [] -> sender >>= normalized
+        [recipient] -> graphRecipient recipient >>= normalized
+        _ -> Nothing
+  where
+    normalized = eitherToMaybe . normalizeMailEmail
+
 recipientsText :: [Aeson.Value] -> Maybe Text
 recipientsText =
     nonEmptyText . Text.intercalate ", " . mapMaybe graphRecipient
@@ -1080,9 +1372,9 @@ nextIsoDay value =
 
 graphSummaryFields, graphMessageFields :: BS.ByteString
 graphSummaryFields =
-    "id,conversationId,subject,from,toRecipients,receivedDateTime,bodyPreview,hasAttachments"
+    "id,conversationId,subject,from,replyTo,toRecipients,receivedDateTime,bodyPreview,hasAttachments"
 graphMessageFields =
-    "id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,body"
+    "id,conversationId,subject,from,replyTo,toRecipients,ccRecipients,receivedDateTime,sentDateTime,body"
 
 graphTextHeaders :: [Header]
 graphTextHeaders =
@@ -1162,6 +1454,8 @@ imapGet settings password request requestedMaximum =
                             , mailMessageSubject =
                                 summary.mailMessageSummarySubject
                             , mailMessageFrom = summary.mailMessageSummaryFrom
+                            , mailMessageReplyTo =
+                                summary.mailMessageSummaryReplyTo
                             , mailMessageTo = summary.mailMessageSummaryTo
                             , mailMessageCc = Nothing
                             , mailMessageReceivedAt =
@@ -1183,19 +1477,19 @@ imapGet settings password request requestedMaximum =
 -- server must advertise a RFC 6154 \Drafts mailbox and UIDPLUS APPENDUID;
 -- without a stable UID reference we cannot safely expose update_draft.
 imapCreateDraft
-    :: MailImapSettings -> Text -> MailDraftContent
+    :: MailImapSettings -> Text -> Text -> MailDraftContent
     -> IO (Either Text MailDraft)
-imapCreateDraft settings password content =
+imapCreateDraft settings password sender content =
     fmap (>>= id) $ withMailImapConnection settings password \connection -> do
         draftsMailbox <- imapDraftsMailbox connection
         imapRequireUidPlus connection "m401"
         imapAppendDraft connection "m402" draftsMailbox
-            (renderMailDraftMime content Nothing)
+            (renderMailDraftMime sender content Nothing)
 
 imapUpdateDraft
-    :: MailImapSettings -> Text -> MailUpdateDraftRequest
+    :: MailImapSettings -> Text -> Text -> MailUpdateDraftRequest
     -> IO (Either Text MailDraft)
-imapUpdateDraft settings password request =
+imapUpdateDraft settings password sender request =
     case decodeImapDraftId request.mailUpdateDraftId of
         Left err -> pure (Left err)
         Right (mailbox, expectedUidValidity, uid) ->
@@ -1213,32 +1507,56 @@ imapUpdateDraft settings password request =
                     failText "The IMAP draft reference has expired. Create a new draft."
                 flags <- imapSimpleCommand connection "m412"
                     ("UID FETCH " <> uid <> " (FLAGS)")
-                unless (any (Text.isInfixOf "\\draft" . Text.toCaseFold) flags) $
+                unless (imapUidHasFlag uid "\\Draft" flags) $
                     failText "That mailbox item is not a draft and cannot be changed."
+                (headerBytes, _) <- imapFetchLiteralWithLines connection "m416"
+                    ("UID FETCH " <> uid
+                        <> " (BODY.PEEK[HEADER.FIELDS (IN-REPLY-TO REFERENCES)])")
+                    maximumImapHeaderBytes
+                replyHeaders <- either failText pure
+                    (validatedReplyHeaders
+                        (parseHeaders (decodeUtf8Lenient headerBytes)))
                 saved <- imapAppendDraft connection "m413" mailbox
-                    (renderMailDraftMime request.mailUpdateDraftContent Nothing)
+                    (renderMailDraftMime
+                        sender request.mailUpdateDraftContent replyHeaders)
                 -- Never issue a bare EXPUNGE/CLOSE: UID EXPUNGE limits removal
                 -- to exactly the replacement target. If the server does not
                 -- support it, retain both drafts rather than deleting data.
                 case saved of
                     Left err -> pure (Left err)
+                    Right draft
+                        | "imap-untracked:" `Text.isPrefixOf`
+                                draft.mailDraftId ->
+                            pure (Right draft
+                                { mailDraftWarning = Just
+                                    "The replacement draft was saved without a stable identifier; the previous draft was retained."
+                                })
                     Right draft -> do
                         -- The replacement has already been durably appended.
                         -- Do not turn a later best-effort cleanup failure into
                         -- a retryable error that could duplicate drafts.
-                        _ <- tryAny do
-                            _ <- imapSimpleCommand connection "m414"
+                        cleanup <- tryAny do
+                            currentFlags <- imapSimpleCommand connection "m414"
+                                ("UID FETCH " <> uid <> " (FLAGS)")
+                            unless (imapUidHasFlag uid "\\Draft" currentFlags) $
+                                failText "The previous IMAP item changed."
+                            _ <- imapSimpleCommand connection "m415"
                                 ("UID STORE " <> uid
                                     <> " +FLAGS.SILENT (\\Deleted)")
-                            _ <- imapSimpleCommand connection "m415"
+                            _ <- imapSimpleCommand connection "m417"
                                 ("UID EXPUNGE " <> uid)
                             pure ()
-                        pure (Right draft)
+                        pure . Right $ case cleanup of
+                            Left (_ :: SomeException) -> draft
+                                { mailDraftWarning = Just
+                                    "The replacement draft was saved, but the previous draft could not be removed automatically."
+                                }
+                            Right () -> draft
 
 imapReplyDraft
-    :: MailImapSettings -> Text -> MailReplyDraftRequest
+    :: MailImapSettings -> Text -> Text -> MailReplyDraftRequest
     -> IO (Either Text MailDraft)
-imapReplyDraft settings password request =
+imapReplyDraft settings password sender request =
     case decodeImapMessageId request.mailReplyDraftMessageId of
         Left err -> pure (Left err)
         Right (mailbox, expectedUidValidity, uid) ->
@@ -1252,38 +1570,97 @@ imapReplyDraft settings password request =
                     failText "The IMAP message reference has expired. Search again."
                 (headerBytes, _) <- imapFetchLiteralWithLines connection "m422"
                     ("UID FETCH " <> uid
-                        <> " (BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID REFERENCES)])")
+                        <> " (BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID REFERENCES REPLY-TO FROM)])")
                     maximumImapHeaderBytes
                 let headers = parseHeaders (decodeUtf8Lenient headerBytes)
-                inReplyTo <- maybe
+                rawMessageId <- maybe
                     (failText "The source email cannot be used for a reply draft.")
                     pure (lookupHeader "message-id" headers)
+                inReplyTo <- either failText pure
+                    (validateMessageIdHeader rawMessageId)
+                recipient <- either failText pure
+                    (replyRecipientFromHeaders
+                        (lookupHeader "reply-to" headers)
+                        (lookupHeader "from" headers))
+                either failText pure
+                    (ensureExpectedReplyRecipient
+                        request.mailReplyDraftTo recipient)
                 draftsMailbox <- imapDraftsMailbox connection
                 imapRequireUidPlus connection "m420"
                 imapAppendDraft connection "m423" draftsMailbox
-                    (renderMailDraftMime MailDraftContent
-                        { mailDraftTo = request.mailReplyDraftTo
-                        , mailDraftCc = request.mailReplyDraftCc
-                        , mailDraftBcc = request.mailReplyDraftBcc
+                    (renderMailDraftMime sender MailDraftContent
+                        { mailDraftTo = [recipient]
+                        , mailDraftCc = []
+                        , mailDraftBcc = []
                         , mailDraftSubject = safeReplySubject
                             (fromMaybe "" (lookupHeader "subject" headers))
                         , mailDraftBody = request.mailReplyDraftBody
                         }
-                        (Just (inReplyTo,
-                            Just (maybe inReplyTo (<> " " <> inReplyTo)
-                                (lookupHeader "references" headers)))))
+                        (Just
+                            ( inReplyTo
+                            , appendReference
+                                (validateReferencesHeader
+                                    =<< lookupHeader "references" headers)
+                                inReplyTo
+                            )))
+
+validatedReplyHeaders
+    :: [(Text, Text)]
+    -> Either Text (Maybe (Text, Maybe Text))
+validatedReplyHeaders headers =
+    case
+        ( lookupHeader "in-reply-to" headers
+        , lookupHeader "references" headers
+        )
+    of
+        (Nothing, Nothing) -> Right Nothing
+        (Nothing, Just _) ->
+            Left "The existing draft contains invalid reply metadata."
+        (Just rawInReplyTo, rawReferences) -> do
+            inReplyTo <- validateMessageIdHeader rawInReplyTo
+            references <- case rawReferences of
+                Nothing -> Right Nothing
+                Just value -> maybe
+                    (Left "The existing draft contains invalid reply metadata.")
+                    (Right . Just)
+                    (validateReferencesHeader value)
+            Right (Just (inReplyTo, references))
+
+imapUidHasFlag :: Text -> Text -> [Text] -> Bool
+imapUidHasFlag expectedUid expectedFlag =
+    any matches
+  where
+    tokens =
+        Text.words
+            . Text.toCaseFold
+            . Text.map (\character ->
+                if character `elem` ['(', ')'] then ' ' else character)
+    matches line = findUid (tokens line)
+    findUid = \case
+        "uid" : uid : rest
+            | uid == Text.toCaseFold expectedUid ->
+                findFlag rest
+            | otherwise -> False
+        _ : rest -> findUid rest
+        [] -> False
+    findFlag = \case
+        "flags" : rest -> Text.toCaseFold expectedFlag `elem` rest
+        _ : rest -> findFlag rest
+        [] -> False
 
 imapDraftsMailbox :: Connection -> IO Text
 imapDraftsMailbox connection = do
     lines' <- imapSimpleCommand connection "m400" "LIST \"\" \"*\""
-    maybe (failText
-        "This IMAP server does not advertise a Drafts mailbox, so drafts are unavailable.")
-        pure
-        (listToMaybe
-            [ mailbox.mailMailboxName
-            | mailbox <- mapMaybe parseListLine lines'
-            , mailbox.mailMailboxRole == Just "drafts"
-            ])
+    case nub
+        [ mailbox.mailMailboxName
+        | mailbox <- mapMaybe parseListLine lines'
+        , mailbox.mailMailboxRole == Just "drafts"
+        ] of
+        [mailbox] -> pure mailbox
+        [] -> failText
+            "This IMAP server does not advertise a Drafts mailbox, so drafts are unavailable."
+        _ -> failText
+            "This IMAP server advertises multiple Drafts mailboxes, so drafts are unavailable."
 
 imapRequireUidPlus :: Connection -> Text -> IO ()
 imapRequireUidPlus connection tag = do
@@ -1300,16 +1677,18 @@ imapAppendDraft connection tag mailbox bytes = do
         (TextEncoding.encodeUtf8
             (tag <> " APPEND " <> imapQuote mailbox <> " (\\Draft) {"
                 <> Text.pack (show (BS.length bytes)) <> "}\r\n"))
-    continuation <- imapReadLine connection
-    unless ("+" `Text.isPrefixOf` continuation) $
-        failText "The IMAP server rejected the draft append request."
+    imapAwaitContinuation connection tag
     Connection.connectionPut connection bytes
     Connection.connectionPut connection "\r\n"
-    completion <- imapReadLine connection
-    ensureTaggedOk tag completion
+    completion <- imapReadTaggedCompletion connection tag
     case parseAppendUid completion of
-        Nothing -> pure (Left
-            "This IMAP server does not return stable draft identifiers (UIDPLUS is required).")
+        Nothing -> pure (Right MailDraft
+            { mailDraftId = "imap-untracked:" <> encodeImapMailboxId mailbox
+            , mailDraftMessageId = Nothing
+            , mailDraftThreadId = Nothing
+            , mailDraftWarning = Just
+                "The draft was saved, but this IMAP server did not return a stable identifier, so the agent cannot update it."
+            })
         Just (uidValidity, uid) -> pure (Right MailDraft
             { mailDraftId = encodeImapDraftId mailbox uidValidity uid
             , mailDraftMessageId = Just (encodeImapMessageId mailbox uidValidity uid)
@@ -1408,7 +1787,7 @@ imapFetchSummary
 imapFetchSummary connection mailbox uidValidity uid = do
     (headerBytes, responseLines) <- imapFetchLiteralWithLines connection "m202"
         ("UID FETCH " <> uid
-            <> " (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO DATE)] BODYSTRUCTURE)")
+            <> " (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM REPLY-TO TO DATE)] BODYSTRUCTURE)")
         maximumImapHeaderBytes
     let headers = parseHeaders (decodeUtf8Lenient headerBytes)
         joined = Text.toCaseFold (Text.unwords responseLines)
@@ -1420,6 +1799,10 @@ imapFetchSummary connection mailbox uidValidity uid = do
         , mailMessageSummaryThreadId = Nothing
         , mailMessageSummarySubject = lookupHeader "subject" headers
         , mailMessageSummaryFrom = lookupHeader "from" headers
+        , mailMessageSummaryReplyTo =
+            eitherToMaybe (replyRecipientFromHeaders
+                (lookupHeader "reply-to" headers)
+                (lookupHeader "from" headers))
         , mailMessageSummaryTo = lookupHeader "to" headers
         , mailMessageSummaryReceivedAt = lookupHeader "date" headers
         , mailMessageSummarySnippet = Nothing
@@ -1551,11 +1934,25 @@ parseListLine raw = do
         { mailMailboxId = encodeImapMailboxId mailbox
         , mailMailboxName = mailbox
         , mailMailboxRole =
-            if "\\drafts" `Text.isInfixOf` Text.toCaseFold stripped
+            if imapListHasFlag "\\Drafts" stripped
                 then Just "drafts"
                 else Nothing
         , mailMailboxUnreadCount = Nothing
         }
+
+parseImapMailboxListLine :: Text -> Maybe MailboxSummary
+parseImapMailboxListLine = parseListLine
+
+imapListHasFlag :: Text -> Text -> Bool
+imapListHasFlag expected line =
+    case Text.breakOn "(" line of
+        (_, suffix)
+            | not (Text.null suffix)
+            , let (rawFlags, close) = Text.breakOn ")" (Text.drop 1 suffix)
+            , not (Text.null close) ->
+                Text.toCaseFold expected
+                    `elem` map Text.toCaseFold (Text.words rawFlags)
+        _ -> False
 
 lastImapArgument :: Text -> Maybe Text
 lastImapArgument line =
@@ -1687,6 +2084,9 @@ parseAppendUid raw =
     punctuationToSpace character
         | character == '[' || character == ']' = ' '
         | otherwise = character
+
+parseImapAppendUid :: Text -> Maybe (Text, Text)
+parseImapAppendUid = parseAppendUid
 
 encodeImapMessageId :: Text -> Text -> Text -> Text
 encodeImapMessageId mailbox uidValidity uid =
@@ -1830,6 +2230,11 @@ maximumGmailMetadataCharacters = 255
 
 maximumReplySubjectBytes :: Int
 maximumReplySubjectBytes = 700
+
+maximumProviderIdentifierBytes, maximumMailboxHeaderBytes, maximumReplyHeaderBytes :: Int
+maximumProviderIdentifierBytes = 700
+maximumMailboxHeaderBytes = 2048
+maximumReplyHeaderBytes = 700
 
 maximumImapRawMessageBytes :: Int
 maximumImapRawMessageBytes = 8 * 1024 * 1024

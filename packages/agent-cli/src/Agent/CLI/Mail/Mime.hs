@@ -21,7 +21,7 @@ import qualified Data.ByteString.Base64.URL as Base64URL
 import qualified Data.ByteString.Builder as ByteStringBuilder
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (chr, isControl, isHexDigit, ord, toLower)
+import Data.Char (chr, isControl, isHexDigit, isSpace, ord, toLower)
 import Data.List (find, foldl')
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
@@ -59,15 +59,17 @@ data ParsedMailAttachment = ParsedMailAttachment
 -- bare addresses and excluded header controls. Body bytes are base64 encoded
 -- so arbitrary Unicode and newlines cannot become headers.
 renderMailDraftMime
-    :: MailDraftContent
+    :: Text -- ^ Validated connected-account From address
+    -> MailDraftContent
     -> Maybe (Text, Maybe Text) -- ^ In-Reply-To and References
     -> BS.ByteString
-renderMailDraftMime content replyHeaders =
+renderMailDraftMime fromAddress content replyHeaders =
     BS.intercalate "\r\n" (headers <> ["", encodedBody, ""])
   where
     headers =
         concat
-            [ addressHeader "To" content.mailDraftTo
+            [ addressHeader "From" [fromAddress]
+            , addressHeader "To" content.mailDraftTo
             , addressHeader "Cc" content.mailDraftCc
             , addressHeader "Bcc" content.mailDraftBcc
             , ["Subject: " <> encodedHeader content.mailDraftSubject]
@@ -80,16 +82,17 @@ renderMailDraftMime content replyHeaders =
             ]
     addressHeader name values
         | null values = []
-        | otherwise =
-            [TextEncoding.encodeUtf8 name <> ": "
-                <> TextEncoding.encodeUtf8 (Text.intercalate ", " values)]
+        | otherwise = [foldAddressHeader name values]
     encodedHeader value
         | Text.all (\character -> character >= ' ' && character <= '~') value =
             TextEncoding.encodeUtf8 value
         | otherwise =
-            "=?UTF-8?B?"
-                <> Base64.encode (TextEncoding.encodeUtf8 value)
-                <> "?="
+            BS.intercalate "\r\n\t"
+                [ "=?UTF-8?B?"
+                    <> Base64.encode (TextEncoding.encodeUtf8 chunk)
+                    <> "?="
+                | chunk <- unicodeHeaderChunks value
+                ]
     encodedBody =
         BS.intercalate "\r\n" (chunks 76
             (Base64.encode (TextEncoding.encodeUtf8 (normalizeLines content.mailDraftBody))))
@@ -98,17 +101,29 @@ renderMailDraftMime content replyHeaders =
             <> maybe [] (\value ->
                 ["References: " <> TextEncoding.encodeUtf8 value]) references
     safeReplyHeaders (inReplyTo, references) = do
-        checkedInReplyTo <- safeHeaderValue inReplyTo
-        pure (checkedInReplyTo, references >>= safeHeaderValue)
-    safeHeaderValue value
-        | Text.null stripped = Nothing
-        | BS.length (TextEncoding.encodeUtf8 stripped)
-            > maximumReplyHeaderBytes = Nothing
-        | not (Text.all isSafeAscii stripped) = Nothing
-        | otherwise = Just stripped
+        checkedInReplyTo <- safeMessageId inReplyTo
+        pure (checkedInReplyTo, references >>= safeReferences)
+    safeMessageId value
+        | utf8Length stripped > maximumReplyHeaderBytes = Nothing
+        | Just inner <- Text.stripPrefix "<" stripped >>= Text.stripSuffix ">"
+        , not (Text.null inner)
+        , Text.all (\character ->
+            not (isControl character || isSpace character
+                || character == '<' || character == '>')) inner =
+            Just stripped
+        | otherwise = Nothing
       where
         stripped = Text.strip value
-        isSafeAscii character = character >= ' ' && character <= '~'
+    safeReferences value
+        | null identifiers = Nothing
+        | otherwise = do
+            checked <- traverse safeMessageId identifiers
+            let joined = Text.unwords checked
+            if utf8Length joined <= maximumReplyHeaderBytes
+                then Just joined
+                else Nothing
+      where
+        identifiers = Text.words value
     chunks width bytes
         | BS.null bytes = [""]
         | otherwise = let (before, after) = BS.splitAt width bytes
@@ -116,7 +131,58 @@ renderMailDraftMime content replyHeaders =
     normalizeLines =
         Text.replace "\r\n" "\n" . Text.replace "\r" "\n"
 
-    maximumReplyHeaderBytes = 4096
+    maximumReplyHeaderBytes = 700
+
+-- Fold only at recipient boundaries. Tool validation has already restricted
+-- every value to a bare addr-spec, so CRLF+TAB below is the only inserted
+-- control sequence.
+foldAddressHeader :: Text -> [Text] -> BS.ByteString
+foldAddressHeader name addresses =
+    TextEncoding.encodeUtf8 (prefix <> go (Text.length prefix) addresses)
+  where
+    prefix = name <> ": "
+    go _ [] = ""
+    go column (address : rest)
+        | null rest = address
+        | column + Text.length address + 2 > preferredHeaderColumns =
+            address <> ",\r\n\t" <> go 1 rest
+        | otherwise =
+            address <> ", " <> go (column + Text.length address + 2) rest
+
+preferredHeaderColumns :: Int
+preferredHeaderColumns = 78
+
+-- Keep each encoded-word below RFC 2047's 75-character ceiling without
+-- splitting a UTF-8 code point between independently decoded words.
+unicodeHeaderChunks :: Text -> [Text]
+unicodeHeaderChunks value
+    | Text.null value = []
+    | otherwise =
+        let (chunk, rest) = takeUtf8Prefix maximumEncodedWordSourceBytes value
+        in chunk : unicodeHeaderChunks rest
+
+takeUtf8Prefix :: Int -> Text -> (Text, Text)
+takeUtf8Prefix maximum = go "" 0
+  where
+    go prefix size remaining =
+        case Text.uncons remaining of
+            Nothing -> (prefix, "")
+            Just (character, rest)
+                | size + characterBytes > maximum
+                , not (Text.null prefix) ->
+                    (prefix, remaining)
+                | otherwise ->
+                    go
+                        (Text.snoc prefix character)
+                        (size + characterBytes)
+                        rest
+              where
+                characterBytes =
+                    BS.length
+                        (TextEncoding.encodeUtf8 (Text.singleton character))
+
+maximumEncodedWordSourceBytes :: Int
+maximumEncodedWordSourceBytes = 45
 
 parseMailMime :: BS.ByteString -> Either Text ParsedMailMime
 parseMailMime raw

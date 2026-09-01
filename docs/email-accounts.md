@@ -50,11 +50,16 @@ The provider-neutral tool contract is:
 
 The runtime integration registers tools only when an enabled, verified
 account exists. IDs are opaque and must come from a preceding email tool
-result. Search accepts
-structured mailbox, sender, recipient, subject, date, attachment, and limit
-fields. Results, message bodies, attachments, provider requests, and wall
-clock duration are bounded. Downloads go to the current session's private
-temporary directory rather than being returned to the model.
+result. Provider-local mailbox, message, attachment, and draft references are
+authenticated with a per-runtime key and bound to both the originating
+account and capability kind. A reference cannot therefore be moved to another
+account, substituted for a different kind of item, or reused after restart.
+Search accepts structured mailbox, sender, recipient, subject, date,
+attachment, and limit fields. Search and get results expose `reply_to` as the
+effective bare reply address when provider metadata is safe and unambiguous.
+Results, message bodies, attachments, provider requests, and wall clock
+duration are bounded. Downloads go to the current session's private temporary
+directory rather than being returned to the model.
 
 Gmail and Microsoft support all eight tools. Compatible custom IMAP servers
 also support drafts when they advertise a Drafts mailbox and the UIDPLUS
@@ -62,11 +67,16 @@ capability needed for safe updates; unsupported servers remain read-only.
 `email_create_draft`, `email_update_draft`, and `email_reply_draft` are
 turn-sequential mailbox writes that require an explicit approval every time.
 They save a provider-side draft only, return `sent: false`, and cannot send
-email. Custom IMAP accounts otherwise support account/mailbox listing,
-structured search, bounded MIME message retrieval, and bounded
-attachment-part downloads. The runtime checks RFC822 size before fetching,
-caps each raw message at 8 MiB, decodes MIME locally, and never performs the
-unbounded full-mailbox fetch used by the older belege.ai integration.
+email. Reply drafts require the exact `reply_to` address returned by
+`email_search` or `email_get`, verify the explicitly approved recipient
+against the source message's current provider metadata, and derive thread
+metadata from that message; changing recipients is a separate, explicitly
+approved `email_update_draft` call. Custom IMAP accounts otherwise support
+account/mailbox listing, structured search, bounded MIME message retrieval,
+and bounded attachment-part downloads. The runtime checks RFC822 size before
+fetching, caps each raw message at 8 MiB, decodes MIME locally, and never
+performs the unbounded full-mailbox fetch used by the older belege.ai
+integration.
 
 All mailbox text is untrusted external content. Tool descriptions and results
 explicitly warn the model not to follow instructions found in messages or

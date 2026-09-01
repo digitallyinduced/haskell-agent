@@ -3,7 +3,8 @@ module Agent.CLI.MailToolsSpec (spec) where
 import Agent.CLI.Mail.Tools
 import Agent.OsPath (fromText)
 import Agent.ToolDispatch
-    ( ToolDispatchConfig(..)
+    ( ToolCallResult(..)
+    , ToolDispatchConfig(..)
     , dispatchToolCall
     , functionToolCall
     )
@@ -13,8 +14,10 @@ import Agent.Tools.Types
     , appToolHandlers
     , defaultToolEnv
     )
+import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -77,8 +80,25 @@ spec = describe "mail tools" do
                 }
         validateMailSearchRequest defaultMailToolLimits request
             `shouldSatisfy` isLeft
-        validateOpaqueMailReference "message_id" (mconcat (replicate 1025 "x"))
+        validateOpaqueMailReference "message_id" (mconcat (replicate 8193 "x"))
             `shouldSatisfy` isLeft
+
+    it "binds opaque mail references to their account and capability kind" do
+        let key = BS.replicate 32 0x5a
+            sealed = sealMailReference key DraftReference "account-a"
+                ["imap-draft:collision"]
+        case sealed of
+            Left err -> expectationFailure (Text.unpack err)
+            Right reference -> do
+                openMailReference key DraftReference "account-a" reference
+                    `shouldBe` Right ["imap-draft:collision"]
+                openMailReference key DraftReference "account-b" reference
+                    `shouldSatisfy` isLeft
+                openMailReference key MessageReference "account-a" reference
+                    `shouldSatisfy` isLeft
+                openMailReference key DraftReference "account-a"
+                    (reference <> "A")
+                    `shouldSatisfy` isLeft
 
     it "decodes search arguments and applies the default result limit" do
         seen <- newIORef Nothing
@@ -143,6 +163,8 @@ spec = describe "mail tools" do
 
     it "saves a draft only after decoding a bounded request" do
         seen <- newIORef Nothing
+        seenUpdate <- newIORef Nothing
+        seenReply <- newIORef Nothing
         toolEnv <- defaultToolEnv (fromText "/tmp")
         let connected = MailAccountSummary
                 { mailAccountId = "mail-1"
@@ -169,11 +191,25 @@ spec = describe "mail tools" do
                         , mailDraftThreadId = Nothing
                         , mailDraftWarning = Nothing
                         })
-                , mailToolsUpdateDraft = \_ -> pure (Left "not exercised")
-                , mailToolsReplyDraft = \_ -> pure (Left "not exercised")
+                , mailToolsUpdateDraft = \request -> do
+                    writeIORef seenUpdate (Just request)
+                    pure (Right MailDraft
+                        { mailDraftId = request.mailUpdateDraftId
+                        , mailDraftMessageId = Nothing
+                        , mailDraftThreadId = Nothing
+                        , mailDraftWarning = Nothing
+                        })
+                , mailToolsReplyDraft = \request -> do
+                    writeIORef seenReply (Just request)
+                    pure (Right MailDraft
+                        { mailDraftId = "draft-reply"
+                        , mailDraftMessageId = Nothing
+                        , mailDraftThreadId = Nothing
+                        , mailDraftWarning = Nothing
+                        })
                 }
         tools <- mailTools env
-        _ <- dispatchToolCall dispatchConfig
+        created <- dispatchToolCall dispatchConfig
             (appToolHandlers tools)
             (functionToolCall "call-1" "email_create_draft"
                 "{\"account_id\":\"mail-1\",\"to\":[\"person@example.com\"],\
@@ -187,6 +223,35 @@ spec = describe "mail tools" do
                 , mailDraftSubject = "Hello"
                 , mailDraftBody = "Draft body"
                 }
+            }
+        created.output `shouldSatisfy` Text.isInfixOf "\"sent\":false"
+        _ <- dispatchToolCall dispatchConfig
+            (appToolHandlers tools)
+            (functionToolCall "call-update" "email_update_draft"
+                "{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\
+                \\"to\":[\"changed@example.com\"],\"subject\":\"Changed\",\
+                \\"body\":\"Updated body\"}")
+        readIORef seenUpdate `shouldReturn` Just MailUpdateDraftRequest
+            { mailUpdateDraftAccountId = "mail-1"
+            , mailUpdateDraftId = "draft-1"
+            , mailUpdateDraftContent = MailDraftContent
+                { mailDraftTo = ["changed@example.com"]
+                , mailDraftCc = []
+                , mailDraftBcc = []
+                , mailDraftSubject = "Changed"
+                , mailDraftBody = "Updated body"
+                }
+            }
+        _ <- dispatchToolCall dispatchConfig
+            (appToolHandlers tools)
+            (functionToolCall "call-2" "email_reply_draft"
+                "{\"account_id\":\"mail-1\",\"message_id\":\"message-1\",\
+                \\"to\":[\"sender@example.com\"],\"body\":\"Reply body\"}")
+        readIORef seenReply `shouldReturn` Just MailReplyDraftRequest
+            { mailReplyDraftAccountId = "mail-1"
+            , mailReplyDraftMessageId = "message-1"
+            , mailReplyDraftTo = ["sender@example.com"]
+            , mailReplyDraftBody = "Reply body"
             }
 
 isAlwaysReadOnly :: ApprovalRule -> Bool

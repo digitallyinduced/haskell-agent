@@ -29,6 +29,9 @@ module Agent.CLI.Mail.Tools
     , validateMailSearchRequest
     , validateMailDraftContent
     , validateOpaqueMailReference
+    , MailReferenceKind(..)
+    , sealMailReference
+    , openMailReference
     ) where
 
 import Agent.OsPath (unsafeToFilePath)
@@ -45,7 +48,9 @@ import Agent.Tools.Types
     , jsonTool
     )
 import Control.Exception.Safe (onException, tryAny)
-import Control.Monad (void)
+import Control.Monad (unless, void)
+import Crypto.Hash (SHA256)
+import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Aeson
     ( ToJSON(..)
     , Value
@@ -53,7 +58,9 @@ import Data.Aeson
     , (.=)
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteArray as ByteArray
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64.URL as Base64URL
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isControl, isPrint)
 import Data.IORef (readIORef)
@@ -66,6 +73,7 @@ import System.Directory (removeFile)
 import System.IO (hClose, openBinaryTempFile)
 import System.Posix.Files (setFileMode)
 import System.Timeout (timeout)
+import qualified System.Entropy as Entropy
 
 -- | Limits applied at the tool boundary.  Providers must also enforce these
 -- limits while streaming responses; checking only after a complete download
@@ -153,6 +161,7 @@ data MailMessageSummary = MailMessageSummary
     , mailMessageSummaryThreadId :: !(Maybe Text)
     , mailMessageSummarySubject :: !(Maybe Text)
     , mailMessageSummaryFrom :: !(Maybe Text)
+    , mailMessageSummaryReplyTo :: !(Maybe Text)
     , mailMessageSummaryTo :: !(Maybe Text)
     , mailMessageSummaryReceivedAt :: !(Maybe Text)
     , mailMessageSummarySnippet :: !(Maybe Text)
@@ -166,6 +175,7 @@ instance ToJSON MailMessageSummary where
         , "thread_id" .= message.mailMessageSummaryThreadId
         , "subject" .= message.mailMessageSummarySubject
         , "from" .= message.mailMessageSummaryFrom
+        , "reply_to" .= message.mailMessageSummaryReplyTo
         , "to" .= message.mailMessageSummaryTo
         , "received_at" .= message.mailMessageSummaryReceivedAt
         , "snippet" .= message.mailMessageSummarySnippet
@@ -201,6 +211,7 @@ data MailMessage = MailMessage
     , mailMessageThreadId :: !(Maybe Text)
     , mailMessageSubject :: !(Maybe Text)
     , mailMessageFrom :: !(Maybe Text)
+    , mailMessageReplyTo :: !(Maybe Text)
     , mailMessageTo :: !(Maybe Text)
     , mailMessageCc :: !(Maybe Text)
     , mailMessageReceivedAt :: !(Maybe Text)
@@ -250,8 +261,6 @@ data MailReplyDraftRequest = MailReplyDraftRequest
     { mailReplyDraftAccountId :: !Text
     , mailReplyDraftMessageId :: !Text
     , mailReplyDraftTo :: ![Text]
-    , mailReplyDraftCc :: ![Text]
-    , mailReplyDraftBcc :: ![Text]
     , mailReplyDraftBody :: !Text
     } deriving (Eq, Show)
 
@@ -331,32 +340,291 @@ data MailTransport = MailTransport
 -- account immediately revokes its tool access even in a live conversation.
 mailToolsForStore :: ToolEnv -> MailTransport -> IO [AppTool]
 mailToolsForStore toolEnv transport =
-    mailTools MailToolsEnv
-        { mailToolsToolEnv = toolEnv
+    tryAny (Entropy.getEntropy mailReferenceKeyBytes) >>= \case
+        Left _ -> pure []
+        Right referenceKey ->
+            mailTools $ MailToolsEnv
+                { mailToolsToolEnv = toolEnv
         , mailToolsLimits = defaultMailToolLimits
         , mailToolsListAccounts = listStoredAccounts
         , mailToolsListMailboxes = \accountId maximum ->
             withStoredCredential accountId \credential ->
                 transport.mailTransportListMailboxes credential maximum
+                    >>= pure . (>>= traverse
+                        (sealMailbox referenceKey accountId))
         , mailToolsSearch = \request ->
-            withStoredCredential request.mailSearchAccountId \credential ->
-                transport.mailTransportSearch credential request
+            case openOptionalReference referenceKey MailboxReference
+                    request.mailSearchAccountId request.mailSearchMailboxId of
+                Left err -> pure (Left err)
+                Right providerMailboxId ->
+                    let providerRequest = request
+                            { mailSearchMailboxId = providerMailboxId }
+                    in withStoredCredential request.mailSearchAccountId \credential ->
+                        transport.mailTransportSearch credential providerRequest
+                            >>= pure . (>>= traverse
+                                (sealMessageSummary
+                                    referenceKey
+                                    request.mailSearchAccountId))
         , mailToolsGetMessage = \request maximum ->
-            withStoredCredential request.mailGetAccountId \credential ->
-                transport.mailTransportGetMessage credential request maximum
+            case openSingleReference referenceKey MessageReference
+                    request.mailGetAccountId request.mailGetMessageId of
+                Left err -> pure (Left err)
+                Right providerMessageId ->
+                    let providerRequest = request
+                            { mailGetMessageId = providerMessageId }
+                    in withStoredCredential request.mailGetAccountId \credential ->
+                        transport.mailTransportGetMessage
+                            credential providerRequest maximum
+                            >>= pure . (>>=
+                                sealMessage
+                                    referenceKey
+                                    request.mailGetAccountId
+                                    providerMessageId)
         , mailToolsDownloadAttachment = \request maximum ->
-            withStoredCredential request.mailAttachmentAccountId \credential ->
-                transport.mailTransportDownloadAttachment credential request maximum
+            case openAttachmentRequest referenceKey request of
+                Left err -> pure (Left err)
+                Right providerRequest ->
+                    withStoredCredential
+                        request.mailAttachmentAccountId \credential ->
+                            transport.mailTransportDownloadAttachment
+                                credential providerRequest maximum
         , mailToolsCreateDraft = \request ->
             withStoredDraftCredential request.mailCreateDraftAccountId \credential ->
                 transport.mailTransportCreateDraft credential request
+                    >>= pure . (>>=
+                        sealDraft referenceKey request.mailCreateDraftAccountId)
         , mailToolsUpdateDraft = \request ->
-            withStoredDraftCredential request.mailUpdateDraftAccountId \credential ->
-                transport.mailTransportUpdateDraft credential request
+            case openSingleReference referenceKey DraftReference
+                    request.mailUpdateDraftAccountId request.mailUpdateDraftId of
+                Left err -> pure (Left err)
+                Right providerDraftId ->
+                    let providerRequest = request
+                            { mailUpdateDraftId = providerDraftId }
+                    in withStoredDraftCredential
+                        request.mailUpdateDraftAccountId \credential ->
+                            transport.mailTransportUpdateDraft
+                                credential providerRequest
+                                >>= pure . (>>=
+                                    sealDraft
+                                        referenceKey
+                                        request.mailUpdateDraftAccountId)
         , mailToolsReplyDraft = \request ->
-            withStoredDraftCredential request.mailReplyDraftAccountId \credential ->
-                transport.mailTransportReplyDraft credential request
+            case openSingleReference referenceKey MessageReference
+                    request.mailReplyDraftAccountId
+                    request.mailReplyDraftMessageId of
+                Left err -> pure (Left err)
+                Right providerMessageId ->
+                    let providerRequest = request
+                            { mailReplyDraftMessageId = providerMessageId }
+                    in withStoredDraftCredential
+                        request.mailReplyDraftAccountId \credential ->
+                            transport.mailTransportReplyDraft
+                                credential providerRequest
+                                >>= pure . (>>=
+                                    sealDraft
+                                        referenceKey
+                                        request.mailReplyDraftAccountId)
         }
+
+data MailReferenceKind
+    = MailboxReference
+    | MessageReference
+    | AttachmentReference
+    | DraftReference
+    deriving (Eq, Show)
+
+-- | Seal provider-local identifiers into a short-lived, account-bound
+-- capability. The per-runtime key means a reference cannot be moved between
+-- accounts, substituted for a different kind of reference, tampered with, or
+-- reused after the runtime restarts.
+sealMailReference
+    :: BS.ByteString
+    -> MailReferenceKind
+    -> Text
+    -> [Text]
+    -> Either Text Text
+sealMailReference key kind accountId components = do
+    checkedAccountId <- validateOpaqueMailReference "account_id" accountId
+    unless (BS.length key >= mailReferenceKeyBytes) invalidReference
+    unless (length components == mailReferenceComponentCount kind)
+        invalidProviderReference
+    checked <- traverse validateProviderReference components
+    let payload = LBS.toStrict (Aeson.encode checked)
+        mac = mailReferenceMac key kind checkedAccountId payload
+        token = mailReferencePrefix
+            <> TextEncoding.decodeUtf8
+                (Base64URL.encodeUnpadded (payload <> mac))
+    if utf8Length token <= maximumOpaqueReferenceBytes
+        then Right token
+        else invalidProviderReference
+
+-- | Open one account-bound reference. Authentication happens before JSON
+-- decoding, and every failure is intentionally indistinguishable to callers.
+openMailReference
+    :: BS.ByteString
+    -> MailReferenceKind
+    -> Text
+    -> Text
+    -> Either Text [Text]
+openMailReference key kind accountId token = do
+    checkedAccountId <- validateOpaqueMailReference "account_id" accountId
+    checkedToken <- validateOpaqueMailReference "email_reference" token
+    unless (BS.length key >= mailReferenceKeyBytes) invalidReference
+    encoded <- maybe invalidReference Right
+        (Text.stripPrefix mailReferencePrefix checkedToken)
+    raw <- either (const invalidReference) Right
+        (Base64URL.decodeUnpadded (TextEncoding.encodeUtf8 encoded))
+    unless (BS.length raw > mailReferenceMacBytes) invalidReference
+    let (payload, suppliedMac) =
+            BS.splitAt (BS.length raw - mailReferenceMacBytes) raw
+        expectedMac = mailReferenceMac key kind checkedAccountId payload
+    unless (ByteArray.constEq suppliedMac expectedMac) invalidReference
+    components <- either (const invalidReference) Right
+        (Aeson.eitherDecodeStrict' payload :: Either String [Text])
+    unless (length components == mailReferenceComponentCount kind)
+        invalidReference
+    traverse (either (const invalidReference) Right . validateProviderReference)
+        components
+
+sealMailbox
+    :: BS.ByteString -> Text -> MailboxSummary -> Either Text MailboxSummary
+sealMailbox key accountId mailbox = do
+    reference <- sealMailReference
+        key MailboxReference accountId [mailbox.mailMailboxId]
+    pure mailbox { mailMailboxId = reference }
+
+sealMessageSummary
+    :: BS.ByteString
+    -> Text
+    -> MailMessageSummary
+    -> Either Text MailMessageSummary
+sealMessageSummary key accountId message = do
+    reference <- sealMailReference
+        key MessageReference accountId [message.mailMessageSummaryId]
+    pure message { mailMessageSummaryId = reference }
+
+sealMessage
+    :: BS.ByteString
+    -> Text
+    -> Text
+    -> MailMessage
+    -> Either Text MailMessage
+sealMessage key accountId expectedProviderMessageId message = do
+    unless
+        (message.mailMessageId == expectedProviderMessageId)
+        invalidProviderReference
+    messageReference <- sealMailReference
+        key MessageReference accountId [message.mailMessageId]
+    attachments <- traverse sealAttachment message.mailMessageAttachments
+    pure message
+        { mailMessageId = messageReference
+        , mailMessageAttachments = attachments
+        }
+  where
+    sealAttachment attachment = do
+        reference <- sealMailReference key AttachmentReference accountId
+            [expectedProviderMessageId, attachment.mailAttachmentId]
+        pure attachment { mailAttachmentId = reference }
+
+sealDraft
+    :: BS.ByteString -> Text -> MailDraft -> Either Text MailDraft
+sealDraft key accountId draft = do
+    draftReference <- sealMailReference
+        key DraftReference accountId [draft.mailDraftId]
+    let messageReference = draft.mailDraftMessageId >>= \providerMessageId ->
+            either (const Nothing) Just
+                (sealMailReference key MessageReference accountId
+                    [providerMessageId])
+    pure draft
+        { mailDraftId = draftReference
+        , mailDraftMessageId = messageReference
+        }
+
+openOptionalReference
+    :: BS.ByteString
+    -> MailReferenceKind
+    -> Text
+    -> Maybe Text
+    -> Either Text (Maybe Text)
+openOptionalReference key kind accountId =
+    traverse (openSingleReference key kind accountId)
+
+openSingleReference
+    :: BS.ByteString
+    -> MailReferenceKind
+    -> Text
+    -> Text
+    -> Either Text Text
+openSingleReference key kind accountId token =
+    openMailReference key kind accountId token >>= \case
+        [providerReference] -> Right providerReference
+        _ -> invalidReference
+
+openAttachmentRequest
+    :: BS.ByteString
+    -> MailAttachmentRequest
+    -> Either Text MailAttachmentRequest
+openAttachmentRequest key request = do
+    providerMessageId <- openSingleReference
+        key MessageReference accountId request.mailAttachmentMessageId
+    attachmentParts <- openMailReference
+        key AttachmentReference accountId request.mailAttachmentRequestId
+    providerAttachmentId <- case attachmentParts of
+        [boundMessageId, attachmentId]
+            | boundMessageId == providerMessageId -> Right attachmentId
+        _ -> invalidReference
+    pure request
+        { mailAttachmentMessageId = providerMessageId
+        , mailAttachmentRequestId = providerAttachmentId
+        }
+  where
+    accountId = request.mailAttachmentAccountId
+
+mailReferenceMac
+    :: BS.ByteString
+    -> MailReferenceKind
+    -> Text
+    -> BS.ByteString
+    -> BS.ByteString
+mailReferenceMac key kind accountId payload =
+    ByteArray.convert
+        (hmac key input :: HMAC SHA256)
+  where
+    input = BS.concat
+        [ "haskell-agent-mail-reference-v1\NUL"
+        , TextEncoding.encodeUtf8 (mailReferenceKindTag kind)
+        , "\NUL"
+        , TextEncoding.encodeUtf8 accountId
+        , "\NUL"
+        , payload
+        ]
+
+mailReferenceKindTag :: MailReferenceKind -> Text
+mailReferenceKindTag = \case
+    MailboxReference -> "mailbox"
+    MessageReference -> "message"
+    AttachmentReference -> "attachment"
+    DraftReference -> "draft"
+
+mailReferenceComponentCount :: MailReferenceKind -> Int
+mailReferenceComponentCount = \case
+    AttachmentReference -> 2
+    _ -> 1
+
+validateProviderReference :: Text -> Either Text Text
+validateProviderReference value
+    | Text.null value
+        || utf8Length value > maximumProviderReferenceBytes
+        || Text.any isControl value = invalidProviderReference
+    | otherwise = Right value
+
+invalidReference :: Either Text value
+invalidReference = Left
+    "That email reference is invalid, expired, or belongs to another account. Run the relevant email listing or search tool again."
+
+invalidProviderReference :: Either Text value
+invalidProviderReference =
+    Left "The email provider returned invalid reference data."
 
 listStoredAccounts :: IO (Either Text [MailAccountSummary])
 listStoredAccounts =
@@ -571,8 +839,6 @@ data ReplyDraftArgs = ReplyDraftArgs
     { replyDraftArgsAccountId :: !Text
     , replyDraftArgsMessageId :: !Text
     , replyDraftArgsTo :: ![Text]
-    , replyDraftArgsCc :: ![Text]
-    , replyDraftArgsBcc :: ![Text]
     , replyDraftArgsBody :: !Text
     }
 
@@ -582,8 +848,6 @@ replyDraftArgsDecoder = Hermes.object $
         <$> Hermes.atKey "account_id" Hermes.text
         <*> Hermes.atKey "message_id" Hermes.text
         <*> Hermes.atKey "to" (Hermes.list Hermes.text)
-        <*> Hermes.defaultKey [] "cc" (Hermes.list Hermes.text)
-        <*> Hermes.defaultKey [] "bcc" (Hermes.list Hermes.text)
         <*> Hermes.defaultKey "" "body" Hermes.text
 
 listAccountsTool :: MailToolsEnv -> AppTool
@@ -641,7 +905,8 @@ searchTool env = jsonTool
     "email_search"
     ( "Search a connected read-only email account with structured filters. "
         <> "An empty query lists recent messages in the selected mailbox. "
-        <> "Use only opaque ids returned by email tools. "
+        <> "Results expose the effective bare reply_to address when it is "
+        <> "safe and unambiguous. Use only opaque ids returned by email tools. "
         <> untrustedEmailWarning
     )
     [ PropertySchema "account_id" PropertyString True $ Just
@@ -688,8 +953,9 @@ getTool :: MailToolsEnv -> AppTool
 getTool env = jsonTool
     "email_get"
     ( "Get one email message's decoded text body and attachment metadata. "
-        <> "The body is size-bounded and may be truncated. Use only opaque ids "
-        <> "returned by email_search. "
+        <> "The body is size-bounded and may be truncated; reply_to is the "
+        <> "effective bare reply address when safe and unambiguous. Use only "
+        <> "opaque ids returned by email_search. "
         <> untrustedEmailWarning
     )
     [ PropertySchema "account_id" PropertyString True $ Just
@@ -828,8 +1094,9 @@ replyDraftTool env = jsonAppToolWithExecution
     "email_reply_draft"
     ( "Save a reply draft for a source email message. This never sends email, "
         <> "but it writes to the user's mailbox and always requires explicit "
-        <> "approval. Supply bare recipient addresses and use only a message_id "
-        <> "returned by email_search. "
+        <> "approval. The recipient must match the source message's reply "
+        <> "address: use the exact reply_to returned by email_search or "
+        <> "email_get. Use only a message_id returned by email_search. "
         <> untrustedEmailWarning
     )
     [ PropertySchema "account_id" PropertyString True $ Just
@@ -837,11 +1104,7 @@ replyDraftTool env = jsonAppToolWithExecution
     , PropertySchema "message_id" PropertyString True $ Just
         "Opaque source message_id returned by email_search."
     , PropertySchema "to" (PropertyArray PropertyString) True $ Just
-        "Recipient addresses as bare addr-spec values."
-    , PropertySchema "cc" (PropertyArray PropertyString) False $ Just
-        "Optional Cc recipient addresses as bare addr-spec values."
-    , PropertySchema "bcc" (PropertyArray PropertyString) False $ Just
-        "Optional Bcc recipient addresses as bare addr-spec values."
+        "Exactly one bare recipient address matching the source message's reply_to."
     , PropertySchema "body" PropertyString False $ Just
         "Plain-text draft body, up to 128 KiB."
     ]
@@ -917,20 +1180,16 @@ replyDraftRequest
 replyDraftRequest limits args = do
     accountId <- validateOpaqueMailReference "account_id" args.replyDraftArgsAccountId
     messageId <- validateOpaqueMailReference "message_id" args.replyDraftArgsMessageId
-    content <- validateMailDraftContent limits MailDraftContent
-        { mailDraftTo = args.replyDraftArgsTo
-        , mailDraftCc = args.replyDraftArgsCc
-        , mailDraftBcc = args.replyDraftArgsBcc
-        , mailDraftSubject = ""
-        , mailDraftBody = args.replyDraftArgsBody
-        }
+    recipients <- traverse (validateDraftRecipient "to") args.replyDraftArgsTo
+    if length recipients == 1
+        then pure ()
+        else Left "a reply draft requires exactly one to recipient"
+    body <- validateDraftBody limits args.replyDraftArgsBody
     pure MailReplyDraftRequest
         { mailReplyDraftAccountId = accountId
         , mailReplyDraftMessageId = messageId
-        , mailReplyDraftTo = content.mailDraftTo
-        , mailReplyDraftCc = content.mailDraftCc
-        , mailReplyDraftBcc = content.mailDraftBcc
-        , mailReplyDraftBody = content.mailDraftBody
+        , mailReplyDraftTo = recipients
+        , mailReplyDraftBody = body
         }
 
 draftContent :: DraftContentArgs -> MailDraftContent
@@ -1047,10 +1306,10 @@ validateAttachmentRequest accountId messageId attachmentId =
 validateOpaqueMailReference :: Text -> Text -> Either Text Text
 validateOpaqueMailReference field value
     | Text.null stripped = Left (field <> " must not be empty")
-    | utf8Length value > maximumOpaqueReferenceBytes =
+    | utf8Length stripped > maximumOpaqueReferenceBytes =
         Left (field <> " is too long")
-    | Text.any isControl value = Left (field <> " contains control characters")
-    | otherwise = Right value
+    | Text.any isControl stripped = Left (field <> " contains control characters")
+    | otherwise = Right stripped
   where
     stripped = Text.strip value
 
@@ -1154,6 +1413,7 @@ mailMessageValue limits message = object
     , "thread_id" .= fmap boundedOpaque message.mailMessageThreadId
     , "subject" .= fmap boundedShortText message.mailMessageSubject
     , "from" .= fmap boundedShortText message.mailMessageFrom
+    , "reply_to" .= fmap boundedShortText message.mailMessageReplyTo
     , "to" .= fmap boundedShortText message.mailMessageTo
     , "cc" .= fmap boundedShortText message.mailMessageCc
     , "received_at" .= fmap boundedShortText message.mailMessageReceivedAt
@@ -1193,6 +1453,8 @@ boundedMessageSummary message = message
     , mailMessageSummaryThreadId = fmap boundedOpaque message.mailMessageSummaryThreadId
     , mailMessageSummarySubject = fmap boundedShortText message.mailMessageSummarySubject
     , mailMessageSummaryFrom = fmap boundedShortText message.mailMessageSummaryFrom
+    , mailMessageSummaryReplyTo =
+        fmap boundedShortText message.mailMessageSummaryReplyTo
     , mailMessageSummaryTo = fmap boundedShortText message.mailMessageSummaryTo
     , mailMessageSummaryReceivedAt =
         fmap boundedShortText message.mailMessageSummaryReceivedAt
@@ -1272,7 +1534,17 @@ boundedShortText :: Text -> Text
 boundedShortText = truncateUtf8 maximumShortTextBytes
 
 maximumOpaqueReferenceBytes :: Int
-maximumOpaqueReferenceBytes = 1024
+maximumOpaqueReferenceBytes = 8192
+
+maximumProviderReferenceBytes :: Int
+maximumProviderReferenceBytes = 2048
+
+mailReferenceKeyBytes, mailReferenceMacBytes :: Int
+mailReferenceKeyBytes = 32
+mailReferenceMacBytes = 32
+
+mailReferencePrefix :: Text
+mailReferencePrefix = "mailref:v1:"
 
 maximumAccountResults :: Int
 maximumAccountResults = 100

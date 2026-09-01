@@ -697,7 +697,7 @@ typedef void (*ha_account_oauth_start_callback)(
 );
 
 /*
- * Read-only email account callbacks never expose passwords, OAuth codes,
+ * Email account-management callbacks never expose passwords, OAuth codes,
  * verifiers, or tokens. All UTF-8 buffers are valid only for the duration of
  * the callback and must be copied by the caller.
  *

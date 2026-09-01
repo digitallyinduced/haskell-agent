@@ -576,6 +576,7 @@ test-suite agent-cli-test
                     , ansi-terminal
                     , async
                     , base >= 4.17 && < 5
+                    , base64-bytestring
                     , brick >= 2.9 && < 3
                     , bytestring
                     , colour
