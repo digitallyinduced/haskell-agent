@@ -183,7 +183,7 @@ modelChoiceWithEffort
                             initialIndex =
                                 fromMaybe 0 (elemIndex initial efforts)
                         in ( modelRowLabel picker option
-                           , modelDetail option
+                           , modelDetail picker option
                            , map (renderEffortIndicator option) efforts
                            , initialIndex
                            )
@@ -230,9 +230,13 @@ openRouterModelOption model =
 
 modelRowLabel :: PickerState -> ModelOption -> Text
 modelRowLabel picker option =
-    option.modelTarget.targetConnectionId
-        <> "/"
-        <> option.modelTarget.targetModelId
+    ( if picker.pickerConnectionId == organizationGatewayConnectionId
+        then option.modelTarget.targetModelId
+        else
+            option.modelTarget.targetConnectionId
+                <> "/"
+                <> option.modelTarget.targetModelId
+    )
         <> if
             option.modelTarget.targetConnectionId == picker.pickerConnectionId
                 && option.modelTarget.targetModelId == picker.pickerCurrent
@@ -241,14 +245,16 @@ modelRowLabel picker option =
             then " ✓"
             else ""
 
-modelDetail :: ModelOption -> Text
-modelDetail option =
+modelDetail :: PickerState -> ModelOption -> Text
+modelDetail picker option =
     Text.intercalate
         " · "
         ( maybe [] pure option.modelLabel
             <> [ option.modelTarget.targetConnectionId
-               , dialectSlug option.modelTarget.targetDialect
+               | picker.pickerConnectionId
+                    /= organizationGatewayConnectionId
                ]
+            <> [dialectSlug option.modelTarget.targetDialect]
             <> if maybe False
                     (Text.isInfixOf "context" . Text.toCaseFold)
                     option.modelLabel
