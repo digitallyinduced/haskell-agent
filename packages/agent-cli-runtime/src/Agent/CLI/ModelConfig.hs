@@ -561,7 +561,11 @@ validateConfig source config = do
                     (connectionSupportsDialect
                         connectionId
                         OpenAIProvider
-                        dialect) $
+                        dialect
+                        || connectionSupportsDialect
+                            connectionId
+                            ClaudeCodeProvider
+                            dialect) $
                     Left
                         ( "model " <> modelId <> " uses dialect "
                             <> raw.modelFileDialect
