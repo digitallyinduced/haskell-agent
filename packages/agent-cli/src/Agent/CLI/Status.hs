@@ -3,6 +3,7 @@ module Agent.CLI.Status
     ( applyReplMode
     , cycleReplInteraction
     , formatContextUsage
+    , formatFooterAccount
     , formatReplStatusLine
     , formatTokenUsage
     , formatTokenUsageOrZero
@@ -49,7 +50,7 @@ formatReplStatusLine
 formatReplStatusLine color width model effort mode account usage rate =
     let left =
             "  " <> Text.intercalate " · " (filter (not . Text.null)
-                [model, effort, replModeLabel mode, account])
+                [model, effort, replModeLabel mode, formatFooterAccount account])
         right = formatUsageWithRate usage rate
         padded = case width of
             Just cols | cols > 0 ->
@@ -57,6 +58,16 @@ formatReplStatusLine color width model effort mode account usage rate =
             _ | Text.null right -> left
             _ -> left <> "  " <> right
     in roleMuted color padded
+
+-- | Keep endpoint URLs out of persistent prompt chrome. Gateway accounts use
+-- their base URL as an identifier, but that implementation detail is too
+-- noisy for the footer. Human-readable account identifiers remain visible.
+formatFooterAccount :: Text -> Text
+formatFooterAccount account
+    | any (`Text.isInfixOf` lowered) ["http://", "https://"] = ""
+    | otherwise = account
+  where
+    lowered = Text.toLower account
 
 -- | Keep the status on one physical row so composer redraws never inherit a
 -- wrapped status line. Prefer interaction state over token totals.
