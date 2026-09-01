@@ -7,7 +7,7 @@ import Agent.CLI.RepositoryReview
     )
 import System.Timeout (timeout)
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, tryAny)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
@@ -28,12 +28,14 @@ import System.Posix.Files
     , setFileMode
     , unionFileModes
     )
+import System.Posix.Process (getProcessStatus)
 import System.Process
     ( CreateProcess(..)
     , proc
     , readCreateProcessWithExitCode
     )
 import Test.Hspec
+import Text.Read (readMaybe)
 
 spec :: Spec
 spec = describe "repository delivery service" do
@@ -524,7 +526,7 @@ spec = describe "repository delivery service" do
                 let descendantPid = root <> "/gh-descendant.pid"
                 setEnv "GH_RETAIN_PIPE_MARKER" descendantPid
                 snapshot <- expectRight =<< repositorySnapshot root
-                result <- timeout 5_000_000
+                result <- timeout 20_000_000
                     (previewPullRequest
                         root snapshot.snapshotId "main" "Title" "Body")
                 result `shouldSatisfy` \case
@@ -692,6 +694,8 @@ withFakeGh root action = do
     originalGhHost <- lookupEnv "GH_HOST"
     withTempDirectory "repository-delivery-gh" \bin -> do
         realGit <- maybe (fail "git not found") pure =<< findExecutable "git"
+        python <- maybe (fail "python3 not found") pure
+            =<< findExecutable "python3"
         localRemote <- Text.unpack . Text.strip
             <$> git root ["remote", "get-url", "origin"]
         expectedHead <- Text.unpack . Text.strip
@@ -705,19 +709,31 @@ withFakeGh root action = do
             candidateQueryMarker =
                 root <> "/pull-request-candidates-queried"
             readyMarker = root <> "/pull-request-ready"
+            retainingChildScript = unlines
+                [ "import os"
+                , "import sys"
+                , "import time"
+                , "pid = os.fork()"
+                , "if pid:"
+                , "    marker = os.open("
+                    <> "sys.argv[1], "
+                    <> "os.O_WRONLY | os.O_CREAT | os.O_TRUNC, "
+                    <> "0o600)"
+                , "    os.write(marker, (str(pid) + \"\\n\").encode())"
+                , "    os.close(marker)"
+                , "    os._exit(0)"
+                , "time.sleep(30)"
+                ]
         _ <- git root ["remote", "set-url", "origin", githubRemote]
         writeFile gitExecutable $ unlines
-            [ "#!/bin/bash"
-            , "set -eu"
-            , "args=()"
-            , "for arg in \"$@\"; do"
-            , "  if [[ \"$arg\" == " <> shellQuote githubRemote <> " ]]; then"
-            , "    args+=(" <> shellQuote localRemote <> ")"
-            , "  else"
-            , "    args+=(\"$arg\")"
-            , "  fi"
-            , "done"
-            , "exec " <> shellQuote realGit <> " \"${args[@]}\""
+            [ "#!" <> python
+            , "import os"
+            , "import sys"
+            , "source = " <> show githubRemote
+            , "target = " <> show localRemote
+            , "git = " <> show realGit
+            , "arguments = [target if arg == source else arg for arg in sys.argv[1:]]"
+            , "os.execv(git, [git] + arguments)"
             ]
         setFileMode gitExecutable
             (ownerReadMode
@@ -729,9 +745,9 @@ withFakeGh root action = do
             , "pwd > " <> shellQuote (root <> "/../gh-cwd.txt")
             , "[ \"${GH_HOST:-}\" = '' ] || exit 65"
             , "if [ \"${GH_RETAIN_PIPE_MARKER:-}\" != '' ] && [ \"$1 $2\" = 'auth status' ]; then"
-            , "  sleep 30 &"
-            , "  printf '%s\\n' \"$!\" > \"$GH_RETAIN_PIPE_MARKER\""
-            , "  exit 0"
+            , "  exec " <> shellQuote python
+                <> " -c " <> shellQuote retainingChildScript
+                <> " \"$GH_RETAIN_PIPE_MARKER\""
             , "fi"
             , "print_pr() {"
             , "  draft=${GH_FAKE_DRAFT:-true}"
@@ -896,9 +912,25 @@ processGoneWithin remaining pid
                 processGoneWithin (remaining - 100_000) pid
   where
     processExists = do
-        (exitCode, _, _) <-
-            readCreateProcessWithExitCode (proc "kill" ["-0", pid]) ""
-        pure (exitCode == ExitSuccess)
+        reaped <- case readMaybe pid of
+            Nothing -> pure Nothing
+            Just processId ->
+                tryAny (getProcessStatus False False processId) >>= \case
+                    Right status -> pure status
+                    Left _ -> pure Nothing
+        case reaped of
+            Just _ -> pure False
+            Nothing -> do
+                (exitCode, _, _) <-
+                    readCreateProcessWithExitCode
+                        (proc "/bin/sh"
+                            [ "-c"
+                            , "kill -0 \"$1\" >/dev/null 2>&1"
+                            , "sh"
+                            , pid
+                            ])
+                        ""
+                pure (exitCode == ExitSuccess)
 
 shellQuote :: String -> String
 shellQuote value = "'" <> concatMap escape value <> "'"

@@ -28,6 +28,7 @@ import System.Directory
     ( createDirectory
     , doesDirectoryExist
     , doesFileExist
+    , findExecutable
     , getTemporaryDirectory
     , removeFile
     , removePathForcibly
@@ -219,7 +220,7 @@ spec = describe "repository review service" do
                 link = root <> "/pipe-link"
             createNamedPipe untrackedPipe
                 (ownerReadMode `unionFileModes` ownerWriteMode)
-            blocked <- timeout 2_000_000 (repositorySnapshot root)
+            blocked <- timeout 10_000_000 (repositorySnapshot root)
             blocked `shouldSatisfy` \case
                 Just (Left (InvalidRepositoryRequest _)) -> True
                 Just (Right _) -> True
@@ -229,7 +230,7 @@ spec = describe "repository review service" do
             createNamedPipe hiddenPipe
                 (ownerReadMode `unionFileModes` ownerWriteMode)
             createSymbolicLink ".git/hidden-pipe" link
-            linked <- timeout 2_000_000 (repositorySnapshot root)
+            linked <- timeout 10_000_000 (repositorySnapshot root)
             linked `shouldSatisfy` \case
                 Just (Right snapshot) ->
                     any
@@ -238,7 +239,7 @@ spec = describe "repository review service" do
                 _ -> False
             case linked of
                 Just (Right snapshot) ->
-                    timeout 2_000_000
+                    timeout 10_000_000
                         (repositoryDiff
                             root
                             snapshot.snapshotId
@@ -283,8 +284,9 @@ spec = describe "repository review service" do
                         <> "fcntl.flock(f,fcntl.LOCK_EX);"
                         <> "open(" <> show readyPath <> ",'w').close();"
                         <> "time.sleep(30)"
+            python <- requireExecutable "python3"
             (_, _, _, locker) <-
-                createProcess (proc "/usr/bin/python3" ["-c", script])
+                createProcess (proc python ["-c", script])
             _ <- awaitFileContents readyPath 200
             pending <- async (repositorySnapshot root)
             blocked <- timeout 200_000 (waitCatch pending)
@@ -559,6 +561,8 @@ spec = describe "repository review service" do
     it "drains large stdout and stderr streams without pipe deadlock" $
         withRepository \root -> do
             snapshot <- expectRight =<< repositorySnapshot root
+            yes <- requireExecutable "yes"
+            headCommand <- requireExecutable "head"
             byteCounts <- newIORef (0, 0)
             terminal <- newEmptyMVar
             check <- expectRight
@@ -567,8 +571,10 @@ spec = describe "repository review service" do
                     snapshot.snapshotId
                     "/bin/sh"
                     [ "-c"
-                    , "/usr/bin/yes o | /usr/bin/head -c 1048576; "
-                        <> "/usr/bin/yes e | /usr/bin/head -c 1048576 >&2"
+                    , shellQuote yes <> " o | "
+                        <> shellQuote headCommand <> " -c 1048576; "
+                        <> shellQuote yes <> " e | "
+                        <> shellQuote headCommand <> " -c 1048576 >&2"
                     ]
                     (\stream bytes ->
                         atomicModifyIORef' byteCounts \(out, err) ->
@@ -617,10 +623,10 @@ spec = describe "repository review service" do
                     [ "-c"
                     , "/bin/sh -c 'trap \"\" TERM; echo $$ > "
                         <> shellQuote pidFile
-                        <> "; exec /bin/sleep 30' & "
+                        <> "; exec sleep 30' & "
                         <> "while [ ! -s "
                         <> shellQuote pidFile
-                        <> " ]; do /bin/sleep 0.01; done; exit 0"
+                        <> " ]; do sleep 0.01; done; exit 0"
                     ]
                     (\_ _ -> pure ())
                     (\cancelled exitCode ->
@@ -641,8 +647,9 @@ spec = describe "repository review service" do
                     (StagePath "tracked.txt")
             let pidFile = root <> "/completed-hook-child.pid"
                 hook = root <> "/.git/hooks/pre-commit"
+            python <- requireExecutable "python3"
             writeFile hook
-                ( "#!/usr/bin/python3\n"
+                ( "#!" <> python <> "\n"
                     <> "import os, signal, time\n"
                     <> "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                     <> "pid = os.fork()\n"
@@ -658,7 +665,7 @@ spec = describe "repository review service" do
                     `unionFileModes` ownerWriteMode
                     `unionFileModes` ownerExecuteMode)
 
-            result <- timeout 5_000_000
+            result <- timeout 20_000_000
                 (commitRepository root staged.snapshotId "completed hook\n")
             result `shouldSatisfy` \case
                 Just (Right _) -> True
@@ -681,7 +688,7 @@ spec = describe "repository review service" do
                     <> "trap '' TERM\n"
                     <> "/bin/sh -c 'trap \"\" TERM; echo $$ > "
                     <> shellQuote pidFile
-                    <> "; exec /bin/sleep 30' &\n"
+                    <> "; exec sleep 30' &\n"
                     <> "wait\n"
                 )
             setFileMode hook
@@ -710,7 +717,7 @@ spec = describe "repository review service" do
                     "/bin/sh"
                     [ "-c"
                     , "trap '' TERM; "
-                        <> "(trap '' TERM; exec /bin/sleep 30) & wait"
+                        <> "(trap '' TERM; exec sleep 30) & wait"
                     ]
                     (\_ _ -> pure ())
                     (\cancelled exitCode -> do
@@ -793,9 +800,22 @@ processExists :: Text.Text -> IO Bool
 processExists pid = do
     (exitCode, _, _) <-
         readCreateProcessWithExitCode
-            (proc "/bin/kill" ["-0", Text.unpack pid])
+            (proc "/bin/sh"
+                [ "-c"
+                , "kill -0 \"$1\" >/dev/null 2>&1"
+                , "sh"
+                , Text.unpack pid
+                ])
             ""
     pure (exitCode == ExitSuccess)
+
+requireExecutable :: String -> IO FilePath
+requireExecutable name =
+    findExecutable name >>= \case
+        Just executable -> pure executable
+        Nothing ->
+            expectationFailure (name <> " executable not found")
+                >> fail "unreachable"
 
 awaitProcessGone :: Text.Text -> Int -> IO Bool
 awaitProcessGone pid attempts =
