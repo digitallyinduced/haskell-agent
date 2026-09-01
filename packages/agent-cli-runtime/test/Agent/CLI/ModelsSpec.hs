@@ -4,7 +4,8 @@ module Agent.CLI.ModelsSpec (spec) where
 
 import Agent.CLI.Models
 import Agent.CLI.ModelConfig
-    ( ModelCatalog
+    ( CatalogModel(catalogModelDefaultReasoningEffort)
+    , ModelCatalog
     , catalogContextWindowFor
     , catalogModelById
     , decodeModelConfig
