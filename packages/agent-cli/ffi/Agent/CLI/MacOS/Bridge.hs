@@ -473,7 +473,7 @@ type AccountOAuthStartCallback =
     -> CString -> CSize -> CString -> CSize -> CInt -> CInt
     -> CString -> CSize -> IO ()
 
--- Dedicated read-only mailbox administration ABI. All strings are
+-- Dedicated mailbox account administration ABI. All strings are
 -- callback-scoped UTF-8 and no credential material is returned.
 type MailAccountListCallback =
     Ptr () -> CInt

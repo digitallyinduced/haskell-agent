@@ -249,6 +249,24 @@ spec = describe "tool presentation" do
             `shouldBe`
                 "Run this shell command?\n\nprintf '␛]0;owned␇'"
 
+    it "shows the bounded content and no-send guarantee for draft approval" do
+        permissionToolCallPrompt
+            (functionToolCall
+                "draft"
+                "email_create_draft"
+                "{\"account_id\":\"mail-1\",\
+                \\"to\":[\"person@example.com\"],\
+                \\"bcc\":[\"archive@example.com\"],\
+                \\"subject\":\"Quarterly update\",\
+                \\"body\":\"Hello,\\n\\nHere is the update.\"}")
+            `shouldBe`
+                "Save this email draft? It will not be sent.\n\n\
+                \Account: mail-1\n\
+                \To: person@example.com\n\
+                \Bcc: archive@example.com\n\
+                \Subject: Quarterly update\n\
+                \Body:\nHello,\n\nHere is the update."
+
     it "falls back to the safe prompt text for ask_secret detail" do
         toolDetail
             (functionToolCall

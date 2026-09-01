@@ -397,4 +397,5 @@ approvalLabel = \case
     AlwaysReadOnly -> "read-only"
     AlwaysAllowed -> "always-allowed"
     AlwaysPrompt -> "prompt"
+    AlwaysConfirm -> "confirm"
     ClassifyReadOnly _ -> "classified"

@@ -239,6 +239,7 @@ isStaticallyReadOnly = \case
     AlwaysReadOnly -> True
     AlwaysAllowed -> False
     AlwaysPrompt -> False
+    AlwaysConfirm -> False
     ClassifyReadOnly _ -> False
 
 requestedProtocolVersion :: Maybe Value -> Text

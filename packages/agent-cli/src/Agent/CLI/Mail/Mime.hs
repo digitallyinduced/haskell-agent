@@ -11,6 +11,7 @@ module Agent.CLI.Mail.Mime
     , mailMimeTextBodyTruncated
     , mailMimeAttachments
     , mailMimeAttachmentContent
+    , renderMailDraftMime
     ) where
 
 import Control.Applicative ((<|>))
@@ -20,8 +21,8 @@ import qualified Data.ByteString.Base64.URL as Base64URL
 import qualified Data.ByteString.Builder as ByteStringBuilder
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (chr, isHexDigit, ord, toLower)
-import Data.List (find)
+import Data.Char (chr, isControl, isHexDigit, ord, toLower)
+import Data.List (find, foldl')
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -29,6 +30,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.Encoding.Error as TextEncodingError
 import Text.HTML.TagSoup (innerText, parseTags)
 import Text.Read (readMaybe)
+import Agent.CLI.Mail.Tools (MailDraftContent(..))
 
 data ParsedMailMime = ParsedMailMime
     { parsedMailParts :: ![MimePart]
@@ -51,6 +53,70 @@ data ParsedMailAttachment = ParsedMailAttachment
     , parsedMailAttachmentBytes :: !BS.ByteString
     }
     deriving (Eq, Show)
+
+-- | Render a deliberately small, text/plain RFC 5322 message for draft-only
+-- mailbox APIs. Tool-layer validation has already restricted recipients to
+-- bare addresses and excluded header controls. Body bytes are base64 encoded
+-- so arbitrary Unicode and newlines cannot become headers.
+renderMailDraftMime
+    :: MailDraftContent
+    -> Maybe (Text, Maybe Text) -- ^ In-Reply-To and References
+    -> BS.ByteString
+renderMailDraftMime content replyHeaders =
+    BS.intercalate "\r\n" (headers <> ["", encodedBody, ""])
+  where
+    headers =
+        concat
+            [ addressHeader "To" content.mailDraftTo
+            , addressHeader "Cc" content.mailDraftCc
+            , addressHeader "Bcc" content.mailDraftBcc
+            , ["Subject: " <> encodedHeader content.mailDraftSubject]
+            , maybe [] renderReplyHeaders
+                (replyHeaders >>= safeReplyHeaders)
+            , [ "MIME-Version: 1.0"
+              , "Content-Type: text/plain; charset=UTF-8"
+              , "Content-Transfer-Encoding: base64"
+              ]
+            ]
+    addressHeader name values
+        | null values = []
+        | otherwise =
+            [TextEncoding.encodeUtf8 name <> ": "
+                <> TextEncoding.encodeUtf8 (Text.intercalate ", " values)]
+    encodedHeader value
+        | Text.all (\character -> character >= ' ' && character <= '~') value =
+            TextEncoding.encodeUtf8 value
+        | otherwise =
+            "=?UTF-8?B?"
+                <> Base64.encode (TextEncoding.encodeUtf8 value)
+                <> "?="
+    encodedBody =
+        BS.intercalate "\r\n" (chunks 76
+            (Base64.encode (TextEncoding.encodeUtf8 (normalizeLines content.mailDraftBody))))
+    renderReplyHeaders (inReplyTo, references) =
+        ["In-Reply-To: " <> TextEncoding.encodeUtf8 inReplyTo]
+            <> maybe [] (\value ->
+                ["References: " <> TextEncoding.encodeUtf8 value]) references
+    safeReplyHeaders (inReplyTo, references) = do
+        checkedInReplyTo <- safeHeaderValue inReplyTo
+        pure (checkedInReplyTo, references >>= safeHeaderValue)
+    safeHeaderValue value
+        | Text.null stripped = Nothing
+        | BS.length (TextEncoding.encodeUtf8 stripped)
+            > maximumReplyHeaderBytes = Nothing
+        | not (Text.all isSafeAscii stripped) = Nothing
+        | otherwise = Just stripped
+      where
+        stripped = Text.strip value
+        isSafeAscii character = character >= ' ' && character <= '~'
+    chunks width bytes
+        | BS.null bytes = [""]
+        | otherwise = let (before, after) = BS.splitAt width bytes
+            in before : chunks width after
+    normalizeLines =
+        Text.replace "\r\n" "\n" . Text.replace "\r" "\n"
+
+    maximumReplyHeaderBytes = 4096
 
 parseMailMime :: BS.ByteString -> Either Text ParsedMailMime
 parseMailMime raw

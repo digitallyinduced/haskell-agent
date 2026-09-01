@@ -2,15 +2,22 @@
 
 module Agent.CLI.MailTransportSpec (spec) where
 
-import Agent.CLI.Mail.Tools (MailAttachment(..), MailMessage(..))
+import Agent.CLI.Mail.Mime (renderMailDraftMime)
+import Agent.CLI.Mail.Tools
+    ( MailAttachment(..)
+    , MailDraftContent(..)
+    , MailMessage(..)
+    )
 import Agent.CLI.Mail.Transport
-    ( decodeImapMessageId
+    ( decodeImapDraftId
+    , decodeImapMessageId
     , decodeGmailAttachmentRef
     , mailProviderStatusError
     , parseGmailMessageValue
     )
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import Data.Text (isInfixOf)
 import Network.HTTP.Types (mkStatus)
@@ -29,6 +36,22 @@ spec = describe "mail transport references" do
             `shouldSatisfy` isLeft
         decodeImapMessageId "SU5CT1gAMQA0Mg"
             `shouldBe` Right ("INBOX", "1", "42")
+        decodeImapDraftId "imap-draft:SU5CT1gAMQA0Mg"
+            `shouldBe` Right ("INBOX", "1", "42")
+        decodeImapDraftId "SU5CT1gAMQA0Mg"
+            `shouldSatisfy` isLeft
+
+    it "renders draft MIME with encoded bodies and no injected header" do
+        let rendered = renderMailDraftMime MailDraftContent
+                { mailDraftTo = ["person@example.com"]
+                , mailDraftCc = []
+                , mailDraftBcc = []
+                , mailDraftSubject = "Hello"
+                , mailDraftBody = "draft\nbody"
+                }
+                Nothing
+        rendered `shouldSatisfy` ("Content-Transfer-Encoding: base64" `BS.isInfixOf`)
+        rendered `shouldSatisfy` ("ZHJhZnQKYm9keQ==" `BS.isInfixOf`)
 
     it "skips Gmail text attachments when selecting the message body" do
         let value = Aeson.object

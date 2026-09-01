@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Browser OAuth for connected, read-only Gmail and Microsoft accounts.
+-- | Browser OAuth for connected Gmail and Microsoft accounts.
 --
 -- The native host receives an authorization URL and opaque flow id only. PKCE
 -- verifiers, callback codes, and tokens remain in the Haskell runtime.  The
@@ -363,7 +363,11 @@ exchangeAndPersist provider clientId authorizationCode verifier redirectUri =
                                         , mailOAuthRefreshToken = Just refresh
                                         , mailOAuthExpiresAt = Just (addUTCTime
                                             (fromIntegral token.tokenExpiresIn) now)
-                                        , mailOAuthScopes = Text.words token.tokenScope
+                                        , mailOAuthScopes =
+                                            case Text.words token.tokenScope of
+                                                [] -> Text.words
+                                                    (oauthScopes provider)
+                                                scopes -> scopes
                                         }
                                 upsertMailAccount account secret >>= \case
                                     Left err -> pure (Left err)
@@ -459,7 +463,7 @@ resolveMailbox provider accessToken =
                     Left err -> pure (Left err)
                     Right value ->
                         pure $ maybe
-                            (Left "Gmail did not return a mailbox identity. Verify gmail.readonly was granted.")
+                            (Left "Gmail did not return a mailbox identity. Reconnect and grant the requested mail permissions.")
                             Right
                             (parseMaybe
                                 (Aeson.withObject "Gmail profile" \object ->
@@ -474,7 +478,7 @@ resolveMailbox provider accessToken =
                 _ <- mailboxProbe
                 value <- identity
                 maybe
-                    (Left "Microsoft did not return a mailbox identity. Verify Mail.Read was granted.")
+                    (Left "Microsoft did not return a mailbox identity. Reconnect and grant the requested mail permissions.")
                     Right
                     (parseMaybe
                         (Aeson.withObject "Microsoft profile" \object -> do
@@ -555,8 +559,10 @@ tokenEndpoint = \case
 
 oauthScopes :: MailProvider -> Text
 oauthScopes = \case
-    GmailProvider -> "openid email https://www.googleapis.com/auth/gmail.readonly"
-    MicrosoftProvider -> "openid profile offline_access User.Read Mail.Read"
+    GmailProvider ->
+        "openid email https://www.googleapis.com/auth/gmail.readonly "
+            <> "https://www.googleapis.com/auth/gmail.compose"
+    MicrosoftProvider -> "openid profile offline_access User.Read Mail.ReadWrite"
     ImapProvider -> ""
 
 -- Microsoft desktop-app registrations use the special localhost redirect,

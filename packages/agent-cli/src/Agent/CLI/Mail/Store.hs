@@ -1,4 +1,4 @@
--- | Private storage and typed account model for connected read-only mail.
+-- | Private storage and typed account model for connected mail.
 --
 -- Metadata is safe for the native settings UI and tool registration. OAuth
 -- tokens and IMAP passwords live only in an owner-only atomic snapshot and

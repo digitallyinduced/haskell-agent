@@ -14,6 +14,7 @@ module Agent.CLI.Approval
     , childApprove
     , planApproval
     , resolveApprovalPrompt
+    , resolveApprovalPromptWith
     , setApprovalPolicy
     , toggleAlwaysApprove
     ) where
@@ -25,11 +26,13 @@ import Agent.CLI.Approval.Decision
     , ApprovalPlan(..)
     , planApproval
     , resolveApprovalPrompt
+    , resolveApprovalPromptWith
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Permission
     ( PermissionChoice
     , promptPermission
+    , promptPermissionOnce
     )
 import Agent.CLI.Project (saveProjectAutoApprove)
 import Agent.CLI.Render (putTextLn)
@@ -54,6 +57,7 @@ import Agent.Tools.Types
     , lookupRegisteredTool
     , toolAcceptsCall
     , toolAllowsWithoutPrompt
+    , toolRequiresExplicitApproval
     )
 import Data.IORef
     ( IORef
@@ -115,7 +119,12 @@ approveToolDecisionClassified classifyReadOnly
         classifyReadOnly
         (\requested -> do
             color <- resolveColor stderr
-            promptPermission color (toText cwd) requested)
+            let requiresExplicit =
+                    maybe False toolRequiresExplicitApproval
+                        (lookupRegisteredTool requested.name tools)
+            if requiresExplicit
+                then promptPermissionOnce color (toText cwd) requested
+                else promptPermission color (toText cwd) requested)
         (\case
             ApprovalWarning message -> do
                 color <- resolveColor stderr
@@ -213,6 +222,9 @@ approveToolDecisionWithReporterAndPersistenceClassified
                     , planPath
                     , readOnly = Nothing
                     , allowedForSession = Nothing
+                    , requiresExplicitApproval =
+                        maybe False toolRequiresExplicitApproval
+                            (lookupRegisteredTool call.name tools)
                     , call
                     }
             interpret initialFacts (planApproval initialFacts)
@@ -222,11 +234,14 @@ approveToolDecisionWithReporterAndPersistenceClassified
             mapM_ runAction actions
             pure result
         NeedReadOnlyClassification -> do
-            readOnly <- classifyReadOnly call >>= \case
-                Just value -> pure value
-                Nothing -> case lookupRegisteredTool call.name tools of
-                    Nothing -> pure False
-                    Just tool -> toolAllowsWithoutPrompt tool call
+            readOnly <-
+                if facts.requiresExplicitApproval
+                    then pure False
+                    else classifyReadOnly call >>= \case
+                        Just value -> pure value
+                        Nothing -> case lookupRegisteredTool call.name tools of
+                            Nothing -> pure False
+                            Just tool -> toolAllowsWithoutPrompt tool call
             let nextFacts = facts { readOnly = Just readOnly }
             interpret nextFacts (planApproval nextFacts)
         NeedSessionAllowance -> do
@@ -239,7 +254,9 @@ approveToolDecisionWithReporterAndPersistenceClassified
             interpret nextFacts (planApproval nextFacts)
         NeedPermissionPrompt -> do
             choice <- requestPermission call
-            interpret facts (resolveApprovalPrompt call choice)
+            interpret facts
+                (resolveApprovalPromptWith
+                    facts.requiresExplicitApproval call choice)
 
     runAction = \case
         SetApprovalPolicy next ->
@@ -284,6 +301,11 @@ childApprove _ _ call
     | isComputerToolCallKind call.callKind =
         pure $ Left
             "Computer use requires an explicit parent approval for every call."
+childApprove _ tools call
+    | Just tool <- lookupRegisteredTool call.name tools
+    , toolRequiresExplicitApproval tool =
+        pure $ Left
+            "This sensitive tool requires an explicit parent approval for every call."
 childApprove policy tools call = case policy of
     ApproveAll -> pure (Right True)
     DenyMutating -> do

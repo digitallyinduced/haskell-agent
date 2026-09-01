@@ -11,6 +11,7 @@ import Agent.CLI.Approval
     , childApprove
     , planApproval
     , resolveApprovalPrompt
+    , resolveApprovalPromptWith
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.ComputerUse (computerUseTool)
@@ -184,6 +185,20 @@ spec = do
             planApproval (facts PromptMutating)
                 `shouldBe` CompleteApproval (Right True) []
 
+        it "requires fresh confirmation despite yolo or remembered approval" do
+            let facts policy = (approvalFacts mutatingCall)
+                    { policy
+                    , readOnly = Just False
+                    , allowedForSession = Just True
+                    , requiresExplicitApproval = True
+                    }
+            planApproval (facts ApproveAll)
+                `shouldBe` NeedPermissionPrompt
+            planApproval (facts PromptMutating)
+                `shouldBe` NeedPermissionPrompt
+            planApproval (facts DenyMutating)
+                `shouldBe` CompleteApproval (Right False) []
+
     describe "resolveApprovalPrompt" do
         it "maps cancellation and explicit denial to an in-band denial" do
             resolveApprovalPrompt mutatingCall Nothing
@@ -219,6 +234,14 @@ spec = do
                         (ApprovalSuccess
                             "✓ always allow run_terminal_command this session")
                     ]
+
+        it "never persists broader approval for an explicit-confirmation call" do
+            resolveApprovalPromptWith True mutatingCall
+                (Just PermissionAllowAll)
+                `shouldBe` CompleteApproval (Right True) []
+            resolveApprovalPromptWith True mutatingCall
+                (Just PermissionAllowTool)
+                `shouldBe` CompleteApproval (Right True) []
 
     describe "approveFilesystemRootAccess" do
         it "bypasses the prompt whenever the live policy is yolo" do
@@ -274,6 +297,27 @@ spec = do
                     "Blocked dangerous shell command"
                         `Text.isInfixOf` message
                 _ -> False
+
+        it "prompts for every explicit-confirmation call under ApproveAll" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef (Set.singleton "sensitive")
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowAll)
+                sensitiveTool = tool "sensitive" AlwaysConfirm
+                sensitiveCall =
+                    functionToolCall "call-sensitive" "sensitive" "{}"
+                approve = approveToolDecisionWithReporter
+                    request (\_ -> pure ()) policy allowed
+                    (registry [sensitiveTool]) plan sensitiveCall
+            approve `shouldReturn` Right True
+            approve `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 2
+            readIORef policy `shouldReturn` ApproveAll
+            readIORef allowed `shouldReturn` Set.singleton "sensitive"
 
         it "reports plan-mode denials without requiring terminal output" do
             policy <- newIORef ApproveAll
@@ -555,6 +599,16 @@ spec = do
             readIORef policy `shouldReturn` ApproveAll
             readIORef allowed `shouldReturn` Set.empty
 
+        it "never lets a child bypass explicit confirmation under ApproveAll" do
+            let sensitiveTool = tool "sensitive" AlwaysConfirm
+                sensitiveCall =
+                    functionToolCall "call-sensitive" "sensitive" "{}"
+            childApprove ApproveAll
+                (registry [sensitiveTool]) sensitiveCall
+                `shouldReturn`
+                    Left
+                        "This sensitive tool requires an explicit parent approval for every call."
+
         it "does not cache allow-tool for computer calls" do
             policy <- newIORef PromptMutating
             allowed <- newIORef Set.empty
@@ -702,5 +756,6 @@ approvalFacts call = ApprovalFacts
     , planPath = unsafeEncodeUtf "/tmp/approval-test/plan.md"
     , readOnly = Nothing
     , allowedForSession = Nothing
+    , requiresExplicitApproval = False
     , call
     }

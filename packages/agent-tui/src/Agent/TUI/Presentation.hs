@@ -94,6 +94,18 @@ permissionToolCallPromptRelative workspace call =
             "Archive learned skill " <> skillIdentity call.arguments <> "?"
         "skill_rollback" ->
             "Restore learned skill " <> skillIdentity call.arguments <> "?"
+        "email_create_draft" ->
+            detailedPrompt
+                "Save this email draft? It will not be sent."
+                (mailDraftApprovalPreview call.arguments)
+        "email_update_draft" ->
+            detailedPrompt
+                "Update this email draft? It will not be sent."
+                (mailDraftApprovalPreview call.arguments)
+        "email_reply_draft" ->
+            detailedPrompt
+                "Save this reply draft? It will not be sent."
+                (mailDraftApprovalPreview call.arguments)
         _ -> "Allow " <> summarizeToolCallRelative workspace call <> "?"
   where
     detailedPrompt question input
@@ -827,6 +839,52 @@ nonEmptyJsonText :: Text -> Text -> Maybe Text
 nonEmptyJsonText key input = jsonTextField key input >>= \value ->
     let stripped = Text.strip value
     in if Text.null stripped then Nothing else Just stripped
+
+mailDraftApprovalPreview :: Text -> Text
+mailDraftApprovalPreview arguments =
+    fromMaybe "Draft details could not be decoded." $
+        render <$> decodeMaybe draftPreviewDecoder arguments
+  where
+    draftPreviewDecoder =
+        Hermes.object $
+            (,,,,,,,)
+                <$> Hermes.atKeyOptional "account_id" Hermes.text
+                <*> Hermes.atKeyOptional "draft_id" Hermes.text
+                <*> Hermes.atKeyOptional "message_id" Hermes.text
+                <*> Hermes.defaultKey [] "to" (Hermes.list Hermes.text)
+                <*> Hermes.defaultKey [] "cc" (Hermes.list Hermes.text)
+                <*> Hermes.defaultKey [] "bcc" (Hermes.list Hermes.text)
+                <*> Hermes.atKeyOptional "subject" Hermes.text
+                <*> Hermes.defaultKey "" "body" Hermes.text
+    render (accountId, draftId, messageId, to, cc, bcc, subject, body) =
+        Text.intercalate "\n" . filter (not . Text.null) $
+            [ maybe "" ("Account: " <>) accountId
+            , maybe "" ("Draft: " <>) draftId
+            , maybe "" ("Reply to message: " <>) messageId
+            , recipientLine "To" to
+            , recipientLine "Cc" cc
+            , recipientLine "Bcc" bcc
+            , maybe "" ("Subject: " <>) (fmap boundedLine subject)
+            , "Body:\n" <> boundedBody body
+            ]
+    recipientLine _ [] = ""
+    recipientLine label recipients =
+        label <> ": " <> Text.intercalate ", " (map boundedLine shown)
+            <> if length recipients > maximumApprovalRecipients
+                then ", …"
+                else ""
+      where
+        shown = take maximumApprovalRecipients recipients
+    boundedLine = Text.take maximumApprovalLineCharacters . firstLine
+    boundedBody body =
+        let preview = Text.take maximumApprovalBodyCharacters body
+        in preview
+            <> if Text.length body > maximumApprovalBodyCharacters
+                then "\n…"
+                else ""
+    maximumApprovalRecipients = 10
+    maximumApprovalLineCharacters = 320
+    maximumApprovalBodyCharacters = 2000
 
 jsonIntField :: Text -> Text -> Maybe Text
 jsonIntField key input =

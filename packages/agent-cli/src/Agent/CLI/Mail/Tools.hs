@@ -1,4 +1,4 @@
--- | Provider-neutral, read-only tools for connected email accounts.
+-- | Provider-neutral tools for connected email accounts.
 --
 -- This module deliberately owns only the model-facing contract.  OAuth,
 -- credentials, provider APIs, and IMAP wire handling live behind
@@ -16,12 +16,18 @@ module Agent.CLI.Mail.Tools
     , MailAttachment(..)
     , MailAttachmentRequest(..)
     , MailAttachmentContent(..)
+    , MailDraftContent(..)
+    , MailCreateDraftRequest(..)
+    , MailUpdateDraftRequest(..)
+    , MailReplyDraftRequest(..)
+    , MailDraft(..)
     , MailToolsEnv(..)
     , MailTransport(..)
     , mailTools
     , mailToolsForStore
     , mailToolsForConnectedAccounts
     , validateMailSearchRequest
+    , validateMailDraftContent
     , validateOpaqueMailReference
     ) where
 
@@ -32,8 +38,10 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (noArgsTool, typedTool)
 import Agent.Tools.Types
     ( AppTool
+    , ApprovalRule(..)
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
     , jsonTool
     )
 import Control.Exception.Safe (onException, tryAny)
@@ -68,6 +76,7 @@ data MailToolLimits = MailToolLimits
     , mailMaximumMailboxes :: !Int
     , mailMaximumBodyBytes :: !Int
     , mailMaximumAttachmentBytes :: !Int
+    , mailMaximumDraftBodyBytes :: !Int
     , mailMaximumResultBytes :: !Int
     } deriving (Eq, Show)
 
@@ -78,6 +87,7 @@ defaultMailToolLimits = MailToolLimits
     , mailMaximumMailboxes = 200
     , mailMaximumBodyBytes = 48 * 1024
     , mailMaximumAttachmentBytes = 20 * 1024 * 1024
+    , mailMaximumDraftBodyBytes = 128 * 1024
     , mailMaximumResultBytes = 96 * 1024
     }
 
@@ -214,6 +224,54 @@ data MailAttachmentContent = MailAttachmentContent
     , mailDownloadedAttachmentBytes :: !BS.ByteString
     } deriving (Eq, Show)
 
+-- | Complete replacement content for one provider-side draft. Recipient
+-- addresses are bare addr-spec values rather than arbitrary RFC 5322 header
+-- text, which keeps MIME construction free of header injection.
+data MailDraftContent = MailDraftContent
+    { mailDraftTo :: ![Text]
+    , mailDraftCc :: ![Text]
+    , mailDraftBcc :: ![Text]
+    , mailDraftSubject :: !Text
+    , mailDraftBody :: !Text
+    } deriving (Eq, Show)
+
+data MailCreateDraftRequest = MailCreateDraftRequest
+    { mailCreateDraftAccountId :: !Text
+    , mailCreateDraftContent :: !MailDraftContent
+    } deriving (Eq, Show)
+
+data MailUpdateDraftRequest = MailUpdateDraftRequest
+    { mailUpdateDraftAccountId :: !Text
+    , mailUpdateDraftId :: !Text
+    , mailUpdateDraftContent :: !MailDraftContent
+    } deriving (Eq, Show)
+
+data MailReplyDraftRequest = MailReplyDraftRequest
+    { mailReplyDraftAccountId :: !Text
+    , mailReplyDraftMessageId :: !Text
+    , mailReplyDraftTo :: ![Text]
+    , mailReplyDraftCc :: ![Text]
+    , mailReplyDraftBcc :: ![Text]
+    , mailReplyDraftBody :: !Text
+    } deriving (Eq, Show)
+
+data MailDraft = MailDraft
+    { mailDraftId :: !Text
+    , mailDraftMessageId :: !(Maybe Text)
+    , mailDraftThreadId :: !(Maybe Text)
+    , mailDraftWarning :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+instance ToJSON MailDraft where
+    toJSON draft = object
+        [ "draft_id" .= boundedOpaque draft.mailDraftId
+        , "message_id" .= fmap boundedOpaque draft.mailDraftMessageId
+        , "thread_id" .= fmap boundedOpaque draft.mailDraftThreadId
+        , "warning" .= fmap boundedShortText draft.mailDraftWarning
+        , "saved" .= True
+        , "sent" .= False
+        ]
+
 -- | The only integration point required by the model-facing tool layer.
 --
 -- Callbacks must return sanitized, non-secret error text.  They must use
@@ -232,6 +290,12 @@ data MailToolsEnv = MailToolsEnv
         :: !(MailGetRequest -> Int -> IO (Either Text MailMessage))
     , mailToolsDownloadAttachment
         :: !(MailAttachmentRequest -> Int -> IO (Either Text MailAttachmentContent))
+    , mailToolsCreateDraft
+        :: !(MailCreateDraftRequest -> IO (Either Text MailDraft))
+    , mailToolsUpdateDraft
+        :: !(MailUpdateDraftRequest -> IO (Either Text MailDraft))
+    , mailToolsReplyDraft
+        :: !(MailReplyDraftRequest -> IO (Either Text MailDraft))
     }
 
 -- | Provider transport behind the store-aware tool factory.  It receives a
@@ -250,9 +314,18 @@ data MailTransport = MailTransport
     , mailTransportDownloadAttachment
         :: !(Store.MailCredential -> MailAttachmentRequest -> Int
             -> IO (Either Text MailAttachmentContent))
+    , mailTransportCreateDraft
+        :: !(Store.MailCredential -> MailCreateDraftRequest
+            -> IO (Either Text MailDraft))
+    , mailTransportUpdateDraft
+        :: !(Store.MailCredential -> MailUpdateDraftRequest
+            -> IO (Either Text MailDraft))
+    , mailTransportReplyDraft
+        :: !(Store.MailCredential -> MailReplyDraftRequest
+            -> IO (Either Text MailDraft))
     }
 
--- | Construct the first-party read-only tools from the canonical mail store.
+-- | Construct the first-party mail tools from the canonical mail store.
 -- Registration takes a snapshot, while every invocation rechecks the account
 -- in the store through 'withStoredCredential'.  Thus disabling or deleting an
 -- account immediately revokes its tool access even in a live conversation.
@@ -274,6 +347,15 @@ mailToolsForStore toolEnv transport =
         , mailToolsDownloadAttachment = \request maximum ->
             withStoredCredential request.mailAttachmentAccountId \credential ->
                 transport.mailTransportDownloadAttachment credential request maximum
+        , mailToolsCreateDraft = \request ->
+            withStoredDraftCredential request.mailCreateDraftAccountId \credential ->
+                transport.mailTransportCreateDraft credential request
+        , mailToolsUpdateDraft = \request ->
+            withStoredDraftCredential request.mailUpdateDraftAccountId \credential ->
+                transport.mailTransportUpdateDraft credential request
+        , mailToolsReplyDraft = \request ->
+            withStoredDraftCredential request.mailReplyDraftAccountId \credential ->
+                transport.mailTransportReplyDraft credential request
         }
 
 listStoredAccounts :: IO (Either Text [MailAccountSummary])
@@ -314,6 +396,48 @@ withStoredCredential rawAccountId action =
                     "That email account is unavailable, disabled, or unverified.")
                 else action credential
 
+-- OAuth accounts connected before draft support was added retain their
+-- read-only grants. Fail before making a provider request and ask the user to
+-- reconnect instead of probing write access with a temporary draft.
+withStoredDraftCredential
+    :: Text
+    -> (Store.MailCredential -> IO (Either Text value))
+    -> IO (Either Text value)
+withStoredDraftCredential accountId action =
+    withStoredCredential accountId \credential ->
+        if credentialCanSaveDrafts credential
+            then action credential
+            else do
+                _ <- Store.setMailAccountStateIfUnchanged
+                    credential.mailCredentialAccount
+                    Store.MailNeedsReauthorization
+                    (Just "provider_auth_failed")
+                pure (Left
+                    "This email account must be reconnected before it can save drafts.")
+
+credentialCanSaveDrafts :: Store.MailCredential -> Bool
+credentialCanSaveDrafts credential =
+    case
+        ( credential.mailCredentialAccount.mailAccountProvider
+        , credential.mailCredentialSecret
+        )
+    of
+        (Store.ImapProvider, Store.MailImapSecret {}) -> True
+        (Store.GmailProvider, secret@Store.MailOAuthSecret {}) ->
+            hasOAuthScope
+                "https://www.googleapis.com/auth/gmail.compose"
+                secret.mailOAuthScopes
+        (Store.MicrosoftProvider, secret@Store.MailOAuthSecret {}) ->
+            any
+                (`hasOAuthScope` secret.mailOAuthScopes)
+                [ "Mail.ReadWrite"
+                , "https://graph.microsoft.com/Mail.ReadWrite"
+                ]
+        _ -> False
+  where
+    hasOAuthScope expected =
+        any ((== Text.toCaseFold expected) . Text.toCaseFold)
+
 -- | Register email tools only when at least one connected account is both
 -- enabled and verified.  This prevents an unconfigured email surface from
 -- being advertised to a model.  A store failure is intentionally treated like
@@ -334,6 +458,9 @@ mailToolsForConnectedAccounts env accounts
         , searchTool env
         , getTool env
         , downloadAttachmentTool env
+        , createDraftTool env
+        , updateDraftTool env
+        , replyDraftTool env
         ]
     | otherwise = []
   where
@@ -399,10 +526,70 @@ downloadArgsDecoder = Hermes.object $
         <*> Hermes.atKey "message_id" Hermes.text
         <*> Hermes.atKey "attachment_id" Hermes.text
 
+data DraftContentArgs = DraftContentArgs
+    { draftContentArgsTo :: ![Text]
+    , draftContentArgsCc :: ![Text]
+    , draftContentArgsBcc :: ![Text]
+    , draftContentArgsSubject :: !Text
+    , draftContentArgsBody :: !Text
+    }
+
+draftContentArgsFields :: Hermes.FieldsDecoder DraftContentArgs
+draftContentArgsFields =
+    DraftContentArgs
+        <$> Hermes.defaultKey [] "to" (Hermes.list Hermes.text)
+        <*> Hermes.defaultKey [] "cc" (Hermes.list Hermes.text)
+        <*> Hermes.defaultKey [] "bcc" (Hermes.list Hermes.text)
+        <*> Hermes.defaultKey "" "subject" Hermes.text
+        <*> Hermes.defaultKey "" "body" Hermes.text
+
+data CreateDraftArgs = CreateDraftArgs
+    { createDraftArgsAccountId :: !Text
+    , createDraftArgsContent :: !DraftContentArgs
+    }
+
+createDraftArgsDecoder :: Hermes.Decoder CreateDraftArgs
+createDraftArgsDecoder = Hermes.object $
+    CreateDraftArgs
+        <$> Hermes.atKey "account_id" Hermes.text
+        <*> draftContentArgsFields
+
+data UpdateDraftArgs = UpdateDraftArgs
+    { updateDraftArgsAccountId :: !Text
+    , updateDraftArgsDraftId :: !Text
+    , updateDraftArgsContent :: !DraftContentArgs
+    }
+
+updateDraftArgsDecoder :: Hermes.Decoder UpdateDraftArgs
+updateDraftArgsDecoder = Hermes.object $
+    UpdateDraftArgs
+        <$> Hermes.atKey "account_id" Hermes.text
+        <*> Hermes.atKey "draft_id" Hermes.text
+        <*> draftContentArgsFields
+
+data ReplyDraftArgs = ReplyDraftArgs
+    { replyDraftArgsAccountId :: !Text
+    , replyDraftArgsMessageId :: !Text
+    , replyDraftArgsTo :: ![Text]
+    , replyDraftArgsCc :: ![Text]
+    , replyDraftArgsBcc :: ![Text]
+    , replyDraftArgsBody :: !Text
+    }
+
+replyDraftArgsDecoder :: Hermes.Decoder ReplyDraftArgs
+replyDraftArgsDecoder = Hermes.object $
+    ReplyDraftArgs
+        <$> Hermes.atKey "account_id" Hermes.text
+        <*> Hermes.atKey "message_id" Hermes.text
+        <*> Hermes.atKey "to" (Hermes.list Hermes.text)
+        <*> Hermes.defaultKey [] "cc" (Hermes.list Hermes.text)
+        <*> Hermes.defaultKey [] "bcc" (Hermes.list Hermes.text)
+        <*> Hermes.defaultKey "" "body" Hermes.text
+
 listAccountsTool :: MailToolsEnv -> AppTool
 listAccountsTool env = jsonTool
     "email_list_accounts"
-    ( "List connected read-only email accounts. Account identifiers are opaque "
+    ( "List connected email accounts. Account identifiers are opaque "
         <> "references returned by this tool; do not invent or infer them. "
         <> untrustedEmailWarning
     )
@@ -583,6 +770,111 @@ downloadAttachmentTool env = jsonTool
                                                 ]
     )
 
+-- Draft tools deliberately remain mutation tools even though this runtime
+-- exposes no send operation. 'AlwaysConfirm' requires a fresh confirmation
+-- for every mailbox write, independent of the tool name.
+createDraftTool :: MailToolsEnv -> AppTool
+createDraftTool env = jsonAppToolWithExecution
+    "email_create_draft"
+    ( "Save a new email draft in a connected mailbox. This never sends email, "
+        <> "but it writes to the user's mailbox and always requires explicit "
+        <> "approval. Recipient addresses must be bare email addresses. "
+        <> untrustedEmailWarning
+    )
+    draftContentProperties
+    AlwaysConfirm
+    TurnSequential
+    (typedTool "email_create_draft" createDraftArgsDecoder \args ->
+        case createDraftRequest env.mailToolsLimits args of
+            Left err -> pure (Left err)
+            Right request -> do
+                ensureConnectedAccount env request.mailCreateDraftAccountId >>= \case
+                    Left err -> pure (Left err)
+                    Right () ->
+                        runMailRequest env (env.mailToolsCreateDraft request) >>= \case
+                            Left err -> pure (Left err)
+                            Right draft -> renderMailResult env (Aeson.toJSON draft)
+    )
+
+updateDraftTool :: MailToolsEnv -> AppTool
+updateDraftTool env = jsonAppToolWithExecution
+    "email_update_draft"
+    ( "Replace the recipients, subject, and body of an existing email draft. "
+        <> "This never sends email, but it writes to the user's mailbox and "
+        <> "always requires explicit approval. Use only a draft_id returned by "
+        <> "an email draft tool. "
+        <> untrustedEmailWarning
+    )
+    ( PropertySchema "draft_id" PropertyString True
+        (Just "Opaque draft_id returned by email_create_draft or email_reply_draft.")
+        : draftContentProperties
+    )
+    AlwaysConfirm
+    TurnSequential
+    (typedTool "email_update_draft" updateDraftArgsDecoder \args ->
+        case updateDraftRequest env.mailToolsLimits args of
+            Left err -> pure (Left err)
+            Right request -> do
+                ensureConnectedAccount env request.mailUpdateDraftAccountId >>= \case
+                    Left err -> pure (Left err)
+                    Right () ->
+                        runMailRequest env (env.mailToolsUpdateDraft request) >>= \case
+                            Left err -> pure (Left err)
+                            Right draft -> renderMailResult env (Aeson.toJSON draft)
+    )
+
+replyDraftTool :: MailToolsEnv -> AppTool
+replyDraftTool env = jsonAppToolWithExecution
+    "email_reply_draft"
+    ( "Save a reply draft for a source email message. This never sends email, "
+        <> "but it writes to the user's mailbox and always requires explicit "
+        <> "approval. Supply bare recipient addresses and use only a message_id "
+        <> "returned by email_search. "
+        <> untrustedEmailWarning
+    )
+    [ PropertySchema "account_id" PropertyString True $ Just
+        "Opaque account_id returned by email_list_accounts."
+    , PropertySchema "message_id" PropertyString True $ Just
+        "Opaque source message_id returned by email_search."
+    , PropertySchema "to" (PropertyArray PropertyString) True $ Just
+        "Recipient addresses as bare addr-spec values."
+    , PropertySchema "cc" (PropertyArray PropertyString) False $ Just
+        "Optional Cc recipient addresses as bare addr-spec values."
+    , PropertySchema "bcc" (PropertyArray PropertyString) False $ Just
+        "Optional Bcc recipient addresses as bare addr-spec values."
+    , PropertySchema "body" PropertyString False $ Just
+        "Plain-text draft body, up to 128 KiB."
+    ]
+    AlwaysConfirm
+    TurnSequential
+    (typedTool "email_reply_draft" replyDraftArgsDecoder \args ->
+        case replyDraftRequest env.mailToolsLimits args of
+            Left err -> pure (Left err)
+            Right request -> do
+                ensureConnectedAccount env request.mailReplyDraftAccountId >>= \case
+                    Left err -> pure (Left err)
+                    Right () ->
+                        runMailRequest env (env.mailToolsReplyDraft request) >>= \case
+                            Left err -> pure (Left err)
+                            Right draft -> renderMailResult env (Aeson.toJSON draft)
+    )
+
+draftContentProperties :: [PropertySchema]
+draftContentProperties =
+    [ PropertySchema "account_id" PropertyString True $ Just
+        "Opaque account_id returned by email_list_accounts."
+    , PropertySchema "to" (PropertyArray PropertyString) False $ Just
+        "Optional To recipient addresses, as bare addr-spec values."
+    , PropertySchema "cc" (PropertyArray PropertyString) False $ Just
+        "Optional Cc recipient addresses, as bare addr-spec values."
+    , PropertySchema "bcc" (PropertyArray PropertyString) False $ Just
+        "Optional Bcc recipient addresses, as bare addr-spec values."
+    , PropertySchema "subject" PropertyString False $ Just
+        "Optional subject, up to 700 UTF-8 bytes and without line breaks."
+    , PropertySchema "body" PropertyString False $ Just
+        "Optional plain-text body, up to 128 KiB."
+    ]
+
 searchRequest :: SearchArgs -> MailSearchRequest
 searchRequest args = MailSearchRequest
     { mailSearchAccountId = args.searchArgsAccountId
@@ -596,6 +888,111 @@ searchRequest args = MailSearchRequest
     , mailSearchHasAttachments = args.searchArgsHasAttachments
     , mailSearchLimit = args.searchArgsLimit
     }
+
+createDraftRequest
+    :: MailToolLimits
+    -> CreateDraftArgs
+    -> Either Text MailCreateDraftRequest
+createDraftRequest limits args =
+    MailCreateDraftRequest
+        <$> validateOpaqueMailReference "account_id" args.createDraftArgsAccountId
+        <*> validateMailDraftContent limits
+            (draftContent args.createDraftArgsContent)
+
+updateDraftRequest
+    :: MailToolLimits
+    -> UpdateDraftArgs
+    -> Either Text MailUpdateDraftRequest
+updateDraftRequest limits args =
+    MailUpdateDraftRequest
+        <$> validateOpaqueMailReference "account_id" args.updateDraftArgsAccountId
+        <*> validateOpaqueMailReference "draft_id" args.updateDraftArgsDraftId
+        <*> validateMailDraftContent limits
+            (draftContent args.updateDraftArgsContent)
+
+replyDraftRequest
+    :: MailToolLimits
+    -> ReplyDraftArgs
+    -> Either Text MailReplyDraftRequest
+replyDraftRequest limits args = do
+    accountId <- validateOpaqueMailReference "account_id" args.replyDraftArgsAccountId
+    messageId <- validateOpaqueMailReference "message_id" args.replyDraftArgsMessageId
+    content <- validateMailDraftContent limits MailDraftContent
+        { mailDraftTo = args.replyDraftArgsTo
+        , mailDraftCc = args.replyDraftArgsCc
+        , mailDraftBcc = args.replyDraftArgsBcc
+        , mailDraftSubject = ""
+        , mailDraftBody = args.replyDraftArgsBody
+        }
+    pure MailReplyDraftRequest
+        { mailReplyDraftAccountId = accountId
+        , mailReplyDraftMessageId = messageId
+        , mailReplyDraftTo = content.mailDraftTo
+        , mailReplyDraftCc = content.mailDraftCc
+        , mailReplyDraftBcc = content.mailDraftBcc
+        , mailReplyDraftBody = content.mailDraftBody
+        }
+
+draftContent :: DraftContentArgs -> MailDraftContent
+draftContent args = MailDraftContent
+    { mailDraftTo = args.draftContentArgsTo
+    , mailDraftCc = args.draftContentArgsCc
+    , mailDraftBcc = args.draftContentArgsBcc
+    , mailDraftSubject = args.draftContentArgsSubject
+    , mailDraftBody = args.draftContentArgsBody
+    }
+
+validateMailDraftContent
+    :: MailToolLimits
+    -> MailDraftContent
+    -> Either Text MailDraftContent
+validateMailDraftContent limits content = do
+    to <- traverse (validateDraftRecipient "to") content.mailDraftTo
+    cc <- traverse (validateDraftRecipient "cc") content.mailDraftCc
+    bcc <- traverse (validateDraftRecipient "bcc") content.mailDraftBcc
+    if length to + length cc + length bcc > maximumDraftRecipients
+        then Left "a draft may contain at most 100 recipients"
+        else pure ()
+    subject <- validateDraftSubject content.mailDraftSubject
+    body <- validateDraftBody limits content.mailDraftBody
+    pure MailDraftContent
+        { mailDraftTo = to
+        , mailDraftCc = cc
+        , mailDraftBcc = bcc
+        , mailDraftSubject = subject
+        , mailDraftBody = body
+        }
+
+validateDraftRecipient :: Text -> Text -> Either Text Text
+validateDraftRecipient field raw
+    | Text.null value = Left (field <> " must not contain an empty recipient")
+    | utf8Length value > maximumDraftRecipientBytes =
+        Left (field <> " recipient is too long")
+    | Text.any isControl value =
+        Left (field <> " recipient contains control characters")
+    | otherwise =
+        case Store.normalizeMailEmail value of
+            Left _ -> Left (field <> " recipients must be bare email addresses")
+            Right _ -> Right value
+  where
+    value = Text.strip raw
+
+validateDraftSubject :: Text -> Either Text Text
+validateDraftSubject value
+    | utf8Length value > maximumDraftSubjectBytes = Left "subject is too long"
+    | Text.any isControl value = Left "subject contains control characters"
+    | otherwise = Right value
+
+validateDraftBody :: MailToolLimits -> Text -> Either Text Text
+validateDraftBody limits value
+    | utf8Length value > limits.mailMaximumDraftBodyBytes =
+        Left "body is too long"
+    | Text.any invalid value = Left "body contains invalid control characters"
+    | otherwise = Right value
+  where
+    invalid character =
+        isControl character && character /= '\r' && character /= '\n'
+            && character /= '\t'
 
 validateMailSearchRequest
     :: MailToolLimits
@@ -882,6 +1279,16 @@ maximumAccountResults = 100
 
 maximumSearchTextBytes :: Int
 maximumSearchTextBytes = 500
+
+maximumDraftRecipients :: Int
+maximumDraftRecipients = 100
+
+maximumDraftRecipientBytes :: Int
+maximumDraftRecipientBytes = 320
+
+maximumDraftSubjectBytes :: Int
+-- Leave room for RFC 2047 base64 encoded-word expansion plus the header name.
+maximumDraftSubjectBytes = 700
 
 maximumShortTextBytes :: Int
 maximumShortTextBytes = 2048

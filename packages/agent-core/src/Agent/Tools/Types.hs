@@ -32,6 +32,7 @@ module Agent.Tools.Types
     , jsonToolParameters
     , appToolHandlers
     , toolAllowsWithoutPrompt
+    , toolRequiresExplicitApproval
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
@@ -90,6 +91,10 @@ data ApprovalRule
     -- mutation prompt (for example a paid provider capability).
     | AlwaysAllowed
     | AlwaysPrompt
+    -- | Sensitive mutation that requires a fresh parent-user confirmation for
+    -- every call. Global auto-approval and remembered per-tool approval do not
+    -- bypass this rule.
+    | AlwaysConfirm
     | ClassifyReadOnly !(ToolCall -> IO Bool)
 
 -- | Whether a tool handler may overlap other handlers emitted in the same
@@ -462,4 +467,13 @@ toolAllowsWithoutPrompt tool call = case tool.appToolApproval of
     AlwaysReadOnly -> pure True
     AlwaysAllowed -> pure True
     AlwaysPrompt -> pure False
+    AlwaysConfirm -> pure False
     ClassifyReadOnly classify -> classify call
+
+-- | Whether every invocation must be confirmed by the parent user. This is
+-- deliberately separate from read-only classification so provider-native
+-- metadata cannot accidentally downgrade a sensitive mutation.
+toolRequiresExplicitApproval :: AppTool -> Bool
+toolRequiresExplicitApproval tool = case tool.appToolApproval of
+    AlwaysConfirm -> True
+    _ -> False

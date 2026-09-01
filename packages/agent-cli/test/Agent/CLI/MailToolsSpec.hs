@@ -31,6 +31,9 @@ spec = describe "mail tools" do
                     pure (Left "not exercised")
                 , mailToolsDownloadAttachment = \_ _ ->
                     pure (Left "not exercised")
+                , mailToolsCreateDraft = \_ -> pure (Left "not exercised")
+                , mailToolsUpdateDraft = \_ -> pure (Left "not exercised")
+                , mailToolsReplyDraft = \_ -> pure (Left "not exercised")
                 }
             connected = MailAccountSummary
                 { mailAccountId = "mail-1"
@@ -49,10 +52,15 @@ spec = describe "mail tools" do
             , "email_search"
             , "email_get"
             , "email_download_attachment"
+            , "email_create_draft"
+            , "email_update_draft"
+            , "email_reply_draft"
             ]
-        all (isAlwaysReadOnly . (.appToolApproval)) (init tools)
+        all (isAlwaysReadOnly . (.appToolApproval)) (take 4 tools)
             `shouldBe` True
-        isAlwaysPrompt (last tools).appToolApproval `shouldBe` True
+        isAlwaysPrompt (tools !! 4).appToolApproval `shouldBe` True
+        all (isAlwaysConfirm . (.appToolApproval)) (drop 5 tools)
+            `shouldBe` True
 
     it "rejects invalid date ranges and oversized references" do
         let request = MailSearchRequest
@@ -94,6 +102,9 @@ spec = describe "mail tools" do
                 , mailToolsGetMessage = \_ _ -> pure (Left "not exercised")
                 , mailToolsDownloadAttachment = \_ _ ->
                     pure (Left "not exercised")
+                , mailToolsCreateDraft = \_ -> pure (Left "not exercised")
+                , mailToolsUpdateDraft = \_ -> pure (Left "not exercised")
+                , mailToolsReplyDraft = \_ -> pure (Left "not exercised")
                 }
         tools <- mailTools env
         _ <- dispatchToolCall dispatchConfig
@@ -113,6 +124,71 @@ spec = describe "mail tools" do
             , mailSearchLimit = 20
             }
 
+    it "validates recipients and bounds draft content before a mailbox write" do
+        let valid = MailDraftContent
+                { mailDraftTo = ["person@example.com"]
+                , mailDraftCc = []
+                , mailDraftBcc = []
+                , mailDraftSubject = "Hello"
+                , mailDraftBody = "Draft body"
+                }
+        validateMailDraftContent defaultMailToolLimits valid
+            `shouldBe` Right valid
+        validateMailDraftContent defaultMailToolLimits valid
+            { mailDraftTo = ["person@example.com\r\nBcc: victim@example.com"] }
+            `shouldSatisfy` isLeft
+        validateMailDraftContent defaultMailToolLimits valid
+            { mailDraftSubject = "Hello\r\nBcc: victim@example.com" }
+            `shouldSatisfy` isLeft
+
+    it "saves a draft only after decoding a bounded request" do
+        seen <- newIORef Nothing
+        toolEnv <- defaultToolEnv (fromText "/tmp")
+        let connected = MailAccountSummary
+                { mailAccountId = "mail-1"
+                , mailAccountProvider = "gmail"
+                , mailAccountEmail = "person@example.com"
+                , mailAccountLabel = Nothing
+                , mailAccountEnabled = True
+                , mailAccountVerified = True
+                }
+            env = MailToolsEnv
+                { mailToolsToolEnv = toolEnv
+                , mailToolsLimits = defaultMailToolLimits
+                , mailToolsListAccounts = pure (Right [connected])
+                , mailToolsListMailboxes = \_ _ -> pure (Right [])
+                , mailToolsSearch = \_ -> pure (Right [])
+                , mailToolsGetMessage = \_ _ -> pure (Left "not exercised")
+                , mailToolsDownloadAttachment = \_ _ ->
+                    pure (Left "not exercised")
+                , mailToolsCreateDraft = \request -> do
+                    writeIORef seen (Just request)
+                    pure (Right MailDraft
+                        { mailDraftId = "draft-1"
+                        , mailDraftMessageId = Nothing
+                        , mailDraftThreadId = Nothing
+                        , mailDraftWarning = Nothing
+                        })
+                , mailToolsUpdateDraft = \_ -> pure (Left "not exercised")
+                , mailToolsReplyDraft = \_ -> pure (Left "not exercised")
+                }
+        tools <- mailTools env
+        _ <- dispatchToolCall dispatchConfig
+            (appToolHandlers tools)
+            (functionToolCall "call-1" "email_create_draft"
+                "{\"account_id\":\"mail-1\",\"to\":[\"person@example.com\"],\
+                \\"subject\":\"Hello\",\"body\":\"Draft body\"}")
+        readIORef seen `shouldReturn` Just MailCreateDraftRequest
+            { mailCreateDraftAccountId = "mail-1"
+            , mailCreateDraftContent = MailDraftContent
+                { mailDraftTo = ["person@example.com"]
+                , mailDraftCc = []
+                , mailDraftBcc = []
+                , mailDraftSubject = "Hello"
+                , mailDraftBody = "Draft body"
+                }
+            }
+
 isAlwaysReadOnly :: ApprovalRule -> Bool
 isAlwaysReadOnly = \case
     AlwaysReadOnly -> True
@@ -121,6 +197,11 @@ isAlwaysReadOnly = \case
 isAlwaysPrompt :: ApprovalRule -> Bool
 isAlwaysPrompt = \case
     AlwaysPrompt -> True
+    _ -> False
+
+isAlwaysConfirm :: ApprovalRule -> Bool
+isAlwaysConfirm = \case
+    AlwaysConfirm -> True
     _ -> False
 
 dispatchConfig :: ToolDispatchConfig

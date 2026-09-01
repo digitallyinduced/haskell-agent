@@ -1,7 +1,7 @@
 module Agent.CLI.MailOAuthSpec (spec) where
 
 import Agent.CLI.Mail.OAuth
-import Agent.CLI.Mail.Store (MailProvider(GmailProvider))
+import Agent.CLI.Mail.Store (MailProvider(GmailProvider, MicrosoftProvider))
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, finally)
 import qualified Data.ByteString as BS
@@ -27,6 +27,28 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "mail OAuth loopback callback" do
+    it "requests Gmail compose/read and Graph write scopes without separate send scopes" $ do
+        gmail <- requireChallenge GmailProvider "test-client.apps.googleusercontent.com"
+        microsoft <- requireChallenge MicrosoftProvider "00000000-0000-0000-0000-000000000000"
+        let cleanup = do
+                _ <- cancelMailOAuth gmail.mailOAuthFlowId
+                _ <- cancelMailOAuth microsoft.mailOAuthFlowId
+                pure ()
+        (do
+            gmailScope <- requireQueryValue "scope" gmail.mailOAuthAuthorizationUrl
+            gmailScope `shouldSatisfy`
+                Text.isInfixOf "https://www.googleapis.com/auth/gmail.readonly"
+            gmailScope `shouldSatisfy`
+                Text.isInfixOf "https://www.googleapis.com/auth/gmail.compose"
+            gmailScope `shouldNotSatisfy`
+                Text.isInfixOf "https://www.googleapis.com/auth/gmail.send"
+
+            microsoftScope <- requireQueryValue
+                "scope" microsoft.mailOAuthAuthorizationUrl
+            microsoftScope `shouldSatisfy` Text.isInfixOf "Mail.ReadWrite"
+            microsoftScope `shouldNotSatisfy` Text.isInfixOf "Mail.Send"
+         ) `finally` cleanup
+
     it "ignores a preconnection and accepts a fragmented matching callback" do
         started <- startMailOAuth
             GmailProvider
@@ -70,6 +92,12 @@ spec = describe "mail OAuth loopback callback" do
                     "access_denied" `Text.isInfixOf` message
                 _ -> False
          ) `finally` cleanup
+
+requireChallenge :: MailProvider -> Text -> IO MailOAuthChallenge
+requireChallenge provider clientId =
+    startMailOAuth provider clientId >>= \case
+        Left err -> expectationFailure (Text.unpack err) >> fail "OAuth did not start"
+        Right challenge -> pure challenge
 
 waitForOAuthResult :: Int -> Text -> IO (Either Text MailOAuthPoll)
 waitForOAuthResult remaining flowId
