@@ -14,6 +14,7 @@ module Agent.CLI.Auth
     , grokNeedsRefresh
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
+    , gatewayLoadedAuthForProvider
     , gatewayRouterTokenProvider
     , isGatewayLoadedAuth
     , geminiAuthStateFromJson
@@ -146,15 +147,7 @@ loadAuth requestedProvider =
         Left gatewayErr ->
             pure (Left ("cannot load gateway credential: " <> gatewayErr))
         Right (Just gateway) ->
-            case requestedProvider of
-                Nothing -> pure (gatewayLoadedAuth gateway)
-                Just OpenAIProvider -> pure (gatewayLoadedAuth gateway)
-                Just ClaudeCodeProvider ->
-                    pure (Right (gatewayClaudeLoadedAuth gateway))
-                Just _ ->
-                    pure
-                        (Left
-                            "organization gateway is active; disconnect it before selecting another provider")
+            pure (gatewayLoadedAuthForProvider requestedProvider gateway)
         Right Nothing ->
             case requestedProvider of
                 Nothing -> loadDetectedProvider
@@ -204,6 +197,22 @@ gatewayLoadedAuth gateway = do
             , loadedSelectionId = Just gatewayAuthSelectionId
             , loadedOpenAiPool = Nothing
             }
+
+-- | Build gateway auth only when the caller's explicit provider selection is
+-- compatible with gateway routing. This pure boundary is also used by startup
+-- paths that already hold one exact credential snapshot.
+gatewayLoadedAuthForProvider
+    :: Maybe Provider
+    -> GatewayCredential
+    -> Either Text LoadedAuth
+gatewayLoadedAuthForProvider requestedProvider gateway =
+    case requestedProvider of
+        Nothing -> gatewayLoadedAuth gateway
+        Just OpenAIProvider -> gatewayLoadedAuth gateway
+        Just ClaudeCodeProvider -> Right (gatewayClaudeLoadedAuth gateway)
+        Just _ ->
+            Left
+                "organization gateway is active; disconnect it before selecting another provider"
 
 gatewayClaudeLoadedAuth :: GatewayCredential -> LoadedAuth
 gatewayClaudeLoadedAuth gateway =

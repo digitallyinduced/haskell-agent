@@ -9,6 +9,7 @@ module Agent.CLI.GatewayClient
     , GatewayAuthorizationCodeResponse(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
+    , gatewayCredentialIdentity
     , connectGatewayBrowser
     , connectGatewayBrowserWithCancel
     , defaultGatewayBaseUrl
@@ -24,13 +25,22 @@ module Agent.CLI.GatewayClient
     , startNativeGatewayAuthorization
     , pollGatewayAuthorization
     , pollNativeGatewayAuthorizationAndSave
+    , pollNativeGatewayAuthorizationAndSaveWith
     , exchangeNativeGatewayAuthorizationCode
+    , exchangeNativeGatewayAuthorizationCodeWith
     , saveGatewayCredential
     , removeGatewayCredential
+    , removeGatewayCredentialWith
     , openGatewayAuthorizationPage
     , connectGateway
     , disconnectGateway
     , gatewayCredentialPath
+    , withGatewayCredentialLock
+    , withGatewayCredentialLockAt
+    , withGatewayCredentialLease
+    , withGatewayCredentialLeaseAt
+    , withGatewayCredentialTurnLease
+    , withGatewayCredentialTurnLeaseAt
     , gatewayDeviceDecoder
     , gatewayPollDecoder
     , loadGatewayCredential
@@ -50,14 +60,34 @@ module Agent.CLI.GatewayClient
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.CLI.Runtime.Options (GatewayCommand (..))
+import Agent.CLI.PrivateFileLock
+    ( withPrivateFileLock
+    , withPrivateSharedFileLock
+    , withPrivateSharedFileLocksAfterGate
+    )
 import Agent.Json.Decode qualified as Hermes
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (ThreadId, myThreadId, threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Concurrent.STM (atomically, retry)
-import Control.Exception.Safe (bracket, bracketOnError, tryAny)
+import Control.Concurrent.STM
+    ( TVar
+    , atomically
+    , newTVarIO
+    , readTVar
+    , retry
+    , writeTVar
+    )
+import Control.Exception.Safe
+    ( bracket
+    , bracketOnError
+    , finally
+    , mask
+    , onException
+    , throwString
+    , tryAny
+    )
 import Control.Monad (when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson ((.=), (.:))
@@ -106,6 +136,7 @@ import Network.Socket.ByteString qualified as Socket
 import System.Directory.OsPath qualified as Directory
 import System.Entropy (getEntropy)
 import System.Exit (ExitCode (..))
+import System.IO.Unsafe (unsafePerformIO)
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import System.Process (rawSystem)
@@ -129,6 +160,60 @@ data GatewayModel = GatewayModel
     , gatewayModelProtocol :: !GatewayModelProtocol
     }
     deriving (Eq, Show)
+
+-- | Stable, non-secret binding for sessions created with one exact gateway
+-- credential. Reauthorization deliberately produces a different identity:
+-- without a gateway-issued organization identifier, treating a replacement
+-- bearer as the same routing boundary could send prior context to another
+-- organization.
+gatewayCredentialIdentity :: GatewayCredential -> Text
+gatewayCredentialIdentity credential =
+    "gateway-sha256:"
+        <> TextEncoding.decodeUtf8
+            (Base64Url.encodeUnpadded
+                (ByteArray.convert
+                    (hash material :: Digest SHA256)))
+  where
+    material =
+        TextEncoding.encodeUtf8 $
+            Text.intercalate
+                "\NUL"
+                [ "haskell-agent gateway session binding v1"
+                , canonicalGatewayIdentityUrl
+                    ""
+                    credential.gatewayBaseUrl
+                , canonicalGatewayIdentityUrl
+                    "/v1/responses"
+                    credential.gatewayWebSocketUrl
+                , credential.gatewayAccessToken
+                ]
+
+canonicalGatewayIdentityUrl :: Text -> Text -> Text
+canonicalGatewayIdentityUrl defaultPath raw =
+    case URI.parseURI (Text.unpack (Text.strip raw)) of
+        Just uri
+            | Just authority <- URI.uriAuthority uri
+            , let scheme = Text.toLower (Text.pack (URI.uriScheme uri))
+            , Right port <-
+                gatewayOriginPort
+                    "invalid gateway identity URL"
+                    scheme
+                    (URI.uriPort authority) ->
+                let host =
+                        Text.toLower (Text.pack (URI.uriRegName authority))
+                    rawPath = Text.pack (URI.uriPath uri)
+                    path
+                        | Text.null rawPath = defaultPath
+                        | Text.null defaultPath =
+                            Text.dropWhileEnd (== '/') rawPath
+                        | otherwise = rawPath
+                in scheme
+                    <> "//"
+                    <> host
+                    <> ":"
+                    <> Text.pack (show port)
+                    <> path
+        _ -> Text.strip raw
 
 newtype GatewayModelCatalogResponse = GatewayModelCatalogResponse
     { gatewayModelCatalogData :: [GatewayModel]
@@ -508,6 +593,205 @@ gatewayCredentialPath home =
         </> unsafeEncodeUtf "credentials"
         </> unsafeEncodeUtf "gateway.json"
 
+gatewayCredentialLockPath :: OsPath -> OsPath
+gatewayCredentialLockPath home =
+    takeDirectory (gatewayCredentialPath home)
+        </> unsafeEncodeUtf "gateway.lock"
+
+gatewayCredentialTurnAdmissionPath :: OsPath -> OsPath
+gatewayCredentialTurnAdmissionPath home =
+    takeDirectory (gatewayCredentialPath home)
+        </> unsafeEncodeUtf "gateway-turn-admission.lock"
+
+gatewayCredentialTurnLeasePath :: OsPath -> OsPath
+gatewayCredentialTurnLeasePath home =
+    takeDirectory (gatewayCredentialPath home)
+        </> unsafeEncodeUtf "gateway-turn.lock"
+
+-- | Serialize gateway credential changes with operations whose authorization
+-- depends on one exact credential snapshot. The process lock is required
+-- because advisory file-lock behavior between threads in one process is
+-- platform-dependent; the private file lock extends the boundary to CLI and
+-- native application processes.
+withGatewayCredentialLock :: IO value -> IO value
+withGatewayCredentialLock action = do
+    home <- Directory.getHomeDirectory
+    withGatewayCredentialLockAt home action
+
+withGatewayCredentialLockAt :: OsPath -> IO value -> IO value
+withGatewayCredentialLockAt home action =
+    withGatewayCredentialProcessWriteLock $
+        withPrivateFileLock (gatewayCredentialTurnAdmissionPath home) $
+            withPrivateFileLock (gatewayCredentialTurnLeasePath home) $
+                withPrivateFileLock
+                    (gatewayCredentialLockPath home)
+                    action
+
+-- | Hold a shared credential lease. Credential changes wait for every lease,
+-- while independent session reads and native turns remain concurrent.
+withGatewayCredentialLease :: IO value -> IO value
+withGatewayCredentialLease action = do
+    home <- Directory.getHomeDirectory
+    withGatewayCredentialLeaseAt home action
+
+withGatewayCredentialLeaseAt :: OsPath -> IO value -> IO value
+withGatewayCredentialLeaseAt home action =
+    withGatewayCredentialProcessReadLock True \needsFileLock ->
+        if needsFileLock
+            then
+                withPrivateSharedFileLock
+                    (gatewayCredentialLockPath home)
+                    action
+            else action
+
+-- | Start a long-running native turn only if no credential writer is already
+-- waiting. Unlike short callback leases, a new turn must not prolong an
+-- organization transition by joining an existing reader phase.
+withGatewayCredentialTurnLease :: IO value -> IO value
+withGatewayCredentialTurnLease action = do
+    home <- Directory.getHomeDirectory
+    withGatewayCredentialTurnLeaseAt home action
+
+withGatewayCredentialTurnLeaseAt :: OsPath -> IO value -> IO value
+withGatewayCredentialTurnLeaseAt home action =
+    withGatewayCredentialProcessReadLock False \_ ->
+        withPrivateSharedFileLocksAfterGate
+            (gatewayCredentialTurnAdmissionPath home)
+            [ gatewayCredentialTurnLeasePath home
+            -- Keep the original credential lock for rolling compatibility
+            -- with an older process that does not know the admission protocol.
+            , gatewayCredentialLockPath home
+            ]
+            action
+
+data GatewayCredentialProcessLockState =
+    GatewayCredentialProcessLockState
+        { processLockReaders :: !Int
+        , processLockWriterOwner :: !(Maybe ThreadId)
+        , processLockWaitingWriters :: !Int
+        }
+
+gatewayCredentialProcessLock :: TVar GatewayCredentialProcessLockState
+gatewayCredentialProcessLock =
+    unsafePerformIO $
+        newTVarIO
+            GatewayCredentialProcessLockState
+                { processLockReaders = 0
+                , processLockWriterOwner = Nothing
+                , processLockWaitingWriters = 0
+                }
+{-# NOINLINE gatewayCredentialProcessLock #-}
+
+withGatewayCredentialProcessReadLock
+    :: Bool
+    -> (Bool -> IO value)
+    -> IO value
+withGatewayCredentialProcessReadLock mayJoinReaderPhase action =
+    mask \restore -> do
+        thread <- myThreadId
+        needsFileLock <- atomically do
+            state <- readTVar gatewayCredentialProcessLock
+            case state.processLockWriterOwner of
+                Just owner
+                    | mayJoinReaderPhase && owner == thread ->
+                        -- A terminal credential callback may synchronously
+                        -- query the new state. The writer already owns the
+                        -- process and file boundaries on this same thread.
+                        pure False
+                    | otherwise -> retry
+                Nothing
+                    -- Short readers may join an active reader phase. This
+                    -- matters for native supervisors: a long-running turn can
+                    -- need a boundary-checked approval or snapshot callback
+                    -- before it can finish and release its lifetime lease.
+                    -- Long turn leases pass False and wait behind the writer;
+                    -- once the last reader leaves, every reader must wait.
+                    | state.processLockWaitingWriters > 0
+                            && ( not mayJoinReaderPhase
+                                    || state.processLockReaders == 0
+                               )
+                        -> retry
+                    | otherwise -> do
+                        writeTVar
+                            gatewayCredentialProcessLock
+                            state
+                                { processLockReaders =
+                                    state.processLockReaders + 1
+                                }
+                        pure True
+        if not needsFileLock
+            then restore (action False)
+            else restore (action True)
+                `finally`
+                    atomically do
+                        state <- readTVar gatewayCredentialProcessLock
+                        writeTVar
+                            gatewayCredentialProcessLock
+                            state
+                                { processLockReaders =
+                                    max 0 (state.processLockReaders - 1)
+                                }
+
+withGatewayCredentialProcessWriteLock :: IO value -> IO value
+withGatewayCredentialProcessWriteLock action =
+    mask \restore -> do
+        thread <- myThreadId
+        reentrant <- atomically do
+            state <- readTVar gatewayCredentialProcessLock
+            case state.processLockWriterOwner of
+                Just owner
+                    | owner == thread -> pure True
+                _ -> do
+                    writeTVar
+                        gatewayCredentialProcessLock
+                        state
+                            { processLockWaitingWriters =
+                                state.processLockWaitingWriters + 1
+                            }
+                    pure False
+        if reentrant
+            then
+                throwString
+                    "A gateway credential transition is already in progress."
+            else do
+                let unregisterWaitingWriter =
+                        atomically do
+                            state <- readTVar gatewayCredentialProcessLock
+                            writeTVar
+                                gatewayCredentialProcessLock
+                                state
+                                    { processLockWaitingWriters =
+                                        max 0
+                                            (state.processLockWaitingWriters - 1)
+                                    }
+                -- Keep the successful handoff masked. A blocked STM
+                -- transaction is still interruptible, so cancellation can
+                -- unregister the waiter; once it commits, no async exception
+                -- can land before the finalizer is installed below.
+                (atomically do
+                        state <- readTVar gatewayCredentialProcessLock
+                        if
+                            state.processLockWriterOwner /= Nothing
+                                || state.processLockReaders > 0
+                        then retry
+                        else
+                            writeTVar
+                                gatewayCredentialProcessLock
+                                state
+                                    { processLockWriterOwner = Just thread
+                                    , processLockWaitingWriters =
+                                        max 0
+                                            (state.processLockWaitingWriters - 1)
+                                    })
+                    `onException` unregisterWaitingWriter
+                restore action
+                    `finally`
+                        atomically do
+                            state <- readTVar gatewayCredentialProcessLock
+                            writeTVar
+                                gatewayCredentialProcessLock
+                                state { processLockWriterOwner = Nothing }
+
 loadGatewayCredential :: IO (Either Text (Maybe GatewayCredential))
 loadGatewayCredential = do
     home <- Directory.getHomeDirectory
@@ -537,18 +821,30 @@ loadGatewayCredentialAt home = do
 
 saveGatewayCredentialAt :: OsPath -> GatewayCredential -> IO (Either Text ())
 saveGatewayCredentialAt home credential =
+    fmap (fmap (const ())) $
+        saveGatewayCredentialAtWith home credential (pure ())
+
+saveGatewayCredentialAtWith
+    :: OsPath
+    -> GatewayCredential
+    -> IO value
+    -> IO (Either Text value)
+saveGatewayCredentialAtWith home credential afterSave =
     case validateGatewayCredential credential of
         Left err -> pure (Left err)
         Right () -> do
-            let path = gatewayCredentialPath home
-                directory = takeDirectory path
-            result <- tryAny do
-                Directory.createDirectoryIfMissing True directory
-                setFileMode (unsafeToFilePath directory) 0o700
-                writeLazyFileAtomically path 0o600 (Aeson.encode credential)
+            result <- tryAny $
+                withGatewayCredentialLockAt home do
+                    let path = gatewayCredentialPath home
+                        directory = takeDirectory path
+                    Directory.createDirectoryIfMissing True directory
+                    setFileMode (unsafeToFilePath directory) 0o700
+                    writeLazyFileAtomically
+                        path 0o600 (Aeson.encode credential)
+                    afterSave
             pure case result of
                 Left exception -> Left (Text.pack (show exception))
-                Right () -> Right ()
+                Right value -> Right value
 
 validateGatewayCredential :: GatewayCredential -> Either Text ()
 validateGatewayCredential credential = do
@@ -592,9 +888,18 @@ validateGatewayCredential credential = do
 
 saveGatewayCredential :: GatewayCredential -> IO (Either Text ())
 saveGatewayCredential credential =
+    fmap (fmap (const ())) $
+        saveGatewayCredentialWith credential (pure ())
+
+saveGatewayCredentialWith
+    :: GatewayCredential
+    -> IO value
+    -> IO (Either Text value)
+saveGatewayCredentialWith credential afterSave =
     tryAny Directory.getHomeDirectory >>= \case
         Left exception -> pure (Left (Text.pack (show exception)))
-        Right home -> saveGatewayCredentialAt home credential
+        Right home ->
+            saveGatewayCredentialAtWith home credential afterSave
 
 startGatewayAuthorization
     :: Text
@@ -942,15 +1247,22 @@ disconnectGateway = do
     putStrLn "Gateway connection removed."
 
 removeGatewayCredential :: IO (Either Text ())
-removeGatewayCredential = do
+removeGatewayCredential =
+    fmap (fmap (const ())) $
+        removeGatewayCredentialWith (pure ())
+
+removeGatewayCredentialWith :: IO value -> IO (Either Text value)
+removeGatewayCredentialWith afterRemove = do
     result <- tryAny do
         home <- Directory.getHomeDirectory
-        let path = gatewayCredentialPath home
-        exists <- Directory.doesFileExist path
-        when exists (Directory.removeFile path)
+        withGatewayCredentialLockAt home do
+            let path = gatewayCredentialPath home
+            exists <- Directory.doesFileExist path
+            when exists (Directory.removeFile path)
+            afterRemove
     pure case result of
         Left exception -> Left (Text.pack (show exception))
-        Right () -> Right ()
+        Right value -> Right value
 
 runGatewayCommand :: GatewayCommand -> IO ()
 runGatewayCommand = \case
@@ -1027,6 +1339,16 @@ pollNativeGatewayAuthorizationAndSave
     -> Text
     -> IO (Either Text GatewayPollResult)
 pollNativeGatewayAuthorizationAndSave rawBaseUrl rawDeviceCode =
+    pollNativeGatewayAuthorizationAndSaveWith
+        rawBaseUrl rawDeviceCode (const (pure ()))
+
+pollNativeGatewayAuthorizationAndSaveWith
+    :: Text
+    -> Text
+    -> (GatewayPollResult -> IO ())
+    -> IO (Either Text GatewayPollResult)
+pollNativeGatewayAuthorizationAndSaveWith
+        rawBaseUrl rawDeviceCode afterAuthorized =
     case validateBaseUrl rawBaseUrl of
         Left err -> pure (Left err)
         Right baseUrl
@@ -1044,7 +1366,7 @@ pollNativeGatewayAuthorizationAndSave rawBaseUrl rawDeviceCode =
                                     authorized@(GatewayAuthorized
                                         accessToken
                                         websocketUrl) -> do
-                                        saveGatewayCredential
+                                        saveGatewayCredentialWith
                                             GatewayCredential
                                                 { gatewayBaseUrl = baseUrl
                                                 , gatewayWebSocketUrl =
@@ -1052,6 +1374,7 @@ pollNativeGatewayAuthorizationAndSave rawBaseUrl rawDeviceCode =
                                                 , gatewayAccessToken =
                                                     accessToken
                                                 }
+                                            (afterAuthorized authorized)
                                             >>= \case
                                                 Left err -> pure (Left err)
                                                 Right () ->
@@ -1119,6 +1442,24 @@ exchangeNativeGatewayAuthorizationCode
     -> IO (Either Text ())
 exchangeNativeGatewayAuthorizationCode
     rawBaseUrl clientId authorizationCode verifier redirectUri =
+        exchangeNativeGatewayAuthorizationCodeWith
+            rawBaseUrl
+            clientId
+            authorizationCode
+            verifier
+            redirectUri
+            (pure ())
+
+exchangeNativeGatewayAuthorizationCodeWith
+    :: Text
+    -> Text
+    -> Text
+    -> Text
+    -> Text
+    -> IO ()
+    -> IO (Either Text ())
+exchangeNativeGatewayAuthorizationCodeWith
+    rawBaseUrl clientId authorizationCode verifier redirectUri afterSave =
         case validateNativeGatewayAuthorizationExchange
             rawBaseUrl
             clientId
@@ -1152,7 +1493,9 @@ exchangeNativeGatewayAuthorizationCode
                                             response of
                                         Left err -> pure (Left err)
                                         Right credential ->
-                                            saveGatewayCredential credential
+                                            saveGatewayCredentialWith
+                                                credential
+                                                afterSave
 
 validateNativeGatewayAuthorizationExchange
     :: Text

@@ -29,8 +29,11 @@ import Agent.CLI.Resume
     , pickResumeSession
     , resumeEntryFromMeta
     , resumeSearchEntries
+    , filterResumeSessionsForBoundary
     )
 import Agent.CLI.Runtime.Types (RunResult(..))
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
+import Agent.CLI.Models (validateResumedGatewayBoundary)
 import Agent.CLI.Session
     ( Persistence(..)
     , PersistenceState(..)
@@ -88,9 +91,10 @@ handleResume
     :: StorePool
     -> Maybe FullscreenRuntime
     -> Maybe Text
+    -> Maybe Text
     -> Persistence
     -> IO (Maybe RunResult)
-handleResume databasePool fullscreen maybeId persist = do
+handleResume databasePool fullscreen gatewayIdentity maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
     let reportInfo message =
@@ -118,25 +122,46 @@ handleResume databasePool fullscreen maybeId persist = do
                         Left err -> do
                             reportError err
                             pure Nothing
-                        Right _ -> pure (Just (RunResumeSession sessionId))
+                        Right meta ->
+                            case
+                                validateResumedGatewayBoundary
+                                    gatewayIdentity
+                                    meta.metaConnection
+                                    meta.metaGatewayIdentity
+                            of
+                                Left err -> reportError err >> pure Nothing
+                                Right () ->
+                                    pure (Just (RunResumeSession sessionId))
     case maybeId of
         Just sessionId -> resume sessionId
         Nothing -> do
-            (sessions, warnings) <- listSessions databasePool root
+            (allSessions, warnings) <- listSessions databasePool root
             mapM_ reportError warnings
+            let sessions =
+                    filterResumeSessionsForBoundary
+                        gatewayIdentity
+                        allSessions
             currentId <- currentSessionId persist
             pickResumeChoice
-                databasePool fullscreen color root currentId sessions >>= \case
+                databasePool
+                fullscreen
+                gatewayIdentity
+                color
+                root
+                currentId
+                sessions >>= \case
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
 
 handleConversationSearch
     :: StorePool
     -> Maybe FullscreenRuntime
+    -> Maybe Text
     -> Text
     -> Persistence
     -> IO (Maybe RunResult)
-handleConversationSearch databasePool fullscreen query persist = do
+handleConversationSearch
+        databasePool fullscreen gatewayIdentity query persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
     let root = sessionsRoot home
@@ -153,9 +178,12 @@ handleConversationSearch databasePool fullscreen query persist = do
                         (roleMuted color (glyphSession <> message))
                 Just runtime ->
                     emitUiEvent runtime (UiSystemMessage message)
-    (sessions, warnings) <- listSessions databasePool root
+    (allSessions, warnings) <- listSessions databasePool root
     mapM_ reportError warnings
-    searchResumeEntries databasePool sessions query >>= \case
+    let sessions =
+            filterResumeSessionsForBoundary gatewayIdentity allSessions
+    searchResumeEntries
+        databasePool gatewayIdentity sessions query >>= \case
         Left err -> do
             reportError err
             pure Nothing
@@ -167,6 +195,7 @@ handleConversationSearch databasePool fullscreen query persist = do
             pickSearchChoice
                 databasePool
                 fullscreen
+                gatewayIdentity
                 color
                 root
                 currentId
@@ -179,20 +208,24 @@ handleConversationSearch databasePool fullscreen query persist = do
                         handleResume
                             databasePool
                             fullscreen
+                            gatewayIdentity
                             (Just sessionId)
                             persist
 
 searchResumeEntries
     :: StorePool
+    -> Maybe Text
     -> [SessionMeta]
     -> Text
     -> IO (Either Text [ResumeEntry])
-searchResumeEntries databasePool sessions query
+searchResumeEntries databasePool gatewayIdentity sessions query
     | Text.null (Text.strip query) =
         pure (Right (map resumeEntryFromMeta sessions))
     | otherwise =
-        StoreSession.searchConversationTurns
+        StoreSession.searchConversationTurnsForBoundary
             databasePool
+            organizationGatewayConnectionId
+            gatewayIdentity
             (Text.strip query)
             100
             >>= \case
@@ -203,6 +236,7 @@ searchResumeEntries databasePool sessions query
 pickSearchChoice
     :: StorePool
     -> Maybe FullscreenRuntime
+    -> Maybe Text
     -> Bool
     -> OsPath
     -> Maybe Text
@@ -213,6 +247,7 @@ pickSearchChoice
 pickSearchChoice
     databasePool
     fullscreen
+    gatewayIdentity
     color
     root
     currentId
@@ -239,17 +274,20 @@ pickSearchChoice
                         browser
                         (loadResumeEntry databasePool root)
                         deleteEntry
-                        (searchResumeEntries databasePool sessions)
+                        (searchResumeEntries
+                            databasePool gatewayIdentity sessions)
 
 pickResumeChoice
     :: StorePool
     -> Maybe FullscreenRuntime
+    -> Maybe Text
     -> Bool
     -> OsPath
     -> Maybe Text
     -> [SessionMeta]
     -> IO (Maybe Text)
-pickResumeChoice databasePool fullscreen color root currentId sessions =
+pickResumeChoice
+        databasePool fullscreen gatewayIdentity color root currentId sessions =
   case fullscreen of
     Nothing -> pickResumeSession databasePool color root sessions
     Just runtime -> do
@@ -267,7 +305,8 @@ pickResumeChoice databasePool fullscreen color root currentId sessions =
                 browser
                 (loadResumeEntry databasePool root)
                 deleteEntry
-                (searchResumeEntries databasePool sessions)
+                (searchResumeEntries
+                    databasePool gatewayIdentity sessions)
 
 pickAgentChoice
     :: Maybe FullscreenRuntime

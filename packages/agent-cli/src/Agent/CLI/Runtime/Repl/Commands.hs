@@ -109,7 +109,8 @@ import Agent.CLI.McpOAuth ( loginMcp )
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models ()
-import Agent.CLI.Options ( ApprovalPolicy(..) )
+import Agent.CLI.Options
+    ( ApprovalPolicy(..), gatewayRoutingChanged )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Permission ( approvalPolicyOptions )
 import Agent.CLI.Plan ()
@@ -167,7 +168,7 @@ import Agent.CLI.Runtime.Repl.Selection
 import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
 import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunEnableCodeMode, RunRestart, RunUpdateAndRestart,
+    ( RunResult(RunEnableCodeMode, RunFreshSession, RunRestart, RunUpdateAndRestart,
                 RunSwitchProvider, RunReload, RunQuit) )
 import Agent.CLI.Secret ( promptSecretLine )
 import Agent.CLI.Session
@@ -310,7 +311,7 @@ import System.Environment ()
 import System.Exit ()
 import System.IO ( stdout, hFlush, stderr )
 import System.IO.Error ( isDoesNotExistError )
-import System.OsPath ( unsafeEncodeUtf, (</>) )
+import System.OsPath ( OsPath, unsafeEncodeUtf, (</>) )
 import System.Posix.Files ( getSymbolicLinkStatus )
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
@@ -1172,8 +1173,8 @@ handleReplLine
                                 color <- resolveColor stderr
                                 runLoginManager color
                         gatewayAfter <- loadGatewayCredential
-                        if gatewayAfter /= gatewayBefore
-                            then requestGatewayRestart fullscreen persist
+                        if gatewayRoutingChanged gatewayBefore gatewayAfter
+                            then requestGatewayRestart fullscreen cwd
                             else continue
                     ReplUsage -> do
                         readIORef gatewayModelsRef >>= \case
@@ -2102,9 +2103,9 @@ requestMetaRestart fullscreen persist = do
 
 requestGatewayRestart
     :: Maybe FullscreenRuntime
-    -> Persistence
+    -> OsPath
     -> IO RunResult
-requestGatewayRestart fullscreen persist = do
+requestGatewayRestart fullscreen cwd = do
     color <- resolveColor stderr
     let report message =
             case fullscreen of
@@ -2113,14 +2114,9 @@ requestGatewayRestart fullscreen persist = do
                         (roleMuted color (glyphSession <> message))
                 Just runtime ->
                     emitUiEvent runtime (UiSystemMessage message)
-    case persist of
-        PersistenceDisabled -> do
-            report "gateway routing changed; restart the agent to continue"
-            pure RunQuit
-        PersistenceEnabled slotRef -> do
-            handle <- ensureSession slotRef
-            report "restarting to apply organization gateway routing…"
-            pure (RunRestart handle.sessionMeta.metaId)
+    report
+        "organization gateway routing changed; starting a fresh conversation…"
+    pure (RunFreshSession cwd)
 
 requestCodeModeRestart
     :: Maybe FullscreenRuntime

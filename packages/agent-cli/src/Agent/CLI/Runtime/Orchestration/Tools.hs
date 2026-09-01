@@ -11,7 +11,7 @@ import Agent.CLI.AgentSessions
                            toolsPool, toolsRoot, toolsProvider, toolsConnection, toolsModel,
                            toolsTransportModel, toolsDialect, toolsAllowedModels,
                            toolsResolveModelOption,
-                           toolsCwd, toolsEffort,
+                           toolsGatewayIdentity, toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn) )
 import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
@@ -42,8 +42,10 @@ import Agent.CLI.Dialects
       filterGhciTools )
 import Agent.CLI.Error ( formatException )
 import Agent.CLI.GatewayClient
-    ( GatewayModelAccess
+    ( GatewayCredential
+    , GatewayModelAccess
     , cachedGatewayModels
+    , gatewayCredentialIdentity
     )
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
@@ -340,6 +342,7 @@ import qualified Agent.XAI.Usage as XAIUsage ()
 runAgentTools
     :: (AgentRunMode -> CliOptions -> IO DevResult)
     -> LoadedAuth
+    -> Maybe GatewayCredential
     -> Bool
     -> Maybe Text
     -> IORef Text
@@ -348,6 +351,7 @@ runAgentTools
     -> ToolEnv
     -> ModelCatalog
     -> IORef (Maybe GatewayModelAccess)
+    -> Maybe Text
     -> Bool
     -> Maybe ModelTarget
     -> Maybe (Text, ResponsesConnection)
@@ -387,6 +391,7 @@ runAgentTools
 runAgentTools
     runAgentChild
     loaded
+    connectedGateway
     learnAboutUserRequested
     customBearerToken
     activeAccountIdRef
@@ -395,6 +400,7 @@ runAgentTools
     baseToolEnv
     catalog
     gatewayModelsRef
+    gatewayIdentity
     checkStartupUsageInBackground
     configuredOptionTarget
     customResponses
@@ -433,6 +439,12 @@ runAgentTools
     = do
     openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
+    when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
+        startupDie startup
+            "gateway session binding and loaded credentials disagree"
+    when ((gatewayCredentialIdentity <$> connectedGateway) /= gatewayIdentity) $
+        startupDie startup
+            "gateway credential snapshot and session binding disagree"
     harnessConfig <-
         loadHarnessConfig home >>= \case
             Left err -> startupDie startup (Text.unpack err)
@@ -816,6 +828,7 @@ runAgentTools
             (trustedPool startup.startupDatabaseStore)
             startup options root
                 inferredTarget { targetDialect = dialectId }
+                gatewayIdentity
                 (isNothing transition) cwd effortText promptText resumed
     writeIORef persistSlotRef persist
     forM_ fullscreen \runtime ->
@@ -1112,6 +1125,7 @@ runAgentTools
             , toolsDialect = dialectId
             , toolsAllowedModels = gatewayAllowedChildModels
             , toolsResolveModelOption = gatewayChildModelOption
+            , toolsGatewayIdentity = gatewayIdentity
             , toolsCwd = cwd
             , toolsEffort = effortText
             , toolsCurrentSessionId =
@@ -1161,6 +1175,7 @@ runAgentTools
                 startup.startupDatabaseStore
                 databaseScopes
                 (readIORef persistSlotRef >>= currentSessionId)
+                gatewayIdentity
         learnedSkillToolsEnv =
             learnedSkillToolsEnvForStore
                 startup.startupDatabaseStore
@@ -1254,6 +1269,7 @@ runAgentTools
             writeIORef planMode.planStateRef PlanPending
     runAgentSession
         loaded
+        connectedGateway
         learnAboutUserRequested
         sessionTmp
         activeAccountIdRef

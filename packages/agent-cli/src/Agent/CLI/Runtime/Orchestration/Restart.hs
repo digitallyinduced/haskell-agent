@@ -33,7 +33,7 @@ data RestartCallbacks = RestartCallbacks
     , restartOptions :: CliOptions -> Text -> CliOptions
     , restartApplyTransition
         :: CliOptions -> ProviderTransition -> CliOptions
-    , restartManageAccounts :: IO ()
+    , restartManageAccounts :: IO (Maybe RunResult)
     , restartChooseModel
         :: CliOptions
         -> Maybe ProviderTransition
@@ -131,7 +131,9 @@ runFullscreenRestartLoop callbacks runtime =
                                 (callbacks.restartApplyTransition options next)
                                 (Just next)
                 Just 2 -> do
-                    withFullscreenSuspended runtime
-                        callbacks.restartManageAccounts
-                    retryStartup options transition
+                    withFullscreenSuspended
+                        runtime
+                        callbacks.restartManageAccounts >>= \case
+                            Just result -> pure result
+                            Nothing -> retryStartup options transition
                 _ -> pure RunQuit

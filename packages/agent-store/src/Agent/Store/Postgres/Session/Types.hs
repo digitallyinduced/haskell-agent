@@ -115,6 +115,7 @@ data SessionMetadata = SessionMetadata
     , sessionMetadataUpdatedAt :: !UTCTime
     , sessionMetadataProvider :: !Text
     , sessionMetadataConnection :: !Text
+    , sessionMetadataGatewayIdentity :: !(Maybe Text)
     , sessionMetadataModel :: !Text
     , sessionMetadataTransportModel :: !(Maybe Text)
     , sessionMetadataDialect :: !Text

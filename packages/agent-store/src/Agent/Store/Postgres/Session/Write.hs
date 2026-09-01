@@ -644,7 +644,8 @@ insertSessionStatement :: Statement SessionMetadata Text
 insertSessionStatement = mkStatement
     "INSERT INTO harness.sessions (\
     \ session_key, session_schema_version, created_at, updated_at,\
-    \ provider, connection_id, model_id, transport_model_id, dialect,\
+    \ provider, connection_id, gateway_identity, model_id,\
+    \ transport_model_id, dialect,\
     \ legacy_target_provider, legacy_target_connection,\
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
@@ -652,7 +653,8 @@ insertSessionStatement = mkStatement
     \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns\
     \ ) VALUES (\
     \ $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,\
-    \ $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26\
+    \ $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,\
+    \ $26, $27\
     \ ) RETURNING session_id::text"
     metadataParams
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
@@ -693,20 +695,20 @@ metadataUpdateSql :: Text
 metadataUpdateSql =
     "UPDATE harness.sessions SET\
     \ session_schema_version = $2, created_at = $3, updated_at = $4,\
-    \ provider = $5, connection_id = $6, model_id = $7,\
-    \ transport_model_id = $8, dialect = $9,\
-    \ legacy_target_provider = $10, legacy_target_connection = $11,\
-    \ legacy_target_effective_model = $12, legacy_target_dialect = $13,\
-    \ cwd = $14, effort = $15,\
-    \ title = CASE WHEN title_is_manual THEN title ELSE $16 END,\
+    \ provider = $5, connection_id = $6, gateway_identity = $7,\
+    \ model_id = $8, transport_model_id = $9, dialect = $10,\
+    \ legacy_target_provider = $11, legacy_target_connection = $12,\
+    \ legacy_target_effective_model = $13, legacy_target_dialect = $14,\
+    \ cwd = $15, effort = $16,\
+    \ title = CASE WHEN title_is_manual THEN title ELSE $17 END,\
     \ title_is_manual = CASE\
-    \   WHEN title_is_manual THEN title_is_manual ELSE $17 END,\
+    \   WHEN title_is_manual THEN title_is_manual ELSE $18 END,\
     \ title_refresh_index = CASE\
-    \   WHEN title_is_manual THEN title_refresh_index ELSE $18 END,\
-    \ title_user_turns = $19,\
-    \ last_response_id = $20, input_tokens = $21, output_tokens = $22,\
-    \ cached_tokens = $23, last_recap = $24, last_turn_summary = $25,\
-    \ last_recap_main_turns = $26"
+    \   WHEN title_is_manual THEN title_refresh_index ELSE $19 END,\
+    \ title_user_turns = $20,\
+    \ last_response_id = $21, input_tokens = $22, output_tokens = $23,\
+    \ cached_tokens = $24, last_recap = $25, last_turn_summary = $26,\
+    \ last_recap_main_turns = $27"
 
 setTitleProjectionStatement
     :: Statement TitleUpdate (Maybe (Text, Int64))
@@ -860,6 +862,7 @@ metadataParams =
     <> ((.sessionMetadataUpdatedAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     <> ((.sessionMetadataProvider) >$< Encoders.param (Encoders.nonNullable Encoders.text))
     <> ((.sessionMetadataConnection) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataGatewayIdentity) >$< Encoders.param (Encoders.nullable Encoders.text))
     <> ((.sessionMetadataModel) >$< Encoders.param (Encoders.nonNullable Encoders.text))
     <> ((.sessionMetadataTransportModel) >$< Encoders.param (Encoders.nullable Encoders.text))
     <> ((.sessionMetadataDialect) >$< Encoders.param (Encoders.nonNullable Encoders.text))

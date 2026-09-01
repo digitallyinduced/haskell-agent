@@ -15,6 +15,7 @@ import Agent.CLI.Database
     , DatabaseScope(..)
     , DatabaseToolsEnv(..)
     )
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.Store.Postgres
     ( Store
     , provisioningPool
@@ -40,7 +41,7 @@ import Agent.Store.Postgres.Custom
     )
 import Agent.Store.Postgres.Session
     ( ConversationSearchResult(..)
-    , searchConversationTurns
+    , searchConversationTurnsForBoundary
     )
 import Agent.Store.Postgres.Scope
     ( Scope(..)
@@ -116,8 +117,11 @@ databaseToolsEnvForStore
     -> DatabaseScopes
     -> IO (Maybe Text)
     -- ^ Current root session id, when persistence has started.
+    -> Maybe Text
+    -- ^ Identity of the connected gateway credential, if any.
     -> DatabaseToolsEnv
-databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
+databaseToolsEnvForStore
+        store scopes currentSessionId gatewayIdentity = DatabaseToolsEnv
     { databaseDescribeScope = \selected ->
         withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
             fmap formatCatalog <$> inspectCustomSchema pool database
@@ -141,9 +145,15 @@ databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
                 purpose
                 sql
     , databaseSearchConversations = \query limit ->
-        searchConversationTurns (trustedPool store) query limit >>= \case
+        searchConversationTurnsForBoundary
+            (trustedPool store)
+            organizationGatewayConnectionId
+            gatewayIdentity
+            query
+            limit >>= \case
             Left err -> pure (Left (renderStoreError err))
-            Right results -> pure $ Right $ map searchResultValue results
+            Right results ->
+                pure (Right (map searchResultValue results))
     }
 
 -- | List the table-like objects exposed by one existing user-defined scope.

@@ -162,6 +162,7 @@ seedBenchmarkSession store sessionKey turnCount activeTurns payloadBytes = do
             , sessionMetadataUpdatedAt = now
             , sessionMetadataProvider = "openai"
             , sessionMetadataConnection = "openai"
+            , sessionMetadataGatewayIdentity = Nothing
             , sessionMetadataModel = "benchmark"
             , sessionMetadataTransportModel = Nothing
             , sessionMetadataDialect = "codex"

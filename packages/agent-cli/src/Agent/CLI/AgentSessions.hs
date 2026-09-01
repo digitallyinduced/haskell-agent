@@ -56,6 +56,7 @@ import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , resolveModelOptionDialect
+    , validateResumedGatewayBoundary
     )
 import Agent.OsPath (fromText)
 import Agent.Dialect
@@ -110,6 +111,7 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsDialect :: !DialectId
     , toolsAllowedModels :: !(Maybe [Text])
     , toolsResolveModelOption :: !(Maybe (Text -> IO (Maybe ModelOption)))
+    , toolsGatewayIdentity :: !(Maybe Text)
     , toolsCwd :: !OsPath
     , toolsEffort :: !Text
     , toolsCurrentSessionId :: !(IO (Maybe Text))
@@ -353,6 +355,7 @@ runCreateAgentSession env args
                         { createPool = env.toolsPool
                         , createRoot = env.toolsRoot
                         , createTarget = target.modelTarget
+                        , createGatewayIdentity = env.toolsGatewayIdentity
                         , createCwd = env.toolsCwd
                         , createEffort =
                             fromMaybe env.toolsEffort args.reasoningEffort
@@ -469,24 +472,27 @@ runReadAgentSession
 runReadAgentSession env args =
     loadSessionMeta env.toolsPool env.toolsRoot args.sessionId >>= \case
         Left err -> pure (Left err)
-        Right meta -> do
-            let limit = min 100 (max 1 (fromMaybe 20 args.limit))
-            loadRecentSessionTurns
-                env.toolsPool env.toolsRoot args.sessionId limit >>= \case
-                    Left err -> pure (Left err)
-                    Right page -> do
-                        status <- env.toolsSessionStatus args.sessionId
-                        activity <-
-                            if status == "running"
-                                then loadSessionActivity
-                                    env.toolsRoot args.sessionId
-                                else pure Nothing
-                        pure $ Right $
-                            renderAgentSession
-                                meta
-                                status
-                                activity
-                                (map snd page.pageTurns)
+        Right meta ->
+            case validateToolSessionBoundary env meta of
+                Left err -> pure (Left err)
+                Right () -> do
+                    let limit = min 100 (max 1 (fromMaybe 20 args.limit))
+                    loadRecentSessionTurns
+                        env.toolsPool env.toolsRoot args.sessionId limit >>= \case
+                            Left err -> pure (Left err)
+                            Right page -> do
+                                status <- env.toolsSessionStatus args.sessionId
+                                activity <-
+                                    if status == "running"
+                                        then loadSessionActivity
+                                            env.toolsRoot args.sessionId
+                                        else pure Nothing
+                                pure $ Right $
+                                    renderAgentSession
+                                        meta
+                                        status
+                                        activity
+                                        (map snd page.pageTurns)
 
 data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
     { sessionId :: Text
@@ -529,10 +535,23 @@ runSendAgentSessionMessage env args
                     env.toolsPool env.toolsRoot args.sessionId >>= \case
                 Left err -> pure (Left err)
                 Right meta ->
-                    launchToolSessionTurn
-                        env
-                        (sessionHandle env.toolsPool env.toolsRoot meta)
-                        args.message
+                    case validateToolSessionBoundary env meta of
+                        Left err -> pure (Left err)
+                        Right () ->
+                            launchToolSessionTurn
+                                env
+                                (sessionHandle env.toolsPool env.toolsRoot meta)
+                                args.message
+
+validateToolSessionBoundary
+    :: AgentSessionToolsEnv
+    -> SessionMeta
+    -> Either Text ()
+validateToolSessionBoundary env meta =
+    validateResumedGatewayBoundary
+        env.toolsGatewayIdentity
+        meta.metaConnection
+        meta.metaGatewayIdentity
 
 launchToolSessionTurn
     :: AgentSessionToolsEnv
