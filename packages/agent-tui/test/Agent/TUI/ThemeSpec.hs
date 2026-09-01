@@ -4,7 +4,8 @@ import Agent.Syntax (SyntaxClass(..))
 import Agent.TUI.Motion (MotionMode(..))
 import qualified Agent.TUI.Theme as Theme
 import Brick (AttrName)
-import Brick.AttrMap (attrMapLookup)
+import Brick.AttrMap (attrMapLookup, mapAttrName, setDefaultAttr)
+import Data.Bits ((.|.))
 import Data.List (nub)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Attributes.Color (Color(..))
@@ -81,6 +82,25 @@ spec = do
             V.attrBackColor userMuted `shouldBe` V.SetTo V.brightBlack
             V.attrBackColor assistant `shouldBe` V.Default
 
+        it "keeps muted transcript text readable on the palette hover band" do
+            let theme = Theme.terminalDefault
+                hover =
+                    attrMapLookup
+                        Theme.transcriptHoverAttr
+                        theme
+                hoveredTheme =
+                    mapAttrName
+                        Theme.transcriptHoverMutedAttr
+                        Theme.mutedAttr
+                        (setDefaultAttr hover theme)
+                hoveredMuted =
+                    attrMapLookup Theme.mutedAttr hoveredTheme
+            V.attrBackColor hover `shouldBe` V.SetTo V.brightBlack
+            V.attrForeColor hover `shouldBe` V.SetTo V.white
+            V.attrForeColor hoveredMuted `shouldBe` V.SetTo V.white
+            V.attrBackColor hoveredMuted `shouldBe` V.SetTo V.brightBlack
+            V.attrStyle hoveredMuted `shouldBe` V.SetTo V.dim
+
         it "does not introduce colors in monochrome mode" do
             map
                 ( \syntaxClass ->
@@ -106,8 +126,25 @@ spec = do
                 , Theme.userMutedAttr
                 , Theme.selectedAttr
                 , Theme.selectedMutedAttr
+                , Theme.transcriptHoverAttr
                 ]
-                `shouldBe` replicate 4 (V.Default, V.Default)
+                `shouldBe` replicate 5 (V.Default, V.Default)
+
+        it "retains reverse video for muted monochrome hover text" do
+            let theme = Theme.monochrome
+                hover =
+                    attrMapLookup
+                        Theme.transcriptHoverAttr
+                        theme
+                hoveredTheme =
+                    mapAttrName
+                        Theme.transcriptHoverMutedAttr
+                        Theme.mutedAttr
+                        (setDefaultAttr hover theme)
+                hoveredMuted =
+                    attrMapLookup Theme.mutedAttr hoveredTheme
+            V.attrStyle hoveredMuted
+                `shouldBe` V.SetTo (V.reverseVideo .|. V.dim)
 
     describe "live accent wave" do
         it "fades a named accent through distinct RGB values" do

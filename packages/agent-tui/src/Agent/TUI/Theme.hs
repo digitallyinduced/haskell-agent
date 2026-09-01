@@ -23,6 +23,10 @@ module Agent.TUI.Theme
     , mutedAttr
     , selectedAttr
     , selectedMutedAttr
+    , transcriptHoverAttr
+    , transcriptHoverMutedAttr
+    , transcriptHoverMutedCancelledAttr
+    , transcriptHoverMutedItalicAttr
     , strongAttr
     , successAttr
     , syntaxAnnotationAttr
@@ -81,6 +85,9 @@ baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr :: AttrName
 todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
 errorAttr, successAttr, selectedAttr, selectedMutedAttr, borderAttr, borderActiveAttr :: AttrName
+transcriptHoverAttr :: AttrName
+transcriptHoverMutedAttr, transcriptHoverMutedItalicAttr :: AttrName
+transcriptHoverMutedCancelledAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
 lambdaDimAttr, lambdaTrailAttr, lambdaGlowAttr, lambdaSparkAttr :: AttrName
@@ -107,6 +114,11 @@ errorAttr = attrName "error"
 successAttr = attrName "success"
 selectedAttr = attrName "selected"
 selectedMutedAttr = attrName "selected-muted"
+transcriptHoverAttr = attrName "transcript-hover"
+transcriptHoverMutedAttr = attrName "transcript-hover-muted"
+transcriptHoverMutedItalicAttr = attrName "transcript-hover-muted-italic"
+transcriptHoverMutedCancelledAttr =
+    attrName "transcript-hover-muted-cancelled"
 borderAttr = attrName "border"
 borderActiveAttr = attrName "border-active"
 headingAttr = attrName "markdown-heading"
@@ -184,6 +196,12 @@ terminalDefault =
             palette V.brightGreen `V.withStyle` V.bold)
         , (selectedAttr, raisedPanelAttr `V.withStyle` V.bold)
         , (selectedMutedAttr, raisedPanelMutedAttr)
+        , (transcriptHoverAttr, raisedPanelMutedAttr)
+        , (transcriptHoverMutedAttr, V.defAttr `V.withStyle` V.dim)
+        , (transcriptHoverMutedItalicAttr,
+            V.defAttr `V.withStyle` (V.dim .|. V.italic))
+        , (transcriptHoverMutedCancelledAttr,
+            V.defAttr `V.withStyle` (V.dim .|. V.strikethrough))
         , (borderAttr, palette V.brightBlack `V.withStyle` V.dim)
         , (borderActiveAttr, palette V.brightBlack)
         , (headingAttr, palette V.magenta `V.withStyle` V.bold)
@@ -245,6 +263,15 @@ monochrome =
         , (selectedAttr, V.defAttr
             `V.withStyle` (V.bold .|. V.reverseVideo))
         , (selectedMutedAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (transcriptHoverAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (transcriptHoverMutedAttr,
+            V.defAttr `V.withStyle` (V.reverseVideo .|. V.dim))
+        , (transcriptHoverMutedItalicAttr,
+            V.defAttr `V.withStyle`
+                (V.reverseVideo .|. V.dim .|. V.italic))
+        , (transcriptHoverMutedCancelledAttr,
+            V.defAttr `V.withStyle`
+                (V.reverseVideo .|. V.dim .|. V.strikethrough))
         , (borderAttr, V.defAttr `V.withStyle` V.dim)
         , (borderActiveAttr, V.defAttr)
         , (headingAttr, V.defAttr `V.withStyle` V.bold)
