@@ -65,7 +65,8 @@ import Agent.CLI.TUI.Types
                     choiceAdjustments, choiceAdjustmentIndices),
       choiceVisibleRows,
       selectedChoiceIndex,
-      ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument),
+      ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument,
+                         ChoiceTheme),
       AppState(appRuntime,
                appDictation, appTextPrompt, appChoice, appMetaConsole,
                appMotionElapsedMillis, appUi, appTerminalFocus),
@@ -526,6 +527,7 @@ drawChoice appState choice
         ChoiceDialog -> drawDialogChoice appState choice
         ChoiceDocument -> drawDialogChoice appState choice
         ChoiceOnboarding -> drawOnboardingChoice appState choice
+        ChoiceTheme -> drawDialogChoice appState choice
 
 drawFilterChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawFilterChoice appState choice =

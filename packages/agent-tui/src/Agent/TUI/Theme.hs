@@ -68,6 +68,12 @@ module Agent.TUI.Theme
     , wavePeakFor
     , waveTrough
     , waveTroughFromColorFgBg
+    , ThemeKind(..)
+    , parseThemeKind
+    , themeKindText
+    , themeKindRows
+    , themeKindAt
+    , themeAttrMap
     ) where
 
 import Agent.Syntax (SyntaxClass(..))
@@ -77,9 +83,70 @@ import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
 import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Text.Read (readMaybe)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Attributes.Color (Color(..))
+
+-- | Built-in fullscreen color schemes.  'Auto' delegates to the terminal's
+-- configured palette, preserving the pre-theme behavior.
+data ThemeKind
+    = Auto
+    | Midnight
+    | Daylight
+    | TokyoNight
+    | RosePineMoon
+    | OscuraMidnight
+    deriving (Eq, Ord, Show, Read, Enum, Bounded)
+
+themeKindText :: ThemeKind -> Text
+themeKindText = \case
+    Auto -> "Auto"
+    Midnight -> "Midnight"
+    Daylight -> "Daylight"
+    TokyoNight -> "Tokyo Night"
+    RosePineMoon -> "Rose Pine Moon"
+    OscuraMidnight -> "Oscura Midnight"
+
+parseThemeKind :: Text -> Maybe ThemeKind
+parseThemeKind raw =
+    case Text.toCaseFold (Text.strip raw) of
+        "auto" -> Just Auto
+        "system" -> Just Auto
+        "midnight" -> Just Midnight
+        "night" -> Just Midnight
+        "daylight" -> Just Daylight
+        "day" -> Just Daylight
+        "tokyonight" -> Just TokyoNight
+        "tokyo-night" -> Just TokyoNight
+        "tokyo night" -> Just TokyoNight
+        "rosepine-moon" -> Just RosePineMoon
+        "rose pine moon" -> Just RosePineMoon
+        "rosé pine moon" -> Just RosePineMoon
+        "oscuramidnight" -> Just OscuraMidnight
+        "oscura-midnight" -> Just OscuraMidnight
+        "oscura midnight" -> Just OscuraMidnight
+        _ -> Nothing
+
+themeKindRows :: [(Text, Text)]
+themeKindRows =
+    [ (themeKindText kind, themeDescription kind)
+    | kind <- [Auto, Midnight, Daylight, TokyoNight, RosePineMoon, OscuraMidnight]
+    ]
+  where
+    themeDescription = \case
+        Auto -> "Use the terminal's native colors"
+        Midnight -> "Dark blue-violet"
+        Daylight -> "Light warm paper"
+        TokyoNight -> "Dark indigo"
+        RosePineMoon -> "Dark rose and lavender"
+        OscuraMidnight -> "Deep black with cyan accents"
+
+themeKindAt :: Int -> ThemeKind
+themeKindAt index =
+    [Auto, Midnight, Daylight, TokyoNight, RosePineMoon, OscuraMidnight]
+        !! max 0 (min 5 index)
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr :: AttrName
@@ -305,6 +372,107 @@ monochrome =
         , (syntaxErrorAttr, V.defAttr
             `V.withStyle` (V.bold .|. V.reverseVideo))
         ]
+
+-- | Resolve a selectable theme to a Brick attribute map.  The semantic
+-- attribute names intentionally stay identical across themes so renderers do
+-- not need to know which palette is active.
+themeAttrMap :: ThemeKind -> AttrMap
+themeAttrMap Auto = terminalDefault
+themeAttrMap Midnight = mkTheme
+    (RGBColor 26 27 38) (RGBColor 220 220 230) (RGBColor 120 125 145)
+    (RGBColor 187 154 247) (RGBColor 122 162 247)
+themeAttrMap Daylight = mkTheme
+    (RGBColor 250 247 242) (RGBColor 45 42 46) (RGBColor 110 105 100)
+    (RGBColor 144 80 150) (RGBColor 45 100 170)
+themeAttrMap TokyoNight = mkTheme
+    (RGBColor 26 27 38) (RGBColor 192 202 245) (RGBColor 86 95 137)
+    (RGBColor 187 154 247) (RGBColor 122 162 247)
+themeAttrMap RosePineMoon = mkTheme
+    (RGBColor 25 23 36) (RGBColor 224 222 244) (RGBColor 144 140 170)
+    (RGBColor 235 188 186) (RGBColor 196 167 231)
+themeAttrMap OscuraMidnight = mkTheme
+    (RGBColor 8 12 18) (RGBColor 220 235 245) (RGBColor 105 130 145)
+    (RGBColor 65 210 190) (RGBColor 80 170 255)
+
+mkTheme :: V.Color -> V.Color -> V.Color -> V.Color -> V.Color -> AttrMap
+mkTheme background foreground muted accent link =
+    attrMap (V.defAttr `V.withBackColor` background)
+        [ (baseAttr, base)
+        , (headerAttr, base `V.withStyle` V.bold)
+        , (footerAttr, mutedA)
+        , (mutedAttr, mutedA)
+        , (userAttr, panel `V.withStyle` V.bold)
+        , (userMutedAttr, panelMuted)
+        , (assistantAttr, base)
+        , (thinkingAttr, accentA)
+        , (thinkingBodyAttr, mutedA `V.withStyle` (V.dim .|. V.italic))
+        , (waitingDimAttr, mutedA)
+        , (waitingMidAttr, accentA)
+        , (toolAttr, linkA)
+        , (todoPendingAttr, base)
+        , (todoInProgressAttr, accentA `V.withStyle` V.bold)
+        , (todoCompletedAttr, mutedA)
+        , (todoCancelledAttr, mutedA `V.withStyle` V.strikethrough)
+        , (errorAttr, redA `V.withStyle` V.bold)
+        , (successAttr, greenA)
+        , (completionFlashAttr, greenA `V.withStyle` V.bold)
+        , (selectedAttr, panel `V.withStyle` V.bold)
+        , (selectedMutedAttr, panelMuted)
+        , (borderAttr, mutedA `V.withStyle` V.dim)
+        , (borderActiveAttr, mutedA)
+        , (headingAttr, accentA `V.withStyle` V.bold)
+        , (codeAttr, linkA)
+        , (dimAttr, mutedA)
+        , (emphasisAttr, base `V.withStyle` V.italic)
+        , (inlineCodeAttr, linkA `V.withStyle` V.reverseVideo)
+        , (lambdaDimAttr, mutedA)
+        , (lambdaTrailAttr, mutedA)
+        , (lambdaGlowAttr, base `V.withStyle` V.bold)
+        , (lambdaSparkAttr, V.defAttr `V.withForeColor` foreground
+            `V.withStyle` V.bold)
+        , (linkAttr, linkA `V.withStyle` V.underline)
+        , (strongAttr, base `V.withStyle` V.bold)
+        , (controlLinkAttr, mutedA)
+        , (controlLinkHoverAttr, base `V.withStyle` V.underline)
+        , (controlLinkActiveAttr, panel `V.withStyle` V.bold)
+        , (syntaxNormalAttr, base)
+        , (syntaxKeywordAttr, accentA)
+        , (syntaxTypeAttr, yellowA)
+        , (syntaxFunctionAttr, linkA)
+        , (syntaxVariableAttr, cyanA)
+        , (syntaxStringAttr, greenA)
+        , (syntaxNumberAttr, accentA)
+        , (syntaxCommentAttr, mutedA `V.withStyle` V.italic)
+        , (syntaxOperatorAttr, yellowA)
+        , (syntaxAnnotationAttr, greenA)
+        , (syntaxPreprocessorAttr, yellowA)
+        , (syntaxWarningAttr, yellowA `V.withStyle` V.bold)
+        , (syntaxErrorAttr, redA `V.withStyle` V.bold)
+        ]
+  where
+    base = V.defAttr `V.withForeColor` foreground
+    panel =
+        V.defAttr
+            `V.withForeColor` foreground
+            `V.withBackColor` lighten background
+    panelMuted =
+        V.defAttr
+            `V.withForeColor` muted
+            `V.withBackColor` lighten background
+    mutedA = V.defAttr `V.withForeColor` muted
+    accentA = V.defAttr `V.withForeColor` accent
+    linkA = V.defAttr `V.withForeColor` link
+    redA = V.defAttr `V.withForeColor` (RGBColor 220 100 120)
+    greenA = V.defAttr `V.withForeColor` (RGBColor 100 210 150)
+    yellowA = V.defAttr `V.withForeColor` (RGBColor 230 190 100)
+    cyanA = V.defAttr `V.withForeColor` (RGBColor 90 200 220)
+
+    lighten (RGBColor r g b) =
+        RGBColor
+            (min 255 (r + 14))
+            (min 255 (g + 14))
+            (min 255 (b + 14))
+    lighten color = color
 
 palette :: V.Color -> V.Attr
 palette = V.withForeColor V.defAttr

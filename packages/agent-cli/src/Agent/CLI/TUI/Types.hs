@@ -51,6 +51,7 @@ import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
 import Agent.Provider (Provider)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
+import Agent.TUI.Theme (ThemeKind)
 import Agent.Syntax (SyntaxHighlighter)
 import Agent.TUI.Motion (MotionDemand, MotionMode)
 import Brick (Location)
@@ -159,6 +160,8 @@ data AppEvent
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetModelIds ![Text]
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
+    | AppSetTheme !ThemeKind
+      -- ^ Apply a theme to the retained fullscreen UI.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppCommitImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppToolImage !Text !TuiImagePreview
@@ -266,6 +269,8 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeImagePreviewIdBase :: !Int
     , runtimeNativeImagePreviews :: !Bool
     , runtimeColor :: !Bool
+    , runtimeTheme :: !ThemeKind
+    , runtimeThemeRef :: !(IORef ThemeKind)
     , runtimeWaveTrough :: !V.Color
     , runtimeLoadSyntaxHighlighter
         :: !(IO (Either Text SyntaxHighlighter))
@@ -313,6 +318,7 @@ data AppState = AppState
     , appNextHistoryBlockId :: !Int
     , appPermissionReply :: !(Maybe (TMVar (Maybe PermissionChoice)))
     , appRuntime :: !FullscreenRuntime
+    , appTheme :: !ThemeKind
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
     , appChoiceReply :: !(Maybe (Maybe ChoiceSelection -> IO ()))
@@ -386,6 +392,7 @@ data ChoicePresentation
     = ChoiceDialog
     | ChoiceDocument
     | ChoiceOnboarding
+    | ChoiceTheme
     deriving (Eq, Show)
 
 data ChoiceOverlay = ChoiceOverlay

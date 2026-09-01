@@ -126,6 +126,7 @@ import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
+import Agent.TUI.Theme (ThemeKind(..))
 import Agent.TUI.Motion ( MotionDemand(..)
     , MotionMode(..)
     , backgroundIndicator
@@ -204,7 +205,29 @@ newFullscreenRuntime
     -> UiState
     -> IO FullscreenRuntime
 newFullscreenRuntime =
-    newFullscreenRuntimeWithSyntaxLoader newSyntaxHighlighter
+    newFullscreenRuntimeWithSyntaxLoaderAndTheme
+        Midnight
+        newSyntaxHighlighter
+
+newFullscreenRuntimeWithTheme
+    :: ThemeKind
+    -> FullscreenInputBuffer
+    -> IO ()
+    -> (Text -> IO ())
+    -> IO CtrlCDecision
+    -> (Text -> IO Bool)
+    -> (Text -> IO ())
+    -> (Bool -> IO ())
+    -> IO (AgentTarget, [AgentEntry])
+    -> (AgentTarget -> IO ())
+    -> IO ()
+    -> (NominalDiffTime -> IO ())
+    -> MotionMode
+    -> Bool
+    -> UiState
+    -> IO FullscreenRuntime
+newFullscreenRuntimeWithTheme theme =
+    newFullscreenRuntimeWithSyntaxLoaderAndTheme theme newSyntaxHighlighter
 
 newFullscreenRuntimeWithSyntaxLoader
     :: IO (Either Text SyntaxHighlighter)
@@ -224,6 +247,31 @@ newFullscreenRuntimeWithSyntaxLoader
     -> UiState
     -> IO FullscreenRuntime
 newFullscreenRuntimeWithSyntaxLoader
+    syntaxLoader =
+    newFullscreenRuntimeWithSyntaxLoaderAndTheme
+        Midnight
+        syntaxLoader
+
+newFullscreenRuntimeWithSyntaxLoaderAndTheme
+    :: ThemeKind
+    -> IO (Either Text SyntaxHighlighter)
+    -> FullscreenInputBuffer
+    -> IO ()
+    -> (Text -> IO ())
+    -> IO CtrlCDecision
+    -> (Text -> IO Bool)
+    -> (Text -> IO ())
+    -> (Bool -> IO ())
+    -> IO (AgentTarget, [AgentEntry])
+    -> (AgentTarget -> IO ())
+    -> IO ()
+    -> (NominalDiffTime -> IO ())
+    -> MotionMode
+    -> Bool
+    -> UiState
+    -> IO FullscreenRuntime
+newFullscreenRuntimeWithSyntaxLoaderAndTheme
+    theme
     syntaxLoader
     inputBuffer
     cancelAction
@@ -264,6 +312,7 @@ newFullscreenRuntimeWithSyntaxLoader
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
         colorFgBg <- lookupEnv "COLORFGBG"
+        themeRef <- newIORef theme
         windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionProvider = Nothing
@@ -317,6 +366,8 @@ newFullscreenRuntimeWithSyntaxLoader
                 imagePreviewProtocol == PreviewKitty
                     && not imagePreviewInTmux
             , runtimeColor = color
+            , runtimeTheme = theme
+            , runtimeThemeRef = themeRef
             , runtimeWaveTrough = Theme.waveTroughFromColorFgBg colorFgBg
             , runtimeLoadSyntaxHighlighter = syntaxLoader
             , runtimeSyntaxLoadFinished = syntaxLoadFinished
@@ -860,6 +911,17 @@ requestFullscreenPermission runtime workspace call = do
     let summary = approvalToolCallPromptRelative workspace call
     notifyAttention stderr PermissionRequested
     enqueueAppEvent runtime (AppAskPermission summary reply)
+    atomically (readTMVar reply)
+
+requestFullscreenThemeChoice
+    :: FullscreenRuntime
+    -> Int
+    -> [(Text, Text)]
+    -> IO (Maybe Int)
+requestFullscreenThemeChoice runtime initial rows = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskChoice ChoiceTheme "Theme" "Choose a theme. Arrow keys preview it live; Enter applies it, Esc cancels." initial rows reply)
     atomically (readTMVar reply)
 
 -- | Open a searchable choice whose right-hand value can be adjusted with

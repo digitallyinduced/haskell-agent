@@ -261,6 +261,7 @@ parseSlash catalog raw line = case Text.words line of
                     then ReplToggleFast
                     else ReplCommandError "usage: /fast"
             "model" -> parseModelCommand args
+            "theme" -> parseThemeCommand args
             "plan" ->
                 let description =
                         Text.strip (Text.drop (Text.length command) line)
@@ -718,6 +719,14 @@ parseModelCommand = \case
             ReplCommandError "usage: /model [NAME]"
         | otherwise -> ReplSetModel name
     _ -> ReplCommandError "usage: /model [NAME]"
+
+parseThemeCommand :: [Text] -> ReplAction
+parseThemeCommand = \case
+    [] -> ReplShowTheme
+    [name]
+        | not (Text.null (Text.strip name)) -> ReplSetTheme name
+        | otherwise -> ReplCommandError "usage: /theme [NAME]"
+    _ -> ReplCommandError "usage: /theme [NAME]"
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 setReasoningEffort

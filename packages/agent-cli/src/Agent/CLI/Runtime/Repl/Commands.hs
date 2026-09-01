@@ -30,10 +30,10 @@ import Agent.CLI.Command
                  ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopy,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
-                 ReplDesktop,
-                 ReplShowTerminal, ReplChangelog,
+                 ReplDesktop, ReplShowTerminal, ReplChangelog,
                  ReplShowEffort, ReplSetEffort, ReplShowModel,
-                 ReplSetModel, ReplToggleFast, ReplEnableCodeMode,
+                 ReplSetModel, ReplShowTheme, ReplSetTheme,
+                 ReplToggleFast, ReplEnableCodeMode,
                  ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplViewPlan, ReplQueue, ReplTranscript, ReplEditPrompt,
                  ReplContext, ReplHistory, ReplFind,
@@ -872,6 +872,8 @@ handleReplLine
                     action@ReplToggleFast -> handleSelectionAction env continue action
                     action@ReplShowModel -> handleSelectionAction env continue action
                     action@ReplSetModel{} -> handleSelectionAction env continue action
+                    action@ReplShowTheme -> handleSelectionAction env continue action
+                    action@ReplSetTheme{} -> handleSelectionAction env continue action
                     ReplEnableCodeMode ->
                         requestCodeModeRestart fullscreen persist
                     ReplToggleAlwaysApprove
