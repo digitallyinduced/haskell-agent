@@ -13,7 +13,8 @@ import Agent.Loop
     , emptyTurnOutput
     )
 import Agent.ToolDispatch
-    ( ToolCallKind(..)
+    ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult(..)
     , customToolCall
     , functionToolCall
@@ -235,6 +236,17 @@ spec = do
                 (functionToolCall "c7" "collaboration.wait_agent"
                     "{\"timeout_ms\":30000}")
                 `shouldBe` "Waited for agent updates"
+
+        it "uses the redacted computer-action summary for privileged calls" do
+            summarizeToolCall
+                ( (functionToolCall
+                    "computer-1"
+                    "computer"
+                    "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}")
+                    { callKind = ComputerCallKind
+                    }
+                )
+                `shouldBe` "Computer: type 6 characters"
 
     describe "truncateToolOutput" do
         it "keeps the first line and marks empty output" do

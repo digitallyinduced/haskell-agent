@@ -42,6 +42,7 @@ import Agent.OsPath (toText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
+    , isComputerToolCallKind
     )
 import Agent.Tools.PlanMode
     ( PlanModeEnv
@@ -51,6 +52,7 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( ToolRegistry
     , lookupRegisteredTool
+    , toolAcceptsCall
     , toolAllowsWithoutPrompt
     )
 import Data.IORef
@@ -193,19 +195,27 @@ approveToolDecisionWithReporterAndPersistenceClassified
     -> IO (Either Text Bool)
 approveToolDecisionWithReporterAndPersistenceClassified
         classifyReadOnly requestPermission report persistAlwaysApprove
-        policyRef allowedToolsRef tools planMode call = do
-    policy <- readIORef policyRef
-    planActive <- isPlanModeActive planMode
-    planPath <- planFilePath planMode
-    let initialFacts = ApprovalFacts
-            { policy
-            , planActive
-            , planPath
-            , readOnly = Nothing
-            , allowedForSession = Nothing
-            , call
-            }
-    interpret initialFacts (planApproval initialFacts)
+        policyRef allowedToolsRef tools planMode call =
+    case lookupRegisteredTool call.name tools of
+        Just tool
+            | not (toolAcceptsCall tool call) -> do
+                let message =
+                        "Rejected: mismatched provider-native tool call kind."
+                report (ApprovalWarning message)
+                pure (Left message)
+        _ -> do
+            policy <- readIORef policyRef
+            planActive <- isPlanModeActive planMode
+            planPath <- planFilePath planMode
+            let initialFacts = ApprovalFacts
+                    { policy
+                    , planActive
+                    , planPath
+                    , readOnly = Nothing
+                    , allowedForSession = Nothing
+                    , call
+                    }
+            interpret initialFacts (planApproval initialFacts)
   where
     interpret facts = \case
         CompleteApproval result actions -> do
@@ -265,6 +275,15 @@ setApprovalPolicy policyRef projectRoot policy = do
         DenyMutating -> "read-only enabled for this session"
 
 childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
+childApprove _ tools call
+    | Just tool <- lookupRegisteredTool call.name tools
+    , not (toolAcceptsCall tool call) =
+        pure $ Left
+            "Mismatched provider-native tool call kind requires parent review."
+childApprove _ _ call
+    | isComputerToolCallKind call.callKind =
+        pure $ Left
+            "Computer use requires an explicit parent approval for every call."
 childApprove policy tools call = case policy of
     ApproveAll -> pure (Right True)
     DenyMutating -> do

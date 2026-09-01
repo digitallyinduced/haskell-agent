@@ -12,6 +12,7 @@ module Agent.Store.Postgres.Session
     , StoredTurn(..)
     , LegacySession(..)
     , ConversationSearchResult(..)
+    , NativeConversationSearchResult(..)
     , SessionReadImplementation(..)
     , sessionSchemaStatements
     , sessionSearchIndexStatements
@@ -20,6 +21,8 @@ module Agent.Store.Postgres.Session
     , createSessionWithInitialPromptEpoch
     , createSessionFromSnapshot
     , replaceSessionMetadata
+    , setSessionTitle
+    , setGeneratedSessionTitle
     , appendSessionPromptEpoch
     , appendSessionTurn
     , appendSessionTurnIndexed
@@ -33,14 +36,23 @@ module Agent.Store.Postgres.Session
     , loadActiveSession
     , loadActiveSessionWithImplementation
     , SessionTurnPage(..)
+    , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
     , loadRecentSessionTurns
+    , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
+    , loadSessionHistoryTurnsBefore
     , loadSessionTurnsAfter
+    , loadSessionHistoryTurnsRange
+    , loadSessionHistoryTurnsRangeBounded
+    , loadSessionHistorySnapshot
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , listSessionArchiveKeys
+    , setSessionArchived
     , searchConversationTurns
+    , searchNativeConversations
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock

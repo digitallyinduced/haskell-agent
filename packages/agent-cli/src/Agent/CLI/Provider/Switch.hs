@@ -40,8 +40,8 @@ import Agent.CLI.Error
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
-    , loadModelCatalogAt
     )
+import Agent.CLI.GatewayModels (loadGatewayModelCatalogAt)
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
@@ -540,7 +540,7 @@ continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
         (Just billing, Just pending) -> do
             home <- getHomeDirectory
             cwd <- maybe getCurrentDirectory pure cwdHint
-            loadModelCatalogAt home cwd >>= \case
+            loadGatewayModelCatalogAt home cwd >>= \case
                 Left _ -> pure Nothing
                 Right catalog ->
                     chooseAutomaticProviderTransition

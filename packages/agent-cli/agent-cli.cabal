@@ -42,7 +42,8 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
-    other-modules:    Agent.CLI.AgentSessions.Render
+    other-modules:    Agent.CLI.AccountUsageCache
+                    , Agent.CLI.AgentSessions.Render
                     , Agent.CLI.AgentViewport.Status
                     , Agent.CLI.Approval.Decision
                     , Agent.CLI.Command.Types
@@ -63,6 +64,7 @@ library
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
+                    , Agent.CLI.ProcessSecurity
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
                     , Agent.CLI.Runtime.Orchestration
@@ -98,7 +100,6 @@ library
                     , Agent.CLI.Session.Runner.Types
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
-                    , Agent.CLI.SessionAdmin
                     , Agent.CLI.Startup.Auth
                     , Agent.CLI.StartupContext
                     , Agent.CLI.Startup.Format
@@ -137,6 +138,7 @@ library
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
+                    , Agent.CLI.BrowserTools
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
@@ -159,6 +161,7 @@ library
                     , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
+                    , Agent.CLI.GatewayModels
                     , Agent.CLI.GitDiff
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
@@ -177,9 +180,11 @@ library
                     , Agent.CLI.MetaConsole
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
+                    , Agent.CLI.McpAdmin
                     , Agent.CLI.McpManager
                     , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
+                    , Agent.CLI.NativeRuntime
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
                     , Agent.CLI.PendingInputs
@@ -190,6 +195,9 @@ library
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
                     , Agent.CLI.Recap
+                    , Agent.CLI.RepositoryDelivery
+                    , Agent.CLI.RepositoryReview
+                    , Agent.CLI.ResourceAdmin
                     , Agent.CLI.Review
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
@@ -200,6 +208,7 @@ library
                     , Agent.CLI.Resume
                     , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
+                    , Agent.CLI.SessionAdmin
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
                     , Agent.CLI.SessionTitle
@@ -312,6 +321,42 @@ executable agent-cli
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
 
+foreign-library haskell-agent-bridge
+    import:           common-options
+    if !os(darwin)
+        buildable:    False
+    type:             native-shared
+    options:          standalone
+    hs-source-dirs:   ffi
+    other-modules:    Agent.CLI.MacOS.Bridge
+                    , Agent.CLI.MacOS.EngineMailbox
+                    , Agent.CLI.MacOS.NativeLoopEvent
+                    , Agent.CLI.MacOS.ResourceAdmin
+    c-sources:        cbits/HaskellAgentBridgeRuntime.c
+    include-dirs:     include
+    includes:         HaskellAgentBridge.h
+    install-includes: HaskellAgentBridge.h
+    ghc-options:      -threaded
+    build-depends:    agent-cli
+                    , agent-runtime-daemon
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
+                    , agent-openai >= 0.1 && < 0.2
+                    , agent-xai >= 0.1 && < 0.2
+                    , agent-openrouter >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filelock
+                    , filepath
+                    , safe-exceptions
+                    , stm
+                    , text >= 2.0 && < 2.2
+                    , time
+
 executable eval-ghci-vs-bash
     import:           common-options
     hs-source-dirs:   eval
@@ -399,20 +444,29 @@ test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
     ghc-options:      -threaded
-    hs-source-dirs:   test
+    hs-source-dirs:   test ffi
     main-is:          Spec.hs
+    include-dirs:     include
     other-modules:    Agent.CLI.AccountSelectionSpec
+                    , Agent.CLI.MacOS.EngineMailboxSpec
+                    , Agent.CLI.MacOS.EngineMailbox
+                    , Agent.CLI.MacOS.NativeLoopEventSpec
+                    , Agent.CLI.MacOS.NativeLoopEvent
+                    , Agent.CLI.MacOS.TaskSchedulerSpec
+                    , Agent.CLI.ResourceAdminSpec
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.AgentViewportRuntimeSpec
                     , Agent.CLI.AuthSpec
+                    , Agent.CLI.BrowserToolsSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.ClaudeSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.ComputerUseSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
                     , Agent.CLI.ContextSpec
@@ -423,6 +477,7 @@ test-suite agent-cli-test
                     , Agent.CLI.DesktopSpec
                     , Agent.CLI.ExternalProgramSpec
                     , Agent.CLI.FileUriSpec
+                    , Agent.CLI.GatewayModelsSpec
                     , Agent.CLI.GitDiffSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
@@ -430,6 +485,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
+                    , Agent.CLI.McpAdminSpec
                     , Agent.CLI.McpManagerSpec
                     , Agent.CLI.MetaConsoleSpec
                     , Agent.CLI.MetaConsoleRuntimeSpec
@@ -449,6 +505,8 @@ test-suite agent-cli-test
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
                     , Agent.CLI.RequestSpec
+                    , Agent.CLI.RepositoryDeliverySpec
+                    , Agent.CLI.RepositoryReviewSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
@@ -480,6 +538,7 @@ test-suite agent-cli-test
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-cli-runtime
+                    , agent-runtime-daemon
                     , agent-core
                     , agent-mcp
                     , agent-json
@@ -516,6 +575,17 @@ test-suite agent-cli-test
                     , transformers
                     , unix
                     , vty >= 6.4 && < 7
+    if os(darwin)
+        c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
+                    , test/cbits/HaskellAgentBridgeImageSmoke.c
+                    , test/cbits/HaskellAgentBridgeTaskSmoke.c
+                    , cbits/HaskellAgentBridgeRuntime.c
+        other-modules: Agent.CLI.MacOS.Bridge
+                     , Agent.CLI.MacOS.ResourceAdmin
+                     , Agent.CLI.MacOS.BrowserBridgeFFISpec
+                     , Agent.CLI.MacOS.BridgeSpec
+                     , Agent.CLI.MacOS.BridgeHeaderSpec
+                     , Agent.CLI.MacOS.BridgeFFISpec
 
 benchmark image-preview-latency-bench
     import:           common-options

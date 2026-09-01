@@ -13,9 +13,11 @@ import Agent.CLI.Approval
     , resolveApprovalPrompt
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.ToolDispatch
-    ( ToolCall
+    ( ToolCall(..)
+    , ToolCallKind(..)
     , functionToolCall
     , noArgsTool
     )
@@ -526,10 +528,110 @@ spec = do
             readIORef permissionRequests `shouldReturn` 1
             readIORef allowed `shouldReturn` Set.singleton "run_terminal_cmd"
 
+        it "prompts for every computer call even under ApproveAll" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowTool)
+                computerCall kind = ToolCall
+                    { callId = "computer-1"
+                    , name = "computer"
+                    , arguments = "{}"
+                    , callKind = kind
+                    , argumentsEncrypted = False
+                    }
+                approve kind = approveToolDecisionWithReporter
+                    request (\_ -> pure ()) policy allowed
+                    (registry [mutatingTool]) plan (computerCall kind)
+            mapM_ (\kind -> do
+                approve kind `shouldReturn` Right True
+                approve kind `shouldReturn` Right True)
+                [ComputerCallKind, ComputerFunctionCallKind]
+            readIORef permissionRequests `shouldReturn` 4
+            readIORef policy `shouldReturn` ApproveAll
+            readIORef allowed `shouldReturn` Set.empty
+
+        it "does not cache allow-tool for computer calls" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowTool)
+                computerCall kind = ToolCall
+                    { callId = "computer-1"
+                    , name = "computer"
+                    , arguments = "{}"
+                    , callKind = kind
+                    , argumentsEncrypted = False
+                    }
+                approve kind = approveToolDecisionWithReporter
+                    request (\_ -> pure ()) policy allowed
+                    (registry [mutatingTool]) plan (computerCall kind)
+            mapM_ (\kind -> do
+                approve kind `shouldReturn` Right True
+                approve kind `shouldReturn` Right True)
+                [ComputerCallKind, ComputerFunctionCallKind]
+            readIORef permissionRequests `shouldReturn` 4
+            readIORef allowed `shouldReturn` Set.empty
+
+        it "rejects spoofed function/custom computer calls under ApproveAll" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef (Set.singleton "computer")
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let spoof kind = ToolCall
+                    { callId = "spoof-1"
+                    , name = "computer"
+                    , arguments = "{}"
+                    , callKind = kind
+                    , argumentsEncrypted = False
+                    }
+                approve call = approveToolDecisionWithReporter
+                    (\_ -> modifyIORef' permissionRequests (+ 1)
+                        >> pure (Just PermissionAllowOnce))
+                    (\_ -> pure ())
+                    policy allowed
+                    (registry [computerUseTool])
+                    plan call
+            functionResult <- approve (spoof FunctionCallKind)
+            customResult <- approve (spoof CustomCallKind)
+            functionResult `shouldSatisfy` either
+                (Text.isInfixOf "mismatched provider-native")
+                (const False)
+            customResult `shouldSatisfy` either
+                (Text.isInfixOf "mismatched provider-native")
+                (const False)
+            readIORef permissionRequests `shouldReturn` 0
+
     describe "childApprove" do
         it "allows every known tool under ApproveAll" do
             childApprove ApproveAll (registry [mutatingTool]) mutatingCall
                 `shouldReturn` Right True
+
+        it "never lets a child bypass computer approval" do
+            let computerCall kind = ToolCall
+                    { callId = "computer-1"
+                    , name = "computer"
+                    , arguments = "{}"
+                    , callKind = kind
+                    , argumentsEncrypted = False
+                    }
+            mapM_ (\kind ->
+                childApprove ApproveAll
+                    (registry [mutatingTool])
+                    (computerCall kind)
+                    `shouldReturn`
+                        Left
+                            "Computer use requires an explicit parent approval for every call.")
+                [ComputerCallKind, ComputerFunctionCallKind]
 
         it "allows only read-only tools under DenyMutating" do
             childApprove DenyMutating (registry [readOnlyTool]) readOnlyCall

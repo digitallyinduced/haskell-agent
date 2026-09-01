@@ -7,6 +7,7 @@ module Agent.Store.Postgres.Skill.Mapping.Types
     , ScopeSlugParams(..)
     , ApplicableScopes(..)
     , SkillSearchParams(..)
+    , SkillListParams(..)
     , InsertSkillParams(..)
     , UpdateSkillParams(..)
     , InsertRevisionParams(..)
@@ -74,6 +75,12 @@ data SkillSearchParams = SkillSearchParams
     { skillSearchScopes :: !ApplicableScopes
     , skillSearchQuery :: !Text
     , skillSearchLimit :: !Int64
+    }
+
+data SkillListParams = SkillListParams
+    { skillListScopes :: !ApplicableScopes
+    , skillListKind :: !(Maybe Text)
+    , skillListLimit :: !Int64
     }
 
 data InsertSkillParams = InsertSkillParams

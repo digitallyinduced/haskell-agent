@@ -41,7 +41,10 @@ import Agent.CLI.Command ( SkillCommand , SlashCatalog(..)
     , defaultSlashCatalog
     , slashCatalogWithSkills
     )
-import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Permission
+    ( PermissionChoice(..)
+    , approvalToolCallPromptRelative
+    )
 import Agent.CLI.Resume ( ResumeBrowser(..)
     , ResumeEntry(..)
     , applyResumeSearchResults
@@ -131,7 +134,6 @@ import Agent.TUI.Motion ( MotionDemand(..)
     , quietIndicator
     , waitingIndicator
     )
-import Agent.TUI.Presentation ( permissionToolCallPromptRelative )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -855,7 +857,7 @@ requestFullscreenPermission
     -> IO (Maybe PermissionChoice)
 requestFullscreenPermission runtime workspace call = do
     reply <- newEmptyTMVarIO
-    let summary = permissionToolCallPromptRelative workspace call
+    let summary = approvalToolCallPromptRelative workspace call
     notifyAttention stderr PermissionRequested
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)

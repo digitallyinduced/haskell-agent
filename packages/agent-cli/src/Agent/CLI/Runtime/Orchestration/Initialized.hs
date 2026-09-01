@@ -21,6 +21,8 @@ import Agent.CLI.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       gatewayAuthSelectionId,
+      gatewayRouterTokenProvider,
+      isGatewayLoadedAuth,
       preferredOpenAiTokenProvider,
       loadAuth,
       loadAuthForAccount,
@@ -37,6 +39,12 @@ import Agent.CLI.Database.Store ( deriveDatabaseScopes )
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayBridge ()
+import Agent.CLI.GatewayModels
+    ( catalogUsesGateway
+    , gatewayDefaultModelId
+    , isGatewayModelId
+    , loadGatewayModelCatalogAt
+    )
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
@@ -49,7 +57,6 @@ import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig
     ( builtinConnectionId,
       catalogConnection,
-      loadModelCatalogAt,
       ConnectionKind(BuiltinConnection, CustomResponsesConnection),
       ModelConnection(connectionId, connectionKind),
       ResponsesConnection(responsesApiKeyEnv, responsesApiKeyOptional) )
@@ -332,7 +339,7 @@ runAgentInitializedWithLock
                 (loadProjectSettings projectRoot)
                 (loadUserSettings home))
             (concurrently
-                (loadModelCatalogAt home cwd)
+                (loadGatewayModelCatalogAt home cwd)
                 (detectGitBranch cwd))
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
@@ -342,13 +349,17 @@ runAgentInitializedWithLock
         catalogResult
     setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
-    let transitionTarget = (.transitionTarget) <$> transition
+    let gatewayMode = catalogUsesGateway catalog
+        transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         unavailableProviders =
             maybe Set.empty (.transitionUnavailableProviders) transition
         configuredOptionTarget =
             (.modelTarget)
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
+        gatewayDefaultTarget =
+            (.modelTarget)
+                <$> resolveConfiguredModel catalog gatewayDefaultModelId
         savedTarget provider connection model transport dialect =
             case resolveConfiguredModel catalog model of
                 Just option
@@ -369,10 +380,14 @@ runAgentInitializedWithLock
                                 <> connection <> "/" <> model
                                 <> " is not present in ~/.haskell-agent/models.json"
         resumedTargetResult
+            | gatewayMode =
+                Right Nothing
             | isJust transitionTarget || isJust options.optModel =
                 Right Nothing
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
+            Just meta
+                | isGatewayModelId meta.metaModel -> Right Nothing
             Just meta ->
                 Just <$> savedTarget
                     meta.metaProvider
@@ -381,6 +396,8 @@ runAgentInitializedWithLock
                     meta.metaTransportModel
                     meta.metaDialect
         projectTargetResult
+            | gatewayMode =
+                Right Nothing
             | isJust transitionTarget
                 || isJust options.optModel
                 || isJust resumed =
@@ -389,24 +406,73 @@ runAgentInitializedWithLock
             Nothing -> Right Nothing
             Just remembered ->
                 let target = remembered.projectModelTarget
-                in
-                Just <$> savedTarget
-                    target.targetProvider
-                    target.targetConnectionId
-                    target.targetModelId
-                    (Just target.targetWireModelId)
-                    target.targetDialect
+                in if isGatewayModelId target.targetModelId
+                    then Right Nothing
+                    else
+                        Just <$> savedTarget
+                            target.targetProvider
+                            target.targetConnectionId
+                            target.targetModelId
+                            (Just target.targetWireModelId)
+                            target.targetDialect
+    when
+        ( gatewayMode
+            && isJust options.optModel
+            && isNothing configuredOptionTarget
+        ) $
+        startupDie startup
+            "the connected gateway accepts router-default, router-codex, or \
+            \router-grok; direct provider model ids are unavailable"
+    when
+        ( gatewayMode
+            && maybe
+                False
+                (not . isGatewayModelId . (.targetModelId))
+                transitionTarget
+        ) $
+        startupDie startup
+            "the connected gateway cannot apply a direct-provider transition; \
+            \select router-default, router-codex, or router-grok"
+    when
+        ( not gatewayMode
+            && maybe False isGatewayModelId options.optModel
+        ) $
+        startupDie startup
+            "gateway router models require an active gateway connection"
+    when
+        ( not gatewayMode
+            && maybe
+                False
+                (isGatewayModelId . (.targetModelId))
+                transitionTarget
+        ) $
+        startupDie startup
+            "the requested gateway transition is unavailable after disconnect"
     resumedTarget <-
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
         either (startupDie startup . Text.unpack) pure projectTargetResult
-    let targetHint =
-            transitionTarget
-                <|> configuredOptionTarget
-                <|> resumedTarget
-                <|> if isNothing options.optModel
-                    then projectTarget
+    let gatewayTarget candidate =
+            candidate >>= \target ->
+                if isGatewayModelId target.targetModelId
+                    then
+                        (.modelTarget)
+                            <$> resolveConfiguredModel
+                                catalog
+                                target.targetModelId
                     else Nothing
+        targetHint
+            | gatewayMode =
+                gatewayTarget transitionTarget
+                    <|> configuredOptionTarget
+                    <|> gatewayDefaultTarget
+            | otherwise =
+                transitionTarget
+                    <|> configuredOptionTarget
+                    <|> resumedTarget
+                    <|> if isNothing options.optModel
+                        then projectTarget
+                        else Nothing
         requestedProvider =
             (.targetProvider) <$> targetHint
                 <|> options.optProvider
@@ -421,7 +487,8 @@ runAgentInitializedWithLock
                     (connection.connectionId, responses)
                 BuiltinConnection _ -> Nothing
         checkStartupUsageInBackground =
-            isJust fullscreen
+            not gatewayMode
+                && isJust fullscreen
                 && isNothing transition
                 && isNothing resumed
                 && isNothing options.optProvider
@@ -491,6 +558,8 @@ runAgentInitializedWithLock
     (loaded, startupAccountIds) <- case customResponses of
         Just _ -> pure (initialLoaded, Nothing)
         Nothing
+            | gatewayMode ->
+                pure (initialLoaded, Nothing)
             | Just active <- transition
             , Just selectionId <- active.transitionAccountSelectionId ->
                 pure
@@ -562,15 +631,21 @@ runAgentInitializedWithLock
                                                 , selected.selectedAccountId
                                                 )
                                             ))
+    when (gatewayMode /= isGatewayLoadedAuth loaded) $
+        startupDie startup
+            "gateway model routing and loaded credentials disagree; refusing \
+            \to start with an unsafe transport configuration"
     case (transitionTarget, resumed) of
         (Just target, _)
-            | loaded.loadedProvider /= target.targetProvider ->
+            | not gatewayMode
+            , loaded.loadedProvider /= target.targetProvider ->
                 startupDie startup $ "provider transition requested "
                     <> Text.unpack (providerSlug target.targetProvider)
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         (Nothing, Just (meta, _))
-            | loaded.loadedProvider /= meta.metaProvider ->
+            | not gatewayMode
+            , loaded.loadedProvider /= meta.metaProvider ->
                 startupDie startup $ "session provider is "
                     <> Text.unpack (providerSlug meta.metaProvider)
                     <> " but auth resolved "
@@ -601,7 +676,7 @@ runAgentInitializedWithLock
                 (OpenAIProvider, Just (_, accountId))
                     | not (Text.null accountId) -> Just accountId
                 _ -> Nothing
-    let selectableTokenProvider =
+    let unguardedSelectableTokenProvider =
             case loaded.loadedOpenAiPool of
                 Just pool ->
                     preferredOpenAiTokenProvider
@@ -610,6 +685,11 @@ runAgentInitializedWithLock
                         loaded.loadedTokenProvider
                 Nothing ->
                     loaded.loadedTokenProvider
+        selectableTokenProvider
+            | gatewayMode =
+                gatewayRouterTokenProvider unguardedSelectableTokenProvider
+            | otherwise =
+                unguardedSelectableTokenProvider
     initialHttp <- case customResponses of
         Just (connectionId, _) -> do
             writeIORef activeAccountRef connectionId

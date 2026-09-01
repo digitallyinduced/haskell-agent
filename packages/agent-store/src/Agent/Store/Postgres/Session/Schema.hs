@@ -44,6 +44,7 @@ sessionSchemaStatements =
       \ last_recap_main_turns bigint NOT NULL DEFAULT 0 CHECK (last_recap_main_turns >= 0),\
       \ next_event_sequence bigint NOT NULL DEFAULT 1,\
       \ next_turn_index bigint NOT NULL DEFAULT 0,\
+      \ archived_at timestamptz,\
       \ deleted_at timestamptz,\
       \ CHECK (updated_at >= created_at),\
       \ CHECK (next_event_sequence >= 1),\
@@ -67,6 +68,9 @@ sessionSchemaStatements =
     , "CREATE INDEX IF NOT EXISTS sessions_updated_at_idx\
       \ ON harness.sessions (updated_at DESC)\
       \ WHERE deleted_at IS NULL"
+    , "CREATE INDEX IF NOT EXISTS sessions_archived_at_idx\
+      \ ON harness.sessions (archived_at DESC)\
+      \ WHERE deleted_at IS NULL AND archived_at IS NOT NULL"
     , "CREATE TABLE IF NOT EXISTS harness.session_events (\
       \ event_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
       \ session_id uuid NOT NULL\

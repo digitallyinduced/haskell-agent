@@ -22,6 +22,7 @@ module Agent.Tools.Types
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
+    , toolAcceptsCall
     , toolExecutionPolicyFor
     , toolSchedulingPlanFor
     , dispatchRegisteredToolCall
@@ -35,6 +36,7 @@ import Agent.Cancel (CancelFlag, newCancelFlag)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult
     , ToolDispatchOutcome
     , ToolDispatchConfig
@@ -73,6 +75,10 @@ data ToolSchema
     -- (@format.type = "grammar"@). The fields are the grammar syntax
     -- (for example @"lark"@) and its definition text.
     | FreeformGrammarSchema !Text !Text
+    -- | The privileged local computer function. Keeping this distinct from
+    -- caller-defined JSON functions prevents an unrelated MCP tool from
+    -- acquiring the desktop-control handler or its output encoding.
+    | HostedComputerSchema
     deriving (Eq, Show)
 
 -- | Whether a call may run without generic user approval.
@@ -381,7 +387,7 @@ dispatchRegisteredToolCall
     -> IO ToolCallResult
 dispatchRegisteredToolCall config registry call =
     dispatchToolHandler config
-        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        (acceptedHandler registry call)
         call
 
 dispatchRegisteredToolCallDetailed
@@ -391,8 +397,28 @@ dispatchRegisteredToolCallDetailed
     -> IO ToolDispatchOutcome
 dispatchRegisteredToolCallDetailed config registry call =
     dispatchToolHandlerDetailed config
-        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        (acceptedHandler registry call)
         call
+
+acceptedHandler :: ToolRegistry -> ToolCall -> Maybe ToolHandler
+acceptedHandler registry call = do
+    tool <- lookupRegisteredTool call.name registry
+    if toolAcceptsCall tool call
+        then Just tool.appToolHandler
+        else Nothing
+
+-- | Privileged computer calls may only reach their dedicated handler. This
+-- prevents a caller-defined function/custom tool from acquiring desktop
+-- control, and keeps legacy native calls away from ordinary handlers.
+toolAcceptsCall :: AppTool -> ToolCall -> Bool
+toolAcceptsCall tool call =
+    case (tool.appToolSchema, call.callKind) of
+        (HostedComputerSchema, ComputerCallKind) -> True
+        (HostedComputerSchema, ComputerFunctionCallKind) -> True
+        (HostedComputerSchema, _) -> False
+        (_, ComputerCallKind) -> False
+        (_, ComputerFunctionCallKind) -> False
+        _ -> True
 
 jsonToolParameters :: AppTool -> Maybe [PropertySchema]
 jsonToolParameters tool = case tool.appToolSchema of
@@ -400,6 +426,7 @@ jsonToolParameters tool = case tool.appToolSchema of
     RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
     FreeformGrammarSchema _ _ -> Nothing
+    HostedComputerSchema -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.

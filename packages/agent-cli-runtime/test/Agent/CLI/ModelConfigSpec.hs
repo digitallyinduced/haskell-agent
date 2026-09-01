@@ -61,6 +61,28 @@ spec = describe "Agent.CLI.ModelConfig" do
                 , "gemini-3.1-pro-preview"
                 , "gemini-3.5-flash-lite"
                 ]
+        fmap
+            (\model ->
+                ( model.catalogModelReasoningEfforts
+                , model.catalogModelDefaultReasoningEffort
+                ))
+            (findModel "opus" catalog.catalogModels)
+            `shouldBe`
+                Just
+                    ( Just ["low", "medium", "high", "xhigh", "max"]
+                    , Just "xhigh"
+                    )
+        fmap
+            (\model ->
+                ( model.catalogModelReasoningEfforts
+                , model.catalogModelDefaultReasoningEffort
+                ))
+            (Map.lookup "gpt-5.6-sol" catalog.catalogModelsById)
+            `shouldBe`
+                Just
+                    ( Just ["low", "medium", "high", "xhigh", "max"]
+                    , Just "low"
+                    )
 
     it "adds a custom Responses connection and model" do
         defaults <- readPackagedDefaults
@@ -203,6 +225,41 @@ spec = describe "Agent.CLI.ModelConfig" do
             (Just ("models.json", overlay))
             `shouldSatisfy` leftContains "context_window must be positive"
 
+    it "rejects invalid or duplicate reasoning efforts" do
+        defaults <- readPackagedDefaults
+        let invalid effortFields =
+                LBS.pack $
+                    "{\"version\":1,\"models\":[{\"id\":\"gpt-5.6-sol\","
+                    <> "\"connection\":\"openai\",\"dialect\":\"codex\","
+                    <> "\"default\":true,"
+                    <> effortFields
+                    <> "}]}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just
+                ( "models.json"
+                , invalid "\"reasoning_efforts\":[\"medium\",\"turbo\"]"
+                ))
+            `shouldSatisfy` leftContains "unsupported reasoning_efforts"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just
+                ( "models.json"
+                , invalid "\"reasoning_efforts\":[\"high\",\"high\"]"
+                ))
+            `shouldSatisfy` leftContains "must not contain duplicates"
+
+    it "requires a model reasoning default to be advertised" do
+        defaults <- readPackagedDefaults
+        let overlay =
+                "{\"version\":1,\"models\":[{\"id\":\"gpt-5.6-sol\",\"connection\":\"openai\",\"dialect\":\"codex\",\"reasoning_efforts\":[\"low\",\"medium\"],\"default_reasoning_effort\":\"high\",\"default\":true}]}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", overlay))
+            `shouldSatisfy`
+                leftContains
+                    "default_reasoning_effort must be listed"
+
     it "loads ~/.haskell-agent/models.json over an explicit default path" $
         withTempDirectory "agent-model-config-" \root -> do
             defaults <- readPackagedDefaults
@@ -225,6 +282,15 @@ leftContains :: Text -> Either Text value -> Bool
 leftContains needle = \case
     Left err -> needle `Text.isInfixOf` err
     Right _ -> False
+
+findModel :: Text -> [CatalogModel] -> Maybe CatalogModel
+findModel modelId = go
+  where
+    go = \case
+        [] -> Nothing
+        model : rest
+            | model.catalogModelId == modelId -> Just model
+            | otherwise -> go rest
 
 expectRight :: Either Text value -> IO value
 expectRight = \case

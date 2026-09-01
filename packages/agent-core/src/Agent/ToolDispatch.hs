@@ -3,6 +3,7 @@
 module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
+    , isComputerToolCallKind
     , ToolCallResult(..)
     , ToolDispatchOutcome(..)
     , ToolResultImage(..)
@@ -51,11 +52,20 @@ import qualified Data.Text as Text
 data ToolCallKind
     = FunctionCallKind
     | CustomCallKind
-    -- | A provider-native computer call. Its arguments are the encoded
-    -- action list, and its result is encoded by the provider adapter as a
-    -- structured screenshot output rather than a function output string.
+    -- | A legacy provider-native computer call retained so persisted sessions
+    -- can still be resumed.
     | ComputerCallKind
+    -- | The reserved ordinary computer function. It uses the local executor
+    -- and explicit approval rules; Responses continuations pair its text
+    -- @function_call_output@ with a fresh user screenshot.
+    | ComputerFunctionCallKind
     deriving (Eq, Show)
+
+isComputerToolCallKind :: ToolCallKind -> Bool
+isComputerToolCallKind = \case
+    ComputerCallKind -> True
+    ComputerFunctionCallKind -> True
+    _ -> False
 
 -- | Provider-neutral function or custom tool call emitted by a model transport.
 data ToolCall = ToolCall

@@ -15,8 +15,12 @@ module Agent.CLI.GatewayClient
     , gatewayPkceChallenge
     , validateGatewayAuthorizationCallback
     , validateGatewayAuthorizationCodeResponse
+    , validateGatewayDeviceAuthorization
     , startGatewayAuthorization
+    , startNativeGatewayAuthorization
     , pollGatewayAuthorization
+    , pollNativeGatewayAuthorizationAndSave
+    , exchangeNativeGatewayAuthorizationCode
     , saveGatewayCredential
     , removeGatewayCredential
     , openGatewayAuthorizationPage
@@ -215,6 +219,44 @@ gatewayDeviceDecoder =
             <*> Hermes.atKey "expires_in" Hermes.int
             <*> Hermes.atKey "interval" Hermes.int
 
+-- | Ensure a device response cannot make a native or terminal client open an
+-- unrelated origin.
+validateGatewayDeviceAuthorization
+    :: Text
+    -> GatewayDeviceAuthorization
+    -> Either Text GatewayDeviceAuthorization
+validateGatewayDeviceAuthorization rawBaseUrl authorization = do
+    baseUrl <- validateBaseUrl rawBaseUrl
+    whenEither
+        (Text.null (Text.strip authorization.deviceCode))
+        "The gateway returned an empty device code."
+    whenEither
+        (Text.null (Text.strip authorization.userCode))
+        "The gateway returned an empty user code."
+    whenEither
+        (authorization.expiresInSeconds <= 0)
+        "The gateway returned an invalid authorization expiry."
+    whenEither
+        (authorization.pollIntervalSeconds <= 0)
+        "The gateway returned an invalid polling interval."
+    gatewayOrigin <-
+        parseGatewayOrigin
+            "The gateway URL is invalid."
+            baseUrl
+    verificationOrigin <-
+        parseGatewayResourceOrigin
+            "The gateway returned an invalid verification URL."
+            authorization.verificationUri
+    completeOrigin <-
+        parseGatewayResourceOrigin
+            "The gateway returned an invalid complete verification URL."
+            authorization.verificationUriComplete
+    whenEither
+        (verificationOrigin /= gatewayOrigin
+            || completeOrigin /= gatewayOrigin)
+        "The gateway returned a verification URL for a different origin."
+    pure authorization
+
 data GatewayPollResult
     = GatewayAuthorized !Text !Text
     | GatewayAuthorizationPending !(Maybe Int)
@@ -314,15 +356,27 @@ saveGatewayCredentialAt home credential =
 
 validateGatewayCredential :: GatewayCredential -> Either Text ()
 validateGatewayCredential credential = do
-    _ <- validateBaseUrl credential.gatewayBaseUrl
+    baseUrl <- validateBaseUrl credential.gatewayBaseUrl
     validateGatewayWebSocketUrl credential.gatewayWebSocketUrl
     whenEither
         (Text.null (Text.strip credential.gatewayAccessToken))
         "Gateway access token cannot be empty."
-  where
-    whenEither condition message
-        | condition = Left message
-        | otherwise = Right ()
+    baseOrigin <-
+        parseGatewayOrigin
+            "Gateway credential contains an invalid base URL."
+            baseUrl
+    websocketOrigin <-
+        parseGatewayOrigin
+            "Gateway credential contains an invalid WebSocket URL."
+            credential.gatewayWebSocketUrl
+    let expectedWebSocketOrigin =
+            case baseOrigin of
+                ("https:", host, port) -> ("wss:", host, port)
+                ("http:", host, port) -> ("ws:", host, port)
+                origin -> origin
+    whenEither
+        (websocketOrigin /= expectedWebSocketOrigin)
+        "Gateway credential WebSocket URL uses a different origin."
 
 saveGatewayCredential :: GatewayCredential -> IO (Either Text ())
 saveGatewayCredential credential =
@@ -334,22 +388,52 @@ startGatewayAuthorization
     :: Text
     -> IO (Either Text GatewayAuthorization)
 startGatewayAuthorization rawBaseUrl =
+    startGatewayAuthorizationWithClient rawBaseUrl "haskell-agent"
+
+-- | Start the device flow used by native clients without opening a browser or
+-- beginning a poll loop.
+startNativeGatewayAuthorization
+    :: Text
+    -> Text
+    -> IO (Either Text GatewayDeviceAuthorization)
+startNativeGatewayAuthorization rawBaseUrl rawClientName =
+    fmap (fmap (.authorizationDevice)) $
+        startGatewayAuthorizationWithClient rawBaseUrl rawClientName
+
+startGatewayAuthorizationWithClient
+    :: Text
+    -> Text
+    -> IO (Either Text GatewayAuthorization)
+startGatewayAuthorizationWithClient rawBaseUrl rawClientName =
     case validateBaseUrl rawBaseUrl of
         Left err -> pure (Left err)
-        Right baseUrl -> do
-            tryAny newTlsManager >>= \case
-                Left exception ->
-                    pure (Left (Text.pack (show exception)))
-                Right manager ->
-                    fmap (GatewayAuthorization baseUrl) <$>
-                        postJson manager
-                            (baseUrl
-                                <> "/api/v1/agent-connections/device")
-                            (Aeson.object
-                                [ "client_name"
-                                    .= ("haskell-agent" :: Text)
-                                ])
-                            gatewayDeviceDecoder
+        Right baseUrl
+            | Text.null clientName || Text.length clientName > 160 ->
+                pure
+                    (Left
+                        "Gateway client name must contain between 1 and 160 characters.")
+            | otherwise -> do
+                tryAny newTlsManager >>= \case
+                    Left exception ->
+                        pure (Left (Text.pack (show exception)))
+                    Right manager -> do
+                        result <-
+                            postJson manager
+                                (baseUrl
+                                    <> "/api/v1/agent-connections/device")
+                                (Aeson.object
+                                    [ "client_name"
+                                        .= clientName
+                                    ])
+                                gatewayDeviceDecoder
+                        pure do
+                            device <- result
+                            GatewayAuthorization baseUrl
+                                <$> validateGatewayDeviceAuthorization
+                                    baseUrl
+                                    device
+  where
+    clientName = Text.strip rawClientName
 
 pollGatewayAuthorization
     :: GatewayAuthorization
@@ -706,15 +790,63 @@ pollGatewayAuthorizationWith
     -> GatewayAuthorization
     -> IO (Either Text GatewayPollResult)
 pollGatewayAuthorizationWith manager authorization =
+    pollGatewayDeviceCodeWith
+        manager
+        authorization.authorizationBaseUrl
+        authorization.authorizationDevice.deviceCode
+
+pollGatewayDeviceCodeWith
+    :: HTTP.Manager
+    -> Text
+    -> Text
+    -> IO (Either Text GatewayPollResult)
+pollGatewayDeviceCodeWith manager baseUrl deviceCode =
     postJson
         manager
-        (authorization.authorizationBaseUrl
-            <> "/api/v1/agent-connections/token")
+        (baseUrl <> "/api/v1/agent-connections/token")
         (Aeson.object
-            [ "device_code"
-                .= authorization.authorizationDevice.deviceCode
-            ])
+            [ "device_code" .= deviceCode ])
         gatewayPollDecoder
+
+-- | Perform one native device-flow poll and persist an authorized credential.
+-- Secret token fields remain inside the trusted Haskell runtime.
+pollNativeGatewayAuthorizationAndSave
+    :: Text
+    -> Text
+    -> IO (Either Text GatewayPollResult)
+pollNativeGatewayAuthorizationAndSave rawBaseUrl rawDeviceCode =
+    case validateBaseUrl rawBaseUrl of
+        Left err -> pure (Left err)
+        Right baseUrl
+            | Text.null deviceCode || Text.length deviceCode > 4096 ->
+                pure (Left "Gateway device code is invalid.")
+            | otherwise ->
+                tryAny newTlsManager >>= \case
+                    Left exception ->
+                        pure (Left (Text.pack (show exception)))
+                    Right manager ->
+                        pollGatewayDeviceCodeWith manager baseUrl deviceCode
+                            >>= \case
+                                Left err -> pure (Left err)
+                                Right
+                                    authorized@(GatewayAuthorized
+                                        accessToken
+                                        websocketUrl) -> do
+                                        saveGatewayCredential
+                                            GatewayCredential
+                                                { gatewayBaseUrl = baseUrl
+                                                , gatewayWebSocketUrl =
+                                                    websocketUrl
+                                                , gatewayAccessToken =
+                                                    accessToken
+                                                }
+                                            >>= \case
+                                                Left err -> pure (Left err)
+                                                Right () ->
+                                                    pure (Right authorized)
+                                Right result -> pure (Right result)
+  where
+    deviceCode = Text.strip rawDeviceCode
 
 postJson
     :: HTTP.Manager
@@ -763,6 +895,80 @@ exchangeGatewayAuthorizationCode
             , ("code_verifier", verifier)
             , ("redirect_uri", redirectUri)
             ]
+
+-- | Exchange the registered macOS custom-scheme callback and persist the
+-- resulting credential without exposing its secret fields through the ABI.
+exchangeNativeGatewayAuthorizationCode
+    :: Text
+    -> Text
+    -> Text
+    -> Text
+    -> Text
+    -> IO (Either Text ())
+exchangeNativeGatewayAuthorizationCode
+    rawBaseUrl clientId authorizationCode verifier redirectUri =
+        case validateNativeGatewayAuthorizationExchange
+            rawBaseUrl
+            clientId
+            authorizationCode
+            verifier
+            redirectUri of
+            Left err -> pure (Left err)
+            Right baseUrl ->
+                tryAny newTlsManager >>= \case
+                    Left _ ->
+                        pure
+                            (Left
+                                "Could not prepare the gateway token request.")
+                    Right manager ->
+                        postGatewayOAuthForm
+                            manager
+                            (baseUrl
+                                <> "/api/v1/agent-connections/oauth/token")
+                            [ ("grant_type", "authorization_code")
+                            , ("client_id", clientId)
+                            , ("code", authorizationCode)
+                            , ("code_verifier", verifier)
+                            , ("redirect_uri", redirectUri)
+                            ]
+                            >>= \case
+                                Left err -> pure (Left err)
+                                Right response ->
+                                    case
+                                        validateGatewayAuthorizationCodeResponse
+                                            baseUrl
+                                            response of
+                                        Left err -> pure (Left err)
+                                        Right credential ->
+                                            saveGatewayCredential credential
+
+validateNativeGatewayAuthorizationExchange
+    :: Text
+    -> Text
+    -> Text
+    -> Text
+    -> Text
+    -> Either Text Text
+validateNativeGatewayAuthorizationExchange
+    rawBaseUrl clientId authorizationCode verifier redirectUri = do
+        baseUrl <- validateBaseUrl rawBaseUrl
+        whenEither
+            (clientId /= "haskell-agent-macos")
+            "Gateway OAuth client ID is invalid."
+        whenEither
+            (Text.null authorizationCode
+                || Text.length authorizationCode > 4096)
+            "Gateway authorization code is invalid."
+        whenEither
+            ( Text.length verifier < 43
+                || Text.length verifier > 128
+                || not (Text.all isPkceCharacter verifier)
+            )
+            "Gateway PKCE code verifier is invalid."
+        whenEither
+            (redirectUri /= "haskell-agent-auth://gateway/callback")
+            "Gateway OAuth redirect URI is invalid."
+        pure baseUrl
 
 postGatewayOAuthForm
     :: HTTP.Manager
@@ -1026,6 +1232,27 @@ parseGatewayOrigin errorMessage raw = do
         ( not (null (URI.uriUserInfo authority))
             || Text.null host
             || not (null (URI.uriQuery uri))
+            || not (null (URI.uriFragment uri))
+        )
+        errorMessage
+    port <- gatewayOriginPort errorMessage scheme (URI.uriPort authority)
+    pure (scheme, host, port)
+
+parseGatewayResourceOrigin
+    :: Text
+    -> Text
+    -> Either Text (Text, Text, Int)
+parseGatewayResourceOrigin errorMessage raw = do
+    uri <-
+        maybe (Left errorMessage) Right $
+            URI.parseURI (Text.unpack (Text.strip raw))
+    authority <-
+        maybe (Left errorMessage) Right (URI.uriAuthority uri)
+    let scheme = Text.toLower (Text.pack (URI.uriScheme uri))
+        host = Text.toLower (Text.pack (URI.uriRegName authority))
+    whenEither
+        ( not (null (URI.uriUserInfo authority))
+            || Text.null host
             || not (null (URI.uriFragment uri))
         )
         errorMessage

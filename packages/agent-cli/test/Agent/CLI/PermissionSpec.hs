@@ -3,6 +3,7 @@ module Agent.CLI.PermissionSpec (spec) where
 import Agent.CLI.Permission
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -62,6 +63,21 @@ spec = do
                 Text.isInfixOf "Always approve all tools for this project"
             frame `shouldSatisfy` Text.isInfixOf "Always allow this tool this session"
             frame `shouldSatisfy` Text.isInfixOf "Deny"
+
+    describe "approvalToolCallPrompt" do
+        it "summarizes privileged computer calls without dumping JSON" do
+            let call = ToolCall
+                    { callId = "computer-1"
+                    , name = "computer"
+                    , arguments =
+                        "{\"actions\":[{\"type\":\"screenshot\"}]}"
+                    , callKind = ComputerCallKind
+                    , argumentsEncrypted = False
+                    }
+                prompt = approvalToolCallPromptRelative "/repo" call
+            prompt `shouldSatisfy`
+                Text.isPrefixOf "Allow this computer action?"
+            prompt `shouldNotSatisfy` Text.isInfixOf "\"actions\""
 
     describe "approval policy picker" do
         it "selects the current policy" do

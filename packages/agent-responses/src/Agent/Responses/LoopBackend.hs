@@ -18,6 +18,7 @@ module Agent.Responses.LoopBackend
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput
+    , normalizeResponseInputItems
     ) where
 
 import Agent.Error (ApiError)
@@ -27,7 +28,7 @@ import Agent.InterAgentMessage
     , renderInterAgentMessage
     , renderInterAgentMessageHeader
     )
-import Agent.Json (RawJson, rawJsonFromEncoding)
+import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
 import Agent.JsonText (jsonTextFieldPartial)
 import Agent.Loop
     ( Backend(..)
@@ -57,6 +58,7 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolResultImage(..)
     , canonicalToolName
+    , isComputerToolCallKind
     , toolCallResultImages
     )
 import Control.Applicative ((<|>))
@@ -71,6 +73,7 @@ import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -110,7 +113,9 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
                     { backendOutput = responseToTurnOutput response
                     , backendState =
                         advanceBackendSnapshot snapshot
-                            (requestItems <> response.output)
+                            ( normalizeResponseInputItems requestItems
+                                <> response.output
+                            )
                             Nothing
                     }
 
@@ -139,7 +144,8 @@ withRequestInput ResponseCreateParams{..} items =
         -- Replayed transcript items are provider output; drop their lifecycle
         -- status before they become input (see 'stripReplayedItemStatus').
         normalizedItems =
-            map (normalizeRequestItem . stripReplayedItemStatus) items
+            map stripReplayedItemStatus
+                (normalizeResponseInputItems items)
         requestItems
             | any isAdditionalTools prefix =
                 ensureReasoningHasFollowingItem
@@ -205,7 +211,7 @@ stripResponsesLiteImageDetails = \case
             , name = callOutput.name
             , namespace = callOutput.namespace
             , provider = callOutput.provider
-            , output = callOutput.output
+            , output = stripRawJsonImageDetails callOutput.output
             , status = callOutput.status
 
             }
@@ -214,7 +220,7 @@ stripResponsesLiteImageDetails = \case
             { itemId = callOutput.itemId
             , callId = callOutput.callId
             , name = callOutput.name
-            , output = callOutput.output
+            , output = stripRawJsonImageDetails callOutput.output
             , status = callOutput.status
 
             }
@@ -224,15 +230,97 @@ stripResponsesLiteImageDetails = \case
         InputImagePart{..} -> InputImagePart { detail = Nothing, .. }
         part -> part
 
--- Older local compaction snapshots accidentally persisted assistant summaries
--- as input_text. Responses input accepts assistant history, but its content
--- parts must use output_text (or refusal). Repair those snapshots at the wire
--- boundary so resumed sessions recover without rewriting their session files.
-normalizeRequestItem :: ResponseItem -> ResponseItem
+stripRawJsonImageDetails :: RawJson -> RawJson
+stripRawJsonImageDetails raw =
+    case Aeson.decodeStrict' (rawJsonBytes raw) of
+        Just value ->
+            let cleaned = stripInputImageDetailValue value
+            in if cleaned == value
+                then raw
+                else rawJsonFromEncoding (Aeson.toEncoding cleaned)
+        Nothing -> raw
+
+stripInputImageDetailValue :: Aeson.Value -> Aeson.Value
+stripInputImageDetailValue = \case
+    Aeson.Object object ->
+        let nested = KeyMap.map stripInputImageDetailValue object
+        in Aeson.Object $
+            if KeyMap.lookup "type" nested
+                    == Just (Aeson.String "input_image")
+                then KeyMap.delete "detail" nested
+                else nested
+    Aeson.Array values ->
+        Aeson.Array (fmap stripInputImageDetailValue values)
+    value -> value
+
+-- Repair persisted compatibility shapes at the wire boundary without
+-- rewriting session files. Older assistant summaries used input_text, and
+-- older computer sessions used provider-native call/output items that Codex
+-- does not accept.
+normalizeResponseInputItems :: [ResponseItem] -> [ResponseItem]
+normalizeResponseInputItems = go Set.empty Nothing
+  where
+    go legacyFunctionCalls pendingScreenshot = \case
+        [] -> computerObservationItems pendingScreenshot
+        FunctionCallItem call : items
+            | isLegacyComputerFunctionCall call ->
+                computerObservationItems pendingScreenshot
+                    <> [FunctionCallItem
+                        (normalizeLegacyComputerFunctionCall call)]
+                    <> go
+                        (Set.insert call.callId legacyFunctionCalls)
+                        Nothing
+                        items
+        FunctionCallOutputItem output : items
+            | Set.member output.callId legacyFunctionCalls ->
+                let screenshot = legacyFunctionScreenshot output
+                in normalizeLegacyComputerFunctionOutput output screenshot
+                    : go
+                        (Set.delete output.callId legacyFunctionCalls)
+                        screenshot
+                        items
+        item : items
+            | isToolOutputItem item ->
+                normalizeRequestItem item
+                    <> go
+                        legacyFunctionCalls
+                        (updatedComputerScreenshot pendingScreenshot item)
+                        items
+            | otherwise ->
+                computerObservationItems pendingScreenshot
+                    <> normalizeRequestItem item
+                    <> go legacyFunctionCalls Nothing items
+
+    computerObservationItems =
+        maybe [] (pure . legacyComputerScreenshotObservation)
+
+-- Keep a legacy screenshot behind the complete run of tool outputs. A later
+-- incomplete computer output invalidates an earlier image rather than
+-- presenting stale pixels as the latest desktop state.
+updatedComputerScreenshot
+    :: Maybe Text
+    -> ResponseItem
+    -> Maybe Text
+updatedComputerScreenshot current = \case
+    ComputerCallOutputItem output -> legacyComputerScreenshot output
+    _ -> current
+
+isToolOutputItem :: ResponseItem -> Bool
+isToolOutputItem = \case
+    FunctionCallOutputItem{} -> True
+    CustomToolCallOutputItem{} -> True
+    ComputerCallOutputItem{} -> True
+    _ -> False
+
+normalizeRequestItem :: ResponseItem -> [ResponseItem]
 normalizeRequestItem = \case
+    ComputerCallItem call ->
+        [FunctionCallItem (legacyComputerFunctionCall call)]
+    ComputerCallOutputItem output ->
+        [legacyComputerFunctionOutput output]
     MessageItem message
         | message.role == RoleAssistant ->
-            MessageItem ResponseMessage
+            [ MessageItem ResponseMessage
                 { messageId = message.messageId
                 , content = case message.content of
                     MessageContentText text ->
@@ -246,7 +334,97 @@ normalizeRequestItem = \case
                 , passthrough = message.passthrough
 
                 }
-    item -> item
+            ]
+    item -> [item]
+
+legacyComputerFunctionCall :: ComputerCall -> FunctionCall
+legacyComputerFunctionCall call = FunctionCall
+    { itemId = Nothing
+    , callId = call.computerCallId
+    , name = computerFunctionName
+    , namespace = Nothing
+    , provider = Nothing
+    , arguments =
+        Text.decodeUtf8 . LBS.toStrict . Aeson.encode $
+            Aeson.object ["actions" Aeson..= call.computerActions]
+    , encryptedFunctionArgs = Nothing
+    , status = call.computerCallStatus
+    }
+
+legacyComputerFunctionOutput :: ComputerCallOutput -> ResponseItem
+legacyComputerFunctionOutput output =
+    FunctionCallOutputItem FunctionCallOutput
+        { itemId = Nothing
+        , callId = output.computerOutputCallId
+        , name = Nothing
+        , namespace = Nothing
+        , provider = Nothing
+        , output = rawJsonFromEncoding . Aeson.toEncoding $
+            if legacyComputerOutputCompleted output
+                then ("Computer action completed." :: Text)
+                else "Computer action did not complete."
+        , status = output.computerOutputStatus
+        }
+
+legacyComputerScreenshot :: ComputerCallOutput -> Maybe Text
+legacyComputerScreenshot output
+    | legacyComputerOutputCompleted output =
+        Just output.screenshotDataUrl
+    | otherwise = Nothing
+
+legacyComputerOutputCompleted :: ComputerCallOutput -> Bool
+legacyComputerOutputCompleted output =
+    output.computerOutputStatus `elem` [Nothing, Just ItemCompleted]
+
+normalizeLegacyComputerFunctionCall :: FunctionCall -> FunctionCall
+normalizeLegacyComputerFunctionCall call = FunctionCall
+    { itemId = Nothing
+    , callId = call.callId
+    , name = computerFunctionName
+    , namespace = Nothing
+    , provider = Nothing
+    , arguments = call.arguments
+    , encryptedFunctionArgs = call.encryptedFunctionArgs
+    , status = call.status
+    }
+
+normalizeLegacyComputerFunctionOutput
+    :: FunctionCallOutput
+    -> Maybe Text
+    -> ResponseItem
+normalizeLegacyComputerFunctionOutput output screenshot =
+    FunctionCallOutputItem FunctionCallOutput
+        { itemId = Nothing
+        , callId = output.callId
+        , name = Nothing
+        , namespace = Nothing
+        , provider = Nothing
+        , output =
+            if output.status == Just ItemIncomplete
+                then rawJsonFromEncoding
+                    (Aeson.toEncoding ("Computer action did not complete." :: Text))
+                else case screenshot of
+                    Just _ -> rawJsonFromEncoding
+                        (Aeson.toEncoding ("Computer action completed." :: Text))
+                    Nothing -> output.output
+        , status = output.status
+        }
+
+legacyFunctionScreenshot :: FunctionCallOutput -> Maybe Text
+legacyFunctionScreenshot output
+    | output.status == Just ItemIncomplete = Nothing
+    | otherwise =
+        case Aeson.decodeStrict' (rawJsonBytes output.output) of
+            Just (Aeson.Array parts) ->
+                lastMaybe
+                    [ imageUrl
+                    | Aeson.Object part <- foldr (:) [] parts
+                    , KeyMap.lookup "type" part
+                        == Just (Aeson.String "input_image")
+                    , Just (Aeson.String imageUrl) <-
+                        [KeyMap.lookup "image_url" part]
+                    ]
+            _ -> Nothing
 
 normalizeAssistantPart :: ResponseContentPart -> ResponseContentPart
 normalizeAssistantPart = \case
@@ -283,7 +461,10 @@ emptyAssistantFollowupItem = MessageItem ResponseMessage
     }
 
 turnInputsToItems :: [TurnInput] -> [ResponseItem]
-turnInputsToItems = map turnInputToItem
+turnInputsToItems inputs =
+    map turnInputToItem inputs
+        <> maybeToList
+            (computerScreenshotObservation <$> latestComputerScreenshot inputs)
 
 turnInputToItem :: TurnInput -> ResponseItem
 turnInputToItem = \case
@@ -391,17 +572,27 @@ toolResultToItem result = case result.callKind of
         , output = toolResultOutput result
         , status = Nothing
         }
-    ComputerCallKind -> case Hermes.decodeEither computerCallOutputDecoder
-            (Text.encodeUtf8 result.output) of
-        Right output -> ComputerCallOutputItem output
-            { computerOutputCallId = result.callId }
-        Left _ -> ComputerCallOutputItem ComputerCallOutput
-            { computerOutputItemId = Nothing
-            , computerOutputCallId = result.callId
-            , screenshotDataUrl = transparentPixelDataUrl
-            , acknowledgedChecks = []
-            , computerOutputStatus = Nothing
-            , computerOutputExtra = KeyMap.empty
+    ComputerCallKind ->
+        FunctionCallOutputItem FunctionCallOutput
+            { itemId = Nothing
+            , callId = result.callId
+            , name = Nothing
+            , namespace = Nothing
+            , provider = Nothing
+            , output = rawJsonFromEncoding . Aeson.toEncoding $
+                computerFunctionTextOutput result.output
+            , status = Nothing
+            }
+    ComputerFunctionCallKind ->
+        FunctionCallOutputItem FunctionCallOutput
+            { itemId = Nothing
+            , callId = result.callId
+            , name = Nothing
+            , namespace = Nothing
+            , provider = Nothing
+            , output = rawJsonFromEncoding . Aeson.toEncoding $
+                computerFunctionTextOutput result.output
+            , status = Nothing
             }
 
 toolResultOutput :: ToolCallResult -> RawJson
@@ -423,11 +614,66 @@ toolResultOutput result =
             , promptCacheBreakpoint = Nothing
             }
 
-transparentPixelDataUrl :: Text
-transparentPixelDataUrl =
-    "data:image/png;base64,"
-        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
-        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
+computerFunctionTextOutput :: Text -> Text
+computerFunctionTextOutput rawOutput =
+    case Hermes.decodeEither computerCallOutputDecoder
+            (Text.encodeUtf8 rawOutput) of
+        Right ComputerCallOutput{} ->
+            "Computer action completed."
+        Left _ -> rawOutput
+
+latestComputerScreenshot :: [TurnInput] -> Maybe Text
+latestComputerScreenshot inputs =
+    lastMaybe
+        [ result
+        | CompletedTool result <- inputs
+        , isComputerToolCallKind result.callKind
+        ]
+        >>= \result ->
+            case Hermes.decodeEither computerCallOutputDecoder
+                    (Text.encodeUtf8 result.output) of
+                Right ComputerCallOutput{screenshotDataUrl} ->
+                    Just screenshotDataUrl
+                Left _ -> Nothing
+
+computerScreenshotObservation :: Text -> ResponseItem
+computerScreenshotObservation screenshotDataUrl =
+    computerScreenshotObservationWith
+        "Current macOS desktop after the completed computer action:"
+        screenshotDataUrl
+
+legacyComputerScreenshotObservation :: Text -> ResponseItem
+legacyComputerScreenshotObservation screenshotDataUrl =
+    computerScreenshotObservationWith
+        "macOS desktop observed after the completed computer action:"
+        screenshotDataUrl
+
+computerScreenshotObservationWith :: Text -> Text -> ResponseItem
+computerScreenshotObservationWith observationText screenshotDataUrl =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts
+            [ InputTextPart
+                observationText
+                Nothing
+            , InputImagePart
+                { detail = Just "auto"
+                , fileId = Nothing
+                , imageUrl = Just screenshotDataUrl
+                , promptCacheBreakpoint = Nothing
+                }
+            ]
+        , role = RoleUser
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        }
+
+lastMaybe :: [value] -> Maybe value
+lastMaybe = \case
+    [] -> Nothing
+    values -> Just (last values)
+
 responseToTurnOutput :: Response -> TurnOutput
 responseToTurnOutput response = TurnOutput
     { responseId = response.responseId
@@ -520,6 +766,17 @@ tokenUsageFromResponse = maybe emptyTokenUsage \usage ->
 
 responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
+    FunctionCallItem call
+        | isComputerFunctionCall call ->
+            Just ToolCall
+                { callId = call.callId
+                , name = "computer"
+                , arguments = call.arguments
+                , callKind = ComputerFunctionCallKind
+                -- Desktop input may contain typed secrets. Conservatively
+                -- redact every reserved computer-function payload.
+                , argumentsEncrypted = True
+                }
     FunctionCallItem call ->
         let toolName = namespacedToolName call.namespace call.name
         in Just ToolCall
@@ -547,6 +804,18 @@ responseItemToToolCall = \case
         , argumentsEncrypted = any isSensitiveComputerAction call.computerActions
         }
     _ -> Nothing
+
+isComputerFunctionCall :: FunctionCall -> Bool
+isComputerFunctionCall call =
+    ( call.name == computerFunctionName
+        && call.namespace `elem` [Nothing, Just "functions"]
+    )
+        || isLegacyComputerFunctionCall call
+
+isLegacyComputerFunctionCall :: FunctionCall -> Bool
+isLegacyComputerFunctionCall call =
+    call.name == legacyComputerFunctionName
+        && call.namespace == Just computerFunctionNamespace
 
 isSensitiveComputerAction :: ComputerAction -> Bool
 isSensitiveComputerAction = \case

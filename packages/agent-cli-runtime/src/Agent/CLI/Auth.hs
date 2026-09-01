@@ -14,6 +14,7 @@ module Agent.CLI.Auth
     , grokNeedsRefresh
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
+    , gatewayRouterTokenProvider
     , isGatewayLoadedAuth
     , geminiAuthStateFromJson
     , geminiAuthStateToJson
@@ -96,7 +97,10 @@ import Agent.CLI.GatewayClient
     , loadGatewayCredential
     )
 import Agent.Error (ApiError(..))
-import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
+import Agent.OpenAI.WebSocketClient
+    ( isGatewayWebSocketCredential
+    , validateGatewayWebSocketUrl
+    )
 import Agent.Transport.WebSocket (webSocketHandshakeFailureStatus)
 import qualified Agent.Claude.Auth as ClaudeCode
 import Agent.Provider
@@ -345,6 +349,27 @@ gatewayFallbackTokenProvider gatewayCredential directProvider = do
             , webSocketHandshakeFailureStatus err == Just 403 ->
                 Just AccountAuthenticationRejected
         _ -> Nothing
+
+-- | Enforce the credential/model routing invariant for the gateway catalog.
+--
+-- Gateway aliases such as @router-default@ are not valid direct OpenAI model
+-- ids. The preferred provider may contain a same-billing direct fallback, but
+-- a gateway-mode session must fail before transport setup rather than send a
+-- router alias with that credential. A future explicit provider transition
+-- can replace this guard only when it also replaces the model and session
+-- metadata atomically.
+gatewayRouterTokenProvider :: TokenProvider -> TokenProvider
+gatewayRouterTokenProvider provider =
+    tokenProviderWithNextToken provider \failed ->
+        getNextToken provider failed >>= \case
+            Right credential
+                | isGatewayWebSocketCredential credential ->
+                    pure (Right credential)
+                | otherwise ->
+                    pure $ Left $ CredentialError
+                        "the connected gateway is unavailable; refusing to \
+                        \send a router model with direct OpenAI credentials"
+            Left err -> pure (Left err)
 
 -- | Load one specific account for providers whose HTTP backends can swap
 -- token sources without reconnecting a long-lived transport.

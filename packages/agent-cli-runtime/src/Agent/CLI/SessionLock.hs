@@ -5,7 +5,9 @@
 module Agent.CLI.SessionLock
     ( SessionLock
     , acquireSessionLock
+    , acquireSessionActivityLock
     , releaseSessionLock
+    , sessionActivityLockPath
     , sessionLockFilePath
     , sessionLockIsActive
     , sessionLockPath
@@ -31,9 +33,23 @@ sessionLockPath :: OsPath -> FilePath
 sessionLockPath sessionDir =
     unsafeToFilePath sessionDir FilePath.</> ".agent-running.lock"
 
+sessionActivityLockPath :: OsPath -> FilePath
+sessionActivityLockPath sessionDir =
+    unsafeToFilePath sessionDir FilePath.</> ".agent-turn-running.lock"
+
 acquireSessionLock :: OsPath -> Text -> IO (Either Text SessionLock)
-acquireSessionLock sessionDir sessionId = do
-    let path = sessionLockPath sessionDir
+acquireSessionLock sessionDir sessionId =
+    acquireLockAt (sessionLockPath sessionDir) sessionId
+
+acquireSessionActivityLock
+    :: OsPath
+    -> Text
+    -> IO (Either Text SessionLock)
+acquireSessionActivityLock sessionDir sessionId =
+    acquireLockAt (sessionActivityLockPath sessionDir) sessionId
+
+acquireLockAt :: FilePath -> Text -> IO (Either Text SessionLock)
+acquireLockAt path sessionId = do
     try @_ @SomeException
         (FileLock.tryLockFile path FileLock.Exclusive) >>= \case
             Left err -> pure $ Left

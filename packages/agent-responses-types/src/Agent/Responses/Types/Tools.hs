@@ -5,6 +5,9 @@ module Agent.Responses.Types.Tools
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , computerFunctionNamespace
+    , computerFunctionName
+    , legacyComputerFunctionName
     , CustomTool(..)
     , NamespaceTool(..)
     , responseToolDecoder
@@ -14,6 +17,18 @@ import Agent.Responses.Types.Common
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Hermes as Hermes
 import Data.Text (Text)
+
+-- | Legacy namespace used by sessions written by the earlier Responses Lite
+-- computer fallback.
+computerFunctionNamespace :: Text
+computerFunctionNamespace = "computer_use"
+
+-- | Ordinary function identity for the local computer harness.
+computerFunctionName :: Text
+computerFunctionName = "computer_use"
+
+legacyComputerFunctionName :: Text
+legacyComputerFunctionName = "computer"
 
 data ResponseToolType
     = ToolFunction

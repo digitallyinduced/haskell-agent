@@ -64,6 +64,9 @@ module Agent.Responses.Types
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , computerFunctionNamespace
+    , computerFunctionName
+    , legacyComputerFunctionName
     , CustomTool(..)
     , NamespaceTool(..)
 

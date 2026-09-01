@@ -120,6 +120,17 @@
                     ];
                 };
 
+                agentRuntimeDaemonSource = nix-filter.lib {
+                    root = ./packages/agent-runtime-daemon;
+                    include = [
+                        "app"
+                        "src"
+                        "test"
+                        "agent-runtime-daemon.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentJsonSource = nix-filter.lib {
                     root = ./packages/agent-json;
                     include = [
@@ -257,7 +268,10 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "cbits"
                         "eval"
+                        "ffi"
+                        "include"
                         "skills"
                         "src"
                         "agent-cli.cabal"
@@ -269,7 +283,10 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "cbits"
                         "eval"
+                        "ffi"
+                        "include"
                         "skills"
                         "src"
                         "test"
@@ -473,6 +490,14 @@
                             {
                                 src = agentProcessSource;
                             });
+                        agent-runtime-daemon = localPackage
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-runtime-daemon/package.nix
+                                    { })
+                                {
+                                    src = agentRuntimeDaemonSource;
+                                });
                         agent-json = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-json/package.nix { })
                             {
@@ -572,6 +597,15 @@
                                     "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
                                     "--ghc-option=-DAGENT_BUILD_DATE=\"${agentBuildDate}\""
                                 ];
+                                # GHC's Darwin native-shared output is already
+                                # linked for runtime loading. Stripping it in
+                                # the parent package can turn it into an object
+                                # file, so exclude only the bridge dylib.
+                                stripExclude =
+                                    (old.stripExclude or [ ])
+                                    ++ pkgs.lib.optionals
+                                        pkgs.stdenv.hostPlatform.isDarwin
+                                        [ "lib/libhaskell-agent-bridge.dylib" ];
                             }))
                             [
                                 pkgs.git
@@ -601,6 +635,8 @@
                 agentMcpPackage = productionHaskellPackages.agent-mcp;
                 agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
+                agentRuntimeDaemonPackage =
+                    productionHaskellPackages.agent-runtime-daemon;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = productionHaskellPackages.agent-grok-build-dialect;
                 agentSyntaxPackage = productionHaskellPackages.agent-syntax;
@@ -683,6 +719,9 @@
                 agentCliExecutable =
                     wrapAgentCli
                         (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
+                agentRuntimeDaemonExecutable =
+                    pkgs.haskell.lib.justStaticExecutables
+                        agentRuntimeDaemonPackage;
                 agentCliStaticRuntimeCheck =
                     pkgs.runCommand "agent-cli-static-runtime"
                         { }
@@ -737,6 +776,38 @@
                                             ]}"
                                 '';
                         });
+                agentNativeBridgePackage = pkgs.runCommand
+                    "haskell-agent-native-bridge-0.1.0"
+                    {
+                        # The bridge was already excluded from the parent
+                        # package's strip pass; do not strip it after copying.
+                        dontStrip = true;
+                    }
+                    ''
+                        bridge="$(${pkgs.findutils}/bin/find \
+                            ${agentCliPackage}/lib \
+                            -name libhaskell-agent-bridge.dylib \
+                            -print -quit)"
+                        header="$(${pkgs.findutils}/bin/find \
+                            ${agentCliPackage}/lib \
+                            -name HaskellAgentBridge.h \
+                            -print -quit)"
+                        test -n "$bridge"
+                        test -n "$header"
+                        mkdir -p "$out/lib" "$out/include"
+                        cp "$bridge" "$out/lib/libhaskell-agent-bridge.dylib"
+                        cp "$header" "$out/include/HaskellAgentBridge.h"
+                        bridgeType="$(${pkgs.file}/bin/file -b \
+                            "$out/lib/libhaskell-agent-bridge.dylib")"
+                        case "$bridgeType" in
+                            Mach-O\ 64-bit*dynamically\ linked\ shared\ library*)
+                                ;;
+                            *)
+                                echo "Expected a Mach-O shared library, got: $bridgeType" >&2
+                                exit 1
+                                ;;
+                        esac
+                    '';
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
                 functionalTestCredentialHome =
                     builtins.getEnv "AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME";
@@ -857,11 +928,14 @@
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.agent-cli-runtime = agentCliRuntimePackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
                 packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
+                packages.agent-runtime-daemon = agentRuntimeDaemonExecutable;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
                 packages.agent-syntax = agentSyntaxPackage;
@@ -886,6 +960,10 @@
                     drv = self.packages.${system}.agent-telegram;
                     exePath = "/bin/agent-telegram";
                 };
+                apps.agent-runtime-daemon = flake-utils.lib.mkApp {
+                    drv = self.packages.${system}.agent-runtime-daemon;
+                    exePath = "/bin/agent-runtime-daemon";
+                };
                 apps.agent-openai-login = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-openai-login;
                     exePath = "/bin/agent-openai-login";
@@ -900,6 +978,7 @@
                         packages.agent-mcp
                         packages.agent-json
                         packages.agent-process
+                        packages.agent-runtime-daemon
                         packages.agent-codex-dialect
                         packages.agent-grok-build-dialect
                         packages.agent-syntax
@@ -956,6 +1035,8 @@
                     agent-mcp = haskellPackages.agent-mcp;
                     agent-json = haskellPackages.agent-json;
                     agent-process = haskellPackages.agent-process;
+                    agent-runtime-daemon =
+                        haskellPackages.agent-runtime-daemon;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;
                     agent-grok-build-dialect = haskellPackages.agent-grok-build-dialect;
                     agent-syntax = haskellPackages.agent-syntax;

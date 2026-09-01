@@ -771,6 +771,63 @@ spec = do
                     (seed <> turnInputsToItems resultInput)
                 ]
 
+        it "starts a fresh ordinary-function chain for native computer history" do
+            seen <- newIORef []
+            let legacyCall = ComputerCall
+                    { computerCallItemId = Just "native-item"
+                    , computerCallId = "native-call"
+                    , computerActions = [ScreenshotAction]
+                    , pendingSafetyChecks = []
+                    , computerCallStatus = Just ItemCompleted
+                    , computerCallExtra = KeyMap.empty
+                    }
+            transcript <- newIORef [ComputerCallItem legacyCall]
+            let backend = openAiBackendWith
+                    (recordingSend seen)
+                    (pure baseParams)
+            _ <- submitWithState transcript backend (Just "resp-native")
+                [UserMessage "continue"]
+                (const (pure ()))
+            [(request, previous)] <- readIORef seen
+            previous `shouldBe` Nothing
+            case inputItems request of
+                [FunctionCallItem function, MessageItem{}] -> do
+                    function.name `shouldBe` computerFunctionName
+                    function.namespace `shouldBe` Nothing
+                other -> expectationFailure
+                    ("legacy native item reached Codex: " <> show other)
+
+        it "starts a fresh chain for the earlier Lite computer fallback" do
+            seen <- newIORef []
+            let legacyCall = FunctionCall
+                    { itemId = Just "legacy-item"
+                    , callId = "legacy-call"
+                    , name = legacyComputerFunctionName
+                    , namespace = Just computerFunctionNamespace
+                    , provider = Nothing
+                    , arguments =
+                        "{\"actions\":[{\"type\":\"screenshot\"}]}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    }
+            transcript <- newIORef [FunctionCallItem legacyCall]
+            let backend = openAiBackendWith
+                    (recordingSend seen)
+                    (pure baseParams)
+            _ <- submitWithState transcript backend (Just "resp-legacy-lite")
+                [UserMessage "continue"]
+                (const (pure ()))
+            [(request, previous)] <- readIORef seen
+            previous `shouldBe` Nothing
+            case inputItems request of
+                [FunctionCallItem function, MessageItem{}] -> do
+                    function.itemId `shouldBe` Nothing
+                    function.name `shouldBe` computerFunctionName
+                    function.namespace `shouldBe` Nothing
+                other -> expectationFailure
+                    ("legacy Lite computer item reached Codex: "
+                        <> show other)
+
         it "strips explicitly requested cache retention and starts a fresh chain" do
             seen <- newIORef []
             let seed = turnInputsToItems [UserMessage "old"]
