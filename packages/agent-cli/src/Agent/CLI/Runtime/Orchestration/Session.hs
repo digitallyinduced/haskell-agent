@@ -31,7 +31,11 @@ import Agent.CLI.Error ()
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
-    (InterruptState, catchUserInterrupt, withCtrlCHandler)
+    ( InterruptState
+    , catchUserInterrupt
+    , retryUserInterruptOnce
+    , withCtrlCHandler
+    )
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
 import Agent.CLI.Login ()
@@ -896,8 +900,11 @@ printResumeHint
     :: String
     -> Persistence
     -> IO ()
-printResumeHint progName persist =
-    ensurePersistenceSessionId persist >>= \case
+printResumeHint progName persist = do
+    -- A commit interrupted before publication is safe to adopt once. Keep the
+    -- retry bounded so a later double Ctrl-C can still force a hung exit.
+    sessionId <- retryUserInterruptOnce (ensurePersistenceSessionId persist)
+    case sessionId of
         Nothing -> pure ()
         Just sessionId -> do
             -- Drop an in-place "Thinking…" status so the hint is its own line.
