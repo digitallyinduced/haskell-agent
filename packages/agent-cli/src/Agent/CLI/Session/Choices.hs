@@ -13,6 +13,7 @@ import Agent.CLI.GatewayClient
     ( GatewayModelAccess
     , refreshGatewayModels
     )
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
@@ -141,14 +142,11 @@ modelChoiceWithEffort
                         pure
                             (Left
                                 "The organization gateway does not offer any models.")
-                    Right modelIds -> do
+                    Right models -> do
                         let gatewayConnectionId =
                                 organizationGatewayConnectionId
                             options =
-                                gatewayModelOptions
-                                    catalog
-                                    OpenAIProvider
-                                    modelIds
+                                modelOptionsForGatewayModels catalog models
                         picker <-
                             initialPickerStateForOptions
                                 "organization gateway"

@@ -2,11 +2,14 @@
 -- gateway for native clients that do not own a long-running CLI session.
 module Agent.CLI.GatewayModels
     ( loadGatewayModelOptionsAt
+    , modelOptionsForGatewayModels
     , modelOptionsForGatewayState
     ) where
 
 import Agent.CLI.GatewayClient
-    ( loadGatewayCredentialAt
+    ( GatewayModel(..)
+    , GatewayModelProtocol(..)
+    , loadGatewayCredentialAt
     , newGatewayModelAccess
     , refreshGatewayModels
     )
@@ -19,8 +22,10 @@ import Agent.CLI.Models
     , gatewayModelOptions
     , modelCatalog
     )
-import Agent.Provider (Provider (OpenAIProvider))
+import Agent.Provider
+    ( Provider (ClaudeCodeProvider, OpenAIProvider) )
 import Data.Text (Text)
+import Data.Text qualified as Text
 import System.OsPath (OsPath)
 
 loadGatewayModelOptionsAt
@@ -43,15 +48,39 @@ loadGatewayModelOptionsAt home cwd =
                             pure
                                 (Left
                                     "The organization gateway does not offer any models.")
-                        Right modelIds ->
+                        Right models ->
                             pure
                                 (Right
                                     ( catalog
                                     , Just
-                                        (modelOptionsForGatewayState
-                                            catalog
-                                            (Just modelIds))
+                                        (modelOptionsForGatewayModels
+                                            catalog models)
                                     ))
+
+modelOptionsForGatewayModels
+    :: ModelCatalog
+    -> [GatewayModel]
+    -> [ModelOption]
+modelOptionsForGatewayModels catalog models =
+    gatewayModelOptions catalog OpenAIProvider responseIds
+        <> gatewayModelOptions catalog ClaudeCodeProvider anthropicIds
+  where
+    responseIds =
+        [ model.gatewayModelId
+        | model <- models
+        , model.gatewayModelProtocol == GatewayResponsesProtocol
+        , publicAlias model.gatewayModelId
+        ]
+    anthropicIds =
+        [ model.gatewayModelId
+        | model <- models
+        , model.gatewayModelProtocol == GatewayAnthropicProtocol
+        , publicAlias model.gatewayModelId
+        , model.gatewayModelId `notElem` responseIds
+        ]
+    publicAlias modelId =
+        not ("router-" `Text.isPrefixOf` modelId)
+            && modelId /= "traumimmo-translation"
 
 modelOptionsForGatewayState
     :: ModelCatalog

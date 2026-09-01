@@ -177,8 +177,8 @@ builtinConnectionId = providerSlug
 
 -- | Reserved persisted routing identity for organization-gateway sessions.
 --
--- Gateway requests currently use the OpenAI transport, but must not be
--- indistinguishable from direct OpenAI sessions after the gateway is removed.
+-- The target provider distinguishes Responses from Anthropic while the
+-- reserved connection keeps both protocols separate from direct accounts.
 organizationGatewayConnectionId :: Text
 organizationGatewayConnectionId = "organization-gateway"
 
@@ -259,7 +259,9 @@ connectionBuiltinProvider connection = case connection.connectionKind of
 connectionSupportsDialect :: Text -> Provider -> DialectId -> Bool
 connectionSupportsDialect connection provider dialect
     | connection == organizationGatewayConnectionId =
-        provider == OpenAIProvider && gatewaySupportsDialect dialect
+        (provider == OpenAIProvider && gatewaySupportsDialect dialect)
+            || (provider == ClaudeCodeProvider
+                && dialect == ClaudeCodeDialect)
     | otherwise = providerSupportsDialect provider dialect
 
 catalogDefaultForProvider :: ModelCatalog -> Provider -> Maybe CatalogModel

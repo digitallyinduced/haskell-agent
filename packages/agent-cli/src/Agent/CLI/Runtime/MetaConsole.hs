@@ -28,7 +28,7 @@ import Agent.CLI.Config
     , McpServerConfig(..)
     , WebFetchConfig(..)
     )
-import Agent.CLI.GatewayClient (cachedGatewayModels)
+import Agent.CLI.GatewayClient (cachedGatewayModels, gatewayModelIds)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.MetaConsole
     ( MetaAction(..)
@@ -41,13 +41,13 @@ import Agent.CLI.MetaConsole
     , runMetaConsoleWithCancel
     )
 import Agent.CLI.ModelConfig
-    ( builtinConnectionId
+    ( organizationGatewayConnectionId
     , CatalogModel(..)
     , ModelCatalog(..)
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.SessionEnv (SessionEnv(..))
-import Agent.Provider (Provider(OpenAIProvider), providerSlug)
+import Agent.Provider (providerSlug)
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.Types (ResponseCreateParams(..))
 import Control.Applicative ((<|>))
@@ -363,9 +363,11 @@ buildMetaContext env config = do
         Just access ->
             maybe
                 []
-                (map
+                ( map
                     (\modelId ->
-                        (modelId, builtinConnectionId OpenAIProvider)))
+                        (modelId, organizationGatewayConnectionId))
+                    . gatewayModelIds
+                )
                 <$> cachedGatewayModels access
     pure $
         Aeson.object

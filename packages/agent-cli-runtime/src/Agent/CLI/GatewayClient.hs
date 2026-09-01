@@ -1,6 +1,8 @@
 -- | HTTPS device authorization and restricted gateway credential storage.
 module Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , GatewayModel(..)
+    , GatewayModelProtocol(..)
     , GatewayModelAccess
     , GatewayAuthorization(..)
     , GatewayAuthorizationCodeResponse(..)
@@ -38,10 +40,12 @@ module Agent.CLI.GatewayClient
     , newGatewayModelAccessWith
     , refreshGatewayModels
     , cachedGatewayModels
+    , gatewayModelIds
     , runGatewayCommand
     , saveGatewayCredentialAt
     , showGatewayStatus
     , validateBaseUrl
+    , validateGatewayCredential
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
@@ -115,13 +119,24 @@ data GatewayCredential = GatewayCredential
     }
     deriving (Eq)
 
+data GatewayModelProtocol
+    = GatewayResponsesProtocol
+    | GatewayAnthropicProtocol
+    deriving (Eq, Show)
+
+data GatewayModel = GatewayModel
+    { gatewayModelId :: !Text
+    , gatewayModelProtocol :: !GatewayModelProtocol
+    }
+    deriving (Eq, Show)
+
 -- | A gateway-scoped model catalog and its most recently successful refresh.
 --
 -- The constructor is deliberately hidden: callers can list models but cannot
 -- accidentally inspect or log the credential captured by its fetch action.
 data GatewayModelAccess = GatewayModelAccess
-    { gatewayModelFetch :: !(IO (Either Text [Text]))
-    , gatewayModelCache :: !(IORef (Maybe [Text]))
+    { gatewayModelFetch :: !(IO (Either Text [GatewayModel]))
+    , gatewayModelCache :: !(IORef (Maybe [GatewayModel]))
     , gatewayModelRefreshLock :: !(MVar ())
     }
 
@@ -206,28 +221,27 @@ gatewayCredentialDecoder =
             <*> Hermes.atKey "websocket_url" Hermes.text
             <*> Hermes.atKey "access_token" Hermes.text
 
--- | Decode the OpenAI-compatible @GET /v1/models@ response exposed by a
--- gateway.  Gateways may return either normal model objects or compact string
--- ids in @data@; callers always receive a stable, display-safe list with blank
--- and duplicate ids removed.
-gatewayModelsDecoder :: Hermes.Decoder [Text]
+-- | Decode the unified gateway catalog. Every alias carries the wire protocol
+-- required to invoke it; unknown protocols fail closed.
+gatewayModelsDecoder :: Hermes.Decoder [GatewayModel]
 gatewayModelsDecoder =
     Hermes.object do
-        modelIds <- Hermes.atKey "data" (Hermes.list gatewayModelIdDecoder)
-        pure (normalizeGatewayModelIds modelIds)
+        models <- Hermes.atKey "data" (Hermes.list gatewayModelDecoder)
+        pure (normalizeGatewayModels models)
 
-gatewayModelIdDecoder :: Hermes.Decoder Text
-gatewayModelIdDecoder =
-    Hermes.withOwnedRawJson \raw ->
-        case Hermes.decodeEither Hermes.text raw of
-            Right modelId -> pure modelId
-            Left _ ->
-                case Hermes.decodeEither modelObjectDecoder raw of
-                    Right modelId -> pure modelId
-                    Left _ -> fail "Gateway model entry is invalid."
-  where
-    modelObjectDecoder =
-        Hermes.object (Hermes.atKey "id" Hermes.text)
+gatewayModelDecoder :: Hermes.Decoder GatewayModel
+gatewayModelDecoder =
+    Hermes.object $
+        GatewayModel
+            <$> Hermes.atKey "id" Hermes.text
+            <*> Hermes.atKey "protocol" gatewayModelProtocolDecoder
+
+gatewayModelProtocolDecoder :: Hermes.Decoder GatewayModelProtocol
+gatewayModelProtocolDecoder =
+    Hermes.text >>= \case
+        "responses" -> pure GatewayResponsesProtocol
+        "anthropic" -> pure GatewayAnthropicProtocol
+        _ -> fail "Gateway model protocol is invalid."
 
 -- | Construct a cached model-list handle for a validated gateway credential.
 newGatewayModelAccess :: GatewayCredential -> IO GatewayModelAccess
@@ -238,7 +252,7 @@ newGatewayModelAccess =
 -- The resulting value remains opaque, so the fetch action cannot be read back
 -- or accidentally included in diagnostics.
 newGatewayModelAccessWith
-    :: IO (Either Text [Text])
+    :: IO (Either Text [GatewayModel])
     -> IO GatewayModelAccess
 newGatewayModelAccessWith fetch = do
     cache <- newIORef Nothing
@@ -254,7 +268,9 @@ newGatewayModelAccessWith fetch = do
 -- A failed refresh deliberately clears the previous value.  Continuing to
 -- show a stale authorization list would let an organization revocation look
 -- like an available model.
-refreshGatewayModels :: GatewayModelAccess -> IO (Either Text [Text])
+refreshGatewayModels
+    :: GatewayModelAccess
+    -> IO (Either Text [GatewayModel])
 refreshGatewayModels
         GatewayModelAccess
             { gatewayModelFetch
@@ -271,13 +287,13 @@ refreshGatewayModels
                     Left err -> do
                         writeIORef gatewayModelCache Nothing
                         pure (Left err)
-                    Right modelIds -> do
-                        let normalized = normalizeGatewayModelIds modelIds
+                    Right models -> do
+                        let normalized = normalizeGatewayModels models
                         writeIORef gatewayModelCache (Just normalized)
                         pure (Right normalized)
 
 -- | Read the most recent successful gateway refresh without issuing I/O.
-cachedGatewayModels :: GatewayModelAccess -> IO (Maybe [Text])
+cachedGatewayModels :: GatewayModelAccess -> IO (Maybe [GatewayModel])
 cachedGatewayModels GatewayModelAccess { gatewayModelCache } =
     readIORef gatewayModelCache
 
@@ -285,7 +301,7 @@ cachedGatewayModels GatewayModelAccess { gatewayModelCache } =
 --
 -- Errors deliberately omit exception and response-body detail: both may
 -- contain external content, while request headers contain the bearer token.
-fetchGatewayModels :: GatewayCredential -> IO (Either Text [Text])
+fetchGatewayModels :: GatewayCredential -> IO (Either Text [GatewayModel])
 fetchGatewayModels credential =
     case validateGatewayCredential credential of
         Left _ -> pure (Left "Gateway credential is invalid.")
@@ -297,7 +313,7 @@ fetchGatewayModels credential =
                         (Text.unpack
                             (Text.dropWhileEnd (== '/')
                                 (Text.strip credential.gatewayBaseUrl)
-                                <> "/v1/models"))
+                                <> "/v1/model-catalog"))
                 HTTP.httpLbs
                     initial
                         { HTTP.method = "GET"
@@ -329,7 +345,10 @@ fetchGatewayModels credential =
                             Left _ ->
                                 Left
                                     "Gateway returned an unreadable models response."
-                            Right modelIds -> Right modelIds
+                            Right models
+                                | null models ->
+                                    Left "Gateway returned an empty model catalog."
+                                | otherwise -> Right models
                     | otherwise ->
                         Left $
                             "Gateway models returned HTTP "
@@ -338,18 +357,23 @@ fetchGatewayModels credential =
                                         (statusCode
                                             (HTTP.responseStatus value)))
 
-normalizeGatewayModelIds :: [Text] -> [Text]
-normalizeGatewayModelIds = go Set.empty
+gatewayModelIds :: [GatewayModel] -> [Text]
+gatewayModelIds = fmap (.gatewayModelId)
+
+normalizeGatewayModels :: [GatewayModel] -> [GatewayModel]
+normalizeGatewayModels = go Set.empty
   where
     go _ [] = []
-    go seen (raw : rest)
+    go seen (model : rest)
         | Text.null modelId = go seen rest
         | Text.any (\char -> isSpace char || not (isPrint char)) modelId =
             go seen rest
         | modelId `Set.member` seen = go seen rest
-        | otherwise = modelId : go (Set.insert modelId seen) rest
+        | otherwise =
+            model { gatewayModelId = modelId }
+                : go (Set.insert modelId seen) rest
       where
-        modelId = Text.strip raw
+        modelId = Text.strip model.gatewayModelId
 
 data GatewayDeviceAuthorization = GatewayDeviceAuthorization
     { deviceCode :: !Text

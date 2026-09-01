@@ -15,6 +15,7 @@ import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
+import qualified Agent.CLI.ClaudeGatewayProxySpec as ClaudeGatewayProxySpec
 import qualified Agent.CLI.ClaudeSpec as ClaudeSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ComputerUseSpec as ComputerUseSpec
@@ -117,6 +118,7 @@ main = hspec do
 #endif
     CancelWatchSpec.spec
     ClipboardSpec.spec
+    ClaudeGatewayProxySpec.spec
     ClaudeSpec.spec
     CommandSpec.spec
     ComputerUseSpec.spec

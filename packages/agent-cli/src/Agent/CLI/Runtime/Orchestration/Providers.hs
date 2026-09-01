@@ -12,6 +12,7 @@ import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
 import Agent.CLI.Auth.Types (LoadedAuth(..), isGatewayLoadedAuth)
+import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
 import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
 import Agent.CLI.Command ()
@@ -32,6 +33,7 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
+import Agent.CLI.GatewayClient (loadGatewayCredential)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.LearnedSkills ()
@@ -129,6 +131,7 @@ import Agent.Claude
       claudeCodeOneShotBackend,
       defaultClaudeCodeOptions,
       loadClaudeCodeAuth,
+      loadClaudeCodeGatewayAuth,
       withClaudeCodeBackendWithHost )
 import Agent.Claude.Control
     ( ClaudeCodeHostHandlers(..)
@@ -834,10 +837,11 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-                    ClaudeCodeProvider -> do
-                        claudeAuth <-
-                            loadClaudeCodeAuth
-                                >>= either (startupDie startup . Text.unpack) pure
+                    ClaudeCodeProvider ->
+                        withSelectedClaudeAuth
+                            loaded
+                            (startupDie startup . Text.unpack)
+                            \claudeAuth -> do
                         let permission =
                                 ClaudeCodeManual
                             claudeOptions =
@@ -1120,6 +1124,25 @@ runAgentProviders
                 startupDie startup
                     (Text.unpack (formatApiErrorAt now err))
 
+
+withSelectedClaudeAuth
+    :: LoadedAuth
+    -> (Text -> IO value)
+    -> (ClaudeCodeAuth -> IO value)
+    -> IO value
+withSelectedClaudeAuth loaded onError action
+    | not (isGatewayLoadedAuth loaded) =
+        loadClaudeCodeAuth >>= either onError action
+    | otherwise =
+        loadGatewayCredential >>= \case
+            Left err -> onError err
+            Right Nothing ->
+                onError "No organization gateway credential is connected."
+            Right (Just credential) -> do
+                result <- withClaudeGatewayProxy credential \transport ->
+                    loadClaudeCodeGatewayAuth transport
+                        >>= either onError action
+                either onError pure result
 
 sessionRunnerContinuation :: SessionRunner.SessionRunnerContinuation
 sessionRunnerContinuation =

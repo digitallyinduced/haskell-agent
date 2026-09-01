@@ -3,6 +3,7 @@
 module Agent.Claude.Auth
     ( ClaudeCodeAuth(..)
     , loadClaudeCodeAuth
+    , loadClaudeCodeGatewayAuth
     , parseClaudeCodeAuthStatus
     ) where
 
@@ -50,30 +51,25 @@ data ClaudeCodeAuth = ClaudeCodeAuth
 -- claude.ai subscription. This only reads the CLI's status metadata and never
 -- reads or returns credential material.
 loadClaudeCodeAuth :: IO (Either Text ClaudeCodeAuth)
-loadClaudeCodeAuth = do
-    gatewayUrl <- nonEmptyEnvironment "HASKELL_AGENT_GATEWAY_URL"
-    gatewayToken <- nonEmptyEnvironment "HASKELL_AGENT_GATEWAY_TOKEN"
-    case (gatewayUrl, gatewayToken) of
-        (Nothing, Nothing) -> loadLocalClaudeCodeAuth
-        (Just url, Just token) ->
-            resolveClaudeExecutable >>= \case
-                Left err -> pure (Left err)
-                Right executablePath ->
-                    pure $
-                        Right ClaudeCodeAuth
-                            { executable = executablePath
-                            , accountLabel = "Claude via gateway"
-                            , subscriptionType = Nothing
-                            , transport =
-                                ClaudeCodeGateway
-                                    { gatewayBaseUrl = url
-                                    , gatewayToken = token
-                                    }
-                            }
-        _ ->
+loadClaudeCodeAuth = loadLocalClaudeCodeAuth
+
+-- | Build gateway auth only from an explicit, parent-owned transport. Ambient
+-- environment variables must never turn a long-lived organization bearer into
+-- child-process credentials.
+loadClaudeCodeGatewayAuth
+    :: ClaudeCodeTransport
+    -> IO (Either Text ClaudeCodeAuth)
+loadClaudeCodeGatewayAuth transport =
+    resolveClaudeExecutable >>= \case
+        Left err -> pure (Left err)
+        Right executablePath ->
             pure $
-                Left
-                    "Claude gateway mode requires both HASKELL_AGENT_GATEWAY_URL and HASKELL_AGENT_GATEWAY_TOKEN."
+                Right ClaudeCodeAuth
+                    { executable = executablePath
+                    , accountLabel = "Claude via gateway"
+                    , subscriptionType = Nothing
+                    , transport
+                    }
 
 loadLocalClaudeCodeAuth :: IO (Either Text ClaudeCodeAuth)
 loadLocalClaudeCodeAuth =
@@ -186,10 +182,6 @@ drainCapped handle = go BS.empty
                         then BS.take cap (acc <> chunk)
                         else acc
                 in go acc'
-
-nonEmptyEnvironment :: String -> IO (Maybe Text)
-nonEmptyEnvironment name =
-    lookupEnv name >>= pure . (>>= nonEmptyText . Text.pack)
 
 parseClaudeCodeAuthStatus
     :: FilePath

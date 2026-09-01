@@ -149,6 +149,8 @@ loadAuth requestedProvider =
             case requestedProvider of
                 Nothing -> pure (gatewayLoadedAuth gateway)
                 Just OpenAIProvider -> pure (gatewayLoadedAuth gateway)
+                Just ClaudeCodeProvider ->
+                    pure (Right (gatewayClaudeLoadedAuth gateway))
                 Just _ ->
                     pure
                         (Left
@@ -202,6 +204,24 @@ gatewayLoadedAuth gateway = do
             , loadedSelectionId = Just gatewayAuthSelectionId
             , loadedOpenAiPool = Nothing
             }
+
+gatewayClaudeLoadedAuth :: GatewayCredential -> LoadedAuth
+gatewayClaudeLoadedAuth gateway =
+    let credential = Credential
+            { accessToken = ""
+            , accountId = "gateway-claude"
+            , leaseId = Nothing
+            , provider = ClaudeCodeProvider
+            }
+    in LoadedAuth
+        { loadedProvider = ClaudeCodeProvider
+        , loadedTokenProvider =
+            staticCredentialProvider SubscriptionBilled credential
+        , loadedAccountLabel =
+            const (pure ("Claude via " <> gateway.gatewayBaseUrl))
+        , loadedSelectionId = Just gatewayAuthSelectionId
+        , loadedOpenAiPool = Nothing
+        }
 
 credentialForGateway :: GatewayCredential -> Credential
 credentialForGateway gateway =

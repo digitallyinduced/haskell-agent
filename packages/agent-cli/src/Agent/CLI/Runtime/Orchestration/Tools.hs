@@ -45,6 +45,7 @@ import Agent.CLI.GatewayClient
     ( GatewayModelAccess
     , cachedGatewayModels
     )
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt (InterruptState)
@@ -450,12 +451,9 @@ runAgentTools
                     Nothing ->
                         startupDie startup
                             "The organization gateway model catalog is unavailable."
-                    Just modelIds ->
+                    Just models ->
                         case
-                            gatewayModelOptions
-                                catalog
-                                OpenAIProvider
-                                modelIds
+                            modelOptionsForGatewayModels catalog models
                             of
                             [] ->
                                 startupDie startup
@@ -747,13 +745,11 @@ runAgentTools
                         Just access ->
                             cachedGatewayModels access >>= \case
                                 Nothing -> pure Nothing
-                                Just modelIds ->
+                                Just models ->
                                     pure
                                         (resolveModelOptionById
-                                            (gatewayModelOptions
-                                                catalog
-                                                OpenAIProvider
-                                                modelIds)
+                                            (modelOptionsForGatewayModels
+                                                catalog models)
                                             (Text.strip requested))
         sendToRoot message = do
             enqueuePendingInput pendingNotices (AgentMessage message) >>= \case

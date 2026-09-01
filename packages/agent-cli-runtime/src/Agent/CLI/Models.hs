@@ -40,6 +40,7 @@ import Agent.CLI.ModelConfig
     , catalogDefaultForProvider
     , catalogGatewayModelById
     , catalogModelById
+    , connectionSupportsDialect
     )
 import Agent.Dialect
     ( DialectId(..)
@@ -226,9 +227,12 @@ gatewayModelOptions catalog provider =
     gatewayOption modelId =
         let configured =
                 catalogGatewayModelById catalog modelId >>= \model ->
-                    if provider == OpenAIProvider
-                        && model.catalogModelConnectionId
+                    if model.catalogModelConnectionId
                             == organizationGatewayConnectionId
+                        && connectionSupportsDialect
+                            organizationGatewayConnectionId
+                            provider
+                            model.catalogModelDialect
                     then Just model
                     else Nothing
         in ModelOption

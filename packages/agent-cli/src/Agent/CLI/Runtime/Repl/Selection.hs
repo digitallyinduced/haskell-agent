@@ -33,6 +33,7 @@ import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorInlineAt )
 import Agent.CLI.GatewayClient ( refreshGatewayModels )
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
     ( ReplLine(ReplChooseAccount, ReplChooseModel, ReplChooseEffort) )
@@ -576,13 +577,10 @@ handleSelection
             Just access ->
                 refreshGatewayModels access >>= \case
                     Left err -> pure (Left err)
-                    Right modelIds ->
+                    Right models ->
                         case
                             resolveModelOptionById
-                                (gatewayModelOptions
-                                    catalog
-                                    OpenAIProvider
-                                    modelIds)
+                                (modelOptionsForGatewayModels catalog models)
                                 name
                         of
                             Nothing ->
