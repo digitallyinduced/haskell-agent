@@ -401,13 +401,13 @@ data ChatGPTStreamEndpoint = ChatGPTStreamEndpoint
 
 data ChatGPTStreamState = ChatGPTStreamState
     { utteranceOrder :: ![Text]
-    , finalByUtterance :: !(Map.Map Text Text)
+    , textByUtterance :: !(Map.Map Text Text)
     }
 
 emptyChatGPTStreamState :: ChatGPTStreamState
 emptyChatGPTStreamState = ChatGPTStreamState
     { utteranceOrder = []
-    , finalByUtterance = Map.empty
+    , textByUtterance = Map.empty
     }
 
 streamChatGPTDictation
@@ -643,18 +643,12 @@ receiveChatGPTDictation connection state finished onTranscript =
                         pure (Left message)
                     ChatGPTSessionError True message ->
                         pure (Left message)
-                    ChatGPTTranscriptFinal _ _ -> do
-                        current <- modifyMVar state \previous ->
-                            let next =
-                                    applyChatGPTDictationEvent
-                                        event
-                                        previous
-                            in pure (next, next)
-                        let transcript = renderChatGPTTranscript current
-                        unless (Text.null transcript) $
-                            ignoreSynchronousException
-                                (onTranscript transcript)
-                        loop
+                    ChatGPTTranscriptDelta _ _ ->
+                        updateTranscript event >> loop
+                    ChatGPTTranscriptSegment _ _ ->
+                        updateTranscript event >> loop
+                    ChatGPTTranscriptFinal _ _ ->
+                        updateTranscript event >> loop
                     _ -> do
                         modifyMVar state \previous ->
                             pure
@@ -664,6 +658,17 @@ receiveChatGPTDictation connection state finished onTranscript =
                                 , ()
                                 )
                         loop
+    updateTranscript event = do
+        current <- modifyMVar state \previous ->
+            let next =
+                    applyChatGPTDictationEvent
+                        event
+                        previous
+            in pure (next, next)
+        let transcript = renderChatGPTTranscript current
+        unless (Text.null transcript) $
+            ignoreSynchronousException
+                (onTranscript transcript)
 
 receiverFailure :: SomeException -> Either Text ()
 receiverFailure err =
@@ -685,31 +690,51 @@ applyChatGPTDictationEvent event state =
             ensureChatGPTUtterance utteranceId state
         ChatGPTSpeechStopped utteranceId ->
             ensureChatGPTUtterance utteranceId state
+        ChatGPTTranscriptDelta utteranceId text ->
+            appendChatGPTTranscript utteranceId text state
+        ChatGPTTranscriptSegment utteranceId text ->
+            appendChatGPTTranscript utteranceId text state
         ChatGPTTranscriptFinal utteranceId text ->
             let withUtterance =
                     ensureChatGPTUtterance utteranceId state
             in withUtterance
-                { finalByUtterance =
+                { textByUtterance =
                     Map.insert
                         utteranceId
                         text
-                        withUtterance.finalByUtterance
+                        withUtterance.textByUtterance
                 }
         _ ->
             state
+
+appendChatGPTTranscript
+    :: Text
+    -> Text
+    -> ChatGPTStreamState
+    -> ChatGPTStreamState
+appendChatGPTTranscript utteranceId text state =
+    let withUtterance = ensureChatGPTUtterance utteranceId state
+    in withUtterance
+        { textByUtterance =
+            Map.insertWith
+                (\new previous -> previous <> new)
+                utteranceId
+                text
+                withUtterance.textByUtterance
+        }
 
 ensureChatGPTUtterance
     :: Text
     -> ChatGPTStreamState
     -> ChatGPTStreamState
 ensureChatGPTUtterance utteranceId state
-    | Map.member utteranceId state.finalByUtterance =
+    | Map.member utteranceId state.textByUtterance =
         state
     | otherwise =
         state
             { utteranceOrder = state.utteranceOrder <> [utteranceId]
-            , finalByUtterance =
-                Map.insert utteranceId "" state.finalByUtterance
+            , textByUtterance =
+                Map.insert utteranceId "" state.textByUtterance
             }
 
 renderChatGPTTranscript :: ChatGPTStreamState -> Text
@@ -719,7 +744,7 @@ renderChatGPTTranscript state =
         | utteranceId <- state.utteranceOrder
         , Just transcript <- [Map.lookup
             utteranceId
-            state.finalByUtterance]
+            state.textByUtterance]
         , not (Text.null (Text.strip transcript))
         ]
 
@@ -735,7 +760,7 @@ chatGPTSessionStartMessage sampleRate =
             , "max_utterance_duration_ms" .= (30_000 :: Int)
             , "session_ttl_ms" .= (300_000 :: Int)
             , "provider_mode" .= ("streaming_sse" :: Text)
-            , "transcript_delivery_mode" .= ("final_only" :: Text)
+            , "transcript_delivery_mode" .= ("delta" :: Text)
             , "vad" .= Aeson.object
                 [ "type" .= ("server_vad" :: Text)
                 , "threshold" .= (0.5 :: Double)

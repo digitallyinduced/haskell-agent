@@ -79,6 +79,12 @@ spec = describe "OpenAI transcription" do
                 <> "\"session\":{\"status\":\"closed\"}}")
             `shouldBe` Right (ChatGPTSessionUpdated "closed")
         decodeChatGPTDictationEvent
+            ("{\"type\":\"transcript.delta\",\"sequence_no\":2,"
+                <> "\"utterance_id\":\"utterance-1\",\"revision\":1,"
+                <> "\"text\":\"hello \"}")
+            `shouldBe` Right
+                (ChatGPTTranscriptDelta "utterance-1" "hello ")
+        decodeChatGPTDictationEvent
             ("{\"type\":\"transcript.final\",\"sequence_no\":3,"
                 <> "\"utterance_id\":\"utterance-1\",\"revision\":1,"
                 <> "\"text\":\"hello world\"}")
@@ -168,7 +174,7 @@ spec = describe "OpenAI transcription" do
                         , "session_ttl_ms" .= (300_000 :: Int)
                         , "provider_mode" .= ("streaming_sse" :: Text)
                         , "transcript_delivery_mode" .=
-                            ("final_only" :: Text)
+                            ("delta" :: Text)
                         , "vad" .= Aeson.object
                             [ "type" .= ("server_vad" :: Text)
                             , "threshold" .= (0.5 :: Double)
@@ -197,10 +203,24 @@ spec = describe "OpenAI transcription" do
                     , "utterance_id" .= ("utterance-1" :: Text)
                     ]
                 sendEvent connection $ Aeson.object
-                    [ "type" .= ("transcript.final" :: Text)
+                    [ "type" .= ("transcript.delta" :: Text)
                     , "sequence_no" .= (3 :: Int)
                     , "utterance_id" .= ("utterance-1" :: Text)
                     , "revision" .= (1 :: Int)
+                    , "text" .= ("hello " :: Text)
+                    ]
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("transcript.delta" :: Text)
+                    , "sequence_no" .= (4 :: Int)
+                    , "utterance_id" .= ("utterance-1" :: Text)
+                    , "revision" .= (2 :: Int)
+                    , "text" .= ("from " :: Text)
+                    ]
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("transcript.final" :: Text)
+                    , "sequence_no" .= (5 :: Int)
+                    , "utterance_id" .= ("utterance-1" :: Text)
+                    , "revision" .= (3 :: Int)
                     , "text" .= ("hello from stream" :: Text)
                     ]
                 close <- WS.receiveData connection
@@ -209,7 +229,7 @@ spec = describe "OpenAI transcription" do
                     ]
                 sendEvent connection $ Aeson.object
                     [ "type" .= ("session.updated" :: Text)
-                    , "sequence_no" .= (4 :: Int)
+                    , "sequence_no" .= (6 :: Int)
                     , "session" .= sessionValue "closed"
                     ]
         withWebSocketServer server \port -> do
@@ -228,7 +248,12 @@ spec = describe "OpenAI transcription" do
                     (\text -> modifyIORef' callbacks (<> [text]))
             result `shouldBe` Just (Right "hello from stream")
         readIORef captures `shouldReturn` 1
-        readIORef callbacks `shouldReturn` ["hello from stream"]
+        readIORef callbacks
+            `shouldReturn`
+                [ "hello "
+                , "hello from "
+                , "hello from stream"
+                ]
 
     it "falls back to ChatGPT multipart and reuses audio after a 401" do
         recorded <- newIORef []
