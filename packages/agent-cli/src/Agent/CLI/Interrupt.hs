@@ -13,6 +13,7 @@ module Agent.CLI.Interrupt
     , noteIdleCtrlC
     , isWrappedUserInterrupt
     , catchUserInterrupt
+    , retryUserInterruptOnce
     , noteFullscreenCtrlC
     ) where
 
@@ -31,6 +32,7 @@ import Control.Exception.Safe
     , catchAny
     , catchAsync
     , catchIO
+    , mask
     , throwIO
     )
 import Control.Monad (void)
@@ -212,3 +214,11 @@ catchUserInterrupt action onInterrupt =
     handleSyncException (e :: SomeException)
         | isWrappedUserInterrupt e = onInterrupt
         | otherwise = throwIO e
+
+-- | Retry an idempotent action after at most one user interrupt. Both attempts
+-- run in the caller's original masking state, so another interrupt during the
+-- recovery attempt propagates instead of disabling force-exit indefinitely.
+retryUserInterruptOnce :: IO a -> IO a
+retryUserInterruptOnce action =
+    mask \restore ->
+        catchUserInterrupt (restore action) (restore action)
