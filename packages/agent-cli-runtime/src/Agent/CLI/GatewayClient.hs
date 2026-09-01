@@ -1,6 +1,9 @@
 -- | HTTPS device authorization and restricted gateway credential storage.
 module Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , GatewayModel(..)
+    , GatewayModelProtocol(..)
+    , GatewayModelAccess
     , GatewayAuthorization(..)
     , GatewayAuthorizationCodeResponse(..)
     , GatewayDeviceAuthorization(..)
@@ -31,10 +34,18 @@ module Agent.CLI.GatewayClient
     , gatewayPollDecoder
     , loadGatewayCredential
     , loadGatewayCredentialAt
+    , gatewayModelsDecoder
+    , fetchGatewayModels
+    , newGatewayModelAccess
+    , newGatewayModelAccessWith
+    , refreshGatewayModels
+    , cachedGatewayModels
+    , gatewayModelIds
     , runGatewayCommand
     , saveGatewayCredentialAt
     , showGatewayStatus
     , validateBaseUrl
+    , validateGatewayCredential
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
@@ -44,6 +55,7 @@ import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM (atomically, retry)
 import Control.Exception.Safe (bracket, bracketOnError, tryAny)
 import Control.Monad (when)
@@ -57,14 +69,18 @@ import Data.ByteString.Base64.URL qualified as Base64Url
 import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
-import Data.Char (isDigit)
+import Data.Char (isDigit, isPrint, isSpace)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
-    ( hContentType
+    ( hAccept
+    , hAuthorization
+    , hContentType
     , statusCode
     , statusIsSuccessful
     )
@@ -102,6 +118,27 @@ data GatewayCredential = GatewayCredential
     , gatewayAccessToken :: !Text
     }
     deriving (Eq)
+
+data GatewayModelProtocol
+    = GatewayResponsesProtocol
+    | GatewayAnthropicProtocol
+    deriving (Eq, Show)
+
+data GatewayModel = GatewayModel
+    { gatewayModelId :: !Text
+    , gatewayModelProtocol :: !GatewayModelProtocol
+    }
+    deriving (Eq, Show)
+
+-- | A gateway-scoped model catalog and its most recently successful refresh.
+--
+-- The constructor is deliberately hidden: callers can list models but cannot
+-- accidentally inspect or log the credential captured by its fetch action.
+data GatewayModelAccess = GatewayModelAccess
+    { gatewayModelFetch :: !(IO (Either Text [GatewayModel]))
+    , gatewayModelCache :: !(IORef (Maybe [GatewayModel]))
+    , gatewayModelRefreshLock :: !(MVar ())
+    }
 
 -- | The hosted gateway selected by the interactive @/login@ flow.
 defaultGatewayBaseUrl :: Text
@@ -183,6 +220,160 @@ gatewayCredentialDecoder =
             <$> Hermes.atKey "base_url" Hermes.text
             <*> Hermes.atKey "websocket_url" Hermes.text
             <*> Hermes.atKey "access_token" Hermes.text
+
+-- | Decode the unified gateway catalog. Every alias carries the wire protocol
+-- required to invoke it; unknown protocols fail closed.
+gatewayModelsDecoder :: Hermes.Decoder [GatewayModel]
+gatewayModelsDecoder =
+    Hermes.object do
+        models <- Hermes.atKey "data" (Hermes.list gatewayModelDecoder)
+        pure (normalizeGatewayModels models)
+
+gatewayModelDecoder :: Hermes.Decoder GatewayModel
+gatewayModelDecoder =
+    Hermes.object $
+        GatewayModel
+            <$> Hermes.atKey "id" Hermes.text
+            <*> Hermes.atKey "protocol" gatewayModelProtocolDecoder
+
+gatewayModelProtocolDecoder :: Hermes.Decoder GatewayModelProtocol
+gatewayModelProtocolDecoder =
+    Hermes.text >>= \case
+        "responses" -> pure GatewayResponsesProtocol
+        "anthropic" -> pure GatewayAnthropicProtocol
+        _ -> fail "Gateway model protocol is invalid."
+
+-- | Construct a cached model-list handle for a validated gateway credential.
+newGatewayModelAccess :: GatewayCredential -> IO GatewayModelAccess
+newGatewayModelAccess =
+    newGatewayModelAccessWith . fetchGatewayModels
+
+-- | Injectable constructor used by tests and alternative trusted transports.
+-- The resulting value remains opaque, so the fetch action cannot be read back
+-- or accidentally included in diagnostics.
+newGatewayModelAccessWith
+    :: IO (Either Text [GatewayModel])
+    -> IO GatewayModelAccess
+newGatewayModelAccessWith fetch = do
+    cache <- newIORef Nothing
+    refreshLock <- newMVar ()
+    pure GatewayModelAccess
+        { gatewayModelFetch = fetch
+        , gatewayModelCache = cache
+        , gatewayModelRefreshLock = refreshLock
+        }
+
+-- | Refresh the gateway's authorized model aliases.
+--
+-- A failed refresh deliberately clears the previous value.  Continuing to
+-- show a stale authorization list would let an organization revocation look
+-- like an available model.
+refreshGatewayModels
+    :: GatewayModelAccess
+    -> IO (Either Text [GatewayModel])
+refreshGatewayModels
+        GatewayModelAccess
+            { gatewayModelFetch
+            , gatewayModelCache
+            , gatewayModelRefreshLock
+            } =
+    withMVar gatewayModelRefreshLock \_ ->
+        tryAny gatewayModelFetch >>= \case
+            Left _ -> do
+                writeIORef gatewayModelCache Nothing
+                pure (Left "Could not refresh organization gateway models.")
+            Right result ->
+                case result of
+                    Left err -> do
+                        writeIORef gatewayModelCache Nothing
+                        pure (Left err)
+                    Right models -> do
+                        let normalized = normalizeGatewayModels models
+                        writeIORef gatewayModelCache (Just normalized)
+                        pure (Right normalized)
+
+-- | Read the most recent successful gateway refresh without issuing I/O.
+cachedGatewayModels :: GatewayModelAccess -> IO (Maybe [GatewayModel])
+cachedGatewayModels GatewayModelAccess { gatewayModelCache } =
+    readIORef gatewayModelCache
+
+-- | Fetch the aliases currently offered to this gateway credential.
+--
+-- Errors deliberately omit exception and response-body detail: both may
+-- contain external content, while request headers contain the bearer token.
+fetchGatewayModels :: GatewayCredential -> IO (Either Text [GatewayModel])
+fetchGatewayModels credential =
+    case validateGatewayCredential credential of
+        Left _ -> pure (Left "Gateway credential is invalid.")
+        Right () -> do
+            response <- tryAny do
+                manager <- newTlsManager
+                initial <-
+                    HTTP.parseRequest
+                        (Text.unpack
+                            (Text.dropWhileEnd (== '/')
+                                (Text.strip credential.gatewayBaseUrl)
+                                <> "/v1/model-catalog"))
+                HTTP.httpLbs
+                    initial
+                        { HTTP.method = "GET"
+                        , HTTP.requestHeaders =
+                            [ ( hAuthorization
+                              , "Bearer "
+                                    <> TextEncoding.encodeUtf8
+                                        credential.gatewayAccessToken
+                              )
+                            , (hAccept, "application/json")
+                            ]
+                        , HTTP.checkResponse = \_ _ -> pure ()
+                        -- Never follow a redirect with the gateway bearer.
+                        , HTTP.redirectCount = 0
+                        , HTTP.responseTimeout =
+                            HTTP.responseTimeoutMicro (5 * 1_000_000)
+                        }
+                    manager
+            pure case response of
+                Left _ ->
+                    Left "Could not reach the gateway models endpoint."
+                Right value
+                    | statusIsSuccessful (HTTP.responseStatus value) ->
+                        case
+                            Hermes.decodeEither
+                                gatewayModelsDecoder
+                                (LBS.toStrict (HTTP.responseBody value))
+                            of
+                            Left _ ->
+                                Left
+                                    "Gateway returned an unreadable models response."
+                            Right models
+                                | null models ->
+                                    Left "Gateway returned an empty model catalog."
+                                | otherwise -> Right models
+                    | otherwise ->
+                        Left $
+                            "Gateway models returned HTTP "
+                                <> Text.pack
+                                    (show
+                                        (statusCode
+                                            (HTTP.responseStatus value)))
+
+gatewayModelIds :: [GatewayModel] -> [Text]
+gatewayModelIds = fmap (.gatewayModelId)
+
+normalizeGatewayModels :: [GatewayModel] -> [GatewayModel]
+normalizeGatewayModels = go Set.empty
+  where
+    go _ [] = []
+    go seen (model : rest)
+        | Text.null modelId = go seen rest
+        | Text.any (\char -> isSpace char || not (isPrint char)) modelId =
+            go seen rest
+        | modelId `Set.member` seen = go seen rest
+        | otherwise =
+            model { gatewayModelId = modelId }
+                : go (Set.insert modelId seen) rest
+      where
+        modelId = Text.strip model.gatewayModelId
 
 data GatewayDeviceAuthorization = GatewayDeviceAuthorization
     { deviceCode :: !Text
@@ -358,6 +549,22 @@ validateGatewayCredential :: GatewayCredential -> Either Text ()
 validateGatewayCredential credential = do
     baseUrl <- validateBaseUrl credential.gatewayBaseUrl
     validateGatewayWebSocketUrl credential.gatewayWebSocketUrl
+    baseOrigin <-
+        parseGatewayOrigin
+            "Gateway URL is invalid."
+            baseUrl
+    websocketOrigin <-
+        parseGatewayOrigin
+            "Gateway WebSocket URL is invalid."
+            credential.gatewayWebSocketUrl
+    let expectedWebSocketOrigin =
+            case baseOrigin of
+                ("https:", host, port) -> ("wss:", host, port)
+                ("http:", host, port) -> ("ws:", host, port)
+                origin -> origin
+    whenEither
+        (websocketOrigin /= expectedWebSocketOrigin)
+        "Gateway base and WebSocket URLs must use the same origin."
     whenEither
         (Text.null (Text.strip credential.gatewayAccessToken))
         "Gateway access token cannot be empty."

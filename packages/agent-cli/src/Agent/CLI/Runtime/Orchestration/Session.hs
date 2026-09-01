@@ -28,6 +28,7 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))
 import Agent.CLI.Error ()
+import Agent.CLI.GatewayClient (GatewayModelAccess)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
@@ -115,7 +116,8 @@ import Agent.CLI.Session.History
       replaceLiveConversation )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
+    ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
+                     gatewayModelsRef, modelInfo,
                      connectionId, options, provider, dialect, policyRef, allTools,
                      claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
@@ -157,7 +159,8 @@ import Agent.CLI.Subagents.Runtime
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
-                      subagentSpawnModelGuidance, subagentAllowedChildModels) )
+                      subagentSpawnModelGuidance, subagentAllowedChildModels,
+                      subagentResolveChildModel, subagentChildModelAllowed) )
 import Agent.CLI.Subagents.Runtime.Types
     (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
@@ -189,7 +192,8 @@ import Agent.OpenRouter.LoopBackend ()
 import Agent.OpenRouter.Options (ClientOptions)
 import Agent.OsPath ()
 import Agent.Provider
-    (Credential, Provider, TokenProvider, tokenProviderBillingMode)
+    (Credential, Provider(OpenAIProvider), TokenProvider,
+     tokenProviderBillingMode)
 import Agent.ReasoningEffort ()
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient (GenericClientOptions)
@@ -204,7 +208,7 @@ import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model ()
 import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents
-    (MultiAgentContext, SubagentWorktree)
+    (CollaborationModelTarget, MultiAgentContext, SubagentWorktree)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
 import Agent.Tools.Secret ()
 import Agent.ToolDispatch (canonicalToolName)
@@ -231,7 +235,7 @@ import Data.IORef
       writeIORef )
 import Data.List ()
 import Data.Map.Strict (Map)
-import Data.Maybe ( isNothing, fromMaybe )
+import Data.Maybe ( isJust, isNothing, fromMaybe )
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time.Clock ( getCurrentTime, utctDay )
@@ -275,6 +279,7 @@ runAgentSession
     -> IO ()
     -> IORef Bool
     -> ModelCatalog
+    -> IORef (Maybe GatewayModelAccess)
     -> Bool
     -> (SessionHandle -> IO ())
     -> Bool
@@ -294,6 +299,8 @@ runAgentSession
     -> [AppTool]
     -> IORef Bool
     -> Maybe [Text]
+    -> Maybe (Text -> IO (Maybe CollaborationModelTarget))
+    -> Maybe (Text -> IO Bool)
     -> OsPath
     -> ModelTarget
     -> InterruptState
@@ -357,6 +364,7 @@ runAgentSession
     clearImageGenerationHistory
     bashEnabledRef
     catalog
+    gatewayModelsRef
     checkStartupUsageInBackground
     claimCurrentSession
     claudeBypassEnabled
@@ -375,7 +383,9 @@ runAgentSession
     fullscreen
     gatewayTools
     ghciEnabledRef
-    grokAllowedChildModels
+    allowedChildModels
+    resolveChildModel
+    childModelAllowed
     home
     inferredTarget
     interrupt
@@ -449,15 +459,14 @@ runAgentSession
         -- rejects its direct namespace. The offline lookup never blocks
         -- startup on the network.
         codexModelInfo <-
-            if isGatewayLoadedAuth loaded
-                then pure Nothing
-                else
-                    loadCodexCatalogModelInfo
-                        stateDirectory
-                        provider
-                        dialect
-                        (Just selectableTokenProvider)
-                        model
+            loadCodexCatalogModelInfo
+                stateDirectory
+                provider
+                dialect
+                (if isGatewayLoadedAuth loaded
+                    then Nothing
+                    else Just selectableTokenProvider)
+                model
         let initializeCodeMode =
                 if options.optCodeMode
                     then codeModeSessionRuntimeFor codexModelInfo tools
@@ -623,10 +632,16 @@ runAgentSession
                 , subagentCreateWorktree = Just createSubagentWorktree
                 , subagentSessionTmp = toolEnv.toolSessionTmp
                 , subagentSpawnModelGuidance =
-                    subscriptionSubagentModelGuidance
-                        provider
-                        (tokenProviderBillingMode tokenProvider)
-                , subagentAllowedChildModels = grokAllowedChildModels
+                    if provider == OpenAIProvider
+                        && isJust allowedChildModels
+                        then Nothing
+                        else
+                            subscriptionSubagentModelGuidance
+                                provider
+                                (tokenProviderBillingMode tokenProvider)
+                , subagentAllowedChildModels = allowedChildModels
+                , subagentResolveChildModel = resolveChildModel
+                , subagentChildModelAllowed = childModelAllowed
                 , subagentOpenAiChild = openaiChild
                 }
         let conversationRef = startup.startupSessionState.sessionConversation
@@ -727,6 +742,7 @@ runAgentSession
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
+                                , gatewayModelsRef
                                 , claudeRuntimeSlot
                                 , claudeBridgeTools
                                 , modelInfo = codexModelInfo
@@ -807,7 +823,8 @@ runAgentSession
                                 , codexCatalogSession = catalogSession
                                 }
                     withStartupAvailability action
-                        | shouldProbeAtStartup =
+                        | shouldProbeAtStartup
+                        , not (isGatewayLoadedAuth loaded) =
                             withAsync
                                 (probeLoadedAvailability
                                     loaded

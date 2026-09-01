@@ -1,7 +1,8 @@
 module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
@@ -18,7 +19,12 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolSchema(..)
     , appToolHandlers
+    )
+import Agent.ToolDSL
+    ( PropertySchema(..)
+    , PropertyType(..)
     )
 import Agent.Store.Postgres
     ( closeStore
@@ -81,6 +87,90 @@ spec = describe "Agent.CLI.AgentSessions" do
             handle.sessionMeta.metaEffort `shouldBe` "high"
             loadSession env.toolsPool env.toolsRoot handle.sessionMeta.metaId
                 `shouldReturn` Right (handle.sessionMeta, [])
+
+    it "advertises and enforces organization-approved session models" $
+        withTempEnv \env launched -> do
+            let scopedEnv =
+                    env { toolsAllowedModels = Just ["company-a", "company-b"] }
+                createTool = head (agentSessionTools scopedEnv)
+            case createTool.appToolSchema of
+                JsonFunctionSchema properties ->
+                    [ propertyKind
+                    | PropertySchema propertyKey propertyKind _ _ <- properties
+                    , propertyKey == "model"
+                    ]
+                        `shouldBe`
+                            [PropertyEnum ["company-a", "company-b"]]
+                other ->
+                    expectationFailure
+                        ("expected JSON function schema, got " <> show other)
+            rejected <- runTool scopedEnv "create_agent_session"
+                "{\"message\":\"try forbidden\",\"model\":\"public-model\"}"
+            rejected `shouldSatisfy`
+                Text.isInfixOf "not allowed by this organization"
+            (null <$> readIORef launched) `shouldReturn` True
+
+            accepted <- runTool scopedEnv "create_agent_session"
+                "{\"message\":\"use approved\",\"model\":\" company-b \"}"
+            accepted `shouldSatisfy` Text.isInfixOf "Status: running"
+            [(handle, _)] <- readIORef launched
+            handle.sessionMeta.metaModel `shouldBe` "company-b"
+
+    it "uses refreshed organization models for persisted child sessions" $
+        withTempEnv \env launched -> do
+            let gatewayOption model dialect = ModelOption
+                    { modelTarget = ModelTarget
+                        { targetProvider = OpenAIProvider
+                        , targetConnectionId =
+                            organizationGatewayConnectionId
+                        , targetModelId = model
+                        , targetWireModelId = model
+                        , targetDialect = dialect
+                        }
+                    , modelContextWindow = Nothing
+                    , modelLabel = Nothing
+                    , modelFallbackPriority = Nothing
+                    }
+            currentModels <-
+                newIORef [gatewayOption "company-a" CodexDialect]
+            let scopedEnv = env
+                    { toolsAllowedModels = Just ["company-a"]
+                    , toolsResolveModelOption =
+                        Just \model ->
+                            lookup model
+                                . map
+                                    (\option ->
+                                        ( option.modelTarget.targetModelId
+                                        , option
+                                        ))
+                                <$> readIORef currentModels
+                    }
+                createTool = head (agentSessionTools scopedEnv)
+            case createTool.appToolSchema of
+                JsonFunctionSchema properties ->
+                    [ propertyKind
+                    | PropertySchema propertyKey propertyKind _ _ <- properties
+                    , propertyKey == "model"
+                    ]
+                        `shouldBe` [PropertyString]
+                other ->
+                    expectationFailure
+                        ("expected JSON function schema, got " <> show other)
+            rejected <- runTool scopedEnv "create_agent_session"
+                "{\"message\":\"not yet\",\"model\":\"company-b\"}"
+            rejected `shouldSatisfy`
+                Text.isInfixOf "not allowed by this organization"
+            writeIORef
+                currentModels
+                [gatewayOption "company-b" GenericResponsesDialect]
+            accepted <- runTool scopedEnv "create_agent_session"
+                "{\"message\":\"now approved\",\"model\":\"company-b\"}"
+            accepted `shouldSatisfy` Text.isInfixOf "Status: running"
+            [(handle, _)] <- readIORef launched
+            handle.sessionMeta.metaModel `shouldBe` "company-b"
+            handle.sessionMeta.metaConnection
+                `shouldBe` organizationGatewayConnectionId
+            handle.sessionMeta.metaDialect `shouldBe` GenericResponsesDialect
 
     it "inherits the active dialect and resolves explicit model overrides" $
         withTempEnv \env launched -> do
@@ -569,6 +659,8 @@ withTempEnv action =
                 , toolsModel = "model-1"
                 , toolsTransportModel = "model-1"
                 , toolsDialect = GrokBuildDialect
+                , toolsAllowedModels = Nothing
+                , toolsResolveModelOption = Nothing
                 , toolsCwd = fromFilePath "/tmp/work"
                 , toolsEffort = "low"
                 , toolsCurrentSessionId = pure Nothing

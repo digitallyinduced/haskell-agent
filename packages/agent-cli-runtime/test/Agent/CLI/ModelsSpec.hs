@@ -5,7 +5,10 @@ module Agent.CLI.ModelsSpec (spec) where
 import Agent.CLI.Models
 import Agent.CLI.ModelConfig
     ( ModelCatalog
+    , catalogContextWindowFor
     , decodeModelConfig
+    , mergeModelConfigs
+    , organizationGatewayConnectionId
     , packagedModelCatalogPath
     )
 import Agent.Dialect
@@ -15,6 +18,7 @@ import Agent.Dialect
 import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.List (find, nub)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as Text
@@ -143,6 +147,206 @@ spec = do
                             "default · frontier · free · coding · 1M context")
             fmap (.modelLabel) (listToMaybe (matching "qwen/example-new"))
                 `shouldBe` Just (Just "OpenRouter live")
+
+    describe "gatewayModelOptions" do
+        it "defers resumed custom connections to the gateway catalog" do
+            let expected = ModelTarget
+                    OpenRouterProvider
+                    "removed-custom"
+                    "company-private"
+                    "upstream-private"
+                    GenericResponsesDialect
+                resolve =
+                    resolveSavedModelTarget
+                        catalog
+                        True
+                        OpenRouterProvider
+                        "removed-custom"
+                        "company-private"
+                        (Just "upstream-private")
+                        GenericResponsesDialect
+            resolve `shouldBe` Right expected
+            resolveSavedModelTarget
+                catalog
+                False
+                OpenRouterProvider
+                "removed-custom"
+                "company-private"
+                (Just "upstream-private")
+                GenericResponsesDialect
+                `shouldBe`
+                    Left
+                        "saved model removed-custom/company-private is not present in ~/.haskell-agent/models.json"
+
+        it "uses only advertised aliases and pins them to the gateway" do
+            let options =
+                    gatewayModelOptions
+                        catalog
+                        OpenAIProvider
+                        [ " gpt-5.6-sol "
+                        , "company-private"
+                        , "gpt-5.6-sol"
+                        , ""
+                        ]
+            map (.modelTarget.targetModelId) options
+                `shouldBe` ["gpt-5.6-sol", "company-private"]
+            all
+                (\option ->
+                    let target = option.modelTarget
+                    in target.targetProvider == OpenAIProvider
+                        && target.targetConnectionId
+                            == organizationGatewayConnectionId
+                        && target.targetWireModelId == target.targetModelId)
+                options
+                `shouldBe` True
+
+        it "rejects a persisted gateway route after disconnection" do
+            let resolve deferToGateway =
+                    resolveSavedModelTarget
+                        catalog
+                        deferToGateway
+                        OpenAIProvider
+                        organizationGatewayConnectionId
+                        "company-private"
+                        (Just "company-private")
+                        CodexDialect
+            resolve True
+                `shouldBe`
+                    Right
+                        (ModelTarget
+                            OpenAIProvider
+                            organizationGatewayConnectionId
+                            "company-private"
+                            "company-private"
+                            CodexDialect)
+            resolve False
+                `shouldBe`
+                    Left
+                        "saved model organization-gateway/company-private requires an active organization gateway"
+
+        it "loads only valid gateway-scoped alias metadata" do
+            defaults <- readPackagedDefaults
+            let overlay = LBS8.pack $ unlines
+                    [ "{"
+                    , "  \"version\": 1,"
+                    , "  \"models\": ["
+                    , "    {"
+                    , "      \"id\": \"company-known\","
+                    , "      \"connection\": \"organization-gateway\","
+                    , "      \"dialect\": \"generic-responses\","
+                    , "      \"label\": \"company label\","
+                    , "      \"fallback_priority\": 9"
+                    , "    },"
+                    , "    {"
+                    , "      \"id\": \"company-foreign\","
+                    , "      \"connection\": \"xai\","
+                    , "      \"dialect\": \"grok-build\","
+                    , "      \"label\": \"foreign label\""
+                    , "    },"
+                    , "    {"
+                    , "      \"id\": \"gpt-5.6-sol\","
+                    , "      \"connection\": \"organization-gateway\","
+                    , "      \"dialect\": \"generic-responses\","
+                    , "      \"context_window\": 777777,"
+                    , "      \"label\": \"company standard alias\""
+                    , "    }"
+                    , "  ]"
+                    , "}"
+                    ]
+            mappedCatalog <- case
+                mergeModelConfigs
+                    ("models.default.json", defaults)
+                    (Just ("models.json", overlay))
+                of
+                    Left err -> expectationFailure (Text.unpack err) >> pure catalog
+                    Right loaded -> pure loaded
+            resolveConfiguredModel mappedCatalog "company-known"
+                `shouldBe` Nothing
+            map (.modelTarget.targetModelId) (modelCatalog mappedCatalog)
+                `shouldSatisfy` notElem "company-known"
+            fmap (.modelTarget)
+                (resolveConfiguredModel mappedCatalog "gpt-5.6-sol")
+                `shouldBe`
+                    Just
+                        (ModelTarget
+                            OpenAIProvider
+                            "openai"
+                            "gpt-5.6-sol"
+                            "gpt-5.6-sol"
+                            CodexDialect)
+            catalogContextWindowFor
+                mappedCatalog
+                organizationGatewayConnectionId
+                "gpt-5.6-sol"
+                `shouldBe` Just 777_777
+            gatewayModelOptions
+                mappedCatalog
+                OpenAIProvider
+                ["gpt-5.6-sol"]
+                `shouldBe`
+                    [ ModelOption
+                        { modelTarget =
+                            ModelTarget
+                                OpenAIProvider
+                                organizationGatewayConnectionId
+                                "gpt-5.6-sol"
+                                "gpt-5.6-sol"
+                                GenericResponsesDialect
+                        , modelContextWindow = Just 777_777
+                        , modelLabel = Just "company standard alias"
+                        , modelFallbackPriority = Nothing
+                        }
+                    ]
+            case
+                gatewayModelOptions
+                    mappedCatalog
+                    OpenAIProvider
+                    ["company-known", "company-foreign"]
+                of
+                [active, foreignOption] -> do
+                    active.modelTarget
+                        `shouldBe`
+                            ModelTarget
+                                OpenAIProvider
+                                organizationGatewayConnectionId
+                                "company-known"
+                                "company-known"
+                                GenericResponsesDialect
+                    active.modelLabel `shouldBe` Just "company label"
+                    active.modelFallbackPriority `shouldBe` Just 9
+                    foreignOption.modelTarget
+                        `shouldBe`
+                            ModelTarget
+                                OpenAIProvider
+                                organizationGatewayConnectionId
+                                "company-foreign"
+                                "company-foreign"
+                                (dialectIdForModel
+                                    OpenAIProvider
+                                    "company-foreign")
+                    foreignOption.modelLabel `shouldBe` Nothing
+                    foreignOption.modelFallbackPriority `shouldBe` Nothing
+                other ->
+                    expectationFailure $
+                        "expected two gateway options, got " <> show other
+
+        it "does not reinsert a stale current model into an authoritative picker" do
+            let options =
+                    gatewayModelOptions
+                        catalog
+                        OpenAIProvider
+                        ["gpt-5.6-terra"]
+            state <-
+                initialPickerStateForOptions
+                    "organization gateway"
+                    options
+                    organizationGatewayConnectionId
+                    OpenAIProvider
+                    "revoked-model"
+                    CodexDialect
+            state.pickerScopeLabel `shouldBe` "organization gateway"
+            map (.modelTarget.targetModelId) state.pickerAll
+                `shouldBe` ["gpt-5.6-terra"]
 
     describe "modelTargetRequiresRebuild" do
         let sameDialect =
@@ -423,8 +627,12 @@ withEnv name value action =
 
 readPackagedCatalog :: IO ModelCatalog
 readPackagedCatalog = do
-    path <- packagedModelCatalogPath
-    bytes <- LBS.readFile path
+    bytes <- readPackagedDefaults
     case decodeModelConfig "models.default.json" bytes of
         Left err -> fail (Text.unpack err)
         Right catalog -> pure catalog
+
+readPackagedDefaults :: IO LBS.ByteString
+readPackagedDefaults = do
+    path <- packagedModelCatalogPath
+    LBS.readFile path

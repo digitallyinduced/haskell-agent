@@ -28,6 +28,7 @@ import Agent.CLI.Config
     , McpServerConfig(..)
     , WebFetchConfig(..)
     )
+import Agent.CLI.GatewayClient (cachedGatewayModels, gatewayModelIds)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.MetaConsole
     ( MetaAction(..)
@@ -40,7 +41,8 @@ import Agent.CLI.MetaConsole
     , runMetaConsoleWithCancel
     )
 import Agent.CLI.ModelConfig
-    ( CatalogModel(..)
+    ( organizationGatewayConnectionId
+    , CatalogModel(..)
     , ModelCatalog(..)
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
@@ -351,6 +353,22 @@ buildMetaContext env config = do
     params <- readIORef env.sessionParams
     policy <- readIORef env.sessionPolicy
     shellMode <- env.sessionShellMode
+    gatewayAccess <- readIORef env.sessionGatewayModels
+    availableModels <- case gatewayAccess of
+        Nothing ->
+            pure
+                [ (model.catalogModelId, model.catalogModelConnectionId)
+                | model <- env.sessionModelCatalog.catalogModels
+                ]
+        Just access ->
+            maybe
+                []
+                ( map
+                    (\modelId ->
+                        (modelId, organizationGatewayConnectionId))
+                    . gatewayModelIds
+                )
+                <$> cachedGatewayModels access
     pure $
         Aeson.object
             [ "session" .= Aeson.object
@@ -364,10 +382,10 @@ buildMetaContext env config = do
                 ]
             , "availableModels" .=
                 [ Aeson.object
-                    [ "id" .= model.catalogModelId
-                    , "connection" .= model.catalogModelConnectionId
+                    [ "id" .= modelId
+                    , "connection" .= connectionId
                     ]
-                | model <- env.sessionModelCatalog.catalogModels
+                | (modelId, connectionId) <- availableModels
                 ]
             , "harness" .= redactMetaContext (Aeson.toJSON config)
             ]

@@ -61,6 +61,12 @@ spec = describe "Agent.CLI.ModelConfig" do
                 , "gemini-3.1-pro-preview"
                 , "gemini-3.5-flash-lite"
                 ]
+        Map.lookup organizationGatewayConnectionId catalog.catalogConnections
+            `shouldBe`
+                Just ModelConnection
+                    { connectionId = organizationGatewayConnectionId
+                    , connectionKind = OrganizationGatewayConnection
+                    }
         fmap
             (\model ->
                 ( model.catalogModelReasoningEfforts
@@ -83,6 +89,64 @@ spec = describe "Agent.CLI.ModelConfig" do
                     ( Just ["low", "medium", "high", "xhigh", "max"]
                     , Just "low"
                     )
+
+    it "loads protocol metadata for organization gateway aliases" do
+        defaults <- readPackagedDefaults
+        let overlay = LBS.pack $ unlines
+                [ "{"
+                , "  \"version\": 1,"
+                , "  \"models\": [{"
+                , "    \"id\": \"company-coder\","
+                , "    \"connection\": \"organization-gateway\","
+                , "    \"dialect\": \"generic-responses\","
+                , "    \"context_window\": 131072,"
+                , "    \"label\": \"company\""
+                , "  }]"
+                , "}"
+                ]
+        catalog <- expectRight
+            (mergeModelConfigs
+                ("models.default.json", defaults)
+                (Just ("models.json", overlay)))
+        catalogModelsForConnection organizationGatewayConnectionId catalog
+            `shouldBe`
+                [ CatalogModel
+                    { catalogModelId = "company-coder"
+                    , catalogModelConnectionId =
+                        organizationGatewayConnectionId
+                    , catalogModelWireId = "company-coder"
+                    , catalogModelDialect = GenericResponsesDialect
+                    , catalogModelContextWindow = Just 131_072
+                    , catalogModelLabel = Just "company"
+                    , catalogModelReasoningEfforts = Nothing
+                    , catalogModelDefaultReasoningEffort = Nothing
+                    , catalogModelDefault = False
+                    , catalogModelFallbackPriority = Nothing
+                    }
+                ]
+        connectionSupportsDialect
+            organizationGatewayConnectionId
+            OpenAIProvider
+            GenericResponsesDialect
+            `shouldBe` True
+        connectionSupportsDialect
+            organizationGatewayConnectionId
+            OpenAIProvider
+            ClaudeCodeDialect
+            `shouldBe` False
+
+        let remapped =
+                "{\"version\":1,\"models\":[{\"id\":\"company-remapped\",\"connection\":\"organization-gateway\",\"model\":\"private-upstream\",\"dialect\":\"codex\"}]}"
+            ownedTools =
+                "{\"version\":1,\"models\":[{\"id\":\"company-claude\",\"connection\":\"organization-gateway\",\"dialect\":\"claude-code\"}]}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", remapped))
+            `shouldSatisfy` leftContains "cannot override its wire model"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", ownedTools))
+            `shouldSatisfy` leftContains "incompatible with connection"
 
     it "adds a custom Responses connection and model" do
         defaults <- readPackagedDefaults
@@ -196,6 +260,13 @@ spec = describe "Agent.CLI.ModelConfig" do
         mergeModelConfigs
             ("models.default.json", defaults)
             (Just ("models.json", overlay))
+            `shouldSatisfy` leftContains "cannot redefine reserved connection"
+
+        let gatewayOverlay =
+                "{\"version\":1,\"connections\":{\"organization-gateway\":{\"api\":\"responses\",\"base_url\":\"http://localhost:8000/v1\"}}}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", gatewayOverlay))
             `shouldSatisfy` leftContains "cannot redefine reserved connection"
 
     it "reports invalid custom references and authentication variables" do

@@ -16,6 +16,7 @@ module Agent.CLI.ProviderAvailability
 
 import Agent.CLI.Auth (LoadedAuth(..))
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.OpenAI.WebSocketClient (isGatewayWebSocketCredential)
 import qualified Agent.OpenAI.Usage as OpenAI
 import qualified Agent.OpenRouter.Usage as OpenRouter
 import Agent.Provider
@@ -49,6 +50,7 @@ probeLoadedAvailability loaded =
                         pure (xaiUsageFailure now snapshot)
         OpenAIProvider
             | billing == SubscriptionBilled
+            , not (isGatewayWebSocketCredential credential)
             , not (nullAccountId credential.accountId) ->
                 OpenAI.fetchUsage
                     credential.accessToken credential.accountId >>= \case

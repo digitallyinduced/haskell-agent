@@ -24,12 +24,12 @@ module Agent.CLI.Session.Types
     ) where
 
 import Agent.CLI.Models (ModelTarget)
+import Agent.CLI.ModelConfig (connectionSupportsDialect)
 import Agent.Dialect
     ( DialectId
     , dialectSlug
     , legacyDialectIdForProvider
     , parseDialect
-    , providerSupportsDialect
     )
 import Agent.Json.Decode (optionalKey)
 import qualified Agent.Json.Decode as Hermes
@@ -142,7 +142,8 @@ sessionPromptSnapshotDecoder = Hermes.object do
             <> Text.unpack dialectText))
         pure
         (parseDialect dialectText)
-    unless (providerSupportsDialect provider dialect) $
+    connection <- Hermes.atKey "connection" Hermes.text
+    unless (connectionSupportsDialect connection provider dialect) $
         fail
             ( "prompt snapshot dialect "
                 <> Text.unpack dialectText
@@ -152,7 +153,7 @@ sessionPromptSnapshotDecoder = Hermes.object do
     SessionPromptSnapshot version
         <$> Hermes.atKey "createdAt" Hermes.utcTime
         <*> pure provider
-        <*> Hermes.atKey "connection" Hermes.text
+        <*> pure connection
         <*> Hermes.atKey "model" Hermes.text
         <*> pure dialect
         <*> (unsafeEncodeUtf . Text.unpack <$> Hermes.atKey "cwd" Hermes.text)
@@ -222,17 +223,17 @@ legacySubagentTargetDecoder = Hermes.object do
                 fail
                     ("unknown legacy subagent dialect: "
                         <> Text.unpack dialectText)
-        unless (providerSupportsDialect provider dialect) $
+        connection <- fromMaybe (providerSlug provider)
+            <$> optionalKey "connection" Hermes.text
+        when (Text.null (Text.strip connection)) $
+            fail "legacy subagent connection must not be empty"
+        unless (connectionSupportsDialect connection provider dialect) $
             fail
                 ( "legacy subagent dialect "
                     <> Text.unpack (dialectSlug dialect)
                     <> " is incompatible with provider "
                     <> Text.unpack (providerSlug provider)
                 )
-        connection <- fromMaybe (providerSlug provider)
-            <$> optionalKey "connection" Hermes.text
-        when (Text.null (Text.strip connection)) $
-            fail "legacy subagent connection must not be empty"
         LegacySubagentTarget provider connection
             <$> Hermes.atKey "effectiveModel" Hermes.text
             <*> pure dialect
@@ -283,7 +284,7 @@ sessionMetaDecoder = Hermes.object do
             Just text -> case parseDialect text of
                 Just parsed -> pure parsed
                 Nothing -> fail ("unknown dialect: " <> Text.unpack text)
-        unless (providerSupportsDialect provider dialect) $
+        unless (connectionSupportsDialect connection provider dialect) $
             fail
                 ( "dialect "
                     <> Text.unpack (dialectSlug dialect)

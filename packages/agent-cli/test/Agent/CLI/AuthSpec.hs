@@ -25,10 +25,8 @@ import Agent.Provider
     , FailedCredential(..)
     , Provider(..)
     , getNextToken
-    , runWithTokenProvider
     , tokenProvider
     , tokenProviderBillingMode
-    , tokenProviderWithNextToken
     )
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Exception.Safe (bracket)
@@ -172,7 +170,7 @@ spec = do
                         loaded.loadedSelectionId
                             `shouldBe` Just gatewayAuthSelectionId
 
-        it "falls back from a rejected gateway to local ChatGPT auth" $
+        it "keeps a gateway session gateway-only after rejection" $
             withTempHome \home ->
                 withCleanOpenAiEnv do
                     saveTestGateway home
@@ -185,10 +183,10 @@ spec = do
                         Left err -> expectationFailure (Text.unpack err)
                         Right loaded -> do
                             case loaded.loadedOpenAiPool of
-                                Nothing ->
+                                Nothing -> pure ()
+                                Just _ ->
                                     expectationFailure
-                                        "expected local OpenAI fallback pool"
-                                Just _ -> pure ()
+                                        "gateway auth must not attach a local account pool"
                             gatewayCredential <-
                                 getNextToken
                                     loaded.loadedTokenProvider
@@ -197,174 +195,38 @@ spec = do
                             gatewayCredential.accountId
                                 `shouldBe`
                                     "wss://gateway.example/v1/responses"
-                            localCredential <-
-                                getNextToken
-                                    loaded.loadedTokenProvider
-                                    (Just FailedCredential
-                                        { credential = gatewayCredential
-                                        , failure =
-                                            AccountAuthenticationRejected
-                                        , failureReason =
-                                            testAuthenticationReason
-                                        })
-                                    >>= expectRightResult
-                            localCredential.accountId
-                                `shouldBe` "local-account"
                             getNextToken
                                 loaded.loadedTokenProvider
-                                Nothing
-                                `shouldReturn` Right localCredential
+                                (Just FailedCredential
+                                    { credential = gatewayCredential
+                                    , failure =
+                                        AccountAuthenticationRejected
+                                    , failureReason =
+                                        testAuthenticationReason
+                                    })
+                                `shouldReturn`
+                                    Left
+                                        (CredentialError
+                                            "static credential was rejected")
 
-        it "never exposes a direct credential to a gateway router session" $
-            withTempHome \home ->
-                withCleanOpenAiEnv do
-                    saveTestGateway home
-                    storeOpenAiAccount
-                        "local-openai"
-                        "local-account"
-                        True
-                        farFutureAccessToken
-                    loaded <-
-                        loadAuth (Just OpenAIProvider) >>= expectRightResult
-                    let guarded =
-                            gatewayRouterTokenProvider
-                                loaded.loadedTokenProvider
-                    gatewayCredential <-
-                        getNextToken guarded Nothing >>= expectRightResult
-                    getNextToken guarded
-                        (Just FailedCredential
-                            { credential = gatewayCredential
-                            , failure = AccountAuthenticationRejected
-                            , failureReason = testAuthenticationReason
-                            })
-                        `shouldReturn`
-                            Left
-                                (CredentialError
-                                    "the connected gateway is unavailable; \
-                                    \refusing to send a router model with \
-                                    \direct OpenAI credentials")
-
-        it "retains handshake failure classification behind the router guard" $
-            withTempHome \home ->
-                withCleanOpenAiEnv do
-                    saveTestGateway home
-                    storeOpenAiAccount
-                        "local-openai"
-                        "local-account"
-                        True
-                        farFutureAccessToken
-                    loaded <-
-                        loadAuth (Just OpenAIProvider) >>= expectRightResult
-                    let guarded =
-                            gatewayRouterTokenProvider
-                                loaded.loadedTokenProvider
-                    attempts <- newIORef ([] :: [Text])
-                    result <- runWithTokenProvider guarded \credential -> do
-                        modifyIORef' attempts (<> [credential.accountId])
-                        pure
-                            ( Left
-                                (HttpError
-                                    403
-                                    "WebSocket handshake returned HTTP 403")
-                                :: Either ApiError Text
-                            )
-                    result `shouldBe`
-                        Left
-                            (CredentialError
-                                "the connected gateway is unavailable; \
-                                \refusing to send a router model with \
-                                \direct OpenAI credentials")
-                    readIORef attempts `shouldReturn`
-                        ["wss://gateway.example/v1/responses"]
-
-        it "falls back after a gateway WebSocket handshake 403" $
-            withTempHome \home ->
-                withCleanOpenAiEnv do
-                    saveTestGateway home
-                    storeOpenAiAccount
-                        "local-openai"
-                        "local-account"
-                        True
-                        farFutureAccessToken
-                    loadAuth (Just OpenAIProvider) >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded -> do
-                            pool <- case loaded.loadedOpenAiPool of
-                                Nothing -> do
-                                    expectationFailure
-                                        "expected local OpenAI fallback pool"
-                                    fail "missing local OpenAI fallback pool"
-                                Just pool -> pure pool
-                            preferred <- newIORef Nothing
-                            let selectableProvider =
-                                    preferredOpenAiTokenProvider
-                                        preferred
-                                        pool
-                                        loaded.loadedTokenProvider
-                                -- The live runtime applies another acquisition
-                                -- decorator to track the active account.
-                                runtimeProvider =
-                                    tokenProviderWithNextToken
-                                        selectableProvider
-                                        (getNextToken selectableProvider)
-                            attempts <- newIORef ([] :: [Text])
-                            result <- runWithTokenProvider
-                                runtimeProvider
-                                \credential -> do
-                                    modifyIORef'
-                                        attempts
-                                        (<> [credential.accountId])
-                                    pure $
-                                        if credential.accountId
-                                            == "wss://gateway.example/v1/responses"
-                                            then Left $ HttpError 403
-                                                "WebSocket handshake returned HTTP 403"
-                                            else Right credential.accountId
-
-                            result `shouldBe` Right "local-account"
-                            readIORef attempts `shouldReturn`
-                                [ "wss://gateway.example/v1/responses"
-                                , "local-account"
-                                ]
-
-        it "does not replay an ordinary gateway request 403" $
-            withTempHome \home ->
-                withCleanOpenAiEnv do
-                    saveTestGateway home
-                    storeOpenAiAccount
-                        "local-openai"
-                        "local-account"
-                        True
-                        farFutureAccessToken
-                    loadAuth (Just OpenAIProvider) >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded -> do
-                            pool <- case loaded.loadedOpenAiPool of
-                                Nothing -> do
-                                    expectationFailure
-                                        "expected local OpenAI fallback pool"
-                                    fail "missing local OpenAI fallback pool"
-                                Just pool -> pure pool
-                            preferred <- newIORef Nothing
-                            let provider =
-                                    preferredOpenAiTokenProvider
-                                        preferred
-                                        pool
-                                        loaded.loadedTokenProvider
-                                forbidden =
-                                    HttpError 403
-                                        "request forbidden after connection"
-                            attempts <- newIORef ([] :: [Text])
-                            result <- runWithTokenProvider provider
-                                \credential -> do
-                                    modifyIORef'
-                                        attempts
-                                        (<> [credential.accountId])
-                                    pure (Left forbidden :: Either ApiError Text)
-
-                            result `shouldBe` Left forbidden
-                            readIORef attempts `shouldReturn`
-                                ["wss://gateway.example/v1/responses"]
+        it "refuses a direct credential for an organization model" do
+            let directCredential = Credential
+                    { accessToken = "direct-token"
+                    , accountId = "direct-account"
+                    , leaseId = Nothing
+                    , provider = OpenAIProvider
+                    }
+                guarded =
+                    gatewayRouterTokenProvider
+                        (staticCredentialProvider
+                            SubscriptionBilled
+                            directCredential)
+            getNextToken guarded Nothing
+                `shouldReturn`
+                    Left
+                        (CredentialError
+                            "the connected gateway is unavailable; refusing to \
+                            \send an organization model with direct OpenAI credentials")
 
         it "does not turn a rejected gateway into API-credit spending" $
             withTempHome \home ->
@@ -405,7 +267,7 @@ spec = do
                                             "expected gateway rejection, got "
                                                 <> show other
 
-        it "uses local OpenAI auth when the gateway file is invalid" $
+        it "fails closed when the gateway file is invalid" $
             withTempHome \home ->
                 withCleanOpenAiEnv do
                     let path = toFilePath (gatewayCredentialPath home)
@@ -419,23 +281,61 @@ spec = do
                         True
                         farFutureAccessToken
                     loadAuth (Just OpenAIProvider) >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded -> do
-                            loaded.loadedSelectionId `shouldBe` Nothing
-                            getNextToken
-                                loaded.loadedTokenProvider
-                                Nothing
-                                >>= \case
-                                    Left err ->
-                                        expectationFailure (show err)
-                                    Right credential ->
-                                        credential.accountId
-                                            `shouldBe` "local-account"
+                        Left err ->
+                            err `shouldSatisfy`
+                                Text.isPrefixOf "cannot load gateway credential:"
+                        Right _ ->
+                            expectationFailure
+                                "expected an invalid gateway to block local auth"
 
-        it "does not turn an invalid gateway into API-credit spending" $
+        it "fails closed for automatic provider detection when the gateway file is invalid" $
             withTempHome \home ->
                 withCleanOpenAiEnv $
                 withCleanGrokEnv do
+                    let path = toFilePath (gatewayCredentialPath home)
+                    createDirectoryIfMissing True
+                        (toFilePath home </> ".haskell-agent"
+                            </> "credentials")
+                    LBS.writeFile path "{not-json"
+                    storeOpenAiAccountWithBilling
+                        ApiBilled
+                        "api-openai"
+                        "api-account"
+                        True
+                        farFutureAccessToken
+                    loadAuth (Just XAIProvider) >>= \case
+                        Left err ->
+                            err `shouldSatisfy`
+                                Text.isInfixOf
+                                    "cannot load gateway credential:"
+                        Right _ ->
+                            expectationFailure
+                                "expected an invalid gateway to block automatic auth"
+
+        it "does not use another subscription provider when the gateway file is invalid" $
+            withTempHome \home ->
+                withCleanOpenAiEnv $
+                withCleanGrokEnv $
+                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
+                    let path = toFilePath (gatewayCredentialPath home)
+                    createDirectoryIfMissing True
+                        (toFilePath home </> ".haskell-agent"
+                            </> "credentials")
+                    LBS.writeFile path "{not-json"
+                    loadAuth Nothing >>= \case
+                        Left err ->
+                            err `shouldSatisfy`
+                                Text.isInfixOf
+                                    "cannot load gateway credential:"
+                        Right _ ->
+                            expectationFailure
+                                "expected an invalid gateway to block local auth"
+
+        it "does not let an explicit provider bypass an invalid gateway" $
+            withTempHome \home ->
+                withCleanOpenAiEnv $
+                withCleanGrokEnv $
+                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
                     let path = toFilePath (gatewayCredentialPath home)
                     createDirectoryIfMissing True
                         (toFilePath home </> ".haskell-agent"
@@ -451,59 +351,24 @@ spec = do
                         Left err ->
                             err `shouldSatisfy`
                                 Text.isInfixOf
-                                    "refusing automatic fallback to API-credit billing"
+                                    "cannot load gateway credential:"
                         Right _ ->
                             expectationFailure
-                                "expected invalid gateway to preserve the billing boundary"
+                                "expected an invalid gateway to block local auth"
 
-        it "uses another subscription provider when the gateway file is invalid" $
-            withTempHome \home ->
-                withCleanOpenAiEnv $
-                withCleanGrokEnv $
-                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
-                    let path = toFilePath (gatewayCredentialPath home)
-                    createDirectoryIfMissing True
-                        (toFilePath home </> ".haskell-agent"
-                            </> "credentials")
-                    LBS.writeFile path "{not-json"
-                    loadAuth Nothing >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded ->
-                            loaded.loadedProvider `shouldBe` XAIProvider
-
-        it "skips API-credit auth to use another subscription provider" $
-            withTempHome \home ->
-                withCleanOpenAiEnv $
-                withCleanGrokEnv $
-                withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
-                    let path = toFilePath (gatewayCredentialPath home)
-                    createDirectoryIfMissing True
-                        (toFilePath home </> ".haskell-agent"
-                            </> "credentials")
-                    LBS.writeFile path "{not-json"
-                    storeOpenAiAccountWithBilling
-                        ApiBilled
-                        "api-openai"
-                        "api-account"
-                        True
-                        farFutureAccessToken
-                    loadAuth Nothing >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded -> do
-                            loaded.loadedProvider `shouldBe` XAIProvider
-                            tokenProviderBillingMode
-                                loaded.loadedTokenProvider
-                                `shouldBe` SubscriptionBilled
-
-        it "does not let a gateway override an explicit non-OpenAI provider" $
+        it "does not let an explicit non-OpenAI provider bypass the gateway" $
             withTempHome \home ->
                 withCleanGrokEnv $
                 withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
                     saveTestGateway home
                     loadAuth (Just XAIProvider) >>= \case
-                        Left err -> expectationFailure (Text.unpack err)
-                        Right loaded ->
-                            loaded.loadedProvider `shouldBe` XAIProvider
+                        Left err ->
+                            err `shouldSatisfy`
+                                Text.isInfixOf
+                                    "organization gateway is active"
+                        Right _ ->
+                            expectationFailure
+                                "expected the gateway to block direct xAI auth"
 
     describe "loadOpenAiDictationAuth" do
         it "loads ChatGPT OAuth as subscription-billed OpenAI auth" $
@@ -727,7 +592,7 @@ spec = do
                         `shouldReturn` Right second
 
     describe "loadAuthForAccount" do
-        it "keeps local fallback when the gateway route is selected" $
+        it "keeps the gateway selected when its route is selected" $
             withTempHome \home ->
                 withCleanOpenAiEnv do
                     saveTestGateway home
@@ -748,21 +613,21 @@ spec = do
                                         loaded.loadedTokenProvider
                                         Nothing
                                         >>= expectRightResult
-                                localCredential <-
-                                    getNextToken
-                                        loaded.loadedTokenProvider
-                                        (Just FailedCredential
-                                            { credential = gatewayCredential
-                                            , failure =
-                                                AccountAuthenticationRejected
-                                            , failureReason =
-                                                testAuthenticationReason
-                                            })
-                                        >>= expectRightResult
-                                localCredential.accountId
-                                    `shouldBe` "local-account"
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    (Just FailedCredential
+                                        { credential = gatewayCredential
+                                        , failure =
+                                            AccountAuthenticationRejected
+                                        , failureReason =
+                                            testAuthenticationReason
+                                        })
+                                    `shouldReturn`
+                                        Left
+                                            (CredentialError
+                                                "static credential was rejected")
 
-        it "loads the selected local OpenAI account while a gateway is connected" $
+        it "does not let a local OpenAI selection escape a connected gateway" $
             withTempHome \home ->
                 withCleanOpenAiEnv do
                     saveTestGateway home
@@ -781,21 +646,13 @@ spec = do
                         "local-account-b"
                         >>= \case
                             Left err ->
-                                expectationFailure (Text.unpack err)
-                            Right loaded -> do
-                                loaded.loadedSelectionId
-                                    `shouldBe` Just "local-account-b"
-                                getNextToken
-                                    loaded.loadedTokenProvider
-                                    Nothing
-                                    >>= \case
-                                        Left err ->
-                                            expectationFailure (show err)
-                                        Right credential ->
-                                            credential.accountId
-                                                `shouldBe` "local-account-b"
+                                err `shouldBe`
+                                    "organization gateway is active; disconnect it before selecting another account"
+                            Right _ ->
+                                expectationFailure
+                                    "expected the gateway to block a local account"
 
-        it "does not let a gateway override a selected non-OpenAI account" $
+        it "does not let a selected non-OpenAI account escape a gateway" $
             withTempHome \home ->
                 withCleanGrokEnv $
                 withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
@@ -805,9 +662,11 @@ spec = do
                         (externalAuthSelectionId XAIProvider "environment")
                         >>= \case
                             Left err ->
-                                expectationFailure (Text.unpack err)
-                            Right loaded ->
-                                loaded.loadedProvider `shouldBe` XAIProvider
+                                err `shouldBe`
+                                    "organization gateway is active; disconnect it before selecting another account"
+                            Right _ ->
+                                expectationFailure
+                                    "expected the gateway to block another provider account"
 
         it "loads the selected managed Grok account" $
             withTempHome \_ ->

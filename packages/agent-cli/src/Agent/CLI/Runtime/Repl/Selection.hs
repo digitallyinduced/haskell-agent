@@ -32,6 +32,8 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorInlineAt )
+import Agent.CLI.GatewayClient ( refreshGatewayModels )
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
     ( ReplLine(ReplChooseAccount, ReplChooseModel, ReplChooseEffort) )
@@ -43,11 +45,12 @@ import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
-import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models
-    ( modelTargetRequiresRebuild,
+    ( gatewayModelOptions,
+      modelTargetRequiresRebuild,
       rawModelOption,
       resolveConfiguredModel,
+      resolveModelOptionById,
       resolveModelOptionDialect,
       ModelOption(modelTarget),
       ModelTarget(targetDialect, targetProvider, targetModelId,
@@ -219,6 +222,22 @@ selectRequestedAccount
     -> Maybe Text
     -> IO (Either Text (Maybe RunResult))
 selectRequestedAccount env requestedProvider selector =
+    readIORef env.sessionGatewayModels >>= \case
+        Just _ ->
+            pure $ Left
+                "Account switching is unavailable while connected to the organization gateway. Disconnect the gateway first."
+        Nothing ->
+            selectRequestedAccountWithoutGateway
+                env
+                requestedProvider
+                selector
+
+selectRequestedAccountWithoutGateway
+    :: SessionEnv
+    -> Provider
+    -> Maybe Text
+    -> IO (Either Text (Maybe RunResult))
+selectRequestedAccountWithoutGateway env requestedProvider selector =
     case env.sessionFullscreen of
         Nothing ->
             pure
@@ -366,6 +385,7 @@ handleSelection
             , sessionProvider = provider
             , sessionConnection = connectionId
             , sessionModelCatalog = catalog
+            , sessionGatewayModels = gatewayModelsRef
             , sessionDialect = dialect
             , sessionParams = paramsRef
             , sessionPersist = persist
@@ -434,32 +454,27 @@ handleSelection
         chooseModel continue
     Right (ReplSetModel name) -> do
         color <- resolveColor stdout
-        let rawChoice = rawModelOption provider name
-        choice <-
-            resolveModelOptionDialect $
-                fromMaybe
-                    (rawChoice
-                        { modelTarget =
-                            rawChoice.modelTarget
-                                { targetConnectionId = connectionId
-                                , targetDialect = dialectId dialect
-                                }
-                        })
-                    (resolveConfiguredModel catalog name)
-        if modelTargetRequiresRebuild
-                connectionId provider (dialectId dialect) choice
-            then
-                switchModelTarget color choice Nothing continue
-            else do
-                message <- applyModelChange
-                    home projectRoot provider connectionId name
-                    choice.modelTarget.targetWireModelId
-                    choice.modelTarget.targetDialect
-                    paramsRef render conversationRef persist
-                displayInfo message $
-                    Text.putStrLn
-                        (roleMuted color (glyphOk <> message))
+        resolveRequestedModel name >>= \case
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
                 continue
+            Right choice ->
+                if modelTargetRequiresRebuild
+                        connectionId provider (dialectId dialect) choice
+                    then
+                        switchModelTarget color choice Nothing continue
+                    else do
+                        message <- applyModelChange
+                            home projectRoot provider connectionId
+                            choice.modelTarget.targetModelId
+                            choice.modelTarget.targetWireModelId
+                            choice.modelTarget.targetDialect
+                            paramsRef render conversationRef persist
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
+                        continue
     _ -> error "handleSelection: unsupported input"
   where
     displayInfo message minimalAction = case fullscreen of
@@ -507,12 +522,17 @@ handleSelection
     chooseModel next = do
         color <- resolveColor stderr
         params <- readIORef paramsRef
+        gatewayAccess <- readIORef gatewayModelsRef
         let current = currentModel params
         modelChoiceWithEffort
-            catalog fullscreen color connectionId provider current
+            catalog gatewayAccess fullscreen color connectionId provider current
                 (dialectId dialect) (currentEffort params) >>= \case
-            Nothing -> next
-            Just selection -> do
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right Nothing -> next
+            Right (Just selection) -> do
                 let rawChoice = selection.modelPickerOption
                     selectedEffort = selection.modelPickerEffort
                 choice <- resolveModelOptionDialect rawChoice
@@ -552,6 +572,38 @@ handleSelection
                     next
                   else
                     switchModelTarget color choice (Just selectedEffort) next
+    resolveRequestedModel name =
+        readIORef gatewayModelsRef >>= \case
+            Just access ->
+                refreshGatewayModels access >>= \case
+                    Left err -> pure (Left err)
+                    Right models ->
+                        case
+                            resolveModelOptionById
+                                (modelOptionsForGatewayModels catalog models)
+                                name
+                        of
+                            Nothing ->
+                                pure
+                                    (Left
+                                        ("Model '"
+                                            <> name
+                                            <> "' is not available through your organization gateway."))
+                            Just choice ->
+                                Right <$> resolveModelOptionDialect choice
+            Nothing -> do
+                let rawChoice = rawModelOption provider name
+                    choice =
+                        fromMaybe
+                            (rawChoice
+                                { modelTarget =
+                                    rawChoice.modelTarget
+                                        { targetConnectionId = connectionId
+                                        , targetDialect = dialectId dialect
+                                        }
+                                })
+                            (resolveConfiguredModel catalog name)
+                Right <$> resolveModelOptionDialect choice
     switchModelTarget color choice selectedEffort next =
         requestModelTargetSwitch fullscreen choice persist >>= \case
             Left err
@@ -604,7 +656,16 @@ handleSelection
                         <> ": "
                     )
                     message)
-    chooseAccount next =
+    chooseAccount next = do
+        gatewayAccess <- readIORef gatewayModelsRef
+        case gatewayAccess of
+            Just _ -> do
+                displayError
+                    "Account switching is unavailable while connected to the organization gateway. Disconnect the gateway first."
+                    (pure ())
+                next
+            Nothing -> chooseAccountFromOptions next
+    chooseAccountFromOptions next =
         case fullscreen of
             Just runtime -> do
                 currentSelectionId <- readIORef selectionRef

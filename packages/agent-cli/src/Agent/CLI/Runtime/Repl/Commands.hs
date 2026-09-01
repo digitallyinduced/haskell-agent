@@ -94,6 +94,7 @@ import Agent.CLI.Input
                ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage,
                ReplPasted) )
 import Agent.CLI.Interrupt ()
+import Agent.CLI.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
 import Agent.CLI.Login
@@ -364,6 +365,7 @@ handleReplLine
             , sessionHome = home
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
+            , sessionGatewayModels = gatewayModelsRef
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
@@ -1159,22 +1161,35 @@ handleReplLine
                     action@ReplRename{} -> handleSessionAction env slashCatalog continue action
                     action@ReplRenameAuto -> handleSessionAction env slashCatalog continue action
                     ReplLogin -> do
+                        gatewayBefore <- loadGatewayCredential
                         case fullscreen of
                             Just runtime ->
                                 runFullscreenLoginManager runtime
                             Nothing -> do
                                 color <- resolveColor stderr
                                 runLoginManager color
-                        continue
+                        gatewayAfter <- loadGatewayCredential
+                        if gatewayAfter /= gatewayBefore
+                            then requestGatewayRestart fullscreen persist
+                            else continue
                     ReplUsage -> do
-                        case fullscreen of
+                        readIORef gatewayModelsRef >>= \case
+                            Just _ ->
+                                displayInfo
+                                    "usage: managed by the organization gateway"
+                                    (Text.putStrLn
+                                        (roleMuted stdoutColor
+                                            "usage: managed by the organization gateway"))
                             Nothing ->
-                                showAccountUsage
-                                    provider tokenProvider openAiPool
-                            Just runtime ->
-                                accountUsageText
-                                    False provider tokenProvider openAiPool
-                                    >>= emitUiEvent runtime . UiSystemMessage
+                                case fullscreen of
+                                    Nothing ->
+                                        showAccountUsage
+                                            provider tokenProvider openAiPool
+                                    Just runtime ->
+                                        accountUsageText
+                                            False provider tokenProvider openAiPool
+                                            >>= emitUiEvent runtime
+                                                . UiSystemMessage
                         continue
                     ReplReloadAuth -> do
                         reloadResult <- reloadAuth provider tokenProvider
@@ -2080,6 +2095,28 @@ requestMetaRestart fullscreen persist = do
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
             report "restarting to apply Meta Console changes…"
+            pure (RunRestart handle.sessionMeta.metaId)
+
+requestGatewayRestart
+    :: Maybe FullscreenRuntime
+    -> Persistence
+    -> IO RunResult
+requestGatewayRestart fullscreen persist = do
+    color <- resolveColor stderr
+    let report message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+    case persist of
+        PersistenceDisabled -> do
+            report "gateway routing changed; restart the agent to continue"
+            pure RunQuit
+        PersistenceEnabled slotRef -> do
+            handle <- ensureSession slotRef
+            report "restarting to apply organization gateway routing…"
             pure (RunRestart handle.sessionMeta.metaId)
 
 requestCodeModeRestart

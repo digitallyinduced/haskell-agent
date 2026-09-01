@@ -47,7 +47,12 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
+import Agent.Tools.MultiAgents
+    ( CollaborationModelTarget
+    , CollaborationSpawnOptions(..)
+    , MultiAgentContext(..)
+    , SubagentWorktree(..)
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -60,7 +65,7 @@ import Control.Monad (void)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesDirectoryExist)
@@ -224,7 +229,7 @@ sanitizeOptional value = value >>= \raw ->
 
 taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
 taskTool baseCwd ctx specsRef =
-    jsonAppToolWithExecution "task" (taskDescription ctx.multiAllowedChildModels)
+    jsonAppToolWithExecution "task" (taskDescription advertisedModels)
         [ PropertySchema "prompt" PropertyString True $ Just
             "The full task prompt for the subagent to execute."
         , PropertySchema "description" PropertyString True $ Just
@@ -238,13 +243,18 @@ taskTool baseCwd ctx specsRef =
         , PropertySchema "cwd" PropertyString False $ Just
             "Explicit working directory for the subagent. Mutually exclusive with isolation=\"worktree\"."
         , PropertySchema "model" PropertyString False $ Just
-            (taskModelProperty ctx.multiAllowedChildModels)
+            (taskModelProperty advertisedModels)
         , PropertySchema "isolation" (PropertyEnum ["none", "worktree"]) False $ Just
             "Isolation mode: \"none\" (default, shared workspace) or \"worktree\" (isolated git worktree). Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
         (taskApproval ctx)
         TurnSequential
         (typedTool "task" taskArgsDecoder (runTask baseCwd ctx specsRef))
+  where
+    advertisedModels =
+        case ctx.multiChildModelAllowed of
+            Just _ -> Nothing
+            Nothing -> ctx.multiAllowedChildModels
 
 taskApproval :: MultiAgentContext -> ApprovalRule
 taskApproval ctx = case ctx.multiSelfId of
@@ -296,10 +306,10 @@ runTask baseCwd ctx typesRef args
     , Just iso <- args.isolation
     , isWorktreeIsolation iso =
         pure (Left "cwd and isolation are mutually exclusive.")
-    | otherwise =
-        case resolveRequestedGrokChildModel ctx.multiAllowedChildModels args.model of
+    | otherwise = do
+        resolveTaskChildModel ctx args.model >>= \case
             Left err -> pure (Left err)
-            Right model -> mask \restore ->
+            Right (model, resolvedModel) -> mask \restore ->
                 resolveTaskWorkspace baseCwd ctx args >>= \case
                     Left err -> pure (Left err)
                     Right (childCwd, worktree) ->
@@ -309,7 +319,42 @@ runTask baseCwd ctx typesRef args
                                 worktree
                                 ctx
                                 typesRef
-                                args { model })
+                                args { model }
+                                resolvedModel)
+
+resolveTaskChildModel
+    :: MultiAgentContext
+    -> Maybe Text
+    -> IO (Either Text (Maybe Text, Maybe CollaborationModelTarget))
+resolveTaskChildModel ctx requested =
+    case sanitizeOptional requested of
+        Nothing -> pure (Right (Nothing, Nothing))
+        Just model ->
+            case ctx.multiResolveChildModel of
+                Just resolve ->
+                    resolve model >>= \case
+                        Nothing -> pure (Left organizationModelDenied)
+                        Just target ->
+                            pure (Right (Just model, Just target))
+                Nothing ->
+                    case ctx.multiChildModelAllowed of
+                        Nothing ->
+                            pure
+                                (fmap
+                                    (\modelOverride ->
+                                        (modelOverride, Nothing))
+                                    (resolveRequestedGrokChildModel
+                                        ctx.multiAllowedChildModels
+                                        (Just model)))
+                        Just isAllowed ->
+                            isAllowed model >>= \allowed ->
+                                pure
+                                    (if allowed
+                                        then Right (Just model, Nothing)
+                                        else Left organizationModelDenied)
+  where
+    organizationModelDenied =
+        "The requested child model is not allowed by this organization."
 
 spawnFresh
     :: OsPath
@@ -317,8 +362,9 @@ spawnFresh
     -> MultiAgentContext
     -> GrokSubagentSpecs
     -> TaskArgs
+    -> Maybe CollaborationModelTarget
     -> IO (Either Text Text)
-spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
+spawnFresh childCwd worktree ctx typesRef args resolvedModel = mask \restore -> do
     ownedWorktree <- traverse makeIdempotentWorktree worktree
     rootTurnId <- ctx.multiRootTurnId
     let spec = GrokSubagentSpec
@@ -331,7 +377,7 @@ spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
             }
         worktreePath = (.subagentWorktreePath) <$> ownedWorktree
         prepare agentId = do
-            recordAgentSpec typesRef agentId spec
+            prepareGrokSpawn ctx typesRef spec resolvedModel agentId
             pure $ case ownedWorktree of
                 Nothing -> mempty
                 Just lease ->
@@ -496,16 +542,57 @@ spawnManagedGrokSubagent
 spawnManagedGrokSubagent childCwd ctx typesRef spec prompt nickname
     | Text.null (Text.strip prompt) =
         pure (Left "subagent prompt must be non-empty")
-    | otherwise =
-        spawnSubagentWithCwdPreparedForTurn
-            ctx.multiRegistry
-            Nothing
-            childCwd
-            (\agentId -> recordAgentSpec typesRef agentId spec >> pure mempty)
-            ctx.multiSelfId
-            ctx.multiDepth
-            prompt
-            nickname
+    | otherwise = do
+        resolvedSpec <-
+            case ctx.multiResolveChildModel of
+                Nothing -> pure (Right (spec, Nothing))
+                Just _ ->
+                    resolveTaskChildModel ctx spec.modelOverride >>= \case
+                        Left err -> pure (Left err)
+                        Right (model, resolvedModel) ->
+                            pure
+                                (Right
+                                    ( spec { modelOverride = model }
+                                    , resolvedModel
+                                    ))
+        case resolvedSpec of
+            Left err -> pure (Left err)
+            Right (preparedSpec, resolvedModel) ->
+                spawnSubagentWithCwdPreparedForTurn
+                    ctx.multiRegistry
+                    Nothing
+                    childCwd
+                    (\agentId -> do
+                        prepareGrokSpawn
+                            ctx typesRef preparedSpec resolvedModel agentId
+                        pure mempty)
+                    ctx.multiSelfId
+                    ctx.multiDepth
+                    prompt
+                    nickname
+
+prepareGrokSpawn
+    :: MultiAgentContext
+    -> GrokSubagentSpecs
+    -> GrokSubagentSpec
+    -> Maybe CollaborationModelTarget
+    -> SubagentId
+    -> IO ()
+prepareGrokSpawn ctx typesRef spec resolvedModel agentId = do
+    case ctx.multiPrepareSpawn of
+        Just prepare
+            | isNothing spec.modelOverride || isJust resolvedModel ->
+                prepare agentId CollaborationSpawnOptions
+                    { collaborationModel = spec.modelOverride
+                    , collaborationResolvedModel = resolvedModel
+                    , collaborationReasoningEffort =
+                        spec.reasoningEffortOverride
+                    , collaborationForkTurns = Just "none"
+                    }
+        _ -> pure ()
+    -- The host hook records collaboration defaults; retain the Grok task's
+    -- actual type and effort after it installs the authoritative target.
+    recordAgentSpec typesRef agentId spec
 
 formatTaskStarted :: SubagentId -> TaskArgs -> Maybe OsPath -> Text
 formatTaskStarted agentId args worktreePath =

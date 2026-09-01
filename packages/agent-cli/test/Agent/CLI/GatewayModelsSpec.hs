@@ -1,66 +1,110 @@
 module Agent.CLI.GatewayModelsSpec (spec) where
 
 import Agent.CLI.GatewayModels
+import Agent.CLI.GatewayClient
+    ( GatewayModel(..)
+    , GatewayModelProtocol(..)
+    )
 import Agent.CLI.ModelConfig
-import Agent.Dialect (DialectId (CodexDialect))
-import Agent.Provider (Provider (OpenAIProvider))
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.Dialect (DialectId(..))
+import Agent.Provider (Provider(ClaudeCodeProvider, OpenAIProvider))
 import Data.Map.Strict qualified as Map
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.GatewayModels" do
-    it "exposes only canonical router aliases while connected" do
-        let active = catalogForGatewayState True directCatalog
-        map (.catalogModelId) active.catalogModels
-            `shouldBe` gatewayModelIds
-        Map.keys active.catalogModelsById
-            `shouldMatchList` gatewayModelIds
-        catalogUsesGateway active `shouldBe` True
-        (catalogDefaultForProvider active OpenAIProvider
-            >>= Just . (.catalogModelId))
-            `shouldBe` Just gatewayDefaultModelId
+    it "uses only the aliases advertised by the connected gateway" do
+        let options =
+                modelOptionsForGatewayState
+                    testCatalog
+                    (Just ["company-b", "company-a", "company-b"])
+        map (.modelTarget.targetModelId) options
+            `shouldBe` ["company-b", "company-a"]
+        map (.modelTarget.targetConnectionId) options
+            `shouldBe` replicate 2 organizationGatewayConnectionId
+        map (.modelTarget.targetWireModelId) options
+            `shouldBe` ["company-b", "company-a"]
+        map (.modelTarget.targetDialect) options
+            `shouldBe` [CodexDialect, GenericResponsesDialect]
+        map (.modelLabel) options
+            `shouldBe` [Nothing, Just "Company A"]
 
-    it "removes reserved router aliases while disconnected" do
-        let spoofed = directCatalog
-                { catalogModels =
-                    directCatalog.catalogModels
-                        <> [directModel
-                                { catalogModelId = gatewayDefaultModelId
-                                , catalogModelWireId = "attacker-model"
-                                }]
-                }
-            inactive = catalogForGatewayState False spoofed
-        map (.catalogModelId) inactive.catalogModels
-            `shouldBe` ["gpt-direct"]
-        Map.keys inactive.catalogModelsById
-            `shouldBe` ["gpt-direct"]
-        catalogUsesGateway inactive `shouldBe` False
+    it "uses only direct catalog entries while disconnected" do
+        let options = modelOptionsForGatewayState testCatalog Nothing
+        map (.modelTarget.targetModelId) options
+            `shouldBe` ["router-default"]
+        map (.modelTarget.targetConnectionId) options
+            `shouldBe` ["openai"]
 
-directCatalog :: ModelCatalog
-directCatalog =
+    it "maps the unified catalog to Responses and Claude transports" do
+        let options =
+                modelOptionsForGatewayModels
+                    testCatalog
+                    [ GatewayModel "company-a" GatewayResponsesProtocol
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    , GatewayModel "router-default" GatewayResponsesProtocol
+                    ]
+        map (.modelTarget.targetProvider) options
+            `shouldBe` [OpenAIProvider, ClaudeCodeProvider]
+        map (.modelTarget.targetModelId) options
+            `shouldBe` ["company-a", "sonnet"]
+        map (.modelTarget.targetConnectionId) options
+            `shouldBe` replicate 2 organizationGatewayConnectionId
+        map (.modelTarget.targetDialect) options
+            `shouldBe` [GenericResponsesDialect, ClaudeCodeDialect]
+
+testCatalog :: ModelCatalog
+testCatalog =
     ModelCatalog
         { catalogConnections =
-            Map.singleton "openai"
-                ModelConnection
-                    { connectionId = "openai"
-                    , connectionKind = BuiltinConnection OpenAIProvider
-                    }
-        , catalogModels = [directModel]
+            Map.fromList
+                [ ( "openai"
+                  , ModelConnection
+                        { connectionId = "openai"
+                        , connectionKind = BuiltinConnection OpenAIProvider
+                        }
+                  )
+                , ( organizationGatewayConnectionId
+                  , ModelConnection
+                        { connectionId = organizationGatewayConnectionId
+                        , connectionKind = OrganizationGatewayConnection
+                        }
+                  )
+                ]
+        , catalogModels = [directModel, gatewayMetadata]
         , catalogModelsById =
             Map.singleton directModel.catalogModelId directModel
+        , catalogGatewayModelsById =
+            Map.singleton gatewayMetadata.catalogModelId gatewayMetadata
         }
 
 directModel :: CatalogModel
 directModel =
     CatalogModel
-        { catalogModelId = "gpt-direct"
+        { catalogModelId = "router-default"
         , catalogModelConnectionId = "openai"
-        , catalogModelWireId = "gpt-direct"
+        , catalogModelWireId = "router-default"
         , catalogModelDialect = CodexDialect
         , catalogModelContextWindow = Nothing
         , catalogModelLabel = Nothing
         , catalogModelReasoningEfforts = Nothing
         , catalogModelDefaultReasoningEffort = Nothing
         , catalogModelDefault = True
+        , catalogModelFallbackPriority = Nothing
+        }
+
+gatewayMetadata :: CatalogModel
+gatewayMetadata =
+    CatalogModel
+        { catalogModelId = "company-a"
+        , catalogModelConnectionId = organizationGatewayConnectionId
+        , catalogModelWireId = "company-a"
+        , catalogModelDialect = GenericResponsesDialect
+        , catalogModelContextWindow = Just 131_072
+        , catalogModelLabel = Just "Company A"
+        , catalogModelReasoningEfforts = Just ["high"]
+        , catalogModelDefaultReasoningEffort = Just "high"
+        , catalogModelDefault = False
         , catalogModelFallbackPriority = Nothing
         }

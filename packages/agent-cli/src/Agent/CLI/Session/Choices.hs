@@ -9,21 +9,29 @@ module Agent.CLI.Session.Choices
     ) where
 
 import Agent.CLI.Error (formatApiErrorInlineAt)
+import Agent.CLI.GatewayClient
+    ( GatewayModelAccess
+    , refreshGatewayModels
+    )
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
+    , organizationGatewayConnectionId
     )
 import Agent.CLI.ModelPicker
     ( ModelPickerSelection(..)
     , initialModelEffort
     , modelEffortOptions
-    , pickModelWithEffort
+    , pickModelStateWithEffort
     , renderEffortIndicator
     )
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , PickerState(..)
+    , gatewayModelOptions
+    , initialPickerStateForOptions
     , initialPickerStateResolvedWith
     , rawModelOption
     )
@@ -75,18 +83,21 @@ import System.IO (stdout)
 
 modelChoice
     :: ModelCatalog
+    -> Maybe GatewayModelAccess
     -> Maybe FullscreenRuntime
     -> Bool
     -> Text
     -> Provider
     -> Text
     -> DialectId
-    -> IO (Maybe ModelOption)
+    -> IO (Either Text (Maybe ModelOption))
 modelChoice
-        catalog fullscreen color connectionId provider current currentDialect =
-    fmap (fmap (.modelPickerOption)) $
+        catalog gatewayAccess fullscreen color connectionId provider current
+        currentDialect =
+    fmap (fmap (fmap (.modelPickerOption))) $
         modelChoiceWithEffort
             catalog
+            gatewayAccess
             fullscreen
             color
             connectionId
@@ -98,6 +109,7 @@ modelChoice
 -- | Choose a model and its reasoning effort in one searchable surface.
 modelChoiceWithEffort
     :: ModelCatalog
+    -> Maybe GatewayModelAccess
     -> Maybe FullscreenRuntime
     -> Bool
     -> Text
@@ -105,9 +117,10 @@ modelChoiceWithEffort
     -> Text
     -> DialectId
     -> ReasoningEffort
-    -> IO (Maybe ModelPickerSelection)
+    -> IO (Either Text (Maybe ModelPickerSelection))
 modelChoiceWithEffort
         catalog
+        gatewayAccess
         fullscreen
         color
         connectionId
@@ -115,54 +128,80 @@ modelChoiceWithEffort
         current
         currentDialect
         currentEffort = do
-    discovered <- discoverModelOptions connectionId provider
-    case fullscreen of
-        Nothing ->
-            pickModelWithEffort
-                catalog
-                discovered
-                color
-                connectionId
-                provider
-                current
-                currentDialect
-                currentEffort
-        Just runtime -> do
-            picker <-
-                initialPickerStateResolvedWith
-                    catalog
-                    discovered
-                    connectionId
-                    provider
-                    current
-                    currentDialect
-            let options = picker.pickerAll
-                row option =
-                    let efforts = modelEffortOptions option
-                        initial =
-                            initialModelEffort picker currentEffort option
-                        initialIndex =
-                            fromMaybe 0 (elemIndex initial efforts)
-                    in ( modelRowLabel picker option
-                       , modelDetail option
-                       , map (renderEffortIndicator option) efforts
-                       , initialIndex
-                       )
-            requestFullscreenAdjustableFilterChoice
-                runtime
-                "Models"
-                picker.pickerIndex
-                (map row options)
-                >>= \case
-                    Just (modelIndex, effortIndex)
-                        | Just option <- atMay modelIndex options
-                        , Just effort <-
-                            atMay effortIndex (modelEffortOptions option) ->
-                                pure $ Just ModelPickerSelection
-                                    { modelPickerOption = option
-                                    , modelPickerEffort = effort
-                                    }
-                    _ -> pure Nothing
+    scopedPicker >>= \case
+        Left err -> pure (Left err)
+        Right (title, picker) ->
+            Right <$> presentPicker title picker
+  where
+    scopedPicker =
+        case gatewayAccess of
+            Just access ->
+                refreshGatewayModels access >>= \case
+                    Left err -> pure (Left err)
+                    Right [] ->
+                        pure
+                            (Left
+                                "The organization gateway does not offer any models.")
+                    Right models -> do
+                        let gatewayConnectionId =
+                                organizationGatewayConnectionId
+                            options =
+                                modelOptionsForGatewayModels catalog models
+                        picker <-
+                            initialPickerStateForOptions
+                                "organization gateway"
+                                options
+                                gatewayConnectionId
+                                OpenAIProvider
+                                current
+                                currentDialect
+                        pure
+                            (Right
+                                ("Models · organization gateway", picker))
+            Nothing -> do
+                discovered <- discoverModelOptions connectionId provider
+                picker <-
+                    initialPickerStateResolvedWith
+                        catalog
+                        discovered
+                        connectionId
+                        provider
+                        current
+                        currentDialect
+                pure (Right ("Models", picker))
+
+    presentPicker title picker =
+        case fullscreen of
+            Nothing ->
+                pickModelStateWithEffort color currentEffort picker
+            Just runtime -> do
+                let options = picker.pickerAll
+                    row option =
+                        let efforts = modelEffortOptions option
+                            initial =
+                                initialModelEffort picker currentEffort option
+                            initialIndex =
+                                fromMaybe 0 (elemIndex initial efforts)
+                        in ( modelRowLabel picker option
+                           , modelDetail option
+                           , map (renderEffortIndicator option) efforts
+                           , initialIndex
+                           )
+                requestFullscreenAdjustableFilterChoice
+                    runtime
+                    title
+                    picker.pickerIndex
+                    (map row options)
+                    >>= \case
+                        Just (modelIndex, effortIndex)
+                            | Just option <- atMay modelIndex options
+                            , Just effort <-
+                                atMay effortIndex (modelEffortOptions option) ->
+                                    pure $ Just ModelPickerSelection
+                                        { modelPickerOption = option
+                                        , modelPickerEffort = effort
+                                        }
+                        _ -> pure Nothing
 
 discoverModelOptions :: Text -> Provider -> IO [ModelOption]
 discoverModelOptions connectionId provider

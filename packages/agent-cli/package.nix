@@ -10,7 +10,7 @@
 , JuicyPixels, lib, memory, mtl, network, network-uri
 , optparse-applicative, process, QuickCheck, retry, safe-exceptions
 , scientific, stm, tagsoup, text, time, transformers, unix, vector
-, vty, vty-crossplatform
+, vty, vty-crossplatform, wai, warp
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -32,7 +32,7 @@ mkDerivation {
     hasql-pool http-client http-client-tls http-types JuicyPixels
     memory mtl network network-uri optparse-applicative process retry
     safe-exceptions scientific stm tagsoup text time transformers unix
-    vector vty vty-crossplatform
+    vector vty vty-crossplatform wai warp
   ];
   executableHaskellDepends = [
     aeson agent-cli-runtime agent-responses agent-responses-types

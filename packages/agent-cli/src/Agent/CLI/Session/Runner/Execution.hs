@@ -899,6 +899,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionProvider = provider
             , sessionConnection = connectionId
             , sessionModelCatalog = catalog
+            , sessionGatewayModels = gatewayModelsRef
             , sessionDialect = dialect
             , sessionRecordImageGenerationInputs =
                 recordImageGenerationInputs
@@ -970,10 +971,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         setSessionEffortText env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
+    gatewayAccess <- readIORef gatewayModelsRef
     forM_ fullscreen \runtime ->
         setFullscreenSessionActions
             runtime
-            (Just provider)
+            (if isJust gatewayAccess then Nothing else Just provider)
             (requestCancel toolEnv.toolCancel)
             (\pasted text -> do
                 images <- loadImagesFromPastedText text

@@ -1,6 +1,12 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.Session.Codec
+    ( fromStoredMetadata
+    , fromStoredPromptSnapshot
+    , toStoredMetadata
+    , toStoredPromptSnapshot
+    )
 import Agent.CLI.SessionLock (acquireSessionLock, releaseSessionLock)
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session.StoreCodec
@@ -8,6 +14,7 @@ import Agent.CLI.Session.StoreCodec
     , toStoredResponseItem
     )
 import Agent.CLI.Models (ModelTarget(..))
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect (DialectId(..))
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import Agent.Json.Decode qualified as Hermes
@@ -1722,6 +1729,40 @@ spec = describe "Agent.CLI.Session" do
             Hermes.decodeEither sessionMetaDecoder
                 (LBS.toStrict (Aeson.encode meta))
                 `shouldBe` Right meta
+
+        it "round-trips gateway protocol identity through every metadata codec" do
+            let prompt =
+                    (testPromptSnapshot "gateway-session")
+                        { promptSnapshotProvider = OpenAIProvider
+                        , promptSnapshotConnection =
+                            organizationGatewayConnectionId
+                        , promptSnapshotModel = "company-coder"
+                        , promptSnapshotDialect = GenericResponsesDialect
+                        }
+                legacy = LegacySubagentTarget
+                    { legacyTargetProvider = OpenAIProvider
+                    , legacyTargetConnection =
+                        organizationGatewayConnectionId
+                    , legacyTargetEffectiveModel = "company-coder"
+                    , legacyTargetDialect = GenericResponsesDialect
+                    }
+                meta =
+                    (testMeta "gateway-session")
+                        { metaProvider = OpenAIProvider
+                        , metaConnection = organizationGatewayConnectionId
+                        , metaModel = "company-coder"
+                        , metaTransportModel = Just "company-coder"
+                        , metaDialect = GenericResponsesDialect
+                        , metaLegacySubagentTarget = Just legacy
+                        , metaPromptSnapshot = Just prompt
+                        }
+            Hermes.decodeEither sessionMetaDecoder
+                (LBS.toStrict (Aeson.encode meta))
+                `shouldBe` Right meta
+            fromStoredMetadata (toStoredMetadata meta)
+                `shouldBe` Right (meta { metaPromptSnapshot = Nothing })
+            fromStoredPromptSnapshot (toStoredPromptSnapshot prompt)
+                `shouldBe` Right prompt
 
         it "infers transcript effects when importing legacy JSON turns" do
             let legacy userText = Aeson.object

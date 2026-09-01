@@ -101,4 +101,6 @@ main =
         , multiSendToRoot = Nothing
         , multiSpawnModelGuidance = Nothing
         , multiAllowedChildModels = Nothing
+        , multiResolveChildModel = Nothing
+        , multiChildModelAllowed = Nothing
         }
