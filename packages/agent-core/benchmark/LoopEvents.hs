@@ -1,19 +1,24 @@
 module Main (main) where
 
 import Agent.Cancel (newCancelFlag)
+import Agent.Error (ApiError(..))
 import qualified Agent.Json.Decode as Json
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
     , BackendStateStore(..)
     , LoopConfig(..)
+    , LoopError(..)
     , LoopEvent(..)
+    , LoopExecution(..)
     , LoopResult
+    , TurnInput(..)
     , defaultLoopDispatch
     , defaultLoopMaxTurns
     , emptyBackendSnapshot
     , emptyTurnOutput
     , runLoop
+    , runLoopInputsDetailed
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -55,6 +60,7 @@ import Text.Printf (printf)
 
 data Workload
     = StreamingEvents
+    | StreamingFailureEvents
     | ParallelToolEvents
     | QueuedEvents
 
@@ -107,11 +113,13 @@ main = do
         _ ->
             die $
                 "usage: loop-events-bench WORKLOAD EVENTS SINK_DELAY_US SAMPLES\n"
-                    <> "workloads: streaming, parallel-tools, queued-events"
+                    <> "workloads: streaming, streaming-failure, "
+                    <> "parallel-tools, queued-events"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "streaming" -> pure StreamingEvents
+    "streaming-failure" -> pure StreamingFailureEvents
     "parallel-tools" -> pure ParallelToolEvents
     "queued-events" -> pure QueuedEvents
     other -> die ("unknown workload: " <> other)
@@ -171,6 +179,8 @@ runWorkload workload eventCount sinkDelayMicros = do
     backend <- case workload of
         StreamingEvents ->
             pure $ streamingBackend eventCount producerFinishedRef
+        StreamingFailureEvents ->
+            pure $ streamingFailureBackend eventCount producerFinishedRef
         ParallelToolEvents ->
             parallelToolBackend eventCount producerFinishedRef
         QueuedEvents ->
@@ -191,6 +201,7 @@ runWorkload workload eventCount sinkDelayMicros = do
                 }
             , loopTools = case workload of
                 StreamingEvents -> emptyRegistry
+                StreamingFailureEvents -> emptyRegistry
                 ParallelToolEvents -> streamingRegistry
                 QueuedEvents -> emptyRegistry
             , loopDispatch = defaultLoopDispatch
@@ -202,14 +213,21 @@ runWorkload workload eventCount sinkDelayMicros = do
             , loopInterrupt = pure ()
             , loopCancel = cancel
             }
-    result <- runLoop config Nothing "benchmark"
-    forceSuccess result
+    displayChecksum <- case workload of
+        StreamingFailureEvents -> do
+            execution <-
+                runLoopInputsDetailed config Nothing [UserMessage "benchmark"]
+            forceStreamingFailure execution
+        _ -> do
+            result <- runLoop config Nothing "benchmark"
+            forceSuccess result
+            pure 0
     checksum <- readIORef checksumRef
     producerFinished <- readIORef producerFinishedRef >>= \case
         Just timestamp -> pure timestamp
         Nothing -> die "benchmark producer did not record completion"
     pure WorkloadResult
-        { resultChecksum = checksum
+        { resultChecksum = checksum + displayChecksum
         , resultProducerFinished = producerFinished
         }
 
@@ -226,6 +244,16 @@ streamingBackend eventCount producerFinishedRef =
                 emptyTurnOutput "stream-response" [] (Just "done")
             , backendState = emptyBackendSnapshot
             }
+
+streamingFailureBackend
+    :: Int
+    -> IORef (Maybe Word64)
+    -> Backend
+streamingFailureBackend eventCount producerFinishedRef =
+    Backend \_state _previous _inputs onEvent -> do
+        replicateM_ eventCount (onEvent (TextDelta "x"))
+        getMonotonicTimeNSec >>= writeIORef producerFinishedRef . Just
+        pure (Left (ConnectionError "benchmark failure"))
 
 queuedEventsBackend
     :: Int
@@ -311,6 +339,14 @@ forceSuccess :: Either error LoopResult -> IO ()
 forceSuccess = \case
     Right result -> result `seq` pure ()
     Left _ -> die "agent loop benchmark failed"
+
+forceStreamingFailure :: LoopExecution -> IO Int
+forceStreamingFailure execution =
+    case execution.executionResult of
+        Left (LoopTransportAfterOutput (ConnectionError _)) ->
+            evaluate $
+                sum (map eventWeight execution.executionUncommittedDisplayEvents)
+        _ -> die "agent loop failure benchmark did not fail after output"
 
 eventWeight :: LoopEvent -> Int
 eventWeight = \case
