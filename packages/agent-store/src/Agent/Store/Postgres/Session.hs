@@ -53,6 +53,7 @@ module Agent.Store.Postgres.Session
     , listSessionArchiveKeys
     , setSessionArchived
     , searchConversationTurns
+    , searchConversationTurnsForBoundary
     , searchNativeConversations
     , deleteSession
     , importLegacySession

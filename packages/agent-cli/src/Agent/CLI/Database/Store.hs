@@ -15,7 +15,7 @@ import Agent.CLI.Database
     , DatabaseScope(..)
     , DatabaseToolsEnv(..)
     )
-import Agent.CLI.Models (validateResumedGatewayBoundary)
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.Store.Postgres
     ( Store
     , provisioningPool
@@ -41,9 +41,7 @@ import Agent.Store.Postgres.Custom
     )
 import Agent.Store.Postgres.Session
     ( ConversationSearchResult(..)
-    , SessionMetadata(..)
-    , loadSessionMetadataMany
-    , searchConversationTurns
+    , searchConversationTurnsForBoundary
     )
 import Agent.Store.Postgres.Scope
     ( Scope(..)
@@ -64,8 +62,7 @@ import Data.Bits (xor)
 import qualified Data.ByteString as ByteString
 import Data.Int (Int64)
 import Data.List (find)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -148,39 +145,15 @@ databaseToolsEnvForStore
                 purpose
                 sql
     , databaseSearchConversations = \query limit ->
-        searchConversationTurns
+        searchConversationTurnsForBoundary
             (trustedPool store)
+            organizationGatewayConnectionId
+            gatewayIdentity
             query
-            (min 1000 (limit * 10)) >>= \case
+            limit >>= \case
             Left err -> pure (Left (renderStoreError err))
             Right results ->
-                loadSessionMetadataMany
-                    (trustedPool store)
-                    (map (.searchSessionId) results) >>= \case
-                        Left err -> pure (Left (renderStoreError err))
-                        Right metadata -> do
-                            let bySession =
-                                    Map.fromList
-                                        [ (meta.sessionMetadataKey, meta)
-                                        | meta <- metadata
-                                        ]
-                                authorized result = do
-                                    meta <-
-                                        Map.lookup
-                                            result.searchSessionId
-                                            bySession
-                                    case
-                                        validateResumedGatewayBoundary
-                                            gatewayIdentity
-                                            meta.sessionMetadataConnection
-                                            meta.sessionMetadataGatewayIdentity
-                                        of
-                                        Left _ -> Nothing
-                                        Right () -> Just result
-                            pure $ Right $
-                                map searchResultValue
-                                    (take limit
-                                        (mapMaybe authorized results))
+                pure (Right (map searchResultValue results))
     }
 
 -- | List the table-like objects exposed by one existing user-defined scope.

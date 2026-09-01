@@ -32,6 +32,7 @@ module Agent.Store.Postgres.Session.Read
     , listSessionMetadata
     , listSessionArchiveKeys
     , searchConversationTurns
+    , searchConversationTurnsForBoundary
     , searchNativeConversations
     ) where
 
@@ -442,6 +443,29 @@ searchConversationTurns pool query limit =
         HasqlSession.statement
             (query, fromIntegral (max 1 (min 100 limit)))
             searchTurnsStatement
+
+-- | Search only sessions that belong to the caller's current gateway routing
+-- boundary. The predicate is applied before ranking and LIMIT so matches from
+-- other credentials cannot displace authorized results.
+searchConversationTurnsForBoundary
+    :: StorePool
+    -> Text
+    -- ^ Reserved organization-gateway connection identifier.
+    -> Maybe Text
+    -- ^ Current gateway credential identity, or 'Nothing' for direct mode.
+    -> Text
+    -> Int
+    -> IO (Either StoreError [ConversationSearchResult])
+searchConversationTurnsForBoundary
+        pool gatewayConnection gatewayIdentity query limit =
+    withSession pool $
+        HasqlSession.statement
+            ( query
+            , gatewayConnection
+            , gatewayIdentity
+            , fromIntegral (max 1 (min 100 limit))
+            )
+            searchTurnsForBoundaryStatement
 
 searchNativeConversations
     :: StorePool
@@ -1004,6 +1028,54 @@ searchTurnsStatement = mkStatement
     \ LIMIT $2"
     ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList $
+        ConversationSearchResult
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.float8))
+    True
+
+searchTurnsForBoundaryStatement
+    :: Statement
+        (Text, Text, Maybe Text, Int64)
+        [ConversationSearchResult]
+searchTurnsForBoundaryStatement = mkStatement
+    "WITH query AS (SELECT websearch_to_tsquery('english', $1) AS value)\
+    \ SELECT s.session_key, t.turn_index, t.occurred_at,\
+    \   t.user_text, t.assistant_text,\
+    \   ts_rank_cd(t.search_vector, query.value)::float8\
+    \ FROM harness.session_turns t\
+    \ JOIN harness.sessions s ON s.session_id = t.session_id\
+    \ CROSS JOIN query\
+    \ WHERE s.deleted_at IS NULL\
+    \ AND (\
+    \   ($3 IS NULL\
+    \     AND s.connection_id <> $2\
+    \     AND s.gateway_identity IS NULL)\
+    \   OR ($3 IS NOT NULL\
+    \     AND s.connection_id = $2\
+    \     AND s.gateway_identity = $3)\
+    \ )\
+    \ AND (\
+    \   t.search_vector @@ query.value\
+    \   OR t.user_text ILIKE '%' || $1 || '%'\
+    \   OR t.assistant_text ILIKE '%' || $1 || '%'\
+    \ )\
+    \ ORDER BY ts_rank_cd(t.search_vector, query.value) DESC,\
+    \   t.occurred_at DESC\
+    \ LIMIT $4"
+    ( ((\(value, _, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, _, value, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowList $
         ConversationSearchResult

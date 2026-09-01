@@ -370,6 +370,18 @@ spec = do
                             expectationFailure
                                 "expected the gateway to block direct xAI auth"
 
+        it "rejects an explicit provider against an exact gateway snapshot" do
+            case gatewayLoadedAuthForProvider
+                    (Just XAIProvider)
+                    testGatewayCredential of
+                Left err ->
+                    err `shouldSatisfy`
+                        Text.isInfixOf
+                            "organization gateway is active"
+                Right _ ->
+                    expectationFailure
+                        "expected exact gateway auth to block direct xAI"
+
     describe "loadOpenAiDictationAuth" do
         it "loads ChatGPT OAuth as subscription-billed OpenAI auth" $
             withTempHome \_ ->
@@ -2134,9 +2146,12 @@ saveTestGateway :: OsPath -> IO ()
 saveTestGateway home =
     saveGatewayCredentialAt
         home
-        GatewayCredential
-            { gatewayBaseUrl = "https://gateway.example"
-            , gatewayWebSocketUrl = "wss://gateway.example/v1/responses"
-            , gatewayAccessToken = "gateway-token"
-            }
+        testGatewayCredential
         `shouldReturn` Right ()
+
+testGatewayCredential :: GatewayCredential
+testGatewayCredential = GatewayCredential
+    { gatewayBaseUrl = "https://gateway.example"
+    , gatewayWebSocketUrl = "wss://gateway.example/v1/responses"
+    , gatewayAccessToken = "gateway-token"
+    }

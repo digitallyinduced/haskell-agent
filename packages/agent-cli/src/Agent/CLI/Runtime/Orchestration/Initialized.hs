@@ -21,7 +21,7 @@ import Agent.CLI.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       gatewayAuthSelectionId,
-      gatewayLoadedAuth,
+      gatewayLoadedAuthForProvider,
       gatewayRouterTokenProvider,
       isGatewayLoadedAuth,
       preferredOpenAiTokenProvider,
@@ -468,7 +468,7 @@ runAgentInitializedWithLock
                     either
                         (startupDie startup . Text.unpack)
                         pure
-                        (gatewayLoadedAuth gateway)
+                        (gatewayLoadedAuthForProvider requestedProvider gateway)
                 pure ((exactLoaded, False, Nothing), Nothing)
             (Nothing, Nothing) -> do
                 (startupAuth, accountUsage) <- loadPreparedOrStartupAuth
