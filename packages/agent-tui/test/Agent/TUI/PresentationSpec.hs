@@ -162,6 +162,52 @@ spec = describe "tool presentation" do
         todoListFromToolArguments "{\"todos\":[]}" `shouldBe` Just []
         todoListFromToolArguments "Todos have been modified" `shouldBe` Nothing
 
+    it "names generic MCP calls after the selected function" do
+        let call =
+                functionToolCall
+                    "mcp"
+                    "mcp_call"
+                    "{\"name\":\"seo-mcp__search_performance\",\
+                    \\"arguments\":{\"days\":90}}"
+        summarizeToolCall call
+            `shouldBe` "seo-mcp: search_performance"
+        toolCallTitle call
+            `shouldBe` "seo-mcp: search_performance"
+        permissionToolCallPrompt call
+            `shouldBe` "Allow seo-mcp: search_performance?"
+
+    it "unwraps MCP text envelopes and pretty-prints embedded JSON" do
+        let call =
+                functionToolCall
+                    "mcp"
+                    "mcp_call"
+                    "{\"name\":\"seo-mcp__search_performance\"}"
+        formatToolOutput call
+            "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"bing\\\":\
+            \{\\\"configured\\\":true},\\\"rows\\\":[{\\\"clicks\\\":5}]}\"}],\
+            \\"structuredContent\":{\"bing\":{\"configured\":true}}}"
+            `shouldBe`
+                "{\n\
+                \    \"bing\": {\n\
+                \        \"configured\": true\n\
+                \    },\n\
+                \    \"rows\": [\n\
+                \        {\n\
+                \            \"clicks\": 5\n\
+                \        }\n\
+                \    ]\n\
+                \}"
+        formatToolOutput call "{\"ok\":true,\"rows\":[1,2]}"
+            `shouldBe`
+                "{\n\
+                \    \"ok\": true,\n\
+                \    \"rows\": [\n\
+                \        1,\n\
+                \        2\n\
+                \    ]\n\
+                \}"
+        formatToolOutput call "plain text" `shouldBe` "plain text"
+
     it "extracts tool details from function and custom calls" do
         toolDetail
             (functionToolCall "read" "read_file"

@@ -48,11 +48,17 @@ import Agent.ToolDispatch
     , canonicalToolName
     )
 import Control.Applicative ((<|>))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encode.Pretty as AesonPretty
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isDigit, isSpace)
+import qualified Data.Foldable as Foldable
 import Data.List (mapAccumL)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall = summarizeToolCallRelative ""
@@ -61,7 +67,10 @@ summarizeToolCall = summarizeToolCallRelative ""
 -- shown relative to that workspace.
 summarizeToolCallRelative :: Text -> ToolCall -> Text
 summarizeToolCallRelative workspace call =
-    let verb = toolVerb call.name
+    let verb = case canonicalToolName call.name of
+            "mcp_call" -> mcpCallDisplayName call.arguments
+            "use_tool" -> mcpCallDisplayName call.arguments
+            _ -> toolVerb call.name
         detail = case toolPathArgument call of
             Just path -> workspaceRelativeDisplayPath workspace path
             Nothing -> toolDetail call
@@ -377,6 +386,8 @@ formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
     "computer" -> "Screenshot captured"
     "exec" -> completedExecOutput output
+    "mcp_call" -> formatMcpOutput output
+    "use_tool" -> formatMcpOutput output
     name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
     "wait_agent" ->
@@ -393,6 +404,48 @@ formatToolOutput call output = case canonicalToolName call.name of
     "todo_write" -> formatTodoList output
     "update_plan" -> formatTodoList output
     _ -> output
+
+-- | MCP servers commonly return a compact @CallToolResult@ envelope whose
+-- text block is itself JSON. Show the useful text payload rather than escaped
+-- transport JSON when every content block is textual, then indent JSON values.
+-- This is presentation-only; the canonical tool result remains unchanged.
+formatMcpOutput :: Text -> Text
+formatMcpOutput output =
+    case decodeJsonValue output of
+        Just value ->
+            case mcpTextBlocks value of
+                Just texts | not (null texts) ->
+                    Text.intercalate "\n" (map beautifyJson texts)
+                _ -> prettyJsonValue value
+        Nothing -> output
+
+beautifyJson :: Text -> Text
+beautifyJson text =
+    case decodeJsonValue text of
+        Just value@Aeson.Object{} -> prettyJsonValue value
+        Just value@Aeson.Array{} -> prettyJsonValue value
+        _ -> text
+
+decodeJsonValue :: Text -> Maybe Aeson.Value
+decodeJsonValue =
+    Aeson.decodeStrict' . TextEncoding.encodeUtf8 . Text.strip
+
+prettyJsonValue :: Aeson.Value -> Text
+prettyJsonValue =
+    TextEncoding.decodeUtf8
+        . LazyByteString.toStrict
+        . AesonPretty.encodePretty
+
+mcpTextBlocks :: Aeson.Value -> Maybe [Text]
+mcpTextBlocks (Aeson.Object object) = do
+    Aeson.Array blocks <- KeyMap.lookup "content" object
+    traverse textBlock (Foldable.toList blocks)
+  where
+    textBlock (Aeson.Object block) = do
+        Aeson.String text <- KeyMap.lookup "text" block
+        pure text
+    textBlock _ = Nothing
+mcpTextBlocks _ = Nothing
 
 -- The exec protocol keeps status and timing metadata for the model. In the
 -- transcript, the invocation itself already communicates successful
@@ -771,6 +824,29 @@ mcpToolDisplayName name =
             , not (Text.null toolName) ->
                 server <> ": " <> toolName
         _ -> name
+
+-- | The generic MCP wrapper keeps the selected tool in its arguments. Display
+-- that identity as @server: tool@ instead of the unhelpful @mcp_call@ name.
+mcpCallDisplayName :: Text -> Text
+mcpCallDisplayName arguments =
+    case nonEmptyJsonText "name" arguments
+        <|> nonEmptyJsonText "tool_name" arguments of
+        Just qualifiedName -> qualifiedMcpDisplayName qualifiedName
+        Nothing -> "MCP call"
+
+qualifiedMcpDisplayName :: Text -> Text
+qualifiedMcpDisplayName name =
+    case Text.breakOn "__" name of
+        (server, rest)
+            | not (Text.null server)
+            , Just tool <- Text.stripPrefix "__" rest
+            , not (Text.null tool) ->
+                unescape server <> ": " <> unescape tool
+        _ -> name
+  where
+    unescape =
+        Text.replace "%5F%5F" "__"
+            . Text.replace "%25" "%"
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case canonicalToolName call.name of
