@@ -8,6 +8,10 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Command
+    ( SlashCatalog(slashCatalogToolNames)
+    , defaultSlashCatalog
+    )
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
     , applyMetaConsoleEdit
@@ -46,6 +50,8 @@ import Agent.CLI.TUI.App
     , quickStartRows
     , quickStartVisible
     , quickStartWideVisible
+    , quickStartCardWidth
+    , drawQuickStartCard
     , startupCapabilityLines
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
@@ -834,12 +840,38 @@ spec = do
         it "shows quick-start actions only when the empty pane has room" do
             quickStartVisible 100 30 `shouldBe` True
             quickStartVisible 47 30 `shouldBe` False
-            quickStartVisible 100 21 `shouldBe` False
+            quickStartVisible 100 12 `shouldBe` False
 
-        it "uses the two-column dashboard only in wide render contexts" do
-            quickStartWideVisible 140 35 `shouldBe` True
-            quickStartWideVisible 103 35 `shouldBe` False
-            quickStartWideVisible 140 28 `shouldBe` False
+        it "adds the quiet logo only in wide render contexts" do
+            quickStartWideVisible 88 14 `shouldBe` True
+            quickStartWideVisible 87 14 `shouldBe` False
+            quickStartWideVisible 88 13 `shouldBe` False
+
+        it "caps the quick-start card instead of filling wide terminals" do
+            quickStartCardWidth 48 `shouldBe` 44
+            quickStartCardWidth 100 `shouldBe` 96
+            quickStartCardWidth 200 `shouldBe` 112
+
+        it "keeps wrapped capability rows vertically fixed" do
+            runtime <- newScriptRuntime initialUiState
+            let catalog =
+                    defaultSlashCatalog
+                        { slashCatalogToolNames =
+                            Set.fromList
+                                [ "analyze_tool_output"
+                                , "apply_patch"
+                                , "ask_secret"
+                                , "ask_user_question"
+                                , "collaboration"
+                                , "conversation_search"
+                                , "create_agent_session"
+                                ]
+                        }
+                state =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appSlashCatalog = catalog }
+            B.vSize (drawQuickStartCard state 96 True)
+                `shouldBe` B.Fixed
 
         it "surfaces the high-value startup commands including changelog" do
             quickStartRows
