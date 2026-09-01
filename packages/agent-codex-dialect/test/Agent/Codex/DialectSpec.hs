@@ -20,6 +20,8 @@ import Agent.Codex.Dialect.Shell
     )
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
+import Agent.Tools.Background (setBackgroundTaskHooks)
+import Agent.Tools.IO (CommandResult(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , ToolDispatchConfig(..)
@@ -30,6 +32,8 @@ import Agent.ToolDispatch
 import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Types
     ( AppTool(..)
+    , BackgroundTaskHooks(..)
+    , BackgroundTaskNotice(..)
     , ToolEnv(..)
     , appToolHandlers
     , defaultToolEnv
@@ -38,6 +42,12 @@ import Agent.Tools.Types
     , toolSchedulingPlanFor
     )
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar_
+    , newMVar
+    , readMVar
+    )
 import Control.Exception.Safe (bracket, tryIO)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -266,6 +276,7 @@ spec = describe "Codex dialect" do
             createDirectory scratch
             env <- defaultToolEnv (unsafeEncodeUtf dir)
             setToolSessionTmp env (Just (unsafeEncodeUtf scratch))
+            notices <- installBackgroundNoticeStore env
             bracket
                 (newCodexShellSession env)
                 closeCodexShellSession
@@ -296,6 +307,7 @@ spec = describe "Codex dialect" do
                                 <> Text.pack (show commandId)
                         Right _ ->
                             expectationFailure "stale command remained available"
+                    readMVar notices `shouldReturn` Nothing
 
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd
@@ -489,6 +501,151 @@ spec = describe "Codex dialect" do
                         Text.isPrefixOf "Exit code: 0\n"
                     continued.output `shouldSatisfy` Text.isInfixOf "done"
 
+    it "reports an unobserved retained command without polling" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            notices <- installBackgroundNoticeStore env
+            bracket
+                (newCodexShellSession env)
+                closeCodexShellSession
+                \session -> do
+                    started <- startCodexShellCommand
+                        session
+                        env.toolCwd
+                        "sleep 0.05; printf completion-output"
+                        1
+                        (\_ _ -> pure ())
+                    commandId <- case started of
+                        Right CodexShellRunning
+                                { codexShellSessionId = runningId } ->
+                            pure runningId
+                        _ -> expectationFailure
+                            "expected a retained command"
+                            >> pure 0
+                    notice <- waitForBackgroundNotice
+                        notices
+                        ("codex-shell:" <> Text.pack (show commandId))
+                    notice.noticeBody `shouldSatisfy`
+                        Text.isInfixOf "completion-output"
+                    notice.noticeBody `shouldSatisfy`
+                        Text.isInfixOf "do not call write_stdin"
+
+    it "does not publish a notice when the initial wait returns the result" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            notices <- installBackgroundNoticeStore env
+            bracket
+                (newCodexShellSession env)
+                closeCodexShellSession
+                \session -> do
+                    result <- startCodexShellCommand
+                        session
+                        env.toolCwd
+                        "printf immediate-output"
+                        1000
+                        (\_ _ -> pure ())
+                    case result of
+                        Right (CodexShellFinished final) ->
+                            final.commandStdout `shouldBe` "immediate-output"
+                        _ -> expectationFailure
+                            "expected the command to finish in the initial wait"
+                    readMVar notices `shouldReturn` Nothing
+
+    it "omits output already returned by the initial yield from its notice" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            notices <- installBackgroundNoticeStore env
+            bracket
+                (newCodexShellSession env)
+                closeCodexShellSession
+                \session -> do
+                    started <- startCodexShellCommand
+                        session
+                        env.toolCwd
+                        "printf early-output; sleep 0.1; printf late-output"
+                        50
+                        (\_ _ -> pure ())
+                    commandId <- case started of
+                        Right CodexShellRunning
+                                { codexShellSessionId = runningId
+                                , codexShellStdout = initialOutput
+                                } -> do
+                            initialOutput `shouldSatisfy`
+                                Text.isInfixOf "early-output"
+                            pure runningId
+                        _ -> expectationFailure
+                            "expected a retained command"
+                            >> pure 0
+                    notice <- waitForBackgroundNotice
+                        notices
+                        ("codex-shell:" <> Text.pack (show commandId))
+                    notice.noticeBody `shouldSatisfy`
+                        Text.isInfixOf "late-output"
+                    notice.noticeBody `shouldNotSatisfy`
+                        Text.isInfixOf "early-output"
+
+    it "retracts a retained-command notice when explicitly collected" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            notices <- installBackgroundNoticeStore env
+            bracket
+                (newCodexShellSession env)
+                closeCodexShellSession
+                \session -> do
+                    started <- startCodexShellCommand
+                        session
+                        env.toolCwd
+                        "sleep 0.05; printf explicit-output"
+                        1
+                        (\_ _ -> pure ())
+                    commandId <- case started of
+                        Right CodexShellRunning
+                                { codexShellSessionId = runningId } ->
+                            pure runningId
+                        _ -> expectationFailure
+                            "expected a retained command"
+                            >> pure 0
+                    _ <- waitForBackgroundNotice
+                        notices
+                        ("codex-shell:" <> Text.pack (show commandId))
+                    collected <-
+                        continueCodexShellCommand session commandId "" 1000
+                    case collected of
+                        Right (CodexShellFinished result) ->
+                            "explicit-output"
+                                `Text.isInfixOf` result.commandStdout
+                                `shouldBe` True
+                        _ -> expectationFailure
+                            "expected the retained command's final result"
+                    readMVar notices `shouldReturn` Nothing
+
+    it "does not count completed sessions against the live command limit" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket
+                (newCodexShellSession env)
+                closeCodexShellSession
+                \session ->
+                    mapM_
+                        (\_ -> do
+                            started <- startCodexShellCommand
+                                session
+                                env.toolCwd
+                                "sleep 0.01"
+                                1
+                                (\_ _ -> pure ())
+                            case started of
+                                Right CodexShellRunning{} -> pure ()
+                                _ -> expectationFailure
+                                    "completed archive exhausted the live command limit"
+                            threadDelay 30000)
+                        [1 .. 66 :: Int]
+
     it "serializes write_stdin only per shell session" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
@@ -564,6 +721,38 @@ expectShellSessionId output =
         _ ->
             expectationFailure "expected one retained shell session id"
                 >> pure "0"
+
+installBackgroundNoticeStore
+    :: ToolEnv
+    -> IO (MVar (Maybe BackgroundTaskNotice))
+installBackgroundNoticeStore env = do
+    notices <- newMVar Nothing
+    setBackgroundTaskHooks env BackgroundTaskHooks
+        { backgroundTaskCompleted = \notice ->
+            modifyMVar_ notices (\_ -> pure (Just notice))
+                >> pure True
+        , backgroundTaskDismissed = \key ->
+            modifyMVar_ notices \current ->
+                pure $ case current of
+                    Just notice | notice.noticeKey == key -> Nothing
+                    _ -> current
+        }
+    pure notices
+
+waitForBackgroundNotice
+    :: MVar (Maybe BackgroundTaskNotice)
+    -> Text.Text
+    -> IO BackgroundTaskNotice
+waitForBackgroundNotice notices key = go (200 :: Int)
+  where
+    go 0 = expectationFailure
+        ("timed out waiting for background notice " <> Text.unpack key)
+        >> fail "unreachable"
+    go remaining =
+        readMVar notices >>= \case
+            Just notice | notice.noticeKey == key -> pure notice
+            Nothing -> threadDelay 10000 >> go (remaining - 1)
+            Just _ -> threadDelay 10000 >> go (remaining - 1)
 
 testDispatchConfig :: ToolDispatchConfig
 testDispatchConfig = ToolDispatchConfig

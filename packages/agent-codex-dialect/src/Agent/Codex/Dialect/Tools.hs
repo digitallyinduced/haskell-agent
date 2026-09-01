@@ -136,7 +136,7 @@ shellCommandTool env session =
             , PropertySchema "timeout_ms" PropertyInteger False $ Just
                 "Maximum command runtime; commands that reach it are stopped. Mutually exclusive with yield_time_ms."
             , PropertySchema "yield_time_ms" PropertyInteger False $ Just
-                "Wait before returning a session_id for a command that is still running. Defaults to 10000 ms when neither timing control is set. Mutually exclusive with timeout_ms."
+                "Wait before returning a session_id for a command that is still running. Defaults to 10000 ms when neither timing control is set. Completion is reported automatically; do not repeatedly poll. Mutually exclusive with timeout_ms."
             ])
         AlwaysPrompt
         TurnSequential
@@ -172,8 +172,9 @@ shellDescription =
     "Runs a shell command and returns its output.\n\
     \- `workdir` is optional; omit it to use the turn cwd. Do not use `cd` unless absolutely necessary.\n\
     \- Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\
-    \- By default, a command that is still running after 10000 ms is retained and returned with a session_id; use `write_stdin` to poll or send input.\n\
-    \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield-time_ms` to change the initial wait."
+    \- By default, a command that is still running after 10000 ms is retained and returned with a session_id. Completion is reported automatically; do not poll or run sleep commands while waiting.\n\
+    \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield_time_ms` to change the initial wait.\n\
+    \- Use `write_stdin` only to send input, interrupt, inspect a current snapshot, or perform one bounded wait."
 
 defaultShellYieldMs :: Int
 defaultShellYieldMs = 10000
@@ -252,7 +253,7 @@ writeStdinTool session =
         [ PropertySchema "session_id" PropertyInteger True $ Just
             "Identifier returned by shell_command for a running command."
         , PropertySchema "chars" PropertyString False $ Just
-            "Text to write to stdin. Omit or use an empty string to poll without writing. Use \\u0003 to interrupt."
+            "Text to write to stdin. Omit or use an empty string for one snapshot or bounded wait; completion is otherwise reported automatically. Use \\u0003 to interrupt."
         , PropertySchema "yield_time_ms" PropertyInteger False $ Just
             "Wait before returning output. Defaults to 5000 ms; maximum 300000 ms."
         ]
@@ -274,7 +275,7 @@ writeStdinResourceClaims call =
 
 writeStdinDescription :: Text
 writeStdinDescription =
-    "Writes text to or polls an existing shell_command session and returns newly produced output."
+    "Writes text to or inspects an existing shell_command session and returns newly produced output. Completion is reported automatically, so do not call this repeatedly to poll."
 
 writeStdinIsReadOnly :: ToolCall -> IO Bool
 writeStdinIsReadOnly call =
@@ -310,7 +311,8 @@ renderShellResult = \case
     CodexShellFinished result -> renderFinished result
     CodexShellRunning sessionId out err ->
         "Process still running.\n\
-        \session_id: " <> Text.pack (show sessionId) <> "\n"
+        \session_id: " <> Text.pack (show sessionId) <> "\n\
+        \Completion will be reported automatically. Do not poll or sleep-wait.\n"
             <> commandBody out err
 
 renderFinished :: CommandResult -> Text
