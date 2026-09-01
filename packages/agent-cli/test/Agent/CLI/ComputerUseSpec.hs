@@ -302,12 +302,12 @@ spec = do
             encoded `shouldSatisfy`
                 (not . ("large-private-payload" `Text.isInfixOf`))
 
-        it "redacts reserved computer function arguments and screenshot output" do
+        it "redacts ordinary computer function arguments and screenshot output" do
             let call = FunctionCall
                     { itemId = Nothing
                     , callId = "call-function"
                     , name = computerFunctionName
-                    , namespace = Just computerFunctionNamespace
+                    , namespace = Just "functions"
                     , arguments =
                         "{\"actions\":[{\"type\":\"type\",\
                         \\"text\":\"top secret\"}]}"

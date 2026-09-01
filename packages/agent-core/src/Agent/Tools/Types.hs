@@ -61,9 +61,9 @@ data ToolSchema
     = JsonFunctionSchema ![PropertySchema]
     | RawJsonFunctionSchema !Value
     | FreeformApplyPatchSchema
-    -- | The provider-native computer tool. Keeping this distinct prevents an
-    -- unrelated function or MCP tool named @computer@ from being projected as
-    -- a hosted desktop-control surface.
+    -- | The privileged local computer function. Keeping this distinct from
+    -- caller-defined JSON functions prevents an unrelated MCP tool from
+    -- acquiring the desktop-control handler or its output encoding.
     | HostedComputerSchema
     deriving (Eq, Show)
 
@@ -328,10 +328,9 @@ dispatchRegisteredToolCall config registry call =
                 else Nothing)
         call
 
--- | Provider-native call kinds may only reach their matching hosted handler.
--- This prevents a function/custom tool that happens to share the hosted name
--- from invoking desktop control, and prevents native calls from reaching an
--- ordinary function handler.
+-- | Privileged computer calls may only reach their dedicated handler. This
+-- prevents a caller-defined function/custom tool from acquiring desktop
+-- control, and keeps legacy native calls away from ordinary handlers.
 toolAcceptsCall :: AppTool -> ToolCall -> Bool
 toolAcceptsCall tool call =
     case (tool.appToolSchema, call.callKind) of

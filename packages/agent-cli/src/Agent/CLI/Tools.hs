@@ -10,6 +10,7 @@ module Agent.CLI.Tools
     ) where
 
 import Agent.Responses.Types
+import Agent.CLI.ComputerUse (computerFunctionParameters)
 import Agent.Dialect
     ( Dialect
     , DialectId(..)
@@ -42,8 +43,17 @@ import qualified Data.Text as Text
 import System.Info (os)
 
 requireToolRegistry :: [AppTool] -> IO ToolRegistry
-requireToolRegistry tools =
-    either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
+requireToolRegistry tools
+    | any reservesComputerFunction tools =
+        ioError . userError . Text.unpack $
+            "tool name " <> computerFunctionName
+                <> " is reserved for local computer control"
+    | otherwise =
+        either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
+  where
+    reservesComputerFunction tool =
+        canonicalToolName tool.appToolName == computerFunctionName
+            && tool.appToolSchema /= HostedComputerSchema
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name =
@@ -97,11 +107,21 @@ isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
+schemaFromAppTool _ tool
+    | canonicalToolName tool.appToolName == computerFunctionName
+    , tool.appToolSchema /= HostedComputerSchema =
+        Nothing
 schemaFromAppTool dialect tool =
     case tool.appToolSchema of
         HostedComputerSchema ->
             if os == "darwin" && dialectId dialect == CodexDialect
-                then Just (knownResponseTool ToolComputer KeyMap.empty)
+                then Just (FunctionToolValue FunctionTool
+                    { name = computerFunctionName
+                    , description = Just tool.appToolDescription
+                    , parameters = Just computerFunctionParameters
+                    , strict = Just True
+                    , extraFields = KeyMap.empty
+                    })
                 else Nothing
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of

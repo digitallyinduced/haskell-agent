@@ -41,13 +41,12 @@ import qualified Data.Text.Encoding as TextEncoding
 data ToolCallKind
     = FunctionCallKind
     | CustomCallKind
-    -- | A provider-native computer call. Its arguments are the encoded
-    -- action list, and its result is encoded by the provider adapter as a
-    -- structured screenshot output rather than a function output string.
+    -- | A legacy provider-native computer call retained so persisted sessions
+    -- can still be resumed.
     | ComputerCallKind
-    -- | The reserved Responses Lite computer function. It uses the same local
-    -- executor and approval rules as a native computer call, but its result
-    -- must be returned as multimodal @function_call_output@ content.
+    -- | The reserved ordinary computer function. It uses the local executor
+    -- and explicit approval rules; Responses continuations pair its text
+    -- @function_call_output@ with a fresh user screenshot.
     | ComputerFunctionCallKind
     deriving (Eq, Show)
 
