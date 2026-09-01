@@ -326,6 +326,7 @@ testMetadata now = SessionMetadata
     , sessionMetadataUpdatedAt = now
     , sessionMetadataProvider = "openai"
     , sessionMetadataConnection = "openai"
+    , sessionMetadataGatewayIdentity = Nothing
     , sessionMetadataModel = "gpt-test"
     , sessionMetadataTransportModel = Just "gpt-test"
     , sessionMetadataDialect = "openai"

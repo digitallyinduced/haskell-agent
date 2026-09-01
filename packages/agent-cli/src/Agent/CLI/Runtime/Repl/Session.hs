@@ -84,13 +84,14 @@ import Agent.CLI.Session
       Persistence(PersistenceEnabled, PersistenceDisabled),
       PersistenceState(PersistenceActive, PersistencePending),
       SessionCreate(createCwd, SessionCreate, createPool, createEffort,
-                    createTarget, createTitleHint, createTitleIsManual, createRoot),
+                    createTarget, createGatewayIdentity, createTitleHint,
+                    createTitleIsManual, createRoot),
       SessionHandle(sessionMeta, sessionPool,
                     sessionTempDir, sessionDir),
       SessionMeta(metaTitle, metaLastResponseId,
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
-                  metaTitleUserTurns, metaId, metaCwd),
+                  metaTitleUserTurns, metaId, metaCwd, metaGatewayIdentity),
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
@@ -410,6 +411,8 @@ handleSessionAction
                                     , targetDialect =
                                         dialectId dialect
                                     }
+                                , createGatewayIdentity =
+                                    handle.sessionMeta.metaGatewayIdentity
                                 , createCwd =
                                     handle.sessionMeta.metaCwd
                                 , createEffort = effort

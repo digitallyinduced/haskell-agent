@@ -23,6 +23,37 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "gateway device authorization" do
+    it "binds sessions to the exact gateway credential without exposing it" do
+        let first =
+                GatewayCredential
+                    "https://gateway.example"
+                    "wss://gateway.example/v1/responses"
+                    "gateway-bearer-secret"
+            same = gatewayCredentialIdentity first
+            replacement =
+                gatewayCredentialIdentity
+                    first { gatewayAccessToken = "replacement-secret" }
+            otherGateway =
+                gatewayCredentialIdentity
+                    first
+                        { gatewayBaseUrl = "https://other.example"
+                        , gatewayWebSocketUrl =
+                            "wss://other.example/v1/responses"
+                        }
+            equivalent =
+                gatewayCredentialIdentity
+                    first
+                        { gatewayBaseUrl = " HTTPS://GATEWAY.EXAMPLE:443/ "
+                        , gatewayWebSocketUrl =
+                            "wss://GATEWAY.EXAMPLE:443"
+                        }
+        same `shouldBe` gatewayCredentialIdentity first
+        equivalent `shouldBe` same
+        replacement `shouldNotBe` same
+        otherGateway `shouldNotBe` same
+        same `shouldNotSatisfy`
+            Text.isInfixOf first.gatewayAccessToken
+
     it "decodes, trims, and deduplicates gateway model ids" do
         Hermes.decodeEither
             gatewayModelsDecoder

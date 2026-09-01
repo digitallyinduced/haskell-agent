@@ -135,6 +135,8 @@ spec = describe "Agent.CLI.AgentSessions" do
                 newIORef [gatewayOption "company-a" CodexDialect]
             let scopedEnv = env
                     { toolsAllowedModels = Just ["company-a"]
+                    , toolsGatewayIdentity =
+                        Just "gateway-sha256:test-tenant"
                     , toolsResolveModelOption =
                         Just \model ->
                             lookup model
@@ -170,6 +172,8 @@ spec = describe "Agent.CLI.AgentSessions" do
             handle.sessionMeta.metaModel `shouldBe` "company-b"
             handle.sessionMeta.metaConnection
                 `shouldBe` organizationGatewayConnectionId
+            handle.sessionMeta.metaGatewayIdentity
+                `shouldBe` Just "gateway-sha256:test-tenant"
             handle.sessionMeta.metaDialect `shouldBe` GenericResponsesDialect
 
     it "inherits the active dialect and resolves explicit model overrides" $
@@ -245,6 +249,65 @@ spec = describe "Agent.CLI.AgentSessions" do
                 "{\"session_id\":\"" <> target <> "\",\"message\":\"loop\"}"
             selfResult `shouldSatisfy`
                 Text.isInfixOf "cannot message the current agent session"
+
+    it "does not expose or continue sessions across gateway boundaries" $
+        withTempEnv \env launched -> do
+            let gatewayCreate =
+                    (testCreate env.toolsPool env.toolsRoot)
+                        { createTarget = ModelTarget
+                            { targetProvider = OpenAIProvider
+                            , targetConnectionId =
+                                organizationGatewayConnectionId
+                            , targetModelId = "company-private"
+                            , targetWireModelId = "company-private"
+                            , targetDialect = CodexDialect
+                            }
+                        , createGatewayIdentity =
+                            Just "gateway-sha256:tenant-a"
+                        }
+            handle <- createSession gatewayCreate
+            _ <- appendTurn handle SessionTurn
+                { turnAt = fixedTime
+                , turnUserText = "tenant A secret"
+                , turnAssistantText = Just "private answer"
+                , turnError = Nothing
+                , turnResponseId = Nothing
+                , turnItems = []
+                , turnUsage = Nothing
+                , turnEffect = TranscriptAppend
+                , turnProviderTelemetry = []
+                }
+            let payload =
+                    "{\"session_id\":\""
+                        <> handle.sessionMeta.metaId
+                        <> "\"}"
+                messagePayload =
+                    "{\"session_id\":\""
+                        <> handle.sessionMeta.metaId
+                        <> "\",\"message\":\"continue\"}"
+                otherGateway =
+                    env
+                        { toolsGatewayIdentity =
+                            Just "gateway-sha256:tenant-b"
+                        }
+                sameGateway =
+                    env
+                        { toolsGatewayIdentity =
+                            Just "gateway-sha256:tenant-a"
+                        }
+            directRead <- runTool env "read_agent_session" payload
+            directRead `shouldSatisfy`
+                Text.isInfixOf "Reconnect the same gateway"
+            otherRead <- runTool otherGateway "read_agent_session" payload
+            otherRead `shouldSatisfy`
+                Text.isInfixOf "different organization gateway"
+            otherSend <-
+                runTool otherGateway "send_agent_session_message" messagePayload
+            otherSend `shouldSatisfy`
+                Text.isInfixOf "different organization gateway"
+            (null <$> readIORef launched) `shouldReturn` True
+            sameRead <- runTool sameGateway "read_agent_session" payload
+            sameRead `shouldSatisfy` Text.isInfixOf "tenant A secret"
 
     it "rejects traversal session ids" $
         withTempEnv \env _ -> do
@@ -661,6 +724,7 @@ withTempEnv action =
                 , toolsDialect = GrokBuildDialect
                 , toolsAllowedModels = Nothing
                 , toolsResolveModelOption = Nothing
+                , toolsGatewayIdentity = Nothing
                 , toolsCwd = fromFilePath "/tmp/work"
                 , toolsEffort = "low"
                 , toolsCurrentSessionId = pure Nothing
@@ -680,6 +744,7 @@ testCreate pool root = SessionCreate
         , targetWireModelId = "model-1"
         , targetDialect = GrokBuildDialect
         }
+    , createGatewayIdentity = Nothing
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Just "test"

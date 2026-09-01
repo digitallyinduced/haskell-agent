@@ -242,6 +242,14 @@ coreMigrations =
                 \ $ha$"
                ]
         }
+    , Migration
+        { migrationVersion = 107
+        , migrationName = "gateway session identity binding"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS gateway_identity text"
+            ]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty

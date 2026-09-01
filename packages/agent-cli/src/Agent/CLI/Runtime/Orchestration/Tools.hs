@@ -11,7 +11,7 @@ import Agent.CLI.AgentSessions
                            toolsPool, toolsRoot, toolsProvider, toolsConnection, toolsModel,
                            toolsTransportModel, toolsDialect, toolsAllowedModels,
                            toolsResolveModelOption,
-                           toolsCwd, toolsEffort,
+                           toolsGatewayIdentity, toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn) )
 import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
@@ -347,6 +347,7 @@ runAgentTools
     -> ToolEnv
     -> ModelCatalog
     -> IORef (Maybe GatewayModelAccess)
+    -> Maybe Text
     -> Bool
     -> Maybe ModelTarget
     -> Maybe (Text, ResponsesConnection)
@@ -394,6 +395,7 @@ runAgentTools
     baseToolEnv
     catalog
     gatewayModelsRef
+    gatewayIdentity
     checkStartupUsageInBackground
     configuredOptionTarget
     customResponses
@@ -432,6 +434,9 @@ runAgentTools
     = do
     openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
+    when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
+        startupDie startup
+            "gateway session binding and loaded credentials disagree"
     harnessConfig <-
         loadHarnessConfig home >>= \case
             Left err -> startupDie startup (Text.unpack err)
@@ -820,6 +825,7 @@ runAgentTools
             (trustedPool startup.startupDatabaseStore)
             startup options root
                 inferredTarget { targetDialect = dialectId }
+                gatewayIdentity
                 (isNothing transition) cwd effortText promptText resumed
     writeIORef persistSlotRef persist
     forM_ fullscreen \runtime ->
@@ -1116,6 +1122,7 @@ runAgentTools
             , toolsDialect = dialectId
             , toolsAllowedModels = gatewayAllowedChildModels
             , toolsResolveModelOption = gatewayChildModelOption
+            , toolsGatewayIdentity = gatewayIdentity
             , toolsCwd = cwd
             , toolsEffort = effortText
             , toolsCurrentSessionId =
@@ -1165,6 +1172,7 @@ runAgentTools
                 startup.startupDatabaseStore
                 databaseScopes
                 (readIORef persistSlotRef >>= currentSessionId)
+                gatewayIdentity
         learnedSkillToolsEnv =
             learnedSkillToolsEnvForStore
                 startup.startupDatabaseStore

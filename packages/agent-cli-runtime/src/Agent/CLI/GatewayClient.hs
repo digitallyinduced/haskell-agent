@@ -6,6 +6,7 @@ module Agent.CLI.GatewayClient
     , GatewayAuthorizationCodeResponse(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
+    , gatewayCredentialIdentity
     , connectGatewayBrowser
     , connectGatewayBrowserWithCancel
     , defaultGatewayBaseUrl
@@ -114,6 +115,60 @@ data GatewayCredential = GatewayCredential
     , gatewayAccessToken :: !Text
     }
     deriving (Eq)
+
+-- | Stable, non-secret binding for sessions created with one exact gateway
+-- credential. Reauthorization deliberately produces a different identity:
+-- without a gateway-issued organization identifier, treating a replacement
+-- bearer as the same routing boundary could send prior context to another
+-- organization.
+gatewayCredentialIdentity :: GatewayCredential -> Text
+gatewayCredentialIdentity credential =
+    "gateway-sha256:"
+        <> TextEncoding.decodeUtf8
+            (Base64Url.encodeUnpadded
+                (ByteArray.convert
+                    (hash material :: Digest SHA256)))
+  where
+    material =
+        TextEncoding.encodeUtf8 $
+            Text.intercalate
+                "\NUL"
+                [ "haskell-agent gateway session binding v1"
+                , canonicalGatewayIdentityUrl
+                    ""
+                    credential.gatewayBaseUrl
+                , canonicalGatewayIdentityUrl
+                    "/v1/responses"
+                    credential.gatewayWebSocketUrl
+                , credential.gatewayAccessToken
+                ]
+
+canonicalGatewayIdentityUrl :: Text -> Text -> Text
+canonicalGatewayIdentityUrl defaultPath raw =
+    case URI.parseURI (Text.unpack (Text.strip raw)) of
+        Just uri
+            | Just authority <- URI.uriAuthority uri
+            , let scheme = Text.toLower (Text.pack (URI.uriScheme uri))
+            , Right port <-
+                gatewayOriginPort
+                    "invalid gateway identity URL"
+                    scheme
+                    (URI.uriPort authority) ->
+                let host =
+                        Text.toLower (Text.pack (URI.uriRegName authority))
+                    rawPath = Text.pack (URI.uriPath uri)
+                    path
+                        | Text.null rawPath = defaultPath
+                        | Text.null defaultPath =
+                            Text.dropWhileEnd (== '/') rawPath
+                        | otherwise = rawPath
+                in scheme
+                    <> "//"
+                    <> host
+                    <> ":"
+                    <> Text.pack (show port)
+                    <> path
+        _ -> Text.strip raw
 
 -- | A gateway-scoped model catalog and its most recently successful refresh.
 --

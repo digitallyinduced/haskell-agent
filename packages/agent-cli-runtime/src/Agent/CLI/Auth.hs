@@ -14,6 +14,7 @@ module Agent.CLI.Auth
     , grokNeedsRefresh
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
+    , gatewayLoadedAuth
     , gatewayRouterTokenProvider
     , isGatewayLoadedAuth
     , geminiAuthStateFromJson

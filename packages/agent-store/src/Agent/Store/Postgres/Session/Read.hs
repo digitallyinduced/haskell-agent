@@ -14,6 +14,7 @@ module Agent.Store.Postgres.Session.Read
     , loadSession
     , loadSessionWithImplementation
     , loadSessions
+    , loadSessionMetadataMany
     , loadSessionMetadata
     , loadLatestSessionPromptEpoch
     , loadActiveSession
@@ -161,6 +162,20 @@ loadSessionMetadata pool sessionKey =
     withSession pool $
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement sessionKey loadMetadataStatement
+
+loadSessionMetadataMany
+    :: StorePool
+    -> [Text]
+    -> IO (Either StoreError [SessionMetadata])
+loadSessionMetadataMany pool sessionKeys =
+    fmap (fmap Vector.toList) $
+        withSession pool $
+            Transactions.transaction
+                Transactions.RepeatableRead
+                Transactions.Read $
+                    Transaction.statement
+                        sessionKeys
+                        loadMetadataManyStatement
 
 loadLatestSessionPromptEpoch
     :: StorePool
@@ -664,7 +679,8 @@ listArchiveKeysStatement = mkStatement
 metadataSelectSql :: Text
 metadataSelectSql =
     "SELECT session_key, session_schema_version, created_at, updated_at,\
-    \ provider, connection_id, model_id, transport_model_id, dialect,\
+    \ provider, connection_id, gateway_identity, model_id,\
+    \ transport_model_id, dialect,\
     \ legacy_target_provider, legacy_target_connection,\
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
@@ -1008,6 +1024,7 @@ metadataRow =
         <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
         <*> Decoders.column (Decoders.nonNullable Decoders.text)
         <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nonNullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nonNullable Decoders.text)

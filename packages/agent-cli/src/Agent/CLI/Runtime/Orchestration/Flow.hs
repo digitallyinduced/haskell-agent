@@ -1,4 +1,7 @@
-module Agent.CLI.Runtime.Orchestration.Flow (runAgentWithRuntime, withRestoredCurrentDirectory) where
+module Agent.CLI.Runtime.Orchestration.Flow
+    ( runAgentWithRuntime
+    , withRestoredCurrentDirectory
+    ) where
 
 import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection ()
@@ -45,6 +48,7 @@ import Agent.CLI.Models
                   targetModelId) )
 import Agent.CLI.Options
     ( defaultEffortFor,
+      freshSessionOptions,
       isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
@@ -302,6 +306,14 @@ runAgentWithRuntime processRuntime runMode options = do
                             , optResume = Just sessionId
                             }
                         Nothing
+            RunFreshSession cwd -> do
+                -- A gateway login change is a routing boundary. Drop prompts
+                -- queued for the prior endpoint along with its session state.
+                nextInputs <- newFullscreenInputBuffer
+                nextState <- newSessionState
+                go nextInputs nextState
+                    (freshSessionOptions current cwd)
+                    Nothing
             RunDeleteSession sessionId cwd -> do
                 home <- getHomeDirectory
                 config <- managedPostgresConfigForHome home

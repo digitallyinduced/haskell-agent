@@ -31,6 +31,7 @@ module Agent.Store.Postgres.Session
     , loadSession
     , loadSessionWithImplementation
     , loadSessions
+    , loadSessionMetadataMany
     , loadSessionMetadata
     , loadLatestSessionPromptEpoch
     , loadActiveSession

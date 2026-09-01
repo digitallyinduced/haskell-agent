@@ -230,6 +230,10 @@ spec = describe "PostgreSQL session schema" do
                                 `shouldReturn` Right True
                             appendSessionTurns pool [turn2, turn3] metadata2
                                 `shouldReturn` Right True
+                            loadSessionMetadataMany
+                                pool
+                                ["session-2", "missing", "session-1"]
+                                `shouldReturn` Right [metadata2, metadata]
                             appendSessionTurns
                                 pool
                                 []
@@ -668,7 +672,8 @@ testMetadata now = SessionMetadata
     , sessionMetadataCreatedAt = now
     , sessionMetadataUpdatedAt = now
     , sessionMetadataProvider = "openai"
-    , sessionMetadataConnection = "openai"
+    , sessionMetadataConnection = "organization-gateway"
+    , sessionMetadataGatewayIdentity = Just "gateway-sha256:test-tenant"
     , sessionMetadataModel = "gpt-test"
     , sessionMetadataTransportModel = Just "gpt-test"
     , sessionMetadataDialect = "openai"

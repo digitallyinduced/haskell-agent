@@ -959,10 +959,49 @@ spec = describe "Agent.CLI.Session" do
                 storedContentPartRoundTrip
 
     describe "PostgreSQL session persistence" do
+        it "rejects inconsistent gateway identities at every creation boundary" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                    directWithGatewayIdentity =
+                        (testCreate pool root)
+                            { createGatewayIdentity =
+                                Just "gateway-sha256:test-tenant"
+                            }
+                    gatewayWithoutIdentity =
+                        (testCreate pool root)
+                            { createTarget = ModelTarget
+                                { targetProvider = OpenAIProvider
+                                , targetConnectionId =
+                                    organizationGatewayConnectionId
+                                , targetModelId = "company-coder"
+                                , targetWireModelId = "company-coder"
+                                , targetDialect = GenericResponsesDialect
+                                }
+                            }
+                newPendingPersistence directWithGatewayIdentity
+                    `shouldThrow` anyException
+                createSession gatewayWithoutIdentity
+                    `shouldThrow` anyException
+
         it "forks turns, metadata, and only allowlisted durable artifacts" $
             withTempStore \store root -> do
                 let pool = trustedPool store
-                source0 <- createSession (testCreate pool root)
+                    gatewayIdentity = "gateway-sha256:test-tenant"
+                    gatewayCreate =
+                        (testCreate pool root)
+                            { createTarget = ModelTarget
+                                { targetProvider = OpenAIProvider
+                                , targetConnectionId =
+                                    organizationGatewayConnectionId
+                                , targetModelId = "company-coder"
+                                , targetWireModelId = "company-coder"
+                                , targetDialect = GenericResponsesDialect
+                                }
+                            , createGatewayIdentity = Just gatewayIdentity
+                            }
+                source0 <- createSession gatewayCreate
+                source0.sessionMeta.metaGatewayIdentity
+                    `shouldBe` Just gatewayIdentity
                 let sourceTurn = SessionTurn
                         { turnAt = fixedTime
                         , turnUserText = "branch from here"
@@ -1012,6 +1051,8 @@ spec = describe "Agent.CLI.Session" do
                         forked.sessionMeta.metaTitle `shouldBe` "Fork title"
                         forked.sessionMeta.metaTitleIsManual `shouldBe` True
                         forked.sessionMeta.metaCwd `shouldBe` forkCwd
+                        forked.sessionMeta.metaGatewayIdentity
+                            `shouldBe` Just gatewayIdentity
                         forked.sessionMeta.metaLastResponseId
                             `shouldBe` Just "response-parent"
                         forked.sessionMeta.metaLastRecap `shouldBe` Just "recap"
@@ -1654,6 +1695,8 @@ spec = describe "Agent.CLI.Session" do
                     (testMeta "gateway-session")
                         { metaProvider = OpenAIProvider
                         , metaConnection = organizationGatewayConnectionId
+                        , metaGatewayIdentity =
+                            Just "gateway-sha256:test-tenant"
                         , metaModel = "company-coder"
                         , metaTransportModel = Just "company-coder"
                         , metaDialect = GenericResponsesDialect
@@ -1667,6 +1710,15 @@ spec = describe "Agent.CLI.Session" do
                 `shouldBe` Right (meta { metaPromptSnapshot = Nothing })
             fromStoredPromptSnapshot (toStoredPromptSnapshot prompt)
                 `shouldBe` Right prompt
+            let legacyJson =
+                    case Aeson.toJSON meta of
+                        Aeson.Object object ->
+                            Aeson.Object
+                                (KeyMap.delete "gatewayIdentity" object)
+                        value -> value
+            Hermes.decodeEither sessionMetaDecoder
+                (LBS.toStrict (Aeson.encode legacyJson))
+                `shouldBe` Right (meta { metaGatewayIdentity = Nothing })
 
         it "infers transcript effects when importing legacy JSON turns" do
             let legacy userText = Aeson.object
@@ -1698,6 +1750,7 @@ testCreate pool root = SessionCreate
         , targetWireModelId = "grok-4"
         , targetDialect = GrokBuildDialect
         }
+    , createGatewayIdentity = Nothing
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing
@@ -1712,6 +1765,7 @@ testMeta sessionId = SessionMeta
     , metaUpdatedAt = fixedTime
     , metaProvider = XAIProvider
     , metaConnection = "xai"
+    , metaGatewayIdentity = Nothing
     , metaModel = "grok-4"
     , metaTransportModel = Just "grok-4"
     , metaDialect = GrokBuildDialect

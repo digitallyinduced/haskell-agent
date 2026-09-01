@@ -112,6 +112,7 @@ testMeta = SessionMeta
     , metaUpdatedAt = testTime
     , metaProvider = OpenAIProvider
     , metaConnection = "openai"
+    , metaGatewayIdentity = Nothing
     , metaModel = "gpt-test"
     , metaTransportModel = Nothing
     , metaDialect = CodexDialect

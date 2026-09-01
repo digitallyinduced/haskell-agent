@@ -13,6 +13,32 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    describe "freshSessionOptions" do
+        it "drops the old routing and resume state after a gateway change" do
+            let cwd = fromFilePath "/tmp/company-work"
+                previous = defaultCliOptions
+                    { optProvider = Just XAIProvider
+                    , optModel = Just "old-model"
+                    , optCwd = Just (fromFilePath "/tmp/old")
+                    , optWorktree = True
+                    , optEffort = Just EffortHigh
+                    , optPrompt = Just "old prompt"
+                    , optPromptFile = Just (fromFilePath "/tmp/prompt")
+                    , optManagedTurnFile =
+                        Just (fromFilePath "/tmp/managed")
+                    , optResume = Just "old-session"
+                    }
+                fresh = freshSessionOptions previous cwd
+            fresh.optProvider `shouldBe` Nothing
+            fresh.optModel `shouldBe` Nothing
+            fresh.optCwd `shouldBe` Just cwd
+            fresh.optWorktree `shouldBe` False
+            fresh.optEffort `shouldBe` Nothing
+            fresh.optPrompt `shouldBe` Nothing
+            fresh.optPromptFile `shouldBe` Nothing
+            fresh.optManagedTurnFile `shouldBe` Nothing
+            fresh.optResume `shouldBe` Nothing
+
     describe "parseArgs" do
         it "parses gateway account commands" do
             parseArgs ["gateway", "connect", "--url", "https://gateway.example"]

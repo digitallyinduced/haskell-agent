@@ -12,6 +12,7 @@ module Agent.CLI.Options
     , StorageCommand(..)
     , defaultCliOptions
     , defaultEffortFor
+    , freshSessionOptions
     , isOneShot
     , parseApprovalAnswer
     , parseArgs
@@ -181,6 +182,22 @@ defaultCliOptions = CliOptions
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
+
+-- | Drop provider-visible routing and conversation inputs when a gateway
+-- credential change creates a new trust boundary.
+freshSessionOptions :: CliOptions -> OsPath -> CliOptions
+freshSessionOptions options cwd =
+    options
+        { optProvider = Nothing
+        , optModel = Nothing
+        , optCwd = Just cwd
+        , optWorktree = False
+        , optEffort = Nothing
+        , optPrompt = Nothing
+        , optPromptFile = Nothing
+        , optManagedTurnFile = Nothing
+        , optResume = Nothing
+        }
 
 isOneShot :: CliOptions -> Bool
 isOneShot options =

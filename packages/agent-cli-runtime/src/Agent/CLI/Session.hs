@@ -104,6 +104,7 @@ import Agent.CLI.SessionLock
     , releaseSessionLock
     )
 import Agent.CLI.Json (decodeLazy)
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.Request
     ( requestPromptParts
     , requestToolIdentities
@@ -175,8 +176,8 @@ import Data.Char (isHexDigit)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
-import Data.List (foldl', sortOn)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.List (sortOn)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -362,6 +363,7 @@ sessionTempsRoot root =
 
 newPendingPersistence :: SessionCreate -> IO Persistence
 newPendingPersistence spec = do
+    validateSessionCreateGatewayBoundary spec
     (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
     newPendingPersistenceReserved spec sessionId tempDir
 
@@ -371,6 +373,7 @@ newPendingPersistenceReserved
     -> OsPath
     -> IO Persistence
 newPendingPersistenceReserved spec sessionId tempDir = do
+    validateSessionCreateGatewayBoundary spec
     expected <- either (fail . Text.unpack) pure
         (sessionTempDirForId spec.createRoot sessionId)
     unless (expected == tempDir) $
@@ -469,6 +472,7 @@ cleanupPendingPersistence = \case
 -- 'Store' owns and releases the pool.
 createSession :: SessionCreate -> IO SessionHandle
 createSession spec = do
+    validateSessionCreateGatewayBoundary spec
     (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
     createReservedSession spec sessionId tempDir Nothing
         `onException` removeReservedTemp spec.createRoot sessionId
@@ -721,6 +725,7 @@ createReservedSession
     -> Maybe SessionPromptSnapshot
     -> IO SessionHandle
 createReservedSession spec sessionId tempDir promptSnapshot = do
+    validateSessionCreateGatewayBoundary spec
     let pool = spec.createPool
     ensurePrivateDir spec.createRoot
     dir <- either (fail . Text.unpack) pure
@@ -738,6 +743,7 @@ createReservedSession spec sessionId tempDir promptSnapshot = do
             , metaUpdatedAt = now
             , metaProvider = spec.createTarget.targetProvider
             , metaConnection = spec.createTarget.targetConnectionId
+            , metaGatewayIdentity = spec.createGatewayIdentity
             , metaModel = spec.createTarget.targetModelId
             , metaTransportModel = Just spec.createTarget.targetWireModelId
             , metaDialect = spec.createTarget.targetDialect
@@ -788,6 +794,16 @@ createReservedSession spec sessionId tempDir promptSnapshot = do
             _ <- tryIO (removePathForcibly dir)
             fail "could not allocate a unique PostgreSQL session id"
         Right True -> pure handle
+
+validateSessionCreateGatewayBoundary :: SessionCreate -> IO ()
+validateSessionCreateGatewayBoundary spec =
+    unless (targetsGateway == hasGatewayIdentity) $
+        fail
+            "session gateway identity does not match its routing connection"
+  where
+    targetsGateway =
+        spec.createTarget.targetConnectionId == organizationGatewayConnectionId
+    hasGatewayIdentity = isJust spec.createGatewayIdentity
 
 -- | Create the session directory on first use when persistence is still pending.
 ensureSession :: IORef PersistenceState -> IO SessionHandle

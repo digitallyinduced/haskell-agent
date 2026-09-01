@@ -318,6 +318,7 @@ sampleMeta sid title =
         , metaUpdatedAt = posixSecondsToUTCTime 0
         , metaProvider = XAIProvider
         , metaConnection = "xai"
+        , metaGatewayIdentity = Nothing
         , metaModel = "grok-4.6"
         , metaTransportModel = Just "grok-4.6"
         , metaDialect = GrokBuildDialect

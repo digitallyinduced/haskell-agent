@@ -21,6 +21,7 @@ import Agent.CLI.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       gatewayAuthSelectionId,
+      gatewayLoadedAuth,
       gatewayRouterTokenProvider,
       isGatewayLoadedAuth,
       preferredOpenAiTokenProvider,
@@ -39,7 +40,9 @@ import Agent.CLI.Database.Store ( deriveDatabaseScopes )
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayClient
-    ( GatewayModelAccess
+    ( GatewayCredential
+    , GatewayModelAccess
+    , gatewayCredentialIdentity
     , loadGatewayCredential
     , newGatewayModelAccess
     , refreshGatewayModels
@@ -65,6 +68,7 @@ import Agent.CLI.ModelConfig
 import Agent.CLI.Models
     ( resolveConfiguredModel,
       resolveSavedModelTarget,
+      validateResumedGatewayBoundary,
       ModelOption(modelTarget),
       ModelTarget(targetWireModelId, targetConnectionId, targetProvider,
                   targetModelId, targetDialect) )
@@ -117,7 +121,7 @@ import Agent.CLI.Runtime.Types ( DevResult, RunResult )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( SessionMeta(metaProvider, metaConnection, metaModel,
-                  metaTransportModel, metaDialect),
+                  metaTransportModel, metaDialect, metaGatewayIdentity),
       SessionTurn )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
@@ -358,13 +362,23 @@ runAgentInitializedWithLock
                 startupDie startup
                     ("Could not load gateway credentials: " <> Text.unpack err)
             Right credential -> pure credential
-    let transitionTarget = (.transitionTarget) <$> transition
+    let connectedGatewayIdentity =
+            gatewayCredentialIdentity <$> connectedGateway
+        transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         unavailableProviders =
             maybe Set.empty (.transitionUnavailableProviders) transition
         configuredOptionTarget =
             (.modelTarget)
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
+        resumedBoundaryResult =
+            case fst <$> resumed of
+                Nothing -> Right ()
+                Just meta ->
+                    validateResumedGatewayBoundary
+                        connectedGatewayIdentity
+                        meta.metaConnection
+                        meta.metaGatewayIdentity
         savedTarget =
             resolveSavedModelTarget catalog False
         resumedTargetResult
@@ -402,6 +416,7 @@ runAgentInitializedWithLock
                         target.targetModelId
                         (Just target.targetWireModelId)
                         target.targetDialect
+    either (startupDie startup . Text.unpack) pure resumedBoundaryResult
     resumedTarget <-
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
@@ -446,8 +461,16 @@ runAgentInitializedWithLock
       )
       , customBearerToken
       ) <-
-        case customResponses of
-            Nothing -> do
+        case (connectedGateway, customResponses) of
+            (Just gateway, Nothing) -> do
+                mapM_ (.retirePreparedStartup) preparedAuth
+                exactLoaded <-
+                    either
+                        (startupDie startup . Text.unpack)
+                        pure
+                        (gatewayLoadedAuth gateway)
+                pure ((exactLoaded, False, Nothing), Nothing)
+            (Nothing, Nothing) -> do
                 (startupAuth, accountUsage) <- loadPreparedOrStartupAuth
                     preparedAuth
                     (options.optYolo && checkStartupUsageInBackground)
@@ -461,7 +484,7 @@ runAgentInitializedWithLock
                       )
                     , Nothing
                     )
-            Just (connectionId, responses) -> do
+            (Nothing, Just (connectionId, responses)) -> do
                 token <- case responses.responsesApiKeyEnv of
                     Nothing
                         | responses.responsesApiKeyOptional -> pure ""
@@ -502,6 +525,9 @@ runAgentInitializedWithLock
                       )
                     , if Text.null token then Nothing else Just token
                     )
+            (Just _, Just _) ->
+                startupDie startup
+                    "gateway and custom connection routing cannot both be active"
     (loaded, startupAccountIds) <- case customResponses of
         Just _ -> pure (initialLoaded, Nothing)
         Nothing
@@ -608,7 +634,7 @@ runAgentInitializedWithLock
                     \billing to API-credit billing"
         _ -> pure ()
     initialGatewayModels <-
-        loadGatewayModelAccess loaded >>= either
+        loadGatewayModelAccess connectedGateway loaded >>= either
             (startupDie startup . Text.unpack)
             pure
     gatewayModelsRef <- newIORef initialGatewayModels
@@ -767,7 +793,7 @@ runAgentInitializedWithLock
                             pure $ Left $ CredentialError
                                 "selected account uses a different billing mode"
                         | otherwise ->
-                            loadGatewayModelAccess selected >>= \case
+                            loadGatewayModelAccess Nothing selected >>= \case
                                 Left err ->
                                     pure (Left (CredentialError err))
                                 Right selectedGatewayModels ->
@@ -831,6 +857,7 @@ runAgentInitializedWithLock
         baseToolEnv
         catalog
         gatewayModelsRef
+        connectedGatewayIdentity
         (checkStartupUsageInBackground && isNothing preparedAccountUsage)
         configuredOptionTarget
         customResponses
@@ -933,17 +960,21 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
                 pure (Right credential)
 
 loadGatewayModelAccess
-    :: LoadedAuth
+    :: Maybe GatewayCredential
+    -> LoadedAuth
     -> IO (Either Text (Maybe GatewayModelAccess))
-loadGatewayModelAccess loaded
-    | not (isGatewayLoadedAuth loaded) = pure (Right Nothing)
+loadGatewayModelAccess connectedGateway loaded
+    | not (isGatewayLoadedAuth loaded) =
+        pure case connectedGateway of
+            Nothing -> Right Nothing
+            Just _ ->
+                Left
+                    "Gateway credential and loaded authentication disagree."
     | otherwise =
-        loadGatewayCredential >>= \case
-            Left err ->
-                pure (Left ("Could not load gateway credentials: " <> err))
-            Right Nothing ->
+        case connectedGateway of
+            Nothing ->
                 pure (Left "No organization gateway credential is connected.")
-            Right (Just credential) -> do
+            Just credential -> do
                 access <- newGatewayModelAccess credential
                 refreshGatewayModels access >>= \case
                     Left err -> pure (Left err)

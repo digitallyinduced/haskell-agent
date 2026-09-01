@@ -71,6 +71,7 @@ data SessionMeta = SessionMeta
     , metaUpdatedAt :: !UTCTime
     , metaProvider :: !Provider
     , metaConnection :: !Text
+    , metaGatewayIdentity :: !(Maybe Text)
     , metaModel :: !Text
     , metaTransportModel :: !(Maybe Text)
     , metaDialect :: !DialectId
@@ -246,6 +247,7 @@ instance ToJSON SessionMeta where
         , "updatedAt" .= meta.metaUpdatedAt
         , "provider" .= providerSlug meta.metaProvider
         , "connection" .= meta.metaConnection
+        , "gatewayIdentity" .= meta.metaGatewayIdentity
         , "model" .= meta.metaModel
         , "transportModel" .= meta.metaTransportModel
         , "dialect" .= dialectSlug meta.metaDialect
@@ -297,6 +299,7 @@ sessionMetaDecoder = Hermes.object do
             <*> Hermes.atKey "updatedAt" Hermes.utcTime
             <*> pure provider
             <*> pure connection
+            <*> optionalKey "gatewayIdentity" Hermes.text
             <*> pure model
             <*> optionalKey "transportModel" Hermes.text
             <*> pure dialect
@@ -449,6 +452,7 @@ data SessionCreate = SessionCreate
     { createPool :: !StorePool
     , createRoot :: !OsPath
     , createTarget :: !ModelTarget
+    , createGatewayIdentity :: !(Maybe Text)
     , createCwd :: !OsPath
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
