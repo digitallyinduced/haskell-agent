@@ -32,6 +32,7 @@ module Agent.CLI.TUI.App
     , motionDemandForTerminalFocus
     , motionModeForTerminalFocus
     , lambdaArtWidget
+    , quickStartCardHeight
     , quickStartRows
     , quickStartVisible
     , quickStartWideVisible

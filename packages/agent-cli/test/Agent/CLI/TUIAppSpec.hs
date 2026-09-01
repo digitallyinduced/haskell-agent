@@ -47,6 +47,7 @@ import Agent.CLI.TUI.App
     , motionDemandForTerminalFocus
     , motionModeForTerminalFocus
     , lambdaArtWidget
+    , quickStartCardHeight
     , quickStartRows
     , quickStartVisible
     , quickStartWideVisible
@@ -882,14 +883,14 @@ spec = do
             rendered 0 `shouldNotBe` rendered 400
 
         it "shows quick-start actions only when the empty pane has room" do
-            quickStartVisible 100 30 `shouldBe` True
+            quickStartVisible 100 14 `shouldBe` True
             quickStartVisible 47 30 `shouldBe` False
-            quickStartVisible 100 12 `shouldBe` False
+            quickStartVisible 100 13 `shouldBe` False
 
         it "adds the quiet logo only in wide render contexts" do
-            quickStartWideVisible 88 14 `shouldBe` True
-            quickStartWideVisible 87 14 `shouldBe` False
-            quickStartWideVisible 88 13 `shouldBe` False
+            quickStartWideVisible 88 15 `shouldBe` True
+            quickStartWideVisible 87 15 `shouldBe` False
+            quickStartWideVisible 88 14 `shouldBe` False
 
         it "caps the quick-start card instead of filling wide terminals" do
             quickStartCardWidth 48 `shouldBe` 44
@@ -916,6 +917,10 @@ spec = do
                         { appSlashCatalog = catalog }
             B.vSize (drawQuickStartCard state 96 True)
                 `shouldBe` B.Fixed
+
+        it "reserves space for every quick-start action at boundary heights" do
+            quickStartCardHeight False `shouldBe` 14
+            quickStartCardHeight True `shouldBe` 15
 
         it "surfaces the high-value startup commands including changelog" do
             quickStartRows
