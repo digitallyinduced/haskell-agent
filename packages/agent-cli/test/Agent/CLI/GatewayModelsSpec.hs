@@ -63,7 +63,7 @@ directModel =
     CatalogModel
         { catalogModelId = "router-default"
         , catalogModelConnectionId = "openai"
-        , catalogModelWireId = "company-local-router"
+        , catalogModelWireId = "router-default"
         , catalogModelDialect = CodexDialect
         , catalogModelContextWindow = Nothing
         , catalogModelLabel = Nothing
