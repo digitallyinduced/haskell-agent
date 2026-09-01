@@ -683,6 +683,8 @@ appEventLogicalBytes = \case
                 skills)
     AppSetModelIds modelIds ->
         saturatingAdd 256 (logicalTextsBytes modelIds)
+    AppSetTheme{} ->
+        256
     AppAgentSnapshot target entries ->
         foldl'
             (\size entry ->

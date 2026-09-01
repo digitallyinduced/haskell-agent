@@ -49,6 +49,8 @@ data ReplAction
     | ReplToggleFast
     | ReplShowModel
     | ReplSetModel Text
+    | ReplShowTheme
+    | ReplSetTheme Text
     | ReplEnableCodeMode
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)

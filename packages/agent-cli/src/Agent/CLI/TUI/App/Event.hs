@@ -192,7 +192,8 @@ fullscreenApp = App
         vScrollToEnd (viewportScroll ConversationViewport)
     , appAttrMap = \state ->
         if state.appRuntime.runtimeColor
-            then Theme.terminalDefault
+            then
+                Theme.themeAttrMap (activeTheme state)
             else Theme.monochrome
     }
 
@@ -685,6 +686,11 @@ handleEventInner' event = case event of
                 AppSyncSubmittedImagePlacements
     AppEvent AppSyncSubmittedImagePlacements ->
         syncSubmittedImagePlacements
+    AppEvent (AppSetTheme theme) -> do
+        state <- get
+        liftIO (writeIORef state.appRuntime.runtimeThemeRef theme)
+        modify' \current -> current { appTheme = theme }
+        invalidateCache
     AppEvent (AppAskPermission summary reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)

@@ -61,7 +61,13 @@ spec = describe "accent rail" do
 
 sampleRail :: Maybe Int -> Int -> Widget ()
 sampleRail waveElapsed rows =
-    accentRail MotionUnicode Theme.toolAttr True Theme.waveTrough waveElapsed $
+    accentRail
+        MotionUnicode
+        Theme.toolAttr
+        True
+        Theme.waveTrough
+        Theme.Auto
+        waveElapsed $
         vBox (replicate rows (str "body"))
 
 containsAccentBar :: String -> Bool

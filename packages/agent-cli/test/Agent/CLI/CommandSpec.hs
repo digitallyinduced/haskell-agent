@@ -319,6 +319,18 @@ spec = do
             parseReplLine "/model openai/gpt-5.1"
                 `shouldBe` ReplSetModel "openai/gpt-5.1"
 
+        it "opens and selects a theme" do
+            parseReplLine "/theme" `shouldBe` ReplShowTheme
+            parseReplLine "/t" `shouldBe` ReplShowTheme
+            parseReplLine "/theme TokyoNight"
+                `shouldBe` ReplSetTheme "TokyoNight"
+            parseReplLine "/t daylight"
+                `shouldBe` ReplSetTheme "daylight"
+
+        it "rejects extra theme arguments" do
+            parseReplLine "/theme tokyo night"
+                `shouldBe` ReplCommandError "usage: /theme [NAME]"
+
         it "opens the resume picker" do
             parseReplLine "/resume" `shouldBe` ReplResume Nothing
             parseReplLine "/resume abc-123" `shouldBe` ReplResume (Just "abc-123")
@@ -453,6 +465,7 @@ spec = do
                     , "find"
                     , "permissions"
                     , "model"
+                    , "theme"
                     , "effort"
                     , "fast"
                     , "plan"
