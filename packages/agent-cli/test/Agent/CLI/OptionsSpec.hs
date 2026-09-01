@@ -39,6 +39,20 @@ spec = do
             fresh.optManagedTurnFile `shouldBe` Nothing
             fresh.optResume `shouldBe` Nothing
 
+        it "detects gateway changes from recovery account management" do
+            let gatewayA = Just ("gateway-a" :: String)
+                gatewayB = Just ("gateway-b" :: String)
+            gatewayRoutingChanged
+                gatewayA
+                gatewayA
+                `shouldBe` False
+            gatewayRoutingChanged
+                gatewayA
+                gatewayB
+                `shouldBe` True
+            gatewayRoutingChanged Nothing gatewayA `shouldBe` True
+            gatewayRoutingChanged gatewayA Nothing `shouldBe` True
+
     describe "parseArgs" do
         it "parses gateway account commands" do
             parseArgs ["gateway", "connect", "--url", "https://gateway.example"]

@@ -13,6 +13,7 @@ module Agent.CLI.Options
     , defaultCliOptions
     , defaultEffortFor
     , freshSessionOptions
+    , gatewayRoutingChanged
     , isOneShot
     , parseApprovalAnswer
     , parseArgs
@@ -198,6 +199,11 @@ freshSessionOptions options cwd =
         , optManagedTurnFile = Nothing
         , optResume = Nothing
         }
+
+-- | Compare complete loaded gateway states so connect, disconnect, endpoint,
+-- and credential changes all create a new routing boundary.
+gatewayRoutingChanged :: Eq gateway => gateway -> gateway -> Bool
+gatewayRoutingChanged before after = before /= after
 
 isOneShot :: CliOptions -> Bool
 isOneShot options =

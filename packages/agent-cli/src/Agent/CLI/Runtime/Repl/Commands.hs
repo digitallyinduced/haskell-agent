@@ -109,7 +109,8 @@ import Agent.CLI.McpOAuth ( loginMcp )
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models ()
-import Agent.CLI.Options ( ApprovalPolicy(..) )
+import Agent.CLI.Options
+    ( ApprovalPolicy(..), gatewayRoutingChanged )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Permission ( approvalPolicyOptions )
 import Agent.CLI.Plan ()
@@ -1172,7 +1173,7 @@ handleReplLine
                                 color <- resolveColor stderr
                                 runLoginManager color
                         gatewayAfter <- loadGatewayCredential
-                        if gatewayAfter /= gatewayBefore
+                        if gatewayRoutingChanged gatewayBefore gatewayAfter
                             then requestGatewayRestart fullscreen cwd
                             else continue
                     ReplUsage -> do

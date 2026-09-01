@@ -53,6 +53,7 @@ import Agent.CLI.Models
 import Agent.CLI.Options
     ( defaultEffortFor,
       freshSessionOptions,
+      gatewayRoutingChanged,
       isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
@@ -90,7 +91,9 @@ import Agent.CLI.Runtime.Orchestration.Initialized
     , withPreparedStartupAuth
     )
 import Agent.CLI.Runtime.Orchestration.Restart
-    ( RestartCallbacks(..), runFullscreenRestartLoop )
+    ( RestartCallbacks(..)
+    , runFullscreenRestartLoop
+    )
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, setNativeProgress )
 import Agent.CLI.Runtime.Orchestration.Types
@@ -608,8 +611,17 @@ runAgent
                         , restartOptions = restartSessionOptions
                         , restartApplyTransition = applyProviderTransition
                         , restartManageAccounts = do
+                            gatewayBefore <- loadGatewayCredential
+                            recoveryCwd <- getCurrentDirectory
                             color <- resolveColor stderr
                             runLoginManager color
+                            gatewayAfter <- loadGatewayCredential
+                            pure
+                                if gatewayRoutingChanged
+                                    gatewayBefore
+                                    gatewayAfter
+                                then Just (RunFreshSession recoveryCwd)
+                                else Nothing
                         , restartChooseModel = chooseRecoveryModel
                         }
                 in
