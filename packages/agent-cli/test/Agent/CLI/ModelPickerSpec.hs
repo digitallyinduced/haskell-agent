@@ -5,6 +5,7 @@ import Agent.CLI.Models
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
+    , organizationGatewayConnectionId
     , packagedModelCatalogPath
     )
 import Agent.Dialect (DialectId(..))
@@ -116,6 +117,31 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "←"
             frame `shouldSatisfy` Text.isInfixOf "→"
             frame `shouldSatisfy` Text.isInfixOf "context"
+
+        it "shows gateway aliases without the internal connection prefix" do
+            let baseOption =
+                    rawModelOption OpenAIProvider "gpt-5.6-sol"
+                option =
+                    baseOption
+                        { modelTarget =
+                            baseOption.modelTarget
+                                { targetConnectionId =
+                                    organizationGatewayConnectionId
+                                }
+                        }
+            models <-
+                initialPickerStateForOptions
+                    "organization gateway"
+                    [option]
+                    organizationGatewayConnectionId
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    CodexDialect
+            let frame = renderPickerFrame False models
+            frame `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
+            frame `shouldNotSatisfy`
+                Text.isInfixOf
+                    (organizationGatewayConnectionId <> "/gpt-5.6-sol")
 
         it "makes untrusted catalog control characters inert" do
             let hostile =

@@ -2,6 +2,7 @@
 module Agent.CLI.GatewayClient
     ( GatewayCredential(..)
     , GatewayModel(..)
+    , GatewayModelCatalogResponse(..)
     , GatewayModelProtocol(..)
     , GatewayModelAccess
     , GatewayAuthorization(..)
@@ -34,7 +35,6 @@ module Agent.CLI.GatewayClient
     , gatewayPollDecoder
     , loadGatewayCredential
     , loadGatewayCredentialAt
-    , gatewayModelsDecoder
     , fetchGatewayModels
     , newGatewayModelAccess
     , newGatewayModelAccessWith
@@ -60,7 +60,7 @@ import Control.Concurrent.STM (atomically, retry)
 import Control.Exception.Safe (bracket, bracketOnError, tryAny)
 import Control.Monad (when)
 import Crypto.Hash (Digest, SHA256, hash)
-import Data.Aeson ((.=))
+import Data.Aeson ((.=), (.:))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Types qualified as AesonTypes
 import Data.ByteArray qualified as ByteArray
@@ -129,6 +129,32 @@ data GatewayModel = GatewayModel
     , gatewayModelProtocol :: !GatewayModelProtocol
     }
     deriving (Eq, Show)
+
+newtype GatewayModelCatalogResponse = GatewayModelCatalogResponse
+    { gatewayModelCatalogData :: [GatewayModel]
+    }
+    deriving (Eq, Show)
+
+instance Aeson.FromJSON GatewayModelCatalogResponse where
+    parseJSON =
+        Aeson.withObject "GatewayModelCatalogResponse" \object ->
+            GatewayModelCatalogResponse
+                . normalizeGatewayModels
+                <$> object .: "data"
+
+instance Aeson.FromJSON GatewayModel where
+    parseJSON =
+        Aeson.withObject "GatewayModel" \object ->
+            GatewayModel
+                <$> object .: "id"
+                <*> object .: "protocol"
+
+instance Aeson.FromJSON GatewayModelProtocol where
+    parseJSON =
+        Aeson.withText "GatewayModelProtocol" \case
+            "responses" -> pure GatewayResponsesProtocol
+            "anthropic" -> pure GatewayAnthropicProtocol
+            _ -> fail "Gateway model protocol is invalid."
 
 -- | A gateway-scoped model catalog and its most recently successful refresh.
 --
@@ -220,28 +246,6 @@ gatewayCredentialDecoder =
             <$> Hermes.atKey "base_url" Hermes.text
             <*> Hermes.atKey "websocket_url" Hermes.text
             <*> Hermes.atKey "access_token" Hermes.text
-
--- | Decode the unified gateway catalog. Every alias carries the wire protocol
--- required to invoke it; unknown protocols fail closed.
-gatewayModelsDecoder :: Hermes.Decoder [GatewayModel]
-gatewayModelsDecoder =
-    Hermes.object do
-        models <- Hermes.atKey "data" (Hermes.list gatewayModelDecoder)
-        pure (normalizeGatewayModels models)
-
-gatewayModelDecoder :: Hermes.Decoder GatewayModel
-gatewayModelDecoder =
-    Hermes.object $
-        GatewayModel
-            <$> Hermes.atKey "id" Hermes.text
-            <*> Hermes.atKey "protocol" gatewayModelProtocolDecoder
-
-gatewayModelProtocolDecoder :: Hermes.Decoder GatewayModelProtocol
-gatewayModelProtocolDecoder =
-    Hermes.text >>= \case
-        "responses" -> pure GatewayResponsesProtocol
-        "anthropic" -> pure GatewayAnthropicProtocol
-        _ -> fail "Gateway model protocol is invalid."
 
 -- | Construct a cached model-list handle for a validated gateway credential.
 newGatewayModelAccess :: GatewayCredential -> IO GatewayModelAccess
@@ -338,17 +342,18 @@ fetchGatewayModels credential =
                 Right value
                     | statusIsSuccessful (HTTP.responseStatus value) ->
                         case
-                            Hermes.decodeEither
-                                gatewayModelsDecoder
+                            Aeson.eitherDecodeStrict'
                                 (LBS.toStrict (HTTP.responseBody value))
+                                :: Either String GatewayModelCatalogResponse
                             of
                             Left _ ->
                                 Left
                                     "Gateway returned an unreadable models response."
-                            Right models
-                                | null models ->
+                            Right catalog
+                                | null catalog.gatewayModelCatalogData ->
                                     Left "Gateway returned an empty model catalog."
-                                | otherwise -> Right models
+                                | otherwise ->
+                                    Right catalog.gatewayModelCatalogData
                     | otherwise ->
                         Left $
                             "Gateway models returned HTTP "

@@ -18,7 +18,10 @@ module Agent.CLI.ModelPicker
     , decodePickerKey
     ) where
 
-import Agent.CLI.ModelConfig (ModelCatalog)
+import Agent.CLI.ModelConfig
+    ( ModelCatalog
+    , organizationGatewayConnectionId
+    )
 import Agent.CLI.Models
 import Agent.CLI.Options
     ( defaultEffortFor
@@ -292,9 +295,11 @@ formatCatalogListingState color state =
                                 state.pickerCurrentDialect
                                 opt =
                                 roleSuccess color
-                                    (glyphOk <> formatOptionName opt)
+                                    (glyphOk
+                                        <> formatOptionName gatewayMode opt)
                             | otherwise =
-                                roleMuted color ("  " <> formatOptionName opt)
+                                roleMuted color
+                                    ("  " <> formatOptionName gatewayMode opt)
                         label = case opt.modelLabel of
                             Nothing -> ""
                             Just l ->
@@ -302,6 +307,7 @@ formatCatalogListingState color state =
                                     ("  " <> displayPickerText l)
                     in mark <> label)
                 state.pickerAll
+        gatewayMode = pickerUsesGateway state
     in Text.intercalate "\n" (header : rows)
 
 -- | Backwards-compatible pure frame seeded from the current provider default.
@@ -326,7 +332,7 @@ renderModelPickerFrame color state =
                 "↓ more"
            , ""
            ]
-        <> selectedDetailLines color selected
+        <> selectedDetailLines gatewayMode color selected
         <> [ ""
            , roleMuted color
                 "↑↓ select · ←→ reasoning effort · ↵ confirm · esc cancel"
@@ -351,6 +357,7 @@ renderModelPickerFrame color state =
             zipWith
                 (\index option ->
                     renderRow
+                        gatewayMode
                         color
                         (index == selectedIndex)
                         models.pickerConnectionId
@@ -366,6 +373,7 @@ renderModelPickerFrame color state =
                 (max 0 (pickerViewportSize - length body))
                 ""
     selected = selectedOption models
+    gatewayMode = pickerUsesGateway models
     header =
         rolePrompt color "Models"
             <> roleMuted color
@@ -393,7 +401,10 @@ pickerCurrentLabel state
                 && option.modelTarget.targetModelId
                     == state.pickerCurrent)
         state.pickerAll =
-            state.pickerConnectionId <> "/" <> state.pickerCurrent
+            displayModelName
+                (pickerUsesGateway state)
+                state.pickerConnectionId
+                state.pickerCurrent
     | otherwise = "(not offered in this scope)"
 
 pickerViewportSize :: Int
@@ -402,6 +413,7 @@ pickerViewportSize = 12
 renderRow
     :: Bool
     -> Bool
+    -> Bool
     -> Text
     -> Text
     -> DialectId
@@ -409,6 +421,7 @@ renderRow
     -> ModelOption
     -> Text
 renderRow
+        gatewayMode
         color
         selected
         currentConnection
@@ -422,13 +435,14 @@ renderRow
         else "  " <> clippedName <> padding <> roleMuted color indicator
   where
     plainName =
-        displayPickerText $
-            option.modelTarget.targetConnectionId
-                <> "/"
-                <> option.modelTarget.targetModelId
+        displayPickerText
+            (displayModelName
+                gatewayMode
+                option.modelTarget.targetConnectionId
+                option.modelTarget.targetModelId
                 <> if isCurrent currentConnection current currentDialect option
                     then " ✓"
-                    else ""
+                    else "")
     clippedName = Text.take modelNameWidth plainName
     padding =
         Text.replicate
@@ -450,8 +464,8 @@ renderEffortIndicator _option effort =
     barWidth = fromEnum (maxBound :: ReasoningEffort)
     filled = min barWidth (fromEnum effort)
 
-selectedDetailLines :: Bool -> Maybe ModelOption -> [Text]
-selectedDetailLines color = \case
+selectedDetailLines :: Bool -> Bool -> Maybe ModelOption -> [Text]
+selectedDetailLines gatewayMode color = \case
     Nothing ->
         [ rolePrompt color "No model selected"
         , roleMuted color "Try a different search."
@@ -459,9 +473,10 @@ selectedDetailLines color = \case
     Just option ->
         [ rolePrompt color $
             displayPickerText
-                (option.modelTarget.targetConnectionId
-                    <> "/"
-                    <> option.modelTarget.targetModelId)
+                (displayModelName
+                    gatewayMode
+                    option.modelTarget.targetConnectionId
+                    option.modelTarget.targetModelId)
         , roleMuted color $
             displayPickerText $
                 Text.intercalate
@@ -543,14 +558,27 @@ atMay index values
 glyphSessionLike :: Text
 glyphSessionLike = "⧉ "
 
-formatOptionName :: ModelOption -> Text
-formatOptionName option =
+formatOptionName :: Bool -> ModelOption -> Text
+formatOptionName gatewayMode option =
     displayPickerText $
-        option.modelTarget.targetConnectionId
-            <> " · "
-            <> option.modelTarget.targetModelId
+        ( if gatewayMode
+            then option.modelTarget.targetModelId
+            else
+                option.modelTarget.targetConnectionId
+                    <> " · "
+                    <> option.modelTarget.targetModelId
+        )
             <> " · "
             <> dialectSlug option.modelTarget.targetDialect
+
+pickerUsesGateway :: PickerState -> Bool
+pickerUsesGateway state =
+    state.pickerConnectionId == organizationGatewayConnectionId
+
+displayModelName :: Bool -> Text -> Text -> Text
+displayModelName gatewayMode connectionId modelId
+    | gatewayMode = modelId
+    | otherwise = connectionId <> "/" <> modelId
 
 displayPickerText :: Text -> Text
 displayPickerText =
