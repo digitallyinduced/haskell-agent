@@ -143,7 +143,7 @@ import Agent.CLI.Session.Runtime.Types
                      accountRef, accountIdRef, selectionRef, accountLabel,
                      selectAccount, onPersisted, compactRunner, codeModeNestedSlot),
       StartupRuntime(startupBackground, startupDatabaseStore,
-                     startupSessionState) )
+                     startupNetworkRecovery, startupSessionState) )
 import Agent.CLI.Session.Selection ( reservedSessionId )
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -157,7 +157,8 @@ import Agent.CLI.StartupContext
 import Agent.CLI.Style ( cliWindowTitle, roleMuted )
 import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
-                      subagentOptions, subagentGhciEnabled, subagentBashEnabled,
+                      subagentOptions, subagentNetworkRecovery,
+                      subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
                       subagentAllowedRoots, subagentRootAccessRequest,
                       subagentParams, subagentMcpTools, subagentRegistry,
@@ -620,6 +621,8 @@ runAgentSession
                     (catalogContextWindowForParams mapTransportModel params)
             subagentRuntime = SubagentRuntime
                 { subagentOptions = options
+                , subagentNetworkRecovery =
+                    startup.startupNetworkRecovery
                 , subagentGhciEnabled = ghciEnabledRef
                 , subagentBashEnabled = bashEnabledRef
                 , subagentPolicy = policyRef

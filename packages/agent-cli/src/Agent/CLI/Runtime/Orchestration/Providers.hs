@@ -28,7 +28,7 @@ import Agent.CLI.Compaction
       runBackendCompactWithContextWindow,
       runResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
-import Agent.CLI.Connectivity ( withConnectionRecovery )
+import Agent.CLI.Connectivity ( withConnectionRecoveryOn )
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
@@ -91,7 +91,7 @@ import Agent.CLI.Session.History
     ( LiveConversation, readLiveTranscript )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( StartupRuntime,
+    ( StartupRuntime(..),
       SessionBackend(..)
     , SessionRequest(..)
     )
@@ -570,6 +570,7 @@ runAgentProviders
                                     Nothing -> pure ()
                                 let (compactSender, lockedBackend) =
                                         lockedOpenAiSession
+                                            startup.startupNetworkRecovery
                                             (isGatewayWebSocketCredential
                                                 credential)
                                             options.optCompactThreshold
@@ -706,7 +707,8 @@ runAgentProviders
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
-                                    withConnectionRecovery $
+                                    withConnectionRecoveryOn
+                                        startup.startupNetworkRecovery $
                                         protectXaiOverflow
                                             contextTokensRef
                                             (readIORef paramsRef)
@@ -791,7 +793,8 @@ runAgentProviders
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
-                                    withConnectionRecovery $
+                                    withConnectionRecoveryOn
+                                        startup.startupNetworkRecovery $
                                         protectGeminiOverflow
                                             geminiOccupancy
                                             (readIORef paramsRef)
@@ -1053,7 +1056,8 @@ runAgentProviders
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
-                                    withConnectionRecovery $
+                                    withConnectionRecoveryOn
+                                        startup.startupNetworkRecovery $
                                         protectOverflow
                                             contextTokensRef
                                             (readIORef paramsRef)

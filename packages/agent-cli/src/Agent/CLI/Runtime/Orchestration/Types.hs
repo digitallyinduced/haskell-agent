@@ -13,6 +13,7 @@ module Agent.CLI.Runtime.Orchestration.Types
 
 import Agent.CLI.AgentSessions ( SessionThreadManager )
 import Agent.CLI.AgentViewport ( AgentEntry )
+import Agent.CLI.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Error ( ApiError )
 import Agent.Loop ( LoopEvent )
@@ -48,6 +49,7 @@ data AgentProcessRuntime = AgentProcessRuntime
         :: !(IORef (Maybe (MCP.McpElicitRequest -> IO MCP.McpElicitResult)))
     -- ^ Interactive elicitation UI installed by the active session, shared by
     -- every MCP fleet the supervisor starts.
+    , processNetworkRecovery :: !(Maybe NetworkRecovery)
     }
 
 data NativeInteractionMode

@@ -14,7 +14,7 @@ import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
     ( autoCompactOpenAiBackendWithSender )
-import Agent.CLI.Connectivity (withConnectionRecovery)
+import Agent.CLI.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
 import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
 import Agent.CLI.Request (requestParams)
@@ -693,7 +693,9 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                 baseBackend
                         backend =
                             withCodexTurnStateScope (pure turnState) $
-                                withConnectionRecovery compactingBackend
+                                withConnectionRecoveryOn
+                                    runtime.subagentNetworkRecovery
+                                    compactingBackend
                     runPreparedChild
                         runtime env prepared.preparedSession
                         prepared.preparedToolEnv toolRegistry
@@ -859,7 +861,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
                     let backend =
-                            withConnectionRecovery $
+                            withConnectionRecoveryOn
+                                runtime.subagentNetworkRecovery $
                                 mkBackend childParams
                     runPreparedChild
                         runtime env prepared.preparedSession

@@ -57,6 +57,7 @@ library
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
+                    , Agent.CLI.NetworkPath
                     , Agent.CLI.Input.Approval
                     , Agent.CLI.Login.Types
                     , Agent.CLI.Lsp.Capabilities
@@ -315,6 +316,10 @@ library
                     , vty-crossplatform >= 0.4 && < 0.5
                     , wai
                     , warp
+    if os(darwin)
+        c-sources:    cbits/NetworkPathMonitor.c
+        cc-options:   -fblocks
+        frameworks:   Network
 
 executable agent-cli
     import:           common-options

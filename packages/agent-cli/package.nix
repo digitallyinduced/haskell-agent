@@ -45,8 +45,9 @@ mkDerivation {
     agent-openai agent-openrouter agent-responses agent-responses-types
     agent-runtime-daemon agent-store agent-tui agent-xai ansi-terminal
     async base brick bytestring colour containers directory filepath
-    haskeline hspec JuicyPixels process QuickCheck safe-exceptions stm
-    text time transformers unix vty
+    haskeline hspec http-client http-types JuicyPixels process
+    QuickCheck safe-exceptions stm text time transformers unix vty wai
+    warp
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types

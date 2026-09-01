@@ -97,7 +97,7 @@ import Agent.CLI.Runtime.Orchestration.Restart
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, setNativeProgress )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AgentProcessRuntime
+    ( AgentProcessRuntime(processNetworkRecovery)
     , AgentRunMode
         ( runInBackground
         , runStdout
@@ -130,7 +130,8 @@ import Agent.CLI.Session.Runtime.Types
     ( StartupCancelled(..),
       StartupFailure(..),
       StartupRuntime(startupSessionState, StartupRuntime, startupToolEnv,
-                     startupDatabaseStore, startupInterrupt, startupEscPaused,
+                     startupNetworkRecovery, startupDatabaseStore,
+                     startupInterrupt, startupEscPaused,
                      startupUiRuntimeRef, startupFullscreen, startupTerminal,
                      startupStdout, startupStderr, startupBackground, startupUseColor,
                      startupStderrTty, startupStdinTty, startupStdoutTty,
@@ -959,6 +960,8 @@ prepareAgentIterationTracked
                         (\target -> readIORef agentSelectRef >>= ($ target))
                 let startup = StartupRuntime
                         { startupToolEnv = toolEnv
+                        , startupNetworkRecovery =
+                            processRuntime.processNetworkRecovery
                         , startupDatabaseStore = databaseStore
                         , startupInterrupt = interrupt
                         , startupEscPaused = escPaused

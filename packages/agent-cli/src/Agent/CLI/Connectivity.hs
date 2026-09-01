@@ -4,12 +4,19 @@
 -- If a connection drops after tools have run, the loop can therefore retry
 -- the exact model continuation without executing those tools again.
 module Agent.CLI.Connectivity
-    ( reconnectDelayMicros
+    ( RecoveryWatcher(..)
+    , reconnectDelayMicros
     , transientRetryDelayMicros
     , withConnectionRecovery
+    , withConnectionRecoveryOn
     , withConnectionRecoveryUsing
+    , withConnectionRecoveryUsingWatcher
     ) where
 
+import Agent.CLI.NetworkPath
+    ( NetworkRecovery
+    , armNetworkRecovery
+    )
 import Agent.Error
     ( ApiError(..)
     , apiErrorRetryAfter
@@ -17,10 +24,18 @@ import Agent.Error
     )
 import Agent.Loop (Backend(..), LoopEvent(..))
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (race)
 import Control.Monad (when)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
+
+-- | Arms an interruptible, restartable wait for the next network recovery.
+-- One armed wait is shared by an in-flight request and its retry delay so an
+-- edge racing the transport error cannot be lost between those two phases.
+newtype RecoveryWatcher = RecoveryWatcher
+    { armRecoveryWatcher :: IO (IO ())
+    }
 
 -- | Retry after 1s, 2s, 4s, 8s, then every 15s while offline.
 reconnectDelayMicros :: Int -> Int
@@ -52,8 +67,15 @@ transientRetryDelayMicros apiError attempt =
 -- flag, so the sleep and all retries remain scoped to the current turn.
 withConnectionRecovery :: Backend -> Backend
 withConnectionRecovery =
-    withConnectionRecoveryUsing
+    withConnectionRecoveryUsingMaybeWatcher threadDelay Nothing
+
+-- | Retry as above, and also restart an in-flight provider submission as soon
+-- as macOS reports that an unavailable network path is satisfied again.
+withConnectionRecoveryOn :: Maybe NetworkRecovery -> Backend -> Backend
+withConnectionRecoveryOn recovery =
+    withConnectionRecoveryUsingMaybeWatcher
         threadDelay
+        (networkRecoveryWatcher <$> recovery)
 
 -- | Injectable variant used by tests. If a response already streamed, emit a
 -- structural restart boundary before the next attempt. Providers may generate
@@ -63,34 +85,71 @@ withConnectionRecoveryUsing
     :: (Int -> IO ())
     -> Backend
     -> Backend
-withConnectionRecoveryUsing waitMicros (Backend submit) =
+withConnectionRecoveryUsing waitMicros =
+    withConnectionRecoveryUsingMaybeWatcher waitMicros Nothing
+
+-- | Injectable recovery watcher used to verify the macOS edge-triggered path
+-- without changing the host's real network configuration.
+withConnectionRecoveryUsingWatcher
+    :: (Int -> IO ())
+    -> RecoveryWatcher
+    -> Backend
+    -> Backend
+withConnectionRecoveryUsingWatcher waitMicros watcher =
+    withConnectionRecoveryUsingMaybeWatcher waitMicros (Just watcher)
+
+withConnectionRecoveryUsingMaybeWatcher
+    :: (Int -> IO ())
+    -> Maybe RecoveryWatcher
+    -> Backend
+    -> Backend
+withConnectionRecoveryUsingMaybeWatcher
+    waitMicros watcher (Backend submit) =
     Backend \state previous inputs onEvent ->
         let go reconnectAttempt transientAttempt = do
                 streamed <- newIORef False
-                result <- submit state previous inputs \event -> do
-                    when (isStreamOutput event) (writeIORef streamed True)
-                    -- A lower layer already closed the interrupted attempt
-                    -- with its own boundary; only output streamed afterwards
-                    -- needs another one before the next replay.
-                    when (isRestartBoundary event) (writeIORef streamed False)
-                    onEvent event
+                armedRecovery <- traverse (.armRecoveryWatcher) watcher
+                outcome <-
+                    raceWithRecovery armedRecovery $
+                        submit state previous inputs \event -> do
+                            when (isStreamOutput event)
+                                (writeIORef streamed True)
+                            -- A lower layer already closed the interrupted
+                            -- attempt with its own boundary; only output
+                            -- streamed afterwards needs another one before
+                            -- the next replay.
+                            when (isRestartBoundary event)
+                                (writeIORef streamed False)
+                            onEvent event
                 didStream <- readIORef streamed
-                case result of
-                    Left ConnectionError{} -> do
+                case outcome of
+                    RecoveryObserved -> do
+                        onEvent
+                            (ActivityUpdated connectionRestoredMessage)
+                        when didStream $
+                            onEvent
+                                (ResponseRestarted
+                                    connectionRestartMessage)
+                        go reconnectAttempt transientAttempt
+                    OperationFinished (Left ConnectionError{}) -> do
                         let delay = reconnectDelayMicros reconnectAttempt
                         onEvent
                             (ActivityUpdated
                                 (connectionWaitingMessage delay))
-                        waitMicros delay
+                        recovered <-
+                            waitForDelayOrRecovery
+                                waitMicros armedRecovery delay
                         onEvent
                             (ActivityUpdated
-                                "Checking internet connection…")
+                                (if recovered
+                                    then connectionRestoredMessage
+                                    else "Checking internet connection…"))
                         when didStream $
                             onEvent
                                 (ResponseRestarted
                                     connectionRestartMessage)
                         go (reconnectAttempt + 1) transientAttempt
-                    Left apiError
+                    OperationFinished (Left apiError)
                         | isInlineRetryableProviderError apiError
                         , transientAttempt <= maxTransientRetries -> do
                             let delay =
@@ -110,8 +169,47 @@ withConnectionRecoveryUsing waitMicros (Backend submit) =
                                     (ResponseRestarted
                                         transientRestartMessage)
                             go reconnectAttempt (transientAttempt + 1)
-                    _ -> pure result
+                    OperationFinished result -> pure result
         in go 1 1
+
+data RecoveryOutcome result
+    = RecoveryObserved
+    | OperationFinished !result
+
+networkRecoveryWatcher :: NetworkRecovery -> RecoveryWatcher
+networkRecoveryWatcher recovery =
+    RecoveryWatcher (armNetworkRecovery recovery)
+
+raceWithRecovery
+    :: Maybe (IO ())
+    -> IO result
+    -> IO (RecoveryOutcome result)
+raceWithRecovery armedRecovery operation =
+    case armedRecovery of
+        Nothing -> OperationFinished <$> operation
+        Just waitForRecovery ->
+            race
+                operation
+                waitForRecovery
+                >>= \case
+                    Left result -> pure (OperationFinished result)
+                    Right () -> pure RecoveryObserved
+
+waitForDelayOrRecovery
+    :: (Int -> IO ())
+    -> Maybe (IO ())
+    -> Int
+    -> IO Bool
+waitForDelayOrRecovery waitMicros armedRecovery delay =
+    case armedRecovery of
+        Nothing -> waitMicros delay >> pure False
+        Just waitForRecovery ->
+            race
+                waitForRecovery
+                (waitMicros delay)
+                >>= \case
+                    Left () -> pure True
+                    Right () -> pure False
 
 maxTransientRetries :: Int
 maxTransientRetries = 2
@@ -143,6 +241,10 @@ connectionRestartMessage :: Text
 connectionRestartMessage =
     "Connection interrupted the response; restarting automatically. "
         <> "The new attempt may repeat partial output shown above."
+
+connectionRestoredMessage :: Text
+connectionRestoredMessage =
+    "Internet connection restored; reconnecting…"
 
 transientWaitingMessage :: Int -> Int -> Text
 transientWaitingMessage attempt delay =

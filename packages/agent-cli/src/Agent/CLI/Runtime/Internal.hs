@@ -43,6 +43,7 @@ import Agent.CLI.McpStatus
     , formatMcpModelNoticeFor
     , formatMcpProgress
     )
+import Agent.CLI.NetworkPath (withNetworkRecovery)
 import Agent.CLI.Options
     ( CliOptions
     , Command(..)
@@ -208,38 +209,42 @@ runAgentWithRestarts options =
         (do
             home <- getHomeDirectory
             let root = sessionsRoot home
-            elicitationRef <- newIORef Nothing
-            cleanupStarted <- newIORef False
-            cleanupRequest <- newEmptyMVar
-            -- Cleanup is intentionally process-scoped rather than
-            -- session-scoped: provider restarts must not rescan every
-            -- worktree. 'withAsync' owns and joins the worker on shutdown.
-            withAsync (takeMVar cleanupRequest >>= id) \_ -> do
-                mcpSupervisor <-
-                    MCP.newMcpSupervisorWith
-                        MCP.defaultMcpHostHooks
-                            { MCP.mcpHostElicit = readIORef elicitationRef }
-                sessionThreads <-
-                    newSessionThreadManager root
-                        `onException` MCP.closeMcpSupervisor mcpSupervisor
-                let startCleanup action = mask_ do
-                        shouldStart <- atomicModifyIORef'
-                            cleanupStarted
-                            (\started -> (True, not started))
-                        if shouldStart
-                            then putMVar cleanupRequest action
-                            else pure ()
-                    processRuntime = AgentProcessRuntime
-                        { processMcpSupervisor = mcpSupervisor
-                        , processSessionThreads = sessionThreads
-                        , processStartCleanup = startCleanup
-                        , processMcpElicitation = elicitationRef
-                        }
-                withRestoredCurrentDirectory
-                    (runAgentWithRuntime processRuntime foregroundRunMode options)
-                    `finally`
-                        (closeSessionThreadManager sessionThreads
-                            `finally` MCP.closeMcpSupervisor mcpSupervisor))
+            withNetworkRecovery \networkRecovery -> do
+                elicitationRef <- newIORef Nothing
+                cleanupStarted <- newIORef False
+                cleanupRequest <- newEmptyMVar
+                -- Cleanup is intentionally process-scoped rather than
+                -- session-scoped: provider restarts must not rescan every
+                -- worktree. 'withAsync' owns and joins the worker on shutdown.
+                withAsync (takeMVar cleanupRequest >>= id) \_ -> do
+                    mcpSupervisor <-
+                        MCP.newMcpSupervisorWith
+                            MCP.defaultMcpHostHooks
+                                { MCP.mcpHostElicit = readIORef elicitationRef }
+                    sessionThreads <-
+                        newSessionThreadManager root
+                            `onException` MCP.closeMcpSupervisor mcpSupervisor
+                    let startCleanup action = mask_ do
+                            shouldStart <- atomicModifyIORef'
+                                cleanupStarted
+                                (\started -> (True, not started))
+                            if shouldStart
+                                then putMVar cleanupRequest action
+                                else pure ()
+                        processRuntime = AgentProcessRuntime
+                            { processMcpSupervisor = mcpSupervisor
+                            , processSessionThreads = sessionThreads
+                            , processStartCleanup = startCleanup
+                            , processMcpElicitation = elicitationRef
+                            , processNetworkRecovery = networkRecovery
+                            }
+                    withRestoredCurrentDirectory
+                        (runAgentWithRuntime
+                            processRuntime foregroundRunMode options)
+                        `finally`
+                            (closeSessionThreadManager sessionThreads
+                                `finally`
+                                    MCP.closeMcpSupervisor mcpSupervisor))
         (pure DevQuit)
 
 loginMcpWithScopes :: [Text] -> Text -> IO ()
