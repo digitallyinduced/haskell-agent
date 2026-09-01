@@ -489,7 +489,13 @@ handleStaticChoiceKey event = do
     scrollNotes =
         vScrollBy (viewportScroll OverlayViewport)
 
-    moveChoice delta =
+    moveChoice delta = do
+        previewingTheme <-
+            gets
+                ( maybe False
+                    ((== ChoiceTheme) . (.choicePresentation))
+                    . (.appChoice)
+                )
         modify' \state ->
             state
                 { appChoice =
@@ -503,6 +509,7 @@ handleStaticChoiceKey event = do
                                 })
                         <$> state.appChoice
                 }
+        when previewingTheme invalidateCache
 
 handleFilterChoiceKey :: V.Event -> EventM Name AppState ()
 handleFilterChoiceKey event = case event of

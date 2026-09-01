@@ -422,7 +422,9 @@ mkTheme background foreground muted accent link =
         , (borderActiveAttr, mutedA)
         , (headingAttr, accentA `V.withStyle` V.bold)
         , (codeAttr, linkA)
-        , (dimAttr, mutedA)
+        -- Overlay dimming uses 'forceAttr', so it must preserve the page
+        -- background instead of falling back to the terminal's colors.
+        , (dimAttr, mutedA `V.withBackColor` background)
         , (emphasisAttr, base `V.withStyle` V.italic)
         , (inlineCodeAttr, linkA `V.withStyle` V.reverseVideo)
         , (lambdaDimAttr, mutedA)
@@ -432,8 +434,9 @@ mkTheme background foreground muted accent link =
             `V.withStyle` V.bold)
         , (linkAttr, linkA `V.withStyle` V.underline)
         , (strongAttr, base `V.withStyle` V.bold)
-        , (controlLinkAttr, mutedA)
-        , (controlLinkHoverAttr, base `V.withStyle` V.underline)
+        , (controlLinkAttr, mutedA `V.withBackColor` background)
+        , (controlLinkHoverAttr,
+            panel `V.withStyle` V.underline)
         , (controlLinkActiveAttr, panel `V.withStyle` V.bold)
         , (syntaxNormalAttr, base)
         , (syntaxKeywordAttr, accentA)
@@ -469,10 +472,15 @@ mkTheme background foreground muted accent link =
 
     lighten (RGBColor r g b) =
         RGBColor
-            (min 255 (r + 14))
-            (min 255 (g + 14))
-            (min 255 (b + 14))
+            (lightenChannel r)
+            (lightenChannel g)
+            (lightenChannel b)
     lighten color = color
+
+    lightenChannel :: Word8 -> Word8
+    lightenChannel channel =
+        fromIntegral
+            (min (255 :: Int) (fromIntegral channel + 14))
 
 palette :: V.Color -> V.Attr
 palette = V.withForeColor V.defAttr

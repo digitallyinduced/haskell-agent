@@ -43,6 +43,23 @@ spec = do
                     ]
 
     describe "syntax theme attributes" do
+        it "keeps the daylight page background while dimming overlays" do
+            V.attrBackColor
+                (attrMapLookup Theme.dimAttr (Theme.themeAttrMap Theme.Daylight))
+                `shouldBe` V.SetTo (RGBColor 250 247 242)
+
+        it "keeps daylight controls on the page instead of the terminal background" do
+            V.attrBackColor
+                (attrMapLookup
+                    Theme.controlLinkAttr
+                    (Theme.themeAttrMap Theme.Daylight))
+                `shouldBe` V.SetTo (RGBColor 250 247 242)
+            V.attrBackColor
+                (attrMapLookup
+                    Theme.controlLinkHoverAttr
+                    (Theme.themeAttrMap Theme.Daylight))
+                `shouldBe` V.SetTo (RGBColor 255 255 255)
+
         it "leaves every syntax background to the terminal theme" do
             map
                 ( V.attrBackColor

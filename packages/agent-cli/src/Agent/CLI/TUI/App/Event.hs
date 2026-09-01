@@ -696,6 +696,7 @@ handleEventInner' event = case event of
         state <- get
         liftIO (writeIORef state.appRuntime.runtimeThemeRef theme)
         modify' \current -> current { appTheme = theme }
+        invalidateCache
     AppEvent (AppAskPermission summary reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
