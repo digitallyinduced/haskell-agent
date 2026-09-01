@@ -520,6 +520,7 @@ data TurnRow = TurnRow
     , turnRowUsageOutput :: !(Maybe Int64)
     , turnRowUsageCached :: !(Maybe Int64)
     , turnRowProviderTelemetry :: !(Maybe Text)
+    , turnRowCanonicalItemCount :: !(Maybe Int64)
     }
 
 loadStoredTurn :: TurnRow -> Transaction.Transaction (Either Text StoredTurn)
@@ -535,6 +536,10 @@ loadStoredTurnWith implementation row = do
         PerItemSessionRead -> loadResponseItemsPerItem row.turnRowId
     pure do
         decodedItems <- items
+        (canonicalItems, displayItems) <-
+            splitStoredTurnItems
+                row.turnRowCanonicalItemCount
+                decodedItems
         effect <- decodeTranscriptEffect row.turnRowEffect
         usage <- decodeUsage
             row.turnRowUsageInput
@@ -550,12 +555,28 @@ loadStoredTurnWith implementation row = do
                 , sessionTurnError = row.turnRowError
                 , sessionTurnResponseId = row.turnRowResponseId
                 , sessionTurnEffect = effect
-                , sessionTurnItems = decodedItems
+                , sessionTurnItems = canonicalItems
+                , sessionTurnDisplayItems = displayItems
                 , sessionTurnUsage = usage
                 , sessionTurnProviderTelemetry =
                     row.turnRowProviderTelemetry
                 }
             }
+
+-- Legacy rows predate the display-only channel, so every stored item is
+-- canonical when the boundary is absent.
+splitStoredTurnItems
+    :: Maybe Int64
+    -> [a]
+    -> Either Text ([a], [a])
+splitStoredTurnItems Nothing items = Right (items, [])
+splitStoredTurnItems (Just canonicalCount) items
+    | canonicalCount < 0 =
+        Left "stored session turn has a negative canonical item count"
+    | canonicalCount > fromIntegral (length items) =
+        Left "stored session turn canonical item count exceeds stored items"
+    | otherwise =
+        Right (splitAt (fromIntegral canonicalCount) items)
 
 decodeUsage
     :: Maybe Int64
@@ -763,7 +784,7 @@ loadTurnsManyStatement = mkStatement
     \ t.occurred_at, t.user_text, t.assistant_text, t.error_text,\
     \ t.response_id, t.transcript_effect, t.usage_input_tokens,\
     \ t.usage_output_tokens, t.usage_cached_tokens,\
-    \ t.provider_telemetry_json\
+    \ t.provider_telemetry_json, t.canonical_item_count\
     \ FROM harness.session_turns t\
     \ JOIN harness.sessions s ON s.session_id = t.session_id\
     \ WHERE s.session_key = ANY($1::text[]) AND s.deleted_at IS NULL\
@@ -1010,7 +1031,7 @@ turnSelectSql =
     \ t.user_text, t.assistant_text, t.error_text, t.response_id,\
     \ t.transcript_effect,\
     \ t.usage_input_tokens, t.usage_output_tokens, t.usage_cached_tokens,\
-    \ t.provider_telemetry_json\
+    \ t.provider_telemetry_json, t.canonical_item_count\
     \ FROM harness.session_turns t\
     \ JOIN harness.sessions s ON s.session_id = t.session_id"
 
@@ -1030,6 +1051,7 @@ turnRowDecoder =
         <*> Decoders.column (Decoders.nullable Decoders.int8)
         <*> Decoders.column (Decoders.nullable Decoders.int8)
         <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.int8)
 
 textArrayParams :: Encoders.Params [Text]
 textArrayParams =

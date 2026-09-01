@@ -115,6 +115,7 @@ import Agent.CLI.TurnState
     , turnInputsWithContext
     , turnNewItems
     , turnReplacesTranscript
+    , uncommittedDisplayItems
     )
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Loop
@@ -464,7 +465,8 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 handle <- ensureSession slotRef
                 writeIORef planMode.planSessionDir (Just handle.sessionDir)
                 writeIORef storeRoot (Just handle.sessionDir)
-                let turn = SessionTurn
+                let displayItems = uncommittedDisplayItems execution
+                    turn = SessionTurn
                         { turnAt = now
                         , turnUserText = promptText
                         , turnAssistantText =
@@ -475,6 +477,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         , turnResponseId = (.responseId) <$> maybeTurn
                         , turnEffect = TranscriptAppend
                         , turnItems = retainedItems
+                        , turnDisplayItems = displayItems
                         , turnUsage = (.tokenUsage) <$> maybeTurn
                         , turnProviderTelemetry =
                             execution.executionProviderTelemetry
@@ -696,6 +699,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnEffect = effect
                             , turnItems = newItems
+                            , turnDisplayItems = []
                             , turnUsage = Just loopResult.tokenUsage
                             , turnProviderTelemetry =
                                 execution.executionProviderTelemetry

@@ -331,6 +331,7 @@ eventWeight = \case
     ToolArgumentsUpdated call -> Text.length call.callId
     ToolRetracted callId -> Text.length callId
     ResponseAttemptDiscarded -> 1
+    ResponseAttemptFailed -> 1
     NativeAgentStarted identifier parent label model ->
         sum
             [ Text.length identifier

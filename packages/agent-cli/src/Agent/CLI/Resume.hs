@@ -741,6 +741,7 @@ loadRecentSessions pool root metas =
                             , turnResponseId = Nothing
                             , turnEffect = TranscriptAppend
                             , turnItems = []
+                            , turnDisplayItems = []
                             , turnUsage = Nothing
                             , turnProviderTelemetry = []
                             }

@@ -182,7 +182,7 @@ import Agent.CLI.Session
       SessionMeta(metaId, metaLastResponseId),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
-                  turnItems, turnProviderTelemetry) )
+                  turnItems, turnDisplayItems, turnProviderTelemetry) )
 import Agent.CLI.Session.Attachments ( queueAttachedImages )
 import Agent.CLI.Session.Choices
     ( accountUsageText, showAccountUsage )
@@ -933,6 +933,7 @@ handleReplLine
                                                 , turnResponseId = Nothing
                                                 , turnEffect = TranscriptReplace
                                                 , turnItems = outcome.compactHistory
+                                                , turnDisplayItems = []
                                                 -- Compaction response usage is
                                                 -- recorded immediately by
                                                 -- compactRunner, including

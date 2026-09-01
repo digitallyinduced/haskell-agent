@@ -373,6 +373,10 @@ claudeCodeSystemPrompt cwd today =
         , "Use Claude Code's built-in tools directly. The outer harness renders Claude Code's"
         , "validated structured output and does not execute tool calls on your behalf."
         , "Follow any AGENTS.md instructions supplied in user context."
+        , "Never use an unbounded polling loop or keep the turn open solely to wait for external"
+        , "state such as CI, deployments, reviews, or rate limits. Spend at most five minutes"
+        , "checking external state; if it is still pending, report its current status and URL,"
+        , "then finish the turn. Every background polling command must have a finite deadline."
         , "Be concise in user-visible responses."
         ]
 

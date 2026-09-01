@@ -44,6 +44,7 @@ import Control.Exception.Safe
     , mask
     , tryAny
     )
+import Control.Monad (when)
 import Data.Aeson (ToJSON(..), object, (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
@@ -246,6 +247,14 @@ data LoopExecution = LoopExecution
     -- 'executionState'. This is display metadata only: callers must not add
     -- it to backend state.
     , executionUncommittedAssistantText :: !(Maybe Text)
+    -- | Replayable live response events from the provider attempt that never
+    -- committed. This is display metadata only: callers may project it into
+    -- durable history, but must never append it to backend/model state.
+    --
+    -- Host tool execution happens after 'TurnFinished' and is deliberately
+    -- excluded because its canonical calls/results are already retained in
+    -- 'executionState' and 'executionPendingInputs'.
+    , executionUncommittedDisplayEvents :: ![LoopEvent]
     -- | Rich provider metadata for every response committed during this loop.
     , executionProviderTelemetry :: ![TurnTelemetry]
     , executionResult :: !(Either LoopError LoopResult)
@@ -383,6 +392,10 @@ data LoopEvent
     -- | Discard all UI activity emitted by the current response attempt.
     -- This is distinct from ending the whole turn: a retry may follow.
     | ResponseAttemptDiscarded
+    -- | The composed backend (including recovery/fallback wrappers) has
+    -- definitively failed after emitting visible output. Renderers must keep
+    -- that output and close any streaming/running blocks as failed.
+    | ResponseAttemptFailed
     -- | Lifecycle/activity from a provider-managed child agent. These agents
     -- are display-only unless the provider exposes targeted controls.
     | NativeAgentStarted Text (Maybe Text) Text (Maybe Text)
@@ -560,11 +573,13 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
     uncommittedTextRef <- newIORef ([], [])
+    uncommittedDisplayEventsRef <- newIORef []
+    providerAttemptActiveRef <- newIORef False
     providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
     withAsync (runEventPump eventPump) \eventWorker -> do
-        let recordVisible event =
+        let recordVisible event = do
                 modifyIORef' uncommittedTextRef \(finished, current) ->
                     case event of
                         TextDelta delta -> (finished, delta : current)
@@ -573,6 +588,29 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                         ResponseRestarted _ -> finishCurrent finished current
                         ResponseAttemptDiscarded -> (finished, [])
                         _ -> (finished, current)
+                case event of
+                    TurnStarted -> do
+                        writeIORef providerAttemptActiveRef True
+                        writeIORef uncommittedDisplayEventsRef []
+                    TurnFinished _ -> do
+                        writeIORef providerAttemptActiveRef False
+                        writeIORef uncommittedDisplayEventsRef []
+                    ResponseRestarted _ ->
+                        modifyIORef'
+                            uncommittedDisplayEventsRef
+                            (event :)
+                    ResponseAttemptDiscarded ->
+                        modifyIORef'
+                            uncommittedDisplayEventsRef
+                            discardCurrentDisplayAttempt
+                    _
+                        | replayableDisplayEvent event -> do
+                            active <- readIORef providerAttemptActiveRef
+                            when active $
+                                modifyIORef'
+                                    uncommittedDisplayEventsRef
+                                    (recordDisplayEvent event)
+                        | otherwise -> pure ()
             finishCurrent finished current
                 | null current = (finished, [])
                 | otherwise = (current : finished, [])
@@ -590,6 +628,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 writeIORef progressRef (state, progress)
                 pending <- readIORef pendingRef
                 (finishedChunks, currentChunks) <- readIORef uncommittedTextRef
+                displayEvents <-
+                    reverse <$> readIORef uncommittedDisplayEventsRef
                 providerTelemetry <-
                     reverse <$> readIORef providerTelemetryRef
                 let uncommittedText = Text.intercalate "\n\n" $
@@ -604,6 +644,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                         if Text.null uncommittedText
                             then Nothing
                             else Just uncommittedText
+                    , executionUncommittedDisplayEvents = displayEvents
                     , executionProviderTelemetry = providerTelemetry
                     , executionResult = result
                     }
@@ -645,16 +686,33 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                             then finishCursor cursor (Left (LoopCancelled []))
                             else do
                                 config.loopOnEvent TurnStarted
-                                outputSeen <- newIORef False
+                                visibleAttempts <- newIORef (False, False)
                                 let onBackendEvent event = do
                                         case event of
-                                            TextDelta _ -> writeIORef outputSeen True
-                                            ReasoningDelta _ -> writeIORef outputSeen True
+                                            _
+                                                | visibleResponseActivity event ->
+                                                    modifyIORef'
+                                                        visibleAttempts
+                                                        (\(prior, _) ->
+                                                            (prior, True))
+                                            -- A retry keeps the previous
+                                            -- attempt visible while opening a
+                                            -- fresh current attempt.
+                                            ResponseRestarted _ ->
+                                                modifyIORef'
+                                                    visibleAttempts
+                                                    (\(prior, current) ->
+                                                        ( prior || current
+                                                        , False
+                                                        ))
                                             -- The backend rolled that attempt back,
-                                            -- so a later failure no longer interrupts
-                                            -- visible output.
+                                            -- but earlier restarted attempts
+                                            -- remain visible.
                                             ResponseAttemptDiscarded ->
-                                                writeIORef outputSeen False
+                                                modifyIORef'
+                                                    visibleAttempts
+                                                    (\(prior, _) ->
+                                                        (prior, False))
                                             _ -> pure ()
                                         config.loopOnEvent event
                                 -- Race the model call against cancel so Ctrl-C / Esc
@@ -718,7 +776,13 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         finishCursor cursor
                                             (Left (LoopCancelled []))
                                     Right (Left err) -> do
-                                        emitted <- readIORef outputSeen
+                                        (priorVisible, currentVisible) <-
+                                            readIORef visibleAttempts
+                                        let emitted =
+                                                priorVisible || currentVisible
+                                        when emitted $
+                                            config.loopOnEvent
+                                                ResponseAttemptFailed
                                         finishCursor cursor $ Left $
                                             if emitted
                                                 then LoopTransportAfterOutput err
@@ -746,6 +810,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 -- it, and its assistant text now lives in the committed state.
                 writeIORef pendingRef []
                 writeIORef uncommittedTextRef ([], [])
+                writeIORef uncommittedDisplayEventsRef []
+                writeIORef providerAttemptActiveRef False
                 -- Result metadata belongs to the response commit even when a
                 -- cancellation lands before the completion event is painted.
                 case turn.providerTelemetry of
@@ -823,6 +889,101 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 readIORef progressRef >>= \(state, progress) ->
                     handleLoopEventFailure unexpected state progress failure
             Right () -> pure execution
+
+-- | Events that can be normalized into stable, display-only response items.
+-- Reasoning is intentionally omitted: durable session history has always
+-- treated provider scratchpad as live-only.
+replayableDisplayEvent :: LoopEvent -> Bool
+replayableDisplayEvent = \case
+    TextDelta _ -> True
+    ToolStarted _ -> True
+    ToolUpdated _ -> True
+    ToolArgumentsUpdated _ -> True
+    ToolOutputUpdated _ _ -> True
+    ToolFinished _ -> True
+    ToolRetracted _ -> True
+    _ -> False
+
+-- The journal is stored newest-first. A restart is the boundary between the
+-- current provider attempt and older attempts that remain visible.
+recordDisplayEvent :: LoopEvent -> [LoopEvent] -> [LoopEvent]
+recordDisplayEvent event events = case event of
+    TextDelta delta ->
+        case events of
+            TextDelta previous : rest ->
+                TextDelta (previous <> delta) : rest
+            _ -> event : events
+    ToolUpdated call ->
+        event : removeCurrentToolUpdates call.callId events
+    ToolArgumentsUpdated call ->
+        event : removeCurrentToolUpdates call.callId events
+    ToolOutputUpdated callId output ->
+        ToolOutputUpdated callId (boundLoopToolOutput output)
+            : removeCurrentToolOutput callId events
+    ToolFinished result ->
+        ToolFinished
+            result
+                { output = boundLoopToolOutput result.output
+                }
+            : removeCurrentToolOutput result.callId events
+    ToolRetracted callId ->
+        removeCurrentToolEvents callId events
+    _ -> event : events
+
+discardCurrentDisplayAttempt :: [LoopEvent] -> [LoopEvent]
+discardCurrentDisplayAttempt =
+    dropWhile \case
+        ResponseRestarted _ -> False
+        _ -> True
+
+removeCurrentToolUpdates :: Text -> [LoopEvent] -> [LoopEvent]
+removeCurrentToolUpdates callId =
+    filterCurrentAttempt \case
+        ToolUpdated call -> call.callId /= callId
+        ToolArgumentsUpdated call -> call.callId /= callId
+        _ -> True
+
+removeCurrentToolOutput :: Text -> [LoopEvent] -> [LoopEvent]
+removeCurrentToolOutput callId =
+    filterCurrentAttempt \case
+        ToolOutputUpdated identifier _ -> identifier /= callId
+        _ -> True
+
+removeCurrentToolEvents :: Text -> [LoopEvent] -> [LoopEvent]
+removeCurrentToolEvents callId =
+    filterCurrentAttempt \case
+        ToolStarted call -> call.callId /= callId
+        ToolUpdated call -> call.callId /= callId
+        ToolArgumentsUpdated call -> call.callId /= callId
+        ToolOutputUpdated identifier _ -> identifier /= callId
+        ToolFinished result -> result.callId /= callId
+        _ -> True
+
+filterCurrentAttempt
+    :: (LoopEvent -> Bool)
+    -> [LoopEvent]
+    -> [LoopEvent]
+filterCurrentAttempt keep = go
+  where
+    go [] = []
+    go allEvents@(ResponseRestarted _ : _) = allEvents
+    go (event : rest)
+        | keep event = event : go rest
+        | otherwise = go rest
+
+visibleResponseActivity :: LoopEvent -> Bool
+visibleResponseActivity = \case
+    TextDelta _ -> True
+    ReasoningDelta _ -> True
+    ToolStarted _ -> True
+    ToolUpdated _ -> True
+    ToolArgumentsUpdated _ -> True
+    ToolOutputUpdated _ _ -> True
+    ToolFinished _ -> True
+    NativeAgentStarted{} -> True
+    NativeAgentOutput{} -> True
+    NativeAgentFinished{} -> True
+    _ -> False
 
 data LoopEventCoalescingKey
     = AssistantTextDelta

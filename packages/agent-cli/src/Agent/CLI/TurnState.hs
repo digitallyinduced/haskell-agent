@@ -19,10 +19,14 @@ module Agent.CLI.TurnState
     , turnInputsWithContext
     , turnNewItems
     , turnReplacesTranscript
+    , isDisplayAttemptBoundary
+    , uncommittedDisplayItems
     ) where
 
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop
     ( LoopError(..)
+    , LoopEvent(..)
     , LoopExecution(..)
     , LoopProgress(..)
     , TokenUsage
@@ -46,18 +50,272 @@ import Agent.Responses.Types
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , ItemStatus(..)
+    , MessageContent(..)
+    , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , TaggedObject(..)
     )
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encoding as AesonEncoding
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+
+data DisplayProjection = DisplayProjection
+    { displayItems :: ![ResponseItem]
+    , displayCanAppendText :: !Bool
+    }
+
+-- | Normalize the transient provider event journal into stable response
+-- items used only by session-history projection. These items must never enter
+-- model context.
+uncommittedDisplayItems :: LoopExecution -> [ResponseItem]
+uncommittedDisplayItems execution =
+    (.displayItems) $
+        foldl'
+            projectDisplayEvent
+            DisplayProjection
+                { displayItems = []
+                , displayCanAppendText = False
+                }
+            execution.executionUncommittedDisplayEvents
+
+projectDisplayEvent :: DisplayProjection -> LoopEvent -> DisplayProjection
+projectDisplayEvent projection = \case
+    TextDelta delta
+        | Text.null delta -> projection
+        | projection.displayCanAppendText ->
+            projection
+                { displayItems =
+                    appendAssistantDelta delta projection.displayItems
+                }
+        | otherwise ->
+            projection
+                { displayItems =
+                    projection.displayItems <> [displayAssistantItem delta]
+                , displayCanAppendText = True
+                }
+    ResponseRestarted _ ->
+        projection
+            { displayItems =
+                projection.displayItems <> [displayAttemptBoundary]
+            , displayCanAppendText = False
+            }
+    ToolStarted call ->
+        projectDisplayCall call projection
+    ToolUpdated call ->
+        projectDisplayCall call projection
+    ToolArgumentsUpdated call ->
+        projectDisplayCall call projection
+    ToolOutputUpdated callId output ->
+        projection
+            { displayItems =
+                replaceDisplayOutput
+                    callId
+                    (displayToolOutput callId output ItemIncomplete)
+                    projection.displayItems
+            , displayCanAppendText = False
+            }
+    ToolFinished result ->
+        projection
+            { displayItems =
+                replaceDisplayOutput
+                    result.callId
+                    (displayToolOutput
+                        result.callId
+                        result.output
+                        ItemCompleted)
+                    projection.displayItems
+            , displayCanAppendText = False
+            }
+    ToolRetracted callId ->
+        projection
+            { displayItems =
+                updateCurrentDisplayAttempt
+                    (filter (not . belongsToDisplayCall callId))
+                    projection.displayItems
+            , displayCanAppendText = False
+            }
+    _ -> projection
+
+projectDisplayCall :: ToolCall -> DisplayProjection -> DisplayProjection
+projectDisplayCall call projection =
+    projection
+        { displayItems =
+            replaceDisplayCall call projection.displayItems
+        , displayCanAppendText = False
+        }
+
+replaceDisplayCall :: ToolCall -> [ResponseItem] -> [ResponseItem]
+replaceDisplayCall call =
+    updateOrAppendCurrentDisplayAttempt
+        (isDisplayCall call.callId)
+        (isDisplayCall call.callId)
+        (displayToolCall call)
+
+replaceDisplayOutput
+    :: Text
+    -> ResponseItem
+    -> [ResponseItem]
+    -> [ResponseItem]
+replaceDisplayOutput callId replacement =
+    updateOrAppendCurrentDisplayAttempt
+        (isDisplayOutput callId)
+        (isDisplayOutput callId)
+        replacement
+
+updateOrAppendCurrentDisplayAttempt
+    :: (ResponseItem -> Bool)
+    -> (ResponseItem -> Bool)
+    -> ResponseItem
+    -> [ResponseItem]
+    -> [ResponseItem]
+updateOrAppendCurrentDisplayAttempt exists replace replacement items =
+    let (prior, current) = splitCurrentDisplayAttempt items
+    in if any exists current
+        then
+            prior
+                <> map
+                    (\item ->
+                        if replace item then replacement else item)
+                    current
+        else items <> [replacement]
+
+updateCurrentDisplayAttempt
+    :: ([ResponseItem] -> [ResponseItem])
+    -> [ResponseItem]
+    -> [ResponseItem]
+updateCurrentDisplayAttempt update items =
+    let (prior, current) = splitCurrentDisplayAttempt items
+    in prior <> update current
+
+splitCurrentDisplayAttempt
+    :: [ResponseItem]
+    -> ([ResponseItem], [ResponseItem])
+splitCurrentDisplayAttempt items =
+    let (currentReversed, priorReversed) =
+            break isDisplayAttemptBoundary (reverse items)
+    in (reverse priorReversed, reverse currentReversed)
+
+displayAttemptBoundary :: ResponseItem
+displayAttemptBoundary =
+    UnknownResponseItem
+        TaggedObject
+            { tag = displayAttemptBoundaryTag
+            }
+
+displayAttemptBoundaryTag :: Text
+displayAttemptBoundaryTag =
+    "haskell_agent_display_attempt_boundary"
+
+isDisplayAttemptBoundary :: ResponseItem -> Bool
+isDisplayAttemptBoundary = \case
+    UnknownResponseItem tagged ->
+        tagged.tag == displayAttemptBoundaryTag
+    _ -> False
+
+displayAssistantItem :: Text -> ResponseItem
+displayAssistantItem text =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content =
+            MessageContentParts
+                [ OutputTextPart
+                    { text
+                    , annotations = Nothing
+                    , logprobs = Nothing
+                    }
+                ]
+        , role = RoleAssistant
+        , status = Just ItemIncomplete
+        , phase = Nothing
+        , passthrough = Nothing
+        }
+
+appendAssistantDelta :: Text -> [ResponseItem] -> [ResponseItem]
+appendAssistantDelta delta items =
+    case reverse items of
+        MessageItem message : rest
+            | message.role == RoleAssistant ->
+                reverse rest
+                    <> [ MessageItem message
+                            { content =
+                                appendMessageText delta message.content
+                            }
+                       ]
+        _ -> items <> [displayAssistantItem delta]
+
+appendMessageText :: Text -> MessageContent -> MessageContent
+appendMessageText delta = \case
+    MessageContentText text ->
+        MessageContentText (text <> delta)
+    MessageContentParts parts ->
+        MessageContentParts $
+            case reverse parts of
+                OutputTextPart{text, annotations, logprobs} : rest ->
+                    reverse rest
+                        <> [ OutputTextPart
+                                { text = text <> delta
+                                , annotations
+                                , logprobs
+                                }
+                           ]
+                _ ->
+                    parts
+                        <> [ OutputTextPart
+                                { text = delta
+                                , annotations = Nothing
+                                , logprobs = Nothing
+                                }
+                           ]
+
+displayToolCall :: ToolCall -> ResponseItem
+displayToolCall call =
+    FunctionCallItem FunctionCall
+        { itemId = Nothing
+        , callId = call.callId
+        , name = call.name
+        , namespace = Nothing
+        , provider = Nothing
+        , arguments =
+            if call.argumentsEncrypted
+                then "{}"
+                else call.arguments
+        , encryptedFunctionArgs = Nothing
+        , status = Just ItemInProgress
+        }
+
+displayToolOutput :: Text -> Text -> ItemStatus -> ResponseItem
+displayToolOutput callId output status =
+    FunctionCallOutputItem FunctionCallOutput
+        { itemId = Nothing
+        , callId
+        , name = Nothing
+        , namespace = Nothing
+        , provider = Nothing
+        , output = rawJsonFromEncoding (AesonEncoding.text output)
+        , status = Just status
+        }
+
+belongsToDisplayCall :: Text -> ResponseItem -> Bool
+belongsToDisplayCall callId item =
+    isDisplayCall callId item || isDisplayOutput callId item
+
+isDisplayCall :: Text -> ResponseItem -> Bool
+isDisplayCall callId = \case
+    FunctionCallItem call -> call.callId == callId
+    _ -> False
+
+isDisplayOutput :: Text -> ResponseItem -> Bool
+isDisplayOutput callId = \case
+    FunctionCallOutputItem output -> output.callId == callId
+    _ -> False
 
 data ConversationState = ConversationState
     { conversationPreviousResponseId :: !(Maybe Text)

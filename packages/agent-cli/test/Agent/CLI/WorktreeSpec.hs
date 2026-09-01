@@ -309,6 +309,27 @@ spec = describe "Agent.CLI.Worktree" do
                 report.cleanupFailures `shouldBe` []
                 doesDirectoryExist older `shouldReturn` True
 
+        it "preserves managed-looking directories without Git metadata" $
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                    repository = root </> fromFilePath "repository"
+                    older =
+                        repository
+                            </> fromFilePath "2026-08-20-00000001"
+                    newer =
+                        repository
+                            </> fromFilePath "2026-08-21-00000002"
+                    sentinel = older </> fromFilePath "unfinished-removal"
+                createDirectoryIfMissing True older
+                createDirectoryIfMissing True newer
+                writeFile (toFilePath sentinel) "preserve me\n"
+
+                report <- cleanupStaleWorktrees root 1 []
+
+                report.cleanupRemoved `shouldBe` []
+                report.cleanupFailures `shouldBe` []
+                doesFileExist sentinel `shouldReturn` True
+
         it "preserves stale worktrees with an active shared lease" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do

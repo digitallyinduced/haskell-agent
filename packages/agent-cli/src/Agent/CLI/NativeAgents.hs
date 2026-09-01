@@ -122,6 +122,8 @@ applyNativeAgentEvent event current =
                 settleRunningNativeAgents NativeAgentCancelled current
             ResponseAttemptDiscarded ->
                 settleRunningNativeAgents NativeAgentCancelled current
+            ResponseAttemptFailed ->
+                settleRunningNativeAgents NativeAgentFailed current
             NativeAgentStarted identifier parent label model ->
                 alterTouched identifier
                     (\case

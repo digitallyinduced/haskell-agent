@@ -532,6 +532,11 @@ renderEventUnlocked config = \case
         pure ()
     ResponseAttemptDiscarded ->
         pure ()
+    ResponseAttemptFailed -> do
+        commitThinkingUnlocked config
+        when config.renderColor do
+            didPrint <- finalizeAssistantBuffer config Nothing
+            when didPrint (putTextLn config.renderStdout "")
     NativeAgentStarted{} ->
         pure ()
     NativeAgentOutput{} ->

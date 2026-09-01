@@ -506,6 +506,11 @@ updateManagedActivity event state =
             state
         ResponseAttemptDiscarded ->
             emptyManagedActivityAccumulator
+        ResponseAttemptFailed ->
+            state
+                { accumulatorKind = "failed"
+                , accumulatorMessage = "Response failed"
+                }
         NativeAgentStarted{} ->
             state
         NativeAgentOutput{} ->

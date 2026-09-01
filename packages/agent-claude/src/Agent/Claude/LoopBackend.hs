@@ -25,7 +25,6 @@ import Agent.Claude.Internal.Messages
     , ClaudeInterpretationError(..)
     , CompletedClaudeTurn(..)
     , assistantMessageItem
-    , claudeEventStateHasActivity
     , emptyClaudeEventState
     , interpretClaudeTurnWithCredentialValidation
     , remainingClaudeEvents
@@ -392,12 +391,7 @@ submitClaudeCodeTurn
                                     modifyIORef' messages (message :))
                         case awaitResult of
                             Left sdkError ->
-                                do
-                                    state <- readIORef eventState
-                                    if claudeEventStateHasActivity state
-                                        then onEvent ResponseAttemptDiscarded
-                                        else pure ()
-                                    pure (Left sdkError)
+                                pure (Left sdkError)
                             Right result -> do
                                 turnMessages <- reverse <$> readIORef messages
                                 case
@@ -407,25 +401,15 @@ submitClaudeCodeTurn
                                         result
                                   of
                                     Left (ClaudeAuthenticationFailure message) ->
-                                        do
-                                            state <- readIORef eventState
-                                            if claudeEventStateHasActivity state
-                                                then onEvent ResponseAttemptDiscarded
-                                                else pure ()
-                                            pure
-                                                (Left ResultError
-                                                    { subtype = "authentication_error"
-                                                    , apiErrorStatus = Nothing
-                                                    , errors = [message]
-                                                    , result = Nothing
-                                                    })
+                                        pure
+                                            (Left ResultError
+                                                { subtype = "authentication_error"
+                                                , apiErrorStatus = Nothing
+                                                , errors = [message]
+                                                , result = Nothing
+                                                })
                                     Left (ClaudeProtocolFailure message) ->
-                                        do
-                                            state <- readIORef eventState
-                                            if claudeEventStateHasActivity state
-                                                then onEvent ResponseAttemptDiscarded
-                                                else pure ()
-                                            pure (Left (CLIProtocolError message))
+                                        pure (Left (CLIProtocolError message))
                                     Right completed -> do
                                         finalEventState <-
                                             readIORef eventState

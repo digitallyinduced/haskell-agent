@@ -100,6 +100,7 @@ turn effect text = SessionTurn
     , turnResponseId = Nothing
     , turnEffect = effect
     , turnItems = []
+    , turnDisplayItems = []
     , turnUsage = Nothing
     , turnProviderTelemetry = []
     }

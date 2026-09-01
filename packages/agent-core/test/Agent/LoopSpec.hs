@@ -1058,8 +1058,11 @@ spec = describe "runLoop" do
         backend <- scriptedBackend submissions
             [Left (ConnectionError "down")]
         config <- testConfig backend
-        result <- runLoop config Nothing "hello"
-        result `shouldBe` Left (LoopTransport (ConnectionError "down"))
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionResult
+            `shouldBe` Left (LoopTransport (ConnectionError "down"))
+        execution.executionUncommittedDisplayEvents `shouldBe` []
 
     it "returns explicit backend state and progress after success" do
         submissions <- newIORef []
@@ -1264,13 +1267,91 @@ spec = describe "runLoop" do
             `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
 
     it "marks a transport failure after streamed output as interrupted" do
+        observed <- newIORef []
         let backend = Backend \_state _prev _inputs onEvent -> do
                 onEvent (TextDelta "partial")
                 pure (Left (ConnectionError "down"))
-        config <- testConfig backend
-        result <- runLoop config Nothing "hello"
-        result `shouldBe`
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \event ->
+                    modifyIORef' observed (<> [event])
+                }
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionResult `shouldBe`
             Left (LoopTransportAfterOutput (ConnectionError "down"))
+        execution.executionUncommittedDisplayEvents
+            `shouldBe` [TextDelta "partial"]
+        readIORef observed `shouldReturn`
+            [TurnStarted, TextDelta "partial", ResponseAttemptFailed]
+
+    it "retains tool-only activity as display metadata on failure" do
+        let call =
+                functionToolCall "c1" "shell_command"
+                    "{\"command\":\"git status\"}"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (ToolStarted call)
+                onEvent (ToolOutputUpdated "c1" "still running")
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionResult `shouldBe`
+            Left (LoopTransportAfterOutput (ConnectionError "down"))
+        execution.executionUncommittedDisplayEvents
+            `shouldBe`
+                [ ToolStarted call
+                , ToolOutputUpdated "c1" "still running"
+                ]
+
+    it "keeps earlier restarted attempts in display metadata" do
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (TextDelta "first")
+                onEvent (ResponseRestarted "retrying")
+                onEvent (TextDelta "second")
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionUncommittedDisplayEvents
+            `shouldBe`
+                [ TextDelta "first"
+                , ResponseRestarted "retrying"
+                , TextDelta "second"
+                ]
+        execution.executionUncommittedAssistantText
+            `shouldBe` Just "first\n\nsecond"
+
+    it "still marks failure after a later retry attempt is discarded" do
+        observed <- newIORef []
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (TextDelta "first")
+                onEvent (ResponseRestarted "retrying")
+                onEvent (TextDelta "discard me")
+                onEvent ResponseAttemptDiscarded
+                pure (Left (ConnectionError "down"))
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \event ->
+                    modifyIORef' observed (<> [event])
+                }
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionResult `shouldBe`
+            Left (LoopTransportAfterOutput (ConnectionError "down"))
+        execution.executionUncommittedDisplayEvents
+            `shouldBe`
+                [ TextDelta "first"
+                , ResponseRestarted "retrying"
+                ]
+        readIORef observed `shouldReturn`
+            [ TurnStarted
+            , TextDelta "first"
+            , ResponseRestarted "retrying"
+            , TextDelta "discard me"
+            , ResponseAttemptDiscarded
+            , ResponseAttemptFailed
+            ]
 
     it "treats a transport failure after a discarded attempt as pre-output" do
         let backend = Backend \_state _prev _inputs onEvent -> do
@@ -1280,6 +1361,32 @@ spec = describe "runLoop" do
         config <- testConfig backend
         result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
+
+    it "bounds completed tool output retained after failure" do
+        let oversized =
+                Text.replicate (3 * 1024 * 1024) "x" <> "newest-tail"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent
+                    (ToolFinished
+                        (ToolCallResult
+                            "large"
+                            oversized
+                            FunctionCallKind))
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        case execution.executionUncommittedDisplayEvents of
+            [ToolFinished result] -> do
+                Text.length result.output
+                    `shouldSatisfy` (<= 2 * 1024 * 1024)
+                result.output `shouldSatisfy`
+                    Text.isPrefixOf "[earlier tool output truncated]"
+                result.output `shouldSatisfy`
+                    Text.isSuffixOf "newest-tail"
+            other ->
+                expectationFailure
+                    ("unexpected display events: " <> show other)
 
     it "turns synchronous backend exceptions into a failed turn" do
         config <- testConfig $ Backend \_state _prev _inputs _onEvent ->

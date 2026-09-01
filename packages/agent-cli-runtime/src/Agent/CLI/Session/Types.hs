@@ -326,7 +326,11 @@ data SessionTurn = SessionTurn
     , turnError :: !(Maybe Text)
     , turnResponseId :: !(Maybe Text)
     , turnEffect :: !TranscriptEffect
+    -- | Canonical items replayed into model context.
     , turnItems :: ![ResponseItem]
+    -- | Uncommitted provider activity retained for display only. These items
+    -- are never folded into resumed model context.
+    , turnDisplayItems :: ![ResponseItem]
     , turnUsage :: !(Maybe TokenUsage)
     , turnProviderTelemetry :: ![TurnTelemetry]
     } deriving (Eq, Show)
@@ -355,6 +359,7 @@ instance ToJSON SessionTurn where
         , "responseId" .= turn.turnResponseId
         , "effect" .= transcriptEffectText turn.turnEffect
         , "items" .= turn.turnItems
+        , "displayItems" .= turn.turnDisplayItems
         , "usage" .= turn.turnUsage
         , "providerTelemetry" .= turn.turnProviderTelemetry
         ]
@@ -367,6 +372,8 @@ sessionTurnDecoder = Hermes.object do
         turnErrorValue <- optionalKey "error" Hermes.text
         responseId <- optionalKey "responseId" Hermes.text
         items <- Hermes.atKey "items" (Hermes.list responseItemDecoder)
+        displayItems <-
+            Hermes.defaultKey [] "displayItems" (Hermes.list responseItemDecoder)
         usage <- optionalKey "usage" tokenUsageDecoder
         providerTelemetry <-
             Hermes.defaultKey [] "providerTelemetry"
@@ -384,6 +391,7 @@ sessionTurnDecoder = Hermes.object do
             , turnResponseId = responseId
             , turnEffect = effect
             , turnItems = items
+            , turnDisplayItems = displayItems
             , turnUsage = usage
             , turnProviderTelemetry = providerTelemetry
             }

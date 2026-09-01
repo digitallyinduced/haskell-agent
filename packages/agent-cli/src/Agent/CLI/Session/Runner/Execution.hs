@@ -856,6 +856,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 , turnResponseId = Nothing
                                 , turnEffect = TranscriptReplace
                                 , turnItems = durableHistory
+                                , turnDisplayItems = []
                                 , turnUsage = Nothing
                                 , turnProviderTelemetry = []
                                 }

@@ -300,7 +300,10 @@ appendSessionTurnIndexedInternal resetPrompt pool turn metadata =
                             , turnInsertTurn = turn
                             }
                         insertTurnStatement
-                    insertResponseItems turnId turn.sessionTurnItems
+                    insertResponseItems turnId
+                        ( turn.sessionTurnItems
+                            <> turn.sessionTurnDisplayItems
+                        )
                     when resetPrompt do
                         _ <- Transaction.statement
                             ( metadata.sessionMetadataKey
@@ -500,7 +503,8 @@ appendTurnTransaction turn metadata = do
                     , turnInsertTurn = turn
                     }
                 insertTurnStatement
-            insertResponseItems turnId turn.sessionTurnItems
+            insertResponseItems turnId
+                (turn.sessionTurnItems <> turn.sessionTurnDisplayItems)
             pure True
 
 data EventInsert = EventInsert
@@ -755,10 +759,10 @@ insertTurnStatement = mkStatement
     \ user_text, assistant_text, error_text, response_id,\
     \ transcript_effect,\
     \ usage_input_tokens, usage_output_tokens, usage_cached_tokens,\
-    \ provider_telemetry_json\
+    \ provider_telemetry_json, canonical_item_count\
     \ ) VALUES (\
     \ $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,\
-    \ $14\
+    \ $14, $15\
     \ ) RETURNING turn_id::text"
     ( ((.turnInsertSessionId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> ((.turnInsertEventId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
@@ -778,6 +782,10 @@ insertTurnStatement = mkStatement
             >$< Encoders.param (Encoders.nullable Encoders.int8))
         <> ((.sessionTurnProviderTelemetry) . (.turnInsertTurn)
             >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ( (fromIntegral . length
+                . (.sessionTurnItems)
+                . (.turnInsertTurn))
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True

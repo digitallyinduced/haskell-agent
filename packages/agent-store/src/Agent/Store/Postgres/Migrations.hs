@@ -244,6 +244,15 @@ coreMigrations =
         }
     , Migration
         { migrationVersion = 107
+        , migrationName = "display-only failed response items"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.session_turns\
+              \ ADD COLUMN IF NOT EXISTS canonical_item_count bigint\
+              \ CHECK (canonical_item_count >= 0)"
+            ]
+        }
+    , Migration
+        { migrationVersion = 108
         , migrationName = "gateway session identity binding"
         , migrationStatements =
             [ "ALTER TABLE IF EXISTS harness.sessions\

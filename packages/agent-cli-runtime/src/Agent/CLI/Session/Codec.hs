@@ -317,6 +317,8 @@ toStoredTurn turn = Store.SessionTurn
     , sessionTurnResponseId = turn.turnResponseId
     , sessionTurnEffect = turn.turnEffect
     , sessionTurnItems = map toStoredResponseItem turn.turnItems
+    , sessionTurnDisplayItems =
+        map toStoredResponseItem turn.turnDisplayItems
     , sessionTurnUsage = toStoredUsage <$> turn.turnUsage
     , sessionTurnProviderTelemetry =
         encodeProviderTelemetry turn.turnProviderTelemetry
@@ -325,6 +327,8 @@ toStoredTurn turn = Store.SessionTurn
 fromStoredTurn :: Store.SessionTurn -> Either Text SessionTurn
 fromStoredTurn stored = do
     items <- traverse fromStoredResponseItem stored.sessionTurnItems
+    displayItems <-
+        traverse fromStoredResponseItem stored.sessionTurnDisplayItems
     providerTelemetry <-
         decodeProviderTelemetry stored.sessionTurnProviderTelemetry
     pure SessionTurn
@@ -335,6 +339,7 @@ fromStoredTurn stored = do
         , turnResponseId = stored.sessionTurnResponseId
         , turnEffect = stored.sessionTurnEffect
         , turnItems = items
+        , turnDisplayItems = displayItems
         , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
         , turnProviderTelemetry = providerTelemetry
         }
