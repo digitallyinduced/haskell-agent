@@ -3,6 +3,7 @@
 module Agent.Claude.AuthSpec (spec) where
 
 import Agent.Claude.Auth
+import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.Text as Text
@@ -34,6 +35,7 @@ spec = do
                         { executable = "/bin/claude"
                         , accountLabel = "person@example.com"
                         , subscriptionType = Just "max"
+                        , transport = ClaudeCodeLocalSubscription
                         }
 
         it "rejects API-key and third-party provider authentication" do
@@ -65,6 +67,7 @@ spec = do
                         { executable = "/bin/claude"
                         , accountLabel = "Claude Code (pro)"
                         , subscriptionType = Just "pro"
+                        , transport = ClaudeCodeLocalSubscription
                         }
 
         it "uses Claude's orgName metadata when no email is present" do
@@ -76,6 +79,7 @@ spec = do
                         { executable = "/bin/claude"
                         , accountLabel = "Example Org"
                         , subscriptionType = Just "team"
+                        , transport = ClaudeCodeLocalSubscription
                         }
 
     describe "loadClaudeCodeAuth" do
@@ -118,6 +122,7 @@ spec = do
                                 { executable
                                 , accountLabel = "auth@example.com"
                                 , subscriptionType = Just "max"
+                                , transport = ClaudeCodeLocalSubscription
                                 }
 
 isLeftContaining :: Text.Text -> Either Text.Text a -> Bool

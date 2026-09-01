@@ -222,8 +222,15 @@ connectionBuiltinProvider connection = case connection.connectionKind of
 
 catalogDefaultForProvider :: ModelCatalog -> Provider -> Maybe CatalogModel
 catalogDefaultForProvider catalog provider =
-    find (.catalogModelDefault) $
-        catalogModelsForConnection (builtinConnectionId provider) catalog
+    find
+        (\model ->
+            model.catalogModelDefault
+                && (catalogConnection
+                        catalog
+                        model.catalogModelConnectionId
+                        >>= connectionBuiltinProvider)
+                    == Just provider)
+        catalog.catalogModels
 
 -- | Decode and validate one standalone file. This is mainly useful for tests;
 -- normal startup should use 'mergeModelConfigs' so defaults can be overlaid.

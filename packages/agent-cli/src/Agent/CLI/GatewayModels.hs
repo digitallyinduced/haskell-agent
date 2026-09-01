@@ -1,58 +1,136 @@
--- | Canonical model aliases exposed by the Digitally Induced LLM gateway.
---
--- Gateway credentials are process-wide, so the active catalog is deliberately
--- exclusive: direct provider models disappear while connected and gateway
--- aliases disappear while disconnected. This prevents a direct model id from
--- being sent to the gateway (or a router alias from reaching a provider).
+-- | Authoritative model aliases exposed by a connected organization gateway.
 module Agent.CLI.GatewayModels
     ( catalogForGatewayState
+    , catalogForGatewayModels
     , catalogUsesGateway
+    , gatewayConnectionId
+    , gatewayAnthropicConnectionId
     , gatewayDefaultModelId
     , gatewayModelIds
-    , isGatewayModelId
+    , isGatewayConnectionId
+    , isLegacyGatewayModelId
     , loadGatewayModelCatalogAt
     ) where
 
-import Agent.CLI.GatewayClient (loadGatewayCredentialAt)
+import Agent.CLI.GatewayClient
+    ( GatewayModelCatalog(..)
+    , fetchGatewayModelCatalog
+    , loadGatewayCredentialAt
+    )
 import Agent.CLI.ModelConfig
     ( CatalogModel(..)
+    , ConnectionKind(..)
     , ModelCatalog(..)
-    , builtinConnectionId
+    , ModelConnection(..)
     , loadModelCatalogAt
     )
-import Agent.Dialect (DialectId (CodexDialect))
-import Agent.Provider (Provider (OpenAIProvider))
+import Agent.Dialect
+    ( DialectId (ClaudeCodeDialect, CodexDialect) )
+import Agent.Provider
+    ( Provider (ClaudeCodeProvider, OpenAIProvider) )
+import Data.List (nub)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
+import Data.Text qualified as Text
 import System.OsPath (OsPath)
 
-gatewayDefaultModelId :: Text
-gatewayDefaultModelId = "router-default"
+gatewayConnectionId :: Text
+gatewayConnectionId = "gateway"
 
+gatewayAnthropicConnectionId :: Text
+gatewayAnthropicConnectionId = "gateway-anthropic"
+
+gatewayDefaultModelId :: Text
+gatewayDefaultModelId = "gpt-5.6-sol"
+
+-- Kept as the canonical defaults for callers/tests that need a disconnected
+-- fixture. A connected catalog is always populated from discovery.
 gatewayModelIds :: [Text]
 gatewayModelIds =
     [ gatewayDefaultModelId
-    , "router-codex"
-    , "router-grok"
+    , "gpt-5.6-terra"
+    , "gpt-5.6-luna"
     ]
 
-isGatewayModelId :: Text -> Bool
-isGatewayModelId modelId = modelId `elem` gatewayModelIds
+isGatewayConnectionId :: Text -> Bool
+isGatewayConnectionId connectionId =
+    connectionId == gatewayConnectionId
+        || connectionId == gatewayAnthropicConnectionId
+
+isLegacyGatewayModelId :: Text -> Bool
+isLegacyGatewayModelId modelId =
+    "router-" `Text.isPrefixOf` modelId
+        || modelId == "traumimmo-translation"
 
 catalogUsesGateway :: ModelCatalog -> Bool
 catalogUsesGateway catalog =
     not (null catalog.catalogModels)
-        && all (isGatewayModelId . (.catalogModelId)) catalog.catalogModels
+        && Map.lookup gatewayConnectionId catalog.catalogConnections
+            == Just gatewayResponsesConnection
+        && all
+            (isGatewayConnectionId . (.catalogModelConnectionId))
+            catalog.catalogModels
 
+-- Compatibility helper used by pure tests. Runtime connection uses discovery.
 catalogForGatewayState :: Bool -> ModelCatalog -> ModelCatalog
 catalogForGatewayState connected catalog
-    | connected = catalog { catalogModels = canonicalGatewayModels }
-    | otherwise =
-        catalog
-            { catalogModels =
-                filter
-                    (not . isGatewayModelId . (.catalogModelId))
-                    catalog.catalogModels
-            }
+    | connected =
+        catalogForGatewayModels
+            GatewayModelCatalog
+                { gatewayResponsesModels = gatewayModelIds
+                , gatewayAnthropicModels = []
+                }
+            catalog
+    | otherwise = disconnectedCatalog catalog
+
+catalogForGatewayModels
+    :: GatewayModelCatalog
+    -> ModelCatalog
+    -> ModelCatalog
+catalogForGatewayModels discovered catalog =
+    catalog
+        { catalogConnections =
+            Map.fromList $
+                (gatewayConnectionId, gatewayResponsesConnection)
+                    : [ (gatewayAnthropicConnectionId, gatewayAnthropicConnection)
+                      | not (null anthropicIds)
+                      ]
+        , catalogModels =
+            zipWith
+                (gatewayModel gatewayConnectionId CodexDialect)
+                responseIds
+                (defaultFlags responseIds anthropicIds)
+                <> zipWith
+                    (gatewayModel
+                        gatewayAnthropicConnectionId
+                        ClaudeCodeDialect)
+                    anthropicIds
+                    (drop (length responseIds)
+                        (defaultFlags responseIds anthropicIds))
+        }
+  where
+    responseIds = sanitize discovered.gatewayResponsesModels
+    anthropicIds =
+        filter (`notElem` responseIds) $
+            sanitize discovered.gatewayAnthropicModels
+    sanitize =
+        nub
+            . filter
+                (\modelId ->
+                    not (Text.null (Text.strip modelId))
+                        && not (isLegacyGatewayModelId modelId))
+
+defaultFlags :: [Text] -> [Text] -> [Bool]
+defaultFlags responseIds anthropicIds =
+    [ Just modelId == selected
+    | modelId <- responseIds <> anthropicIds
+    ]
+  where
+    selected
+        | gatewayDefaultModelId `elem` responseIds =
+            Just gatewayDefaultModelId
+        | otherwise = listToMaybe (responseIds <> anthropicIds)
 
 loadGatewayModelCatalogAt
     :: OsPath
@@ -65,29 +143,57 @@ loadGatewayModelCatalogAt home cwd =
             loadGatewayCredentialAt home >>= \case
                 Left err ->
                     pure (Left ("cannot load gateway credential: " <> err))
-                Right credential ->
-                    pure
-                        (Right
-                            (catalogForGatewayState
-                                (maybe False (const True) credential)
-                                catalog))
+                Right Nothing ->
+                    pure (Right (disconnectedCatalog catalog))
+                Right (Just credential) ->
+                    fetchGatewayModelCatalog credential >>= \case
+                        Left err -> pure (Left err)
+                        Right discovered ->
+                            let active = catalogForGatewayModels discovered catalog
+                             in if null active.catalogModels
+                                    then
+                                        pure $
+                                            Left
+                                                "The connected gateway returned an empty model catalog."
+                                    else pure (Right active)
 
-canonicalGatewayModels :: [CatalogModel]
-canonicalGatewayModels =
-    [ gatewayModel gatewayDefaultModelId "Gateway · Default" True
-    , gatewayModel "router-codex" "Gateway · Codex" False
-    , gatewayModel "router-grok" "Gateway · Grok" False
-    ]
+disconnectedCatalog :: ModelCatalog -> ModelCatalog
+disconnectedCatalog catalog =
+    catalog
+        { catalogModels =
+            filter
+                (not . isLegacyGatewayModelId . (.catalogModelId))
+                catalog.catalogModels
+        }
 
-gatewayModel :: Text -> Text -> Bool -> CatalogModel
-gatewayModel modelId label isDefault =
+gatewayResponsesConnection :: ModelConnection
+gatewayResponsesConnection =
+    ModelConnection
+        { connectionId = gatewayConnectionId
+        , connectionKind = BuiltinConnection OpenAIProvider
+        }
+
+gatewayAnthropicConnection :: ModelConnection
+gatewayAnthropicConnection =
+    ModelConnection
+        { connectionId = gatewayAnthropicConnectionId
+        , connectionKind = BuiltinConnection ClaudeCodeProvider
+        }
+
+gatewayModel
+    :: Text
+    -> DialectId
+    -> Text
+    -> Bool
+    -> CatalogModel
+gatewayModel connection dialect modelId isDefault =
     CatalogModel
         { catalogModelId = modelId
-        , catalogModelConnectionId = builtinConnectionId OpenAIProvider
+        , catalogModelConnectionId = connection
         , catalogModelWireId = modelId
-        , catalogModelDialect = CodexDialect
+        , catalogModelDialect = dialect
         , catalogModelContextWindow = Nothing
-        , catalogModelLabel = Just label
+        , catalogModelLabel = Just "Gateway"
         , catalogModelReasoningEfforts =
             Just ["low", "medium", "high", "xhigh", "max"]
         , catalogModelDefaultReasoningEffort = Just "medium"

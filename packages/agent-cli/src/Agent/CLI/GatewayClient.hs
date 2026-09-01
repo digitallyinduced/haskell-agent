@@ -1,12 +1,14 @@
 -- | HTTPS device authorization and restricted gateway credential storage.
 module Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , GatewayModelCatalog(..)
     , GatewayAuthorizationCodeResponse(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
     , connectGateway
     , disconnectGateway
     , exchangeGatewayAuthorizationCode
+    , fetchGatewayModelCatalog
     , gatewayCredentialPath
     , loadGatewayCredential
     , loadGatewayCredentialAt
@@ -33,6 +35,7 @@ import Control.Monad (when)
 import Data.Aeson ((.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Types qualified as Aeson
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
@@ -41,7 +44,13 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS (newTlsManager)
-import Network.HTTP.Types (hContentType, statusIsSuccessful)
+import Data.Vector qualified as Vector
+import Network.HTTP.Types
+    ( hAccept
+    , hAuthorization
+    , hContentType
+    , statusIsSuccessful
+    )
 import Network.HTTP.Types.URI (renderSimpleQuery)
 import Network.URI qualified as URI
 import System.Directory.OsPath qualified as Directory
@@ -57,6 +66,107 @@ data GatewayCredential = GatewayCredential
     , gatewayAccessToken :: !Text
     }
     deriving (Eq)
+
+-- | Public aliases accepted by the two gateway wire surfaces.
+data GatewayModelCatalog = GatewayModelCatalog
+    { gatewayResponsesModels :: ![Text]
+    , gatewayAnthropicModels :: ![Text]
+    }
+    deriving (Eq, Show)
+
+-- | Read the current user-scoped alias catalog. Both surfaces are required:
+-- a partial result could silently widen or change the configured boundary.
+fetchGatewayModelCatalog
+    :: GatewayCredential
+    -> IO (Either Text GatewayModelCatalog)
+fetchGatewayModelCatalog rawCredential =
+    case validateGatewayCredential rawCredential of
+        Left _ -> pure (Left modelDiscoveryError)
+        Right credential -> do
+            manager <- newTlsManager
+            responses <- fetchModelIds manager credential "/v1/models"
+            anthropic <- fetchModelIds manager credential "/anthropic/v1/models"
+            pure do
+                responseIds <- responses
+                anthropicIds <- anthropic
+                if null responseIds && null anthropicIds
+                    then Left "The connected gateway returned an empty model catalog."
+                    else
+                        Right GatewayModelCatalog
+                            { gatewayResponsesModels = responseIds
+                            , gatewayAnthropicModels = anthropicIds
+                            }
+
+modelDiscoveryError :: Text
+modelDiscoveryError =
+    "Unable to load the connected gateway model catalog."
+
+fetchModelIds
+    :: HTTP.Manager
+    -> GatewayCredential
+    -> Text
+    -> IO (Either Text [Text])
+fetchModelIds manager credential path = do
+    parsed <-
+        tryAny $
+            HTTP.parseRequest $
+                Text.unpack credential.gatewayBaseUrl <> Text.unpack path
+    case parsed of
+        Left _ -> pure (Left modelDiscoveryError)
+        Right initial -> do
+            result <-
+                tryAny $
+                    HTTP.withResponse
+                        initial
+                            { HTTP.method = "GET"
+                            , HTTP.requestHeaders =
+                                [ (hAuthorization, "Bearer " <> TextEncoding.encodeUtf8 credential.gatewayAccessToken)
+                                , (hAccept, "application/json")
+                                ]
+                            , HTTP.redirectCount = 0
+                            , HTTP.checkResponse = \_ _ -> pure ()
+                            , HTTP.responseTimeout =
+                                HTTP.responseTimeoutMicro (15 * 1_000_000)
+                            }
+                        manager
+                        \response -> do
+                            if not (statusIsSuccessful response.responseStatus)
+                                then pure (Left modelDiscoveryError)
+                                else do
+                                    body <- readBoundedBody 1_048_576 response.responseBody
+                                    pure (body >>= decodeModelIds)
+            pure $ either (const (Left modelDiscoveryError)) id result
+
+readBoundedBody
+    :: Int
+    -> HTTP.BodyReader
+    -> IO (Either Text BS.ByteString)
+readBoundedBody limit reader = go 0 []
+  where
+    go size chunks = do
+        chunk <- HTTP.brRead reader
+        if BS.null chunk
+            then pure (Right (BS.concat (reverse chunks)))
+            else
+                let next = size + BS.length chunk
+                 in if next > limit
+                        then pure (Left modelDiscoveryError)
+                        else go next (chunk : chunks)
+
+decodeModelIds :: BS.ByteString -> Either Text [Text]
+decodeModelIds bytes =
+    case Aeson.eitherDecodeStrict' bytes of
+        Right (Aeson.Object object)
+            | Just (Aeson.String "list") <- KeyMap.lookup "object" object
+            , Just (Aeson.Array models) <- KeyMap.lookup "data" object ->
+                traverse decodeModel (Vector.toList models)
+        _ -> Left modelDiscoveryError
+  where
+    decodeModel (Aeson.Object model)
+        | Just (Aeson.String modelId) <- KeyMap.lookup "id" model
+        , not (Text.null (Text.strip modelId)) =
+            Right modelId
+    decodeModel _ = Left modelDiscoveryError
 
 instance Show GatewayCredential where
     show credential =

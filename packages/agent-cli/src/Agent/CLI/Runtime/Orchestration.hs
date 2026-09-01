@@ -48,10 +48,12 @@ import Agent.CLI.Dialects
       filterGhciTools )
 import Agent.CLI.Error ( formatApiErrorAt, formatException )
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
+import Agent.CLI.ClaudeGatewayProxy ( withClaudeGatewayProxy )
+import Agent.CLI.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.GatewayModels
     ( catalogUsesGateway
-    , gatewayDefaultModelId
-    , isGatewayModelId
+    , isGatewayConnectionId
+    , isLegacyGatewayModelId
     , loadGatewayModelCatalogAt
     )
 import Agent.CLI.Input ()
@@ -75,6 +77,7 @@ import Agent.CLI.McpStatus
       summarizeMcpStatuses )
 import Agent.CLI.ModelConfig
     ( ConnectionKind(..),
+      ModelCatalog(..),
       ModelConnection(..),
       ResponsesConnection(..),
       builtinConnectionId,
@@ -82,6 +85,7 @@ import Agent.CLI.ModelConfig
       catalogContextWindowForTransport )
 import Agent.CLI.Models
     ( defaultModelFor,
+      modelOptionFromCatalog,
       rawModelOption,
       resolveConfiguredModel,
       resolvePersistedDialect,
@@ -271,6 +275,7 @@ import Agent.Claude
       ClaudeToolPermissionRequest(..),
       claudeCodeOneShotBackend,
       defaultClaudeCodeOptions,
+      loadClaudeCodeGatewayAuth,
       loadClaudeCodeAuth,
       withClaudeCodeBackendPermissions )
 import Agent.Dialect ( dialectForId, DialectId(GrokBuildDialect) )
@@ -389,7 +394,7 @@ import Data.IORef
       readIORef,
       writeIORef )
 import Data.List ()
-import Data.Maybe ( isNothing, fromMaybe, isJust )
+import Data.Maybe ( isNothing, fromMaybe, isJust, listToMaybe )
 import Data.Text ( Text )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -1085,7 +1090,8 @@ runAgentInitializedWithLock
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
         gatewayDefaultTarget =
             (.modelTarget)
-                <$> resolveConfiguredModel catalog gatewayDefaultModelId
+                <$> (listToMaybe catalog.catalogModels
+                    >>= modelOptionFromCatalog catalog)
         savedTarget provider connection model transport dialect =
             case resolveConfiguredModel catalog model of
                 Just option
@@ -1113,7 +1119,9 @@ runAgentInitializedWithLock
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
             Just meta
-                | isGatewayModelId meta.metaModel -> Right Nothing
+                | isGatewayConnectionId meta.metaConnection
+                    || isLegacyGatewayModelId meta.metaModel ->
+                        Right Nothing
             Just meta ->
                 Just <$> savedTarget
                     meta.metaProvider
@@ -1132,7 +1140,8 @@ runAgentInitializedWithLock
             Nothing -> Right Nothing
             Just remembered ->
                 let target = remembered.projectModelTarget
-                in if isGatewayModelId target.targetModelId
+                in if isGatewayConnectionId target.targetConnectionId
+                    || isLegacyGatewayModelId target.targetModelId
                     then Right Nothing
                     else
                         Just <$> savedTarget
@@ -1147,19 +1156,21 @@ runAgentInitializedWithLock
             && isNothing configuredOptionTarget
         ) $
         startupDie startup
-            "the connected gateway accepts router-default, router-codex, or \
-            \router-grok; direct provider model ids are unavailable"
+            ("the connected gateway does not provide model "
+                <> Text.unpack (fromMaybe "" options.optModel))
     when
         ( not gatewayMode
-            && maybe False isGatewayModelId options.optModel
+            && maybe False isLegacyGatewayModelId options.optModel
         ) $
         startupDie startup
-            "gateway router models require an active gateway connection"
+            "legacy gateway router aliases are no longer available"
     when
         ( not gatewayMode
             && maybe
                 False
-                (isGatewayModelId . (.targetModelId))
+                (\target ->
+                    isGatewayConnectionId target.targetConnectionId
+                        || isLegacyGatewayModelId target.targetModelId)
                 transitionTarget
         ) $
         startupDie startup
@@ -1170,7 +1181,7 @@ runAgentInitializedWithLock
         either (startupDie startup . Text.unpack) pure projectTargetResult
     let gatewayTarget candidate =
             candidate >>= \target ->
-                if isGatewayModelId target.targetModelId
+                if isGatewayConnectionId target.targetConnectionId
                     then Just target
                     else Nothing
         targetHint
@@ -2652,83 +2663,104 @@ runAgentInitializedWithLock
                                 , resetBackendState = pure ()
                                 }
                     ClaudeCodeProvider -> do
-                        claudeAuth <-
-                            loadClaudeCodeAuth
-                                >>= either (startupDie startup . Text.unpack) pure
-                        let permission =
+                        let runClaude claudeAuth = do
+                                let permission =
+                                        if claudeBypassEnabled
+                                            then ClaudeCodeBypass
+                                            else ClaudeCodeDontAsk
+                                    claudeOptions =
+                                        (defaultClaudeCodeOptions
+                                            claudeAuth.executable
+                                            (unsafeToFilePath cwd))
+                                            { permission
+                                            , safeMode = True
+                                            , transport = claudeAuth.transport
+                                            }
+                                    compactRunner _ =
+                                        pure $ Left
+                                            "Claude Code manages its own context; /compact is unavailable."
+                                    btwBackend privateParams =
+                                        Backend \state previous inputs onEvent -> do
+                                            privateTranscript <- newIORef state
+                                            let privateBackend =
+                                                    claudeCodeOneShotBackend
+                                                        claudeOptions
+                                                            { permission =
+                                                                ClaudeCodeDontAsk
+                                                            }
+                                                        (pure privateParams)
+                                                        privateTranscript
+                                            privateBackend.submitTurn
+                                                state
+                                                previous
+                                                inputs
+                                                onEvent
                                 if claudeBypassEnabled
-                                    then ClaudeCodeBypass
-                                    else ClaudeCodeDontAsk
-                            claudeOptions =
-                                (defaultClaudeCodeOptions
-                                    claudeAuth.executable
-                                    (unsafeToFilePath cwd))
-                                    { permission
-                                    , safeMode = True
-                                    }
-                            compactRunner _ =
-                                pure $ Left
-                                    "Claude Code manages its own context; /compact is unavailable."
-                            btwBackend privateParams =
-                                Backend \state previous inputs onEvent -> do
-                                    privateTranscript <- newIORef state
-                                    let privateBackend =
-                                            claudeCodeOneShotBackend
-                                                claudeOptions
-                                                    { permission =
-                                                        ClaudeCodeDontAsk
-                                                    }
-                                                (pure privateParams)
-                                                privateTranscript
-                                    privateBackend.submitTurn
-                                        state
-                                        previous
-                                        inputs
-                                        onEvent
-                        if claudeBypassEnabled
-                            then pure ()
-                            else
-                                case fullscreen of
-                                    Just runtime ->
-                                        emitUiEvent runtime
-                                            (UiSystemMessage
-                                                "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
-                                    Nothing -> do
-                                        color <- resolveColor stderrHandle
-                                        putTextLn stderrHandle $
-                                            roleWarn color $
-                                                glyphWarn
-                                                    <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
-                        writeIORef activeAccountRef claudeAuth.accountLabel
-                        claudeTranscriptRef <-
-                            newIORef =<< readLiveTranscript conversationRef
-                        withClaudeCodeBackendPermissions
-                            claudeOptions
-                            (nativeClaudePermissionHandler
-                                startup.startupNativeHooks)
-                            initialPrevious
-                            (readIORef paramsRef)
-                            claudeTranscriptRef
-                            \backend -> do
-                                activeBackend <-
-                                    prepareTransitionBackend
-                                        projectRoot transition persist backend
-                                result <- runSession
-                                    (sessionRequest
-                                        startupUnavailable
-                                        Nothing
-                                        Nothing
-                                        Nothing
-                                        compactRunner)
-                                    SessionBackend
-                                        { backend = activeBackend
-                                        , btwBackend
-                                        , resetBackendState =
-                                            writeIORef claudeTranscriptRef []
-                                        }
-                                writeLiveTranscript conversationRef
-                                    =<< readIORef claudeTranscriptRef
-                                pure result
+                                    then pure ()
+                                    else
+                                        case fullscreen of
+                                            Just runtime ->
+                                                emitUiEvent runtime
+                                                    (UiSystemMessage
+                                                        "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
+                                            Nothing -> do
+                                                color <- resolveColor stderrHandle
+                                                putTextLn stderrHandle $
+                                                    roleWarn color $
+                                                        glyphWarn
+                                                            <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
+                                writeIORef activeAccountRef claudeAuth.accountLabel
+                                claudeTranscriptRef <-
+                                    newIORef =<< readLiveTranscript conversationRef
+                                withClaudeCodeBackendPermissions
+                                    claudeOptions
+                                    (nativeClaudePermissionHandler
+                                        startup.startupNativeHooks)
+                                    initialPrevious
+                                    (readIORef paramsRef)
+                                    claudeTranscriptRef
+                                    \backend -> do
+                                        activeBackend <-
+                                            prepareTransitionBackend
+                                                projectRoot transition persist backend
+                                        result <- runSession
+                                            (sessionRequest
+                                                startupUnavailable
+                                                Nothing
+                                                Nothing
+                                                Nothing
+                                                compactRunner)
+                                            SessionBackend
+                                                { backend = activeBackend
+                                                , btwBackend
+                                                , resetBackendState =
+                                                    writeIORef claudeTranscriptRef []
+                                                }
+                                        writeLiveTranscript conversationRef
+                                            =<< readIORef claudeTranscriptRef
+                                        pure result
+                            requireAuth load =
+                                load >>= either
+                                    (startupDie startup . Text.unpack)
+                                    pure
+                        if gatewayMode
+                            then
+                                loadGatewayCredential >>= \case
+                                    Left err ->
+                                        startupDie startup (Text.unpack err)
+                                    Right Nothing ->
+                                        startupDie startup
+                                            "the connected gateway credential disappeared"
+                                    Right (Just gateway) ->
+                                        withClaudeGatewayProxy gateway
+                                            (\transport ->
+                                                requireAuth
+                                                    (loadClaudeCodeGatewayAuth transport)
+                                                    >>= runClaude)
+                                            >>= either
+                                                (startupDie startup . Text.unpack)
+                                                pure
+                            else requireAuth loadClaudeCodeAuth >>= runClaude
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of

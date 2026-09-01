@@ -112,7 +112,7 @@ modelCatalog catalog =
 modelsForProvider :: ModelCatalog -> Provider -> [ModelOption]
 modelsForProvider catalog provider =
     filter
-        ((== builtinConnectionId provider) . (.modelTarget.targetConnectionId))
+        ((== provider) . (.modelTarget.targetProvider))
         (modelCatalog catalog)
 
 catalogModelIds :: ModelCatalog -> [Text]

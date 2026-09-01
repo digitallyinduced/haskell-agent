@@ -61,7 +61,6 @@ import Agent.CLI.GatewayClient
     )
 import Agent.Error (ApiError(..))
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
-import Agent.Transport.WebSocket (webSocketHandshakeFailureStatus)
 import qualified Agent.Claude.Auth as ClaudeCode
 import Agent.Provider
     ( AccountFailure(..)
@@ -76,8 +75,6 @@ import Agent.Provider
     , seedTokenProvider
     , tokenProvider
     , tokenProviderBillingMode
-    , tokenProviderWithNextToken
-    , withAccountFailureClassifier
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
 import qualified Agent.XAI.Auth as XAIAuth
@@ -151,11 +148,21 @@ loadDetectedProvider =
         Right provider -> loadProvider provider
 
 loadProvider :: Provider -> IO (Either Text LoadedAuth)
+loadProvider ClaudeCodeProvider =
+    loadGatewayCredential >>= \case
+        Left err -> pure (Left ("cannot load gateway credential: " <> err))
+        Right (Just gateway) ->
+            pure $
+                Right $
+                    claudeLoadedAuth
+                        ("Claude via " <> gateway.gatewayBaseUrl)
+                        "gateway"
+        Right Nothing -> runExceptT loadClaudeCode
 loadProvider provider = runExceptT case provider of
     XAIProvider -> loadXai Nothing
     OpenAIProvider -> loadOpenAi
     OpenRouterProvider -> loadOpenRouter Nothing
-    ClaudeCodeProvider -> loadClaudeCode
+    ClaudeCodeProvider -> error "handled above"
 
 -- | Load local OpenAI credentials without consulting the gateway.
 --
@@ -168,49 +175,8 @@ loadDirectOpenAiAuth =
 loadGatewayPreferredAuth
     :: GatewayCredential
     -> IO (Either Text LoadedAuth)
-loadGatewayPreferredAuth gateway =
-    case gatewayLoadedAuth gateway of
-        Left gatewayErr ->
-            loadDirectOpenAiAuth >>= \case
-                Right directAuth
-                    | tokenProviderBillingMode
-                        directAuth.loadedTokenProvider
-                        == SubscriptionBilled ->
-                            pure (Right directAuth)
-                Right _ ->
-                    pure $ Left $
-                        gatewayErr
-                            <> "; refusing automatic fallback to "
-                            <> "API-credit billing"
-                Left directErr ->
-                    pure $ Left $
-                        gatewayErr <> "; direct OpenAI auth unavailable: "
-                            <> directErr
-        Right gatewayAuth ->
-            loadDirectOpenAiAuth >>= \case
-                Right directAuth
-                    | tokenProviderBillingMode
-                        directAuth.loadedTokenProvider
-                        == SubscriptionBilled -> do
-                            let gatewayCredential =
-                                    credentialForGateway gateway
-                            combined <-
-                                gatewayFallbackTokenProvider
-                                    gatewayCredential
-                                    directAuth.loadedTokenProvider
-                            pure $ Right gatewayAuth
-                                { loadedTokenProvider = combined
-                                , loadedAccountLabel = \credential ->
-                                    if credential == gatewayCredential
-                                        then pure gateway.gatewayBaseUrl
-                                        else
-                                            directAuth.loadedAccountLabel
-                                                credential
-                                , loadedOpenAiPool =
-                                    directAuth.loadedOpenAiPool
-                                }
-                _ ->
-                    pure (Right gatewayAuth)
+loadGatewayPreferredAuth =
+    pure . gatewayLoadedAuth
 
 gatewayLoadedAuth :: GatewayCredential -> Either Text LoadedAuth
 gatewayLoadedAuth gateway = do
@@ -233,44 +199,6 @@ credentialForGateway gateway =
         , leaseId = Nothing
         , provider = OpenAIProvider
         }
-
--- | Prefer the gateway until that exact credential is rejected or exhausted,
--- then stay on the local same-billing OpenAI pool for the rest of the session.
---
--- A gateway failure is not forwarded to the local pool because it describes a
--- different credential and would otherwise cool down an unrelated account.
-gatewayFallbackTokenProvider
-    :: Credential
-    -> TokenProvider
-    -> IO TokenProvider
-gatewayFallbackTokenProvider gatewayCredential directProvider = do
-    gatewayPreferred <- newIORef True
-    pure $
-        withAccountFailureClassifier classifyGatewayFailure $
-            tokenProviderWithNextToken directProvider \failed ->
-                case failed of
-                    Nothing ->
-                        readIORef gatewayPreferred >>= \case
-                            True -> pure (Right gatewayCredential)
-                            False -> getNextToken directProvider Nothing
-                    Just reported
-                        | reported.credential == gatewayCredential -> do
-                            writeIORef gatewayPreferred False
-                            getNextToken directProvider Nothing
-                        | otherwise -> do
-                            writeIORef gatewayPreferred False
-                            getNextToken directProvider (Just reported)
-  where
-    -- A gateway WebSocket handshake 403 rejects this gateway credential
-    -- before any turn effects occur. Treat only that distinct credential as
-    -- failed so the local ChatGPT fallback becomes reachable; ordinary direct
-    -- ChatGPT 403s remain permission failures and never rotate accounts.
-    classifyGatewayFailure credential = \case
-        err
-            | credential == gatewayCredential
-            , webSocketHandshakeFailureStatus err == Just 403 ->
-                Just AccountAuthenticationRejected
-        _ -> Nothing
 
 -- | Load one specific account for providers whose HTTP backends can swap
 -- token sources without reconnecting a long-lived transport.
@@ -435,19 +363,22 @@ loadXai requestedSelectionId = do
 loadClaudeCode :: ExceptT Text IO LoadedAuth
 loadClaudeCode = do
     auth <- lift ClaudeCode.loadClaudeCodeAuth >>= either throwE pure
-    let label = auth.accountLabel
-        credential = Credential
+    pure (claudeLoadedAuth auth.accountLabel "claude-code")
+
+claudeLoadedAuth :: Text -> Text -> LoadedAuth
+claudeLoadedAuth label selectionId =
+    let credential = Credential
             { accessToken = ""
-            , accountId = "claude-code"
+            , accountId = selectionId
             , leaseId = Nothing
             , provider = ClaudeCodeProvider
             }
-    pure LoadedAuth
+     in LoadedAuth
         { loadedProvider = ClaudeCodeProvider
         , loadedTokenProvider =
             staticCredentialProvider SubscriptionBilled credential
         , loadedAccountLabel = const (pure label)
-        , loadedSelectionId = Just "claude-code"
+        , loadedSelectionId = Just selectionId
         , loadedOpenAiPool = Nothing
         }
 
