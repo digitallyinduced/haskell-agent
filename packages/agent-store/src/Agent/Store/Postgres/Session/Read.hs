@@ -34,6 +34,7 @@ module Agent.Store.Postgres.Session.Read
     , searchConversationTurns
     , searchConversationTurnsForBoundary
     , searchNativeConversations
+    , searchNativeConversationsForBoundary
     ) where
 
 import Data.Functor.Contravariant ((>$<))
@@ -475,7 +476,34 @@ searchNativeConversations
 searchNativeConversations pool query limit =
     withSession pool $
         HasqlSession.statement
-            (query, fromIntegral (max 1 (min 100 limit)))
+            ( query
+            , Nothing
+            , Nothing
+            , fromIntegral (max 1 (min 100 limit))
+            )
+            searchNativeConversationsStatement
+
+-- | Native/sidebar search with the same exact credential boundary as CLI
+-- search. The predicate is part of both candidate branches before ordering
+-- and LIMIT, so another organization cannot displace or expose results.
+searchNativeConversationsForBoundary
+    :: StorePool
+    -> Text
+    -- ^ Reserved organization-gateway connection identifier.
+    -> Maybe Text
+    -- ^ Current gateway credential identity, or 'Nothing' for direct mode.
+    -> Text
+    -> Int
+    -> IO (Either StoreError [NativeConversationSearchResult])
+searchNativeConversationsForBoundary
+        pool gatewayConnection gatewayIdentity query limit =
+    withSession pool $
+        HasqlSession.statement
+            ( query
+            , Just gatewayConnection
+            , gatewayIdentity
+            , fromIntegral (max 1 (min 100 limit))
+            )
             searchNativeConversationsStatement
 
 data TurnRow = TurnRow
@@ -571,7 +599,9 @@ loadMetadataManyStatement = mkStatement
     True
 
 searchNativeConversationsStatement
-    :: Statement (Text, Int64) [NativeConversationSearchResult]
+    :: Statement
+        (Text, Maybe Text, Maybe Text, Int64)
+        [NativeConversationSearchResult]
 searchNativeConversationsStatement = mkStatement
     "WITH query AS (SELECT websearch_to_tsquery('english', $1) AS ts,\
     \ lower(btrim($1)) AS needle), candidates AS (\
@@ -581,7 +611,11 @@ searchNativeConversationsStatement = mkStatement
     \ WHEN lower(s.title) LIKE query.needle || '%' THEN 800::float8\
     \ WHEN s.title ILIKE '%' || $1 || '%' THEN 600::float8\
     \ WHEN s.cwd ILIKE '%' || $1 || '%' THEN 400::float8 ELSE 300::float8 END\
-    \ FROM harness.sessions s CROSS JOIN query WHERE s.deleted_at IS NULL AND (\
+    \ FROM harness.sessions s CROSS JOIN query WHERE s.deleted_at IS NULL\
+    \ AND ($2 IS NULL OR (\
+    \   ($3 IS NULL AND s.connection_id <> $2 AND s.gateway_identity IS NULL)\
+    \   OR ($3 IS NOT NULL AND s.connection_id = $2 AND s.gateway_identity = $3)))\
+    \ AND (\
     \ s.title ILIKE '%' || $1 || '%' OR s.cwd ILIKE '%' || $1 || '%' OR\
     \ s.provider ILIKE '%' || $1 || '%' OR s.model_id ILIKE '%' || $1 || '%')\
     \ UNION ALL\
@@ -593,12 +627,22 @@ searchNativeConversationsStatement = mkStatement
     \ t.user_text,t.assistant_text,\
     \ (100 + ts_rank_cd(t.search_vector,query.ts)*100)::float8\
     \ FROM harness.session_turns t JOIN harness.sessions s ON s.session_id=t.session_id\
-    \ CROSS JOIN query WHERE s.deleted_at IS NULL AND (\
+    \ CROSS JOIN query WHERE s.deleted_at IS NULL\
+    \ AND ($2 IS NULL OR (\
+    \   ($3 IS NULL AND s.connection_id <> $2 AND s.gateway_identity IS NULL)\
+    \   OR ($3 IS NOT NULL AND s.connection_id = $2 AND s.gateway_identity = $3)))\
+    \ AND (\
     \ t.search_vector @@ query.ts OR t.user_text ILIKE '%' || $1 || '%' OR\
     \ t.assistant_text ILIKE '%' || $1 || '%'))\
-    \ SELECT * FROM candidates ORDER BY 13 DESC,6 DESC,9 DESC NULLS LAST LIMIT $2"
-    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    \ SELECT * FROM candidates ORDER BY 13 DESC,6 DESC,9 DESC NULLS LAST LIMIT $4"
+    ( ((\(value, _, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, value, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowList $
         NativeConversationSearchResult

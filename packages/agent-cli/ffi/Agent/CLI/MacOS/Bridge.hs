@@ -59,7 +59,7 @@ import Agent.CLI.McpAdmin
     )
 import Agent.Store.Postgres.Session
     ( NativeConversationSearchResult(..)
-    , searchNativeConversations
+    , searchNativeConversationsForBoundary
     )
 import Agent.CLI.ManagedTurn
     ( ManagedTurnMedia(..)
@@ -119,6 +119,7 @@ import Agent.CLI.GatewayClient
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
     , exchangeNativeGatewayAuthorizationCode
+    , gatewayCredentialIdentity
     , loadGatewayCredential
     , pollNativeGatewayAuthorizationAndSave
     , removeGatewayCredential
@@ -133,6 +134,7 @@ import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ModelCatalog
     , catalogModelForConnection
+    , organizationGatewayConnectionId
     )
 import Agent.CLI.GatewayModels (loadGatewayModelOptionsAt)
 import Agent.CLI.Database (DatabaseScope(..))
@@ -4326,8 +4328,19 @@ supervisorLoop
         EngineStop ->
             shutdownSupervisor supervisor
         EngineSearch query limit searchCallback searchContext -> do
-            runConversationSearch
-                config store query limit searchCallback searchContext
+            loadGatewayCredential >>= \case
+                Left err ->
+                    sendSearchFailure searchCallback searchContext
+                        ("Could not load gateway credentials: " <> err)
+                Right credential ->
+                    runConversationSearch
+                        config
+                        store
+                        (gatewayCredentialIdentity <$> credential)
+                        query
+                        limit
+                        searchCallback
+                        searchContext
             go supervisor
         EngineSessionMutation mutation resultCallback resultContext -> do
             runSessionMutation
@@ -4769,25 +4782,42 @@ sendSessionMutationFailure callback context message =
 runConversationSearch
     :: ManagedPostgresConfig
     -> MVar (Maybe Store)
+    -> Maybe Text
     -> Text
     -> Int
     -> FunPtr SearchCallback
     -> Ptr ()
     -> IO ()
-runConversationSearch config store query limit callback context = do
+runConversationSearch
+        config store gatewayIdentity query limit callback context = do
     outcome <- tryAny do
         activeStore <- acquireStore config store
-        searchNativeConversations (trustedPool activeStore) query limit
+        searchNativeConversationsForBoundary
+            (trustedPool activeStore)
+            organizationGatewayConnectionId
+            gatewayIdentity
+            query
+            limit
     case outcome of
         Left exception ->
             sendSearchFailure callback context (Text.pack (show exception))
         Right (Left err) ->
             sendSearchFailure callback context (renderStoreError err)
-        Right (Right results) -> do
-            forM_ results (sendSearchResult callback context)
-            invokeSearchCallback callback context
-                1 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                0 0 (-1) 0 0 nullPtr 0 nullPtr 0 0 nullPtr 0
+        Right (Right results) ->
+            loadGatewayCredential >>= \case
+                Left err ->
+                    sendSearchFailure callback context
+                        ("Could not reload gateway credentials: " <> err)
+                Right current
+                    | (gatewayCredentialIdentity <$> current)
+                        /= gatewayIdentity ->
+                            sendSearchFailure callback context
+                                "Gateway credentials changed during search."
+                    | otherwise -> do
+                        forM_ results (sendSearchResult callback context)
+                        invokeSearchCallback callback context
+                            1 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                            0 0 (-1) 0 0 nullPtr 0 nullPtr 0 0 nullPtr 0
 
 sendSearchFailure :: FunPtr SearchCallback -> Ptr () -> Text -> IO ()
 sendSearchFailure callback context message =

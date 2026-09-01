@@ -55,6 +55,7 @@ module Agent.Store.Postgres.Session
     , searchConversationTurns
     , searchConversationTurnsForBoundary
     , searchNativeConversations
+    , searchNativeConversationsForBoundary
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock

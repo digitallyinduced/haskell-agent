@@ -440,6 +440,32 @@ spec = describe "PostgreSQL session schema" do
                                         expectationFailure
                                             ("unexpected direct-bound search: "
                                                 <> show other)
+                            searchNativeConversationsForBoundary
+                                pool
+                                "organization-gateway"
+                                (Just "gateway-sha256:test-tenant")
+                                boundaryQuery
+                                1 >>= \case
+                                    Right [match] ->
+                                        match.nativeSearchSessionId
+                                            `shouldBe` "boundary-authorized"
+                                    other ->
+                                        expectationFailure
+                                            ("unexpected native gateway search: "
+                                                <> show other)
+                            searchNativeConversationsForBoundary
+                                pool
+                                "organization-gateway"
+                                Nothing
+                                boundaryQuery
+                                1 >>= \case
+                                    Right [match] ->
+                                        match.nativeSearchSessionId
+                                            `shouldBe` "boundary-direct"
+                                    other ->
+                                        expectationFailure
+                                            ("unexpected native direct search: "
+                                                <> show other)
                             setSessionArchived pool "session-2" True now
                                 `shouldReturn` Right True
                             searchNativeConversations pool "second" 10 >>= \case
