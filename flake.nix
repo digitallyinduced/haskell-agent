@@ -269,6 +269,7 @@
                     include = [
                         "app"
                         "cbits"
+                        "data"
                         "eval"
                         "ffi"
                         "include"
