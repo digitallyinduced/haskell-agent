@@ -4,22 +4,36 @@ import Agent.CLI.MacOS.Bridge
     ( TurnStart(..)
     , emitBoundaryChecked
     , nativeExceptionMessage
+    , nativeRequestRequiresGatewayLock
     , nativeSessionRouteMatchesBoundary
+    , nativeTurnRouteMatchesBoundary
     , nativeTurnArguments
     )
 import Agent.CLI.NativeRuntime (StartupFailure(..))
-import Control.Exception.Safe (displayException, toException)
+import Control.Concurrent
+    ( newEmptyMVar
+    , newMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    , withMVar
+    )
+import Control.Concurrent.Async (poll, wait, withAsync)
+import Control.Exception.Safe (bracket_, displayException, toException)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.IORef
     ( atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef )
+import Data.Maybe (isNothing)
 import Test.Hspec
 
 spec :: Spec
 spec = do
     boundaryCheckedEmissionSpec
     computerUseSpec
+    nativeRequestBoundarySpec
     nativeSessionBoundarySpec
+    nativeTurnBoundarySpec
     nativeFailureSpec
 
 computerUseSpec :: Spec
@@ -59,6 +73,7 @@ boundaryCheckedEmissionSpec =
                         [] -> ([], Left "missing boundary check")
                         result : remaining -> (remaining, result)
             result <- emitBoundaryChecked
+                id
                 check
                 (\item -> modifyIORef' emitted (<> [item]))
                 (writeIORef terminal True)
@@ -76,6 +91,7 @@ boundaryCheckedEmissionSpec =
                         [] -> ([], Left "missing boundary check")
                         result : remaining -> (remaining, result)
             emitBoundaryChecked
+                id
                 check
                 (\item -> modifyIORef' emitted (<> [item]))
                 (writeIORef terminal True)
@@ -83,6 +99,103 @@ boundaryCheckedEmissionSpec =
                 `shouldReturn` Right ()
             readIORef emitted `shouldReturn` [1]
             readIORef terminal `shouldReturn` True
+
+        it "holds one critical section across each check and callback" do
+            nextSection <- newIORef (0 :: Int)
+            activeSection <- newIORef (0 :: Int)
+            observedSections <- newIORef ([] :: [Int])
+            let critical action = do
+                    section <- atomicModifyIORef' nextSection \current ->
+                        let next = current + 1
+                        in (next, next)
+                    bracket_
+                        (writeIORef activeSection section)
+                        (writeIORef activeSection 0)
+                        action
+                observe =
+                    readIORef activeSection >>= \section ->
+                        modifyIORef' observedSections (<> [section])
+                check = observe >> pure (Right ())
+            emitBoundaryChecked
+                critical
+                check
+                (const observe)
+                observe
+                [1 :: Int]
+                `shouldReturn` Right ()
+            readIORef observedSections `shouldReturn` [1, 1, 2, 2]
+            readIORef activeSection `shouldReturn` 0
+
+        it "blocks a boundary switch between a check and its callback" do
+            boundaryLock <- newMVar ()
+            checked <- newEmptyMVar
+            releaseCallback <- newEmptyMVar
+            switchStarted <- newEmptyMVar
+            callbackRan <- newIORef False
+            let critical action =
+                    withMVar boundaryLock (const action)
+                check = putMVar checked () >> pure (Right ())
+                emit _ = do
+                    takeMVar releaseCallback
+                    writeIORef callbackRan True
+            withAsync
+                (emitBoundaryChecked
+                    critical
+                    check
+                    emit
+                    (pure ())
+                    [1 :: Int])
+                \emission -> do
+                    takeMVar checked
+                    withAsync
+                        (putMVar switchStarted ()
+                            >> withMVar boundaryLock (const (pure ())))
+                        \switch -> do
+                            takeMVar switchStarted
+                            threadDelay 100000
+                            switchState <- poll switch
+                            switchState `shouldSatisfy` isNothing
+                            readIORef callbackRan `shouldReturn` False
+                            putMVar releaseCallback ()
+                            wait emission `shouldReturn` Right ()
+                            wait switch
+            readIORef callbackRan `shouldReturn` True
+
+nativeRequestBoundarySpec :: Spec
+nativeRequestBoundarySpec =
+    describe "native request gateway callback boundary" do
+        it "serializes every request returning session or model data" do
+            map nativeRequestRequiresGatewayLock
+                ["sessions.list", "sessions.show", "models.list"]
+                `shouldBe` [True, True, True]
+            map nativeRequestRequiresGatewayLock
+                ["ping", "turn.agents", "unknown"]
+                `shouldBe` [False, False, False]
+
+nativeTurnBoundarySpec :: Spec
+nativeTurnBoundarySpec =
+    describe "native turn gateway boundary" do
+        it "routes a queued turn only under its captured credential identity" do
+            nativeTurnRouteMatchesBoundary
+                (Just "gateway-organization-a")
+                (Just "gateway-organization-a")
+                `shouldBe` True
+            nativeTurnRouteMatchesBoundary
+                (Just "gateway-organization-a")
+                (Just "gateway-organization-b")
+                `shouldBe` False
+
+        it "does not cross between direct and organization routes" do
+            nativeTurnRouteMatchesBoundary Nothing Nothing
+                `shouldBe` True
+            nativeTurnRouteMatchesBoundary
+                Nothing
+                (Just "gateway-organization")
+                `shouldBe` False
+            nativeTurnRouteMatchesBoundary
+                (Just "gateway-organization")
+                Nothing
+                `shouldBe` False
 
 nativeFailureSpec :: Spec
 nativeFailureSpec =

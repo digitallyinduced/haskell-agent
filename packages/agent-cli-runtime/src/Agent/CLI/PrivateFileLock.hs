@@ -1,6 +1,7 @@
 -- | Blocking cross-process locks for private harness state.
 module Agent.CLI.PrivateFileLock
     ( withPrivateFileLock
+    , withPrivateSharedFileLock
     ) where
 
 import Agent.OsPath (unsafeToFilePath)
@@ -23,7 +24,20 @@ import System.Posix.IO
 -- contents remain accessible only to the owning user, and the operating system
 -- releases the lock if the process exits.
 withPrivateFileLock :: OsPath -> IO a -> IO a
-withPrivateFileLock path action = do
+withPrivateFileLock path =
+    withPrivateFileLockMode path FileLock.Exclusive
+
+-- | Run an action while holding a shared lock on a private lock file.
+withPrivateSharedFileLock :: OsPath -> IO a -> IO a
+withPrivateSharedFileLock path =
+    withPrivateFileLockMode path FileLock.Shared
+
+withPrivateFileLockMode
+    :: OsPath
+    -> FileLock.SharedExclusive
+    -> IO a
+    -> IO a
+withPrivateFileLockMode path mode action = do
     let directory = takeDirectory path
         filePath = unsafeToFilePath path
     createDirectoryIfMissing True directory
@@ -36,6 +50,6 @@ withPrivateFileLock path action = do
             defaultFileFlags { creat = Just 0o600, cloexec = True })
         closeFd
         (const (setFileMode filePath 0o600))
-    FileLock.withFileLock filePath FileLock.Exclusive \_ -> do
+    FileLock.withFileLock filePath mode \_ -> do
         setFileMode filePath 0o600
         action

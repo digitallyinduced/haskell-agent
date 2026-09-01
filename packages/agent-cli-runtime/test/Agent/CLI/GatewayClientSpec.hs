@@ -3,7 +3,7 @@ module Agent.CLI.GatewayClientSpec (spec) where
 import Agent.CLI.GatewayClient
 import Agent.Json.Decode qualified as Hermes
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Concurrent.Async (poll, wait, withAsync)
+import Control.Concurrent.Async (cancel, poll, wait, waitCatch, withAsync)
 import Control.Exception.Safe (bracket, throwString, tryAny)
 import Control.Monad (void)
 import Data.Aeson qualified as Aeson
@@ -22,12 +22,14 @@ import System.Directory
     , removeFile
     , removePathForcibly
     )
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose, openTempFile)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
 import System.Posix.Process (forkProcess, getProcessStatus)
 import System.Posix.Signals (sigKILL, signalProcess)
+import System.Timeout (timeout)
 import Test.Hspec
 
 decodeGatewayModels :: BS.ByteString -> Either String [GatewayModel]
@@ -465,7 +467,241 @@ spec = describe "gateway device authorization" do
             loadGatewayCredentialAt home
                 `shouldReturn` Right (Just replacement)
 
-    it "serializes credential writes across processes" $
+    it "allows independent gateway credential leases to overlap" $
+        withTempHome \home -> do
+            firstEntered <- newEmptyMVar
+            secondEntered <- newEmptyMVar
+            release <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialLeaseAt home do
+                    putMVar firstEntered ()
+                    takeMVar release)
+                \first -> do
+                    takeMVar firstEntered
+                    withAsync
+                        (withGatewayCredentialLeaseAt home do
+                            putMVar secondEntered ()
+                            takeMVar release)
+                        \second -> do
+                            timeout 1000000 (takeMVar secondEntered)
+                                `shouldReturn` Just ()
+                            putMVar release ()
+                            putMVar release ()
+                            wait first
+                            wait second
+
+    it "waits for every gateway credential lease before writing" $
+        withTempHome \home -> do
+            let initial =
+                    GatewayCredential
+                        "https://gateway"
+                        "wss://gateway/v1/responses"
+                        "initial-secret"
+                replacement =
+                    initial { gatewayAccessToken = "replacement-secret" }
+            saveGatewayCredentialAt home initial `shouldReturn` Right ()
+            firstEntered <- newEmptyMVar
+            secondEntered <- newEmptyMVar
+            releaseFirst <- newEmptyMVar
+            releaseSecond <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialLeaseAt home do
+                    putMVar firstEntered ()
+                    takeMVar releaseFirst)
+                \first ->
+                    withAsync
+                        (withGatewayCredentialLeaseAt home do
+                            putMVar secondEntered ()
+                            takeMVar releaseSecond)
+                        \second -> do
+                            takeMVar firstEntered
+                            takeMVar secondEntered
+                            withAsync
+                                (saveGatewayCredentialAt home replacement)
+                                \writer -> do
+                                    threadDelay 100000
+                                    poll writer
+                                        >>= (`shouldSatisfy` isNothing)
+                                    putMVar releaseFirst ()
+                                    wait first
+                                    threadDelay 100000
+                                    poll writer
+                                        >>= (`shouldSatisfy` isNothing)
+                                    putMVar releaseSecond ()
+                                    wait second
+                                    wait writer `shouldReturn` Right ()
+            loadGatewayCredentialAt home
+                `shouldReturn` Right (Just replacement)
+
+    it "lets callbacks join an active lease phase, then hands off to a writer" $
+        withTempHome \home -> do
+            firstEntered <- newEmptyMVar
+            releaseFirst <- newEmptyMVar
+            writerEntered <- newEmptyMVar
+            releaseWriter <- newEmptyMVar
+            secondEntered <- newEmptyMVar
+            releaseSecond <- newEmptyMVar
+            thirdEntered <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialLeaseAt home do
+                    putMVar firstEntered ()
+                    takeMVar releaseFirst)
+                \first -> do
+                    takeMVar firstEntered
+                    withAsync
+                        (withGatewayCredentialLockAt home do
+                            putMVar writerEntered ()
+                            takeMVar releaseWriter)
+                        \writer -> do
+                            threadDelay 100000
+                            poll writer
+                                >>= (`shouldSatisfy` isNothing)
+                            withAsync
+                                (withGatewayCredentialLeaseAt home $
+                                    putMVar secondEntered ()
+                                        >> takeMVar releaseSecond)
+                                \second -> do
+                                    timeout 1000000 (takeMVar secondEntered)
+                                        `shouldReturn` Just ()
+                                    putMVar releaseFirst ()
+                                    wait first
+                                    threadDelay 100000
+                                    poll writer
+                                        >>= (`shouldSatisfy` isNothing)
+                                    putMVar releaseSecond ()
+                                    wait second
+                                    timeout 1000000
+                                        (takeMVar writerEntered)
+                                        `shouldReturn` Just ()
+                                    withAsync
+                                        (withGatewayCredentialLeaseAt home $
+                                            putMVar thirdEntered ())
+                                        \third -> do
+                                            threadDelay 100000
+                                            poll third
+                                                >>= (`shouldSatisfy` isNothing)
+                                            putMVar releaseWriter ()
+                                            wait writer
+                                            wait third
+                                            takeMVar thirdEntered
+
+    it "does not start a new turn lease ahead of a waiting writer" $
+        withTempHome \home -> do
+            callbackEntered <- newEmptyMVar
+            releaseCallback <- newEmptyMVar
+            writerEntered <- newEmptyMVar
+            releaseWriter <- newEmptyMVar
+            turnEntered <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialLeaseAt home do
+                    putMVar callbackEntered ()
+                    takeMVar releaseCallback)
+                \callbackLease -> do
+                    takeMVar callbackEntered
+                    withAsync
+                        (withGatewayCredentialLockAt home do
+                            putMVar writerEntered ()
+                            takeMVar releaseWriter)
+                        \writer -> do
+                            threadDelay 100000
+                            poll writer
+                                >>= (`shouldSatisfy` isNothing)
+                            withAsync
+                                (withGatewayCredentialTurnLeaseAt home $
+                                    putMVar turnEntered ())
+                                \turnLease -> do
+                                    threadDelay 100000
+                                    poll turnLease
+                                        >>= (`shouldSatisfy` isNothing)
+                                    putMVar releaseCallback ()
+                                    wait callbackLease
+                                    timeout 1000000
+                                        (takeMVar writerEntered)
+                                        `shouldReturn` Just ()
+                                    poll turnLease
+                                        >>= (`shouldSatisfy` isNothing)
+                                    putMVar releaseWriter ()
+                                    wait writer
+                                    wait turnLease
+                                    takeMVar turnEntered
+
+    it "releases a cancelled gateway credential lease" $
+        withTempHome \home -> do
+            entered <- newEmptyMVar
+            blocked <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialLeaseAt home do
+                    putMVar entered ()
+                    takeMVar blocked)
+                \holder -> do
+                    takeMVar entered
+                    cancel holder
+                    void (waitCatch holder)
+                    timeout 1000000
+                        (withGatewayCredentialLockAt home (pure ()))
+                        `shouldReturn` Just ()
+
+    it "unregisters a credential writer cancelled while waiting" $
+        withTempHome \home -> do
+            leaseEntered <- newEmptyMVar
+            releaseLease <- newEmptyMVar
+            writerStarted <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialLeaseAt home do
+                    putMVar leaseEntered ()
+                    takeMVar releaseLease)
+                \lease -> do
+                    takeMVar leaseEntered
+                    withAsync
+                        (putMVar writerStarted ()
+                            >> withGatewayCredentialLockAt home (pure ()))
+                        \writer -> do
+                            takeMVar writerStarted
+                            threadDelay 100000
+                            poll writer
+                                >>= (`shouldSatisfy` isNothing)
+                            cancel writer
+                            void (waitCatch writer)
+                    putMVar releaseLease ()
+                    wait lease
+                    timeout 1000000
+                        (withGatewayCredentialLeaseAt home (pure ()))
+                        `shouldReturn` Just ()
+
+    it "keeps transition completion inside the credential writer boundary" $
+        withTempHome \home ->
+            withHomeEnvironment home do
+                let credential =
+                        GatewayCredential
+                            "https://gateway"
+                            "wss://gateway/v1/responses"
+                            "transition-secret"
+                saveGatewayCredentialAt home credential `shouldReturn` Right ()
+                callbackEntered <- newEmptyMVar
+                releaseCallback <- newEmptyMVar
+                readerEntered <- newEmptyMVar
+                withAsync
+                    (removeGatewayCredentialWith do
+                        loadGatewayCredentialAt home
+                            `shouldReturn` Right Nothing
+                        putMVar callbackEntered ()
+                        takeMVar releaseCallback)
+                    \transition -> do
+                        takeMVar callbackEntered
+                        withAsync
+                            (withGatewayCredentialLeaseAt home $
+                                putMVar readerEntered ())
+                            \reader -> do
+                                threadDelay 100000
+                                poll reader
+                                    >>= (`shouldSatisfy` isNothing)
+                                putMVar releaseCallback ()
+                                wait transition `shouldReturn` Right ()
+                                timeout 1000000 (takeMVar readerEntered)
+                                    `shouldReturn` Just ()
+                                wait reader
+
+    it "serializes credential writes against leases across processes" $
         withTempHome \home -> do
             let homePath =
                     either (error . show) id (decodeUtf home)
@@ -478,7 +714,7 @@ spec = describe "gateway device authorization" do
                         "cross-process-secret"
             bracket
                 (forkProcess $
-                    withGatewayCredentialLockAt home do
+                    withGatewayCredentialLeaseAt home do
                         writeFile locked ""
                         waitForFile release)
                 (\pid -> do
@@ -569,3 +805,15 @@ waitForFile path = go (100 :: Int)
             doesFileExist path >>= \case
                 True -> pure ()
                 False -> threadDelay 10000 >> go (remaining - 1)
+
+withHomeEnvironment :: OsPath -> IO value -> IO value
+withHomeEnvironment home action =
+    bracket
+        (lookupEnv "HOME")
+        (\case
+            Just previous -> setEnv "HOME" previous
+            Nothing -> unsetEnv "HOME")
+        \_ -> do
+            setEnv "HOME" $
+                either (error . show) id (decodeUtf home)
+            action
