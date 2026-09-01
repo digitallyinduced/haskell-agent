@@ -17,6 +17,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     )
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Text as Text
@@ -27,6 +28,23 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    describe "publishResumeHistoryAfterBoundary" do
+        it "does not publish fullscreen history across a gateway boundary" do
+            published <- newIORef False
+            publishResumeHistoryAfterBoundary
+                (Left "gateway boundary mismatch")
+                (writeIORef published True)
+                `shouldReturn` Left "gateway boundary mismatch"
+            readIORef published `shouldReturn` False
+
+        it "publishes fullscreen history after boundary validation" do
+            published <- newIORef False
+            publishResumeHistoryAfterBoundary
+                (Right ())
+                (writeIORef published True)
+                `shouldReturn` Right ()
+            readIORef published `shouldReturn` True
+
     describe "resumeEntriesFrom" do
         it "uses untitled when the title is empty" do
             case resumeEntriesFrom [(sampleMeta "abc" "", [])] of
@@ -103,6 +121,16 @@ spec = do
                     (Just "gateway-a")
                     sessions)
                 `shouldBe` ["allowed"]
+
+        it "rejects resume metadata before startup can use it" do
+            validateResumeMetaForBoundary
+                (Just "gateway-a")
+                (gateway "gateway-b" "other")
+                `shouldBe`
+                    Left
+                        "This session belongs to a different organization \
+                        \gateway credential and cannot be resumed. Start a new \
+                        \session."
 
     describe "resumeNeedsGeneratedContext" do
         it "requeues context after compact, clear, and new boundaries" do

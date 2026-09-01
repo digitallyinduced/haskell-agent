@@ -26,6 +26,7 @@ import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
 import Agent.CLI.GatewayClient
     ( GatewayModelAccess
+    , gatewayCredentialIdentity
     , loadGatewayCredential
     , newGatewayModelAccess
     )
@@ -79,9 +80,8 @@ import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
 import Agent.CLI.Request ()
-import Agent.CLI.Resume ()
-import Agent.CLI.Runtime.HistorySource
-    ( loadFullscreenHistoryPage, sessionUiPageSize )
+import Agent.CLI.Resume ( validateResumeMetaForBoundary )
+import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Initialized
@@ -113,10 +113,10 @@ import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( deleteSession,
       loadActiveSession,
-      loadRecentSessionTurns,
+      loadSessionMeta,
       sessionDirForId,
       sessionsRoot,
-      SessionMeta(metaId, metaCwd) )
+      SessionMeta(metaCwd) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.ModelPicker
     ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
@@ -158,11 +158,9 @@ import Agent.CLI.TUI.App
       newFullscreenRuntimeWithTheme,
       queuedFullscreenInputDisplays,
       runFullscreen,
-      setFullscreenHistorySource,
       setFullscreenSessionActions )
-import Agent.CLI.TUI.History
-    ( HistoryDirection(HistoryNewer), HistoryGeneration(..) )
-import Agent.CLI.TUI.SessionHistory ( sessionHistoryPage )
+import Agent.CLI.TUI.History ()
+import Agent.CLI.TUI.SessionHistory ()
 import Agent.CLI.Terminal
     ( copyTerminalClipboard,
       detectTerminalCapabilities,
@@ -715,6 +713,14 @@ prepareAgentIterationTracked
         Left err -> failPreparation (Text.unpack (renderStoreError err))
         Right store -> writeIORef databaseStoreRef (Just store) >> pure store
     let sessionPool = trustedPool databaseStore
+    connectedGateway <-
+        loadGatewayCredential >>= \case
+            Left err ->
+                failPreparation
+                    ("Could not load gateway credentials: " <> Text.unpack err)
+            Right credential -> pure credential
+    let connectedGatewayIdentity =
+            gatewayCredentialIdentity <$> connectedGateway
     resumed <- case options.optResume of
         Nothing -> pure Nothing
         Just sessionId -> do
@@ -735,13 +741,41 @@ prepareAgentIterationTracked
                     failPreparation (Text.unpack err)
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
-                    loadActiveSession sessionPool root sessionId >>= \case
+                    loadSessionMeta sessionPool root sessionId >>= \case
                         Left err -> do
                             signalReady (Left err)
                             failPreparation (Text.unpack err)
-                        Right loaded -> do
-                            signalReady (Right ())
-                            pure (Just loaded)
+                        Right meta ->
+                            case
+                                validateResumeMetaForBoundary
+                                    connectedGatewayIdentity
+                                    meta
+                            of
+                                Left err -> do
+                                    signalReady (Left err)
+                                    failPreparation (Text.unpack err)
+                                Right () ->
+                                    loadActiveSession
+                                        sessionPool
+                                        root
+                                        sessionId >>= \case
+                                            Left err -> do
+                                                signalReady (Left err)
+                                                failPreparation
+                                                    (Text.unpack err)
+                                            Right loaded@(loadedMeta, _) ->
+                                                case
+                                                    validateResumeMetaForBoundary
+                                                        connectedGatewayIdentity
+                                                        loadedMeta
+                                                of
+                                                    Left err -> do
+                                                        signalReady (Left err)
+                                                        failPreparation
+                                                            (Text.unpack err)
+                                                    Right () -> do
+                                                        signalReady (Right ())
+                                                        pure (Just loaded)
 
     source <- case options.optCwd of
         Just requestedCwd -> makeAbsolute requestedCwd
@@ -831,28 +865,9 @@ prepareAgentIterationTracked
                     useColor
                     initialFullscreenState
             | otherwise -> pure Nothing
-    forM_ fullscreen \runtime ->
-        case resumed of
-            Nothing ->
-                clearFullscreenHistorySource runtime
-            Just (meta, _) ->
-                loadRecentSessionTurns
-                    sessionPool
-                    root
-                    meta.metaId
-                    sessionUiPageSize >>= \case
-                        Left err ->
-                            failPreparation (Text.unpack err)
-                        Right page ->
-                            setFullscreenHistorySource
-                                runtime
-                                meta.metaId
-                                (loadFullscreenHistoryPage
-                                    sessionPool root meta.metaId)
-                                (sessionHistoryPage
-                                    (HistoryGeneration 0)
-                                    HistoryNewer
-                                    page)
+    -- A reused fullscreen must not retain its prior transcript while resumed
+    -- history is revalidated and installed for this preparation snapshot.
+    forM_ fullscreen clearFullscreenHistorySource
     writeIORef uiRuntimeRef fullscreen
     resumeLock <- readIORef resumeLockRef
     let runAction
@@ -967,6 +982,7 @@ prepareAgentIterationTracked
                     resumeLock
                     cwd
                     startup
+                    connectedGateway
                     preparedAuth
         action
             | options.optWorktree

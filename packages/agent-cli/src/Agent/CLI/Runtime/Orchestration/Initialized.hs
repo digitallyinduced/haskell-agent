@@ -43,7 +43,6 @@ import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
     , gatewayCredentialIdentity
-    , loadGatewayCredential
     , newGatewayModelAccess
     , refreshGatewayModels
     )
@@ -101,8 +100,9 @@ import Agent.CLI.Recap ()
 import Agent.CLI.Render ()
 import Agent.CLI.ReplMode ()
 import Agent.CLI.Request ()
-import Agent.CLI.Resume ()
-import Agent.CLI.Runtime.HistorySource ()
+import Agent.CLI.Resume ( publishResumeHistoryAfterBoundary )
+import Agent.CLI.Runtime.HistorySource
+    ( loadFullscreenHistoryPage, sessionUiPageSize )
 import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Restart ()
@@ -120,7 +120,8 @@ import Agent.CLI.Runtime.Repl ()
 import Agent.CLI.Runtime.Types ( DevResult, RunResult )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
-    ( SessionMeta(metaProvider, metaConnection, metaModel,
+    ( loadRecentSessionTurns,
+      SessionMeta(metaId, metaProvider, metaConnection, metaModel,
                   metaTransportModel, metaDialect, metaGatewayIdentity),
       SessionTurn )
 import Agent.CLI.Session.Attachments ()
@@ -130,7 +131,8 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
-                     startupUiRuntimeRef, startupEscPaused, startupInterrupt) )
+                     startupUiRuntimeRef, startupEscPaused, startupInterrupt,
+                     startupDatabaseStore) )
 import Agent.CLI.Session.Selection ()
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -143,9 +145,11 @@ import Agent.CLI.Startup.Auth
 import Agent.CLI.StartupContext ()
 import Agent.CLI.Style ( setCliWindowTitle )
 import Agent.CLI.Subagents.Runtime ()
-import Agent.CLI.TUI.App ( setFullscreenWindowTitle )
-import Agent.CLI.TUI.History ()
-import Agent.CLI.TUI.SessionHistory ()
+import Agent.CLI.TUI.App
+    ( setFullscreenHistorySource, setFullscreenWindowTitle )
+import Agent.CLI.TUI.History
+    ( HistoryDirection(HistoryNewer), HistoryGeneration(..) )
+import Agent.CLI.TUI.SessionHistory ( sessionHistoryPage )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Tools ()
 import Agent.CLI.Turn ()
@@ -182,7 +186,7 @@ import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ()
 import Agent.Skills ()
-import Agent.Store.Postgres ()
+import Agent.Store.Postgres ( trustedPool )
 import Agent.Store.Types ()
 import Agent.Subagents ()
 import Agent.Subagents.TaskPath ()
@@ -208,7 +212,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe ( onException )
-import Control.Monad ( void, when )
+import Control.Monad ( forM_, void, when )
 import Data.Functor ()
 import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
 import Data.List ()
@@ -295,12 +299,35 @@ runAgentInitialized
     -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
+    -> Maybe GatewayCredential
     -> Maybe PreparedStartupAuthWorker
     -> IO RunResult
 runAgentInitialized
-        runAgentChild processRuntime options transition home root resumed resumeLock cwd startup preparedAuth =
+        runAgentChild
+        processRuntime
+        options
+        transition
+        home
+        root
+        resumed
+        resumeLock
+        cwd
+        startup
+        connectedGateway
+        preparedAuth =
     runAgentInitializedWithLock
-        runAgentChild processRuntime options transition home root resumed resumeLock cwd startup preparedAuth
+        runAgentChild
+        processRuntime
+        options
+        transition
+        home
+        root
+        resumed
+        resumeLock
+        cwd
+        startup
+        connectedGateway
+        preparedAuth
         `onException` mapM_ releaseSessionLock resumeLock
 
 runAgentInitializedWithLock
@@ -314,11 +341,13 @@ runAgentInitializedWithLock
     -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
+    -> Maybe GatewayCredential
     -> Maybe PreparedStartupAuthWorker
     -> IO RunResult
 runAgentInitializedWithLock
         runAgentChild processRuntime
-        options transition home root resumed resumeLock cwd startup preparedAuth = do
+        options transition home root resumed resumeLock cwd startup
+        connectedGateway preparedAuth = do
     let baseToolEnv = startup.startupToolEnv
         mcpSupervisor = processRuntime.processMcpSupervisor
         interrupt = startup.startupInterrupt
@@ -356,12 +385,6 @@ runAgentInitializedWithLock
         catalogResult
     setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
-    connectedGateway <-
-        loadGatewayCredential >>= \case
-            Left err ->
-                startupDie startup
-                    ("Could not load gateway credentials: " <> Text.unpack err)
-            Right credential -> pure credential
     let connectedGatewayIdentity =
             gatewayCredentialIdentity <$> connectedGateway
         transitionTarget = (.transitionTarget) <$> transition
@@ -416,7 +439,30 @@ runAgentInitializedWithLock
                         target.targetModelId
                         (Just target.targetWireModelId)
                         target.targetDialect
-    either (startupDie startup . Text.unpack) pure resumedBoundaryResult
+    resumedHistoryResult <-
+        publishResumeHistoryAfterBoundary resumedBoundaryResult $
+            forM_ fullscreen \runtime ->
+                forM_ resumed \(meta, _) ->
+                    loadRecentSessionTurns
+                        (trustedPool startup.startupDatabaseStore)
+                        root
+                        meta.metaId
+                        sessionUiPageSize >>= \case
+                            Left err ->
+                                startupDie startup (Text.unpack err)
+                            Right page ->
+                                setFullscreenHistorySource
+                                    runtime
+                                    meta.metaId
+                                    (loadFullscreenHistoryPage
+                                        (trustedPool startup.startupDatabaseStore)
+                                        root
+                                        meta.metaId)
+                                    (sessionHistoryPage
+                                        (HistoryGeneration 0)
+                                        HistoryNewer
+                                        page)
+    either (startupDie startup . Text.unpack) pure resumedHistoryResult
     resumedTarget <-
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
