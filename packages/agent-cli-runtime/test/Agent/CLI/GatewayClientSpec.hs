@@ -1,11 +1,12 @@
 module Agent.CLI.GatewayClientSpec (spec) where
 
 import Agent.CLI.GatewayClient
+import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.Json.Decode qualified as Hermes
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (cancel, poll, wait, waitCatch, withAsync)
 import Control.Exception.Safe (bracket, throwString, tryAny)
-import Control.Monad (void)
+import Control.Monad (forM_, void)
 import Data.Aeson qualified as Aeson
 import Data.Bits ((.&.))
 import Data.ByteString qualified as BS
@@ -18,6 +19,7 @@ import System.Directory
     ( createDirectory
     , createDirectoryIfMissing
     , doesFileExist
+    , findExecutable
     , getTemporaryDirectory
     , removeFile
     , removePathForcibly
@@ -27,7 +29,7 @@ import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose, openTempFile)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
-import System.Posix.Process (forkProcess, getProcessStatus)
+import System.Posix.Process (executeFile, forkProcess, getProcessStatus)
 import System.Posix.Signals (sigKILL, signalProcess)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -641,6 +643,44 @@ spec = describe "gateway device authorization" do
                         (withGatewayCredentialLockAt home (pure ()))
                         `shouldReturn` Just ()
 
+    it "releases turn admission when cancellation races lock acquisition" $
+        withTempHome \home -> do
+            let credentialDirectory =
+                    takeDirectory $
+                        either (error . show) id
+                            (decodeUtf (gatewayCredentialPath home))
+                admissionLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory
+                            </> "gateway-turn-admission.lock"
+                turnLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory </> "gateway-turn.lock"
+            forM_ [admissionLock, turnLock] \blockedLock -> do
+                holderEntered <- newEmptyMVar
+                releaseHolder <- newEmptyMVar
+                withAsync
+                    (withPrivateFileLock blockedLock do
+                        putMVar holderEntered ()
+                        takeMVar releaseHolder)
+                    \holder -> do
+                        takeMVar holderEntered
+                        withAsync
+                            (withGatewayCredentialTurnLeaseAt home (pure ()))
+                            \turn -> do
+                                threadDelay 100000
+                                poll turn
+                                    >>= (`shouldSatisfy` isNothing)
+                                withAsync (cancel turn) \canceller -> do
+                                    threadDelay 10000
+                                    putMVar releaseHolder ()
+                                    wait holder
+                                    wait canceller
+                                void (waitCatch turn)
+                timeout 1000000
+                    (withGatewayCredentialLockAt home (pure ()))
+                    `shouldReturn` Just ()
+
     it "unregisters a credential writer cancelled while waiting" $
         withTempHome \home -> do
             leaseEntered <- newEmptyMVar
@@ -682,8 +722,9 @@ spec = describe "gateway device authorization" do
                 readerEntered <- newEmptyMVar
                 withAsync
                     (removeGatewayCredentialWith do
-                        loadGatewayCredentialAt home
-                            `shouldReturn` Right Nothing
+                        withGatewayCredentialLeaseAt home
+                            (loadGatewayCredentialAt home)
+                                `shouldReturn` Right Nothing
                         putMVar callbackEntered ()
                         takeMVar releaseCallback)
                     \transition -> do
@@ -700,6 +741,25 @@ spec = describe "gateway device authorization" do
                                 timeout 1000000 (takeMVar readerEntered)
                                     `shouldReturn` Just ()
                                 wait reader
+
+    it "does not leak a gateway lease into an executed child process" $
+        withTempHome \home -> do
+            sleep <- findExecutable "sleep"
+                >>= maybe
+                    (expectationFailure "sleep is unavailable" >> pure "")
+                    pure
+            bracket
+                (withGatewayCredentialTurnLeaseAt home $
+                    withGatewayCredentialLeaseAt home $
+                        forkProcess
+                            (executeFile sleep False ["10"] Nothing))
+                (\pid -> do
+                    void (tryAny (signalProcess sigKILL pid))
+                    void (tryAny (getProcessStatus True False pid)))
+                \_ ->
+                    timeout 1000000
+                        (withGatewayCredentialLockAt home (pure ()))
+                        `shouldReturn` Just ()
 
     it "serializes credential writes against leases across processes" $
         withTempHome \home -> do
@@ -739,6 +799,165 @@ spec = describe "gateway device authorization" do
                             wait writer `shouldReturn` Right ()
             loadGatewayCredentialAt home
                 `shouldReturn` Right (Just credential)
+
+    it "allows a required callback while a cross-process writer waits" $
+        withTempHome \home -> do
+            let credentialDirectory =
+                    takeDirectory $
+                        either (error . show) id
+                            (decodeUtf (gatewayCredentialPath home))
+                admissionLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory
+                            </> "gateway-turn-admission.lock"
+                turnLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory </> "gateway-turn.lock"
+                credentialLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory </> "gateway.lock"
+                homePath =
+                    either (error . show) id (decodeUtf home)
+                startWriter = homePath </> "start-writer"
+                writerAdmitted = homePath </> "writer-admitted"
+                writerEntered = homePath </> "writer-entered"
+                releaseWriter = homePath </> "release-writer"
+            bracket
+                (forkProcess do
+                    waitForFile startWriter
+                    withPrivateFileLock admissionLock do
+                        writeFile writerAdmitted ""
+                        withPrivateFileLock turnLock $
+                            withPrivateFileLock credentialLock do
+                                writeFile writerEntered ""
+                                waitForFile releaseWriter)
+                (\pid -> do
+                    writeFile releaseWriter ""
+                    void (tryAny (signalProcess sigKILL pid))
+                    void (tryAny (getProcessStatus False False pid)))
+                \pid -> do
+                    turnEntered <- newEmptyMVar
+                    releaseTurn <- newEmptyMVar
+                    withAsync
+                        (withGatewayCredentialTurnLeaseAt home do
+                            putMVar turnEntered ()
+                            takeMVar releaseTurn)
+                        \turn -> do
+                            takeMVar turnEntered
+                            writeFile startWriter ""
+                            waitForFile writerAdmitted
+                            timeout 1000000
+                                (withGatewayCredentialLeaseAt home (pure ()))
+                                `shouldReturn` Just ()
+                            doesFileExist writerEntered `shouldReturn` False
+                            putMVar releaseTurn ()
+                            wait turn
+                            waitForFile writerEntered
+                            writeFile releaseWriter ""
+                            _ <- getProcessStatus True False pid
+                            pure ()
+
+    it "does not start a new turn ahead of a cross-process writer" $
+        withTempHome \home -> do
+            let credentialDirectory =
+                    takeDirectory $
+                        either (error . show) id
+                            (decodeUtf (gatewayCredentialPath home))
+                admissionLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory
+                            </> "gateway-turn-admission.lock"
+                turnLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory </> "gateway-turn.lock"
+                credentialLock =
+                    unsafeEncodeUtf $
+                        credentialDirectory </> "gateway.lock"
+                homePath =
+                    either (error . show) id (decodeUtf home)
+                startWriter = homePath </> "start-turn-writer"
+                writerAdmitted = homePath </> "turn-writer-admitted"
+                writerEntered = homePath </> "turn-writer-entered"
+                releaseWriter = homePath </> "release-turn-writer"
+            bracket
+                (forkProcess do
+                    waitForFile startWriter
+                    withPrivateFileLock admissionLock do
+                        writeFile writerAdmitted ""
+                        withPrivateFileLock turnLock $
+                            withPrivateFileLock credentialLock do
+                                writeFile writerEntered ""
+                                waitForFile releaseWriter)
+                (\pid -> do
+                    writeFile releaseWriter ""
+                    void (tryAny (signalProcess sigKILL pid))
+                    void (tryAny (getProcessStatus False False pid)))
+                \pid -> do
+                    existingEntered <- newEmptyMVar
+                    releaseExisting <- newEmptyMVar
+                    newTurnEntered <- newEmptyMVar
+                    withAsync
+                        (withGatewayCredentialTurnLeaseAt home do
+                            putMVar existingEntered ()
+                            takeMVar releaseExisting)
+                        \existing -> do
+                            takeMVar existingEntered
+                            writeFile startWriter ""
+                            waitForFile writerAdmitted
+                            withAsync
+                                (withGatewayCredentialTurnLeaseAt home $
+                                    putMVar newTurnEntered ())
+                                \newTurn -> do
+                                    threadDelay 100000
+                                    poll newTurn
+                                        >>= (`shouldSatisfy` isNothing)
+                                    putMVar releaseExisting ()
+                                    wait existing
+                                    waitForFile writerEntered
+                                    poll newTurn
+                                        >>= (`shouldSatisfy` isNothing)
+                                    writeFile releaseWriter ""
+                                    _ <- getProcessStatus True False pid
+                                    timeout 1000000 (takeMVar newTurnEntered)
+                                        `shouldReturn` Just ()
+                                    wait newTurn
+
+    it "blocks a legacy gateway writer for the lifetime of a new turn" $
+        withTempHome \home -> do
+            let credentialPath =
+                    either (error . show) id
+                        (decodeUtf (gatewayCredentialPath home))
+                legacyLock =
+                    unsafeEncodeUtf $
+                        takeDirectory credentialPath </> "gateway.lock"
+                homePath =
+                    either (error . show) id (decodeUtf home)
+                writerEntered = homePath </> "legacy-writer-entered"
+            turnEntered <- newEmptyMVar
+            releaseTurn <- newEmptyMVar
+            writerStarted <- newEmptyMVar
+            withAsync
+                (withGatewayCredentialTurnLeaseAt home do
+                    putMVar turnEntered ()
+                    takeMVar releaseTurn)
+                \turn -> do
+                    takeMVar turnEntered
+                    withAsync
+                        (putMVar writerStarted ()
+                            >> withPrivateFileLock legacyLock
+                                (writeFile writerEntered ""))
+                        \legacyWriter -> do
+                            takeMVar writerStarted
+                            threadDelay 100000
+                            poll legacyWriter
+                                >>= (`shouldSatisfy` isNothing)
+                            doesFileExist writerEntered
+                                `shouldReturn` False
+                            putMVar releaseTurn ()
+                            wait turn
+                            wait legacyWriter
+                            doesFileExist writerEntered
+                                `shouldReturn` True
 
     it "rejects invalid gateway endpoints before persisting them" $
         withTempHome \home -> do

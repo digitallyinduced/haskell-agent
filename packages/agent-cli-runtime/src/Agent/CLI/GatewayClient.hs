@@ -63,11 +63,12 @@ import Agent.CLI.Runtime.Options (GatewayCommand (..))
 import Agent.CLI.PrivateFileLock
     ( withPrivateFileLock
     , withPrivateSharedFileLock
+    , withPrivateSharedFileLocksAfterGate
     )
 import Agent.Json.Decode qualified as Hermes
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (ThreadId, myThreadId, threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
@@ -84,6 +85,7 @@ import Control.Exception.Safe
     , finally
     , mask
     , onException
+    , throwString
     , tryAny
     )
 import Control.Monad (when)
@@ -596,6 +598,16 @@ gatewayCredentialLockPath home =
     takeDirectory (gatewayCredentialPath home)
         </> unsafeEncodeUtf "gateway.lock"
 
+gatewayCredentialTurnAdmissionPath :: OsPath -> OsPath
+gatewayCredentialTurnAdmissionPath home =
+    takeDirectory (gatewayCredentialPath home)
+        </> unsafeEncodeUtf "gateway-turn-admission.lock"
+
+gatewayCredentialTurnLeasePath :: OsPath -> OsPath
+gatewayCredentialTurnLeasePath home =
+    takeDirectory (gatewayCredentialPath home)
+        </> unsafeEncodeUtf "gateway-turn.lock"
+
 -- | Serialize gateway credential changes with operations whose authorization
 -- depends on one exact credential snapshot. The process lock is required
 -- because advisory file-lock behavior between threads in one process is
@@ -609,7 +621,11 @@ withGatewayCredentialLock action = do
 withGatewayCredentialLockAt :: OsPath -> IO value -> IO value
 withGatewayCredentialLockAt home action =
     withGatewayCredentialProcessWriteLock $
-        withPrivateFileLock (gatewayCredentialLockPath home) action
+        withPrivateFileLock (gatewayCredentialTurnAdmissionPath home) $
+            withPrivateFileLock (gatewayCredentialTurnLeasePath home) $
+                withPrivateFileLock
+                    (gatewayCredentialLockPath home)
+                    action
 
 -- | Hold a shared credential lease. Credential changes wait for every lease,
 -- while independent session reads and native turns remain concurrent.
@@ -620,10 +636,13 @@ withGatewayCredentialLease action = do
 
 withGatewayCredentialLeaseAt :: OsPath -> IO value -> IO value
 withGatewayCredentialLeaseAt home action =
-    withGatewayCredentialProcessReadLock True $
-        withPrivateSharedFileLock
-            (gatewayCredentialLockPath home)
-            action
+    withGatewayCredentialProcessReadLock True \needsFileLock ->
+        if needsFileLock
+            then
+                withPrivateSharedFileLock
+                    (gatewayCredentialLockPath home)
+                    action
+            else action
 
 -- | Start a long-running native turn only if no credential writer is already
 -- waiting. Unlike short callback leases, a new turn must not prolong an
@@ -635,15 +654,20 @@ withGatewayCredentialTurnLease action = do
 
 withGatewayCredentialTurnLeaseAt :: OsPath -> IO value -> IO value
 withGatewayCredentialTurnLeaseAt home action =
-    withGatewayCredentialProcessReadLock False $
-        withPrivateSharedFileLock
-            (gatewayCredentialLockPath home)
+    withGatewayCredentialProcessReadLock False \_ ->
+        withPrivateSharedFileLocksAfterGate
+            (gatewayCredentialTurnAdmissionPath home)
+            [ gatewayCredentialTurnLeasePath home
+            -- Keep the original credential lock for rolling compatibility
+            -- with an older process that does not know the admission protocol.
+            , gatewayCredentialLockPath home
+            ]
             action
 
 data GatewayCredentialProcessLockState =
     GatewayCredentialProcessLockState
         { processLockReaders :: !Int
-        , processLockWriterActive :: !Bool
+        , processLockWriterOwner :: !(Maybe ThreadId)
         , processLockWaitingWriters :: !Int
         }
 
@@ -653,96 +677,120 @@ gatewayCredentialProcessLock =
         newTVarIO
             GatewayCredentialProcessLockState
                 { processLockReaders = 0
-                , processLockWriterActive = False
+                , processLockWriterOwner = Nothing
                 , processLockWaitingWriters = 0
                 }
 {-# NOINLINE gatewayCredentialProcessLock #-}
 
-withGatewayCredentialProcessReadLock :: Bool -> IO value -> IO value
+withGatewayCredentialProcessReadLock
+    :: Bool
+    -> (Bool -> IO value)
+    -> IO value
 withGatewayCredentialProcessReadLock mayJoinReaderPhase action =
     mask \restore -> do
-        atomically do
+        thread <- myThreadId
+        needsFileLock <- atomically do
             state <- readTVar gatewayCredentialProcessLock
-            if
-                state.processLockWriterActive
+            case state.processLockWriterOwner of
+                Just owner
+                    | mayJoinReaderPhase && owner == thread ->
+                        -- A terminal credential callback may synchronously
+                        -- query the new state. The writer already owns the
+                        -- process and file boundaries on this same thread.
+                        pure False
+                    | otherwise -> retry
+                Nothing
                     -- Short readers may join an active reader phase. This
                     -- matters for native supervisors: a long-running turn can
                     -- need a boundary-checked approval or snapshot callback
                     -- before it can finish and release its lifetime lease.
                     -- Long turn leases pass False and wait behind the writer;
                     -- once the last reader leaves, every reader must wait.
-                    || ( state.processLockWaitingWriters > 0
+                    | state.processLockWaitingWriters > 0
                             && ( not mayJoinReaderPhase
                                     || state.processLockReaders == 0
                                )
-                       )
-            then retry
-            else
-                writeTVar
-                    gatewayCredentialProcessLock
-                    state
-                        { processLockReaders =
-                            state.processLockReaders + 1
-                        }
-        restore action
-            `finally`
-                atomically do
-                    state <- readTVar gatewayCredentialProcessLock
-                    writeTVar
-                        gatewayCredentialProcessLock
-                        state
-                            { processLockReaders =
-                                max 0 (state.processLockReaders - 1)
-                            }
+                        -> retry
+                    | otherwise -> do
+                        writeTVar
+                            gatewayCredentialProcessLock
+                            state
+                                { processLockReaders =
+                                    state.processLockReaders + 1
+                                }
+                        pure True
+        if not needsFileLock
+            then restore (action False)
+            else restore (action True)
+                `finally`
+                    atomically do
+                        state <- readTVar gatewayCredentialProcessLock
+                        writeTVar
+                            gatewayCredentialProcessLock
+                            state
+                                { processLockReaders =
+                                    max 0 (state.processLockReaders - 1)
+                                }
 
 withGatewayCredentialProcessWriteLock :: IO value -> IO value
 withGatewayCredentialProcessWriteLock action =
     mask \restore -> do
-        atomically do
+        thread <- myThreadId
+        reentrant <- atomically do
             state <- readTVar gatewayCredentialProcessLock
-            writeTVar
-                gatewayCredentialProcessLock
-                state
-                    { processLockWaitingWriters =
-                        state.processLockWaitingWriters + 1
-                    }
-        let unregisterWaitingWriter =
-                atomically do
-                    state <- readTVar gatewayCredentialProcessLock
+            case state.processLockWriterOwner of
+                Just owner
+                    | owner == thread -> pure True
+                _ -> do
                     writeTVar
                         gatewayCredentialProcessLock
                         state
                             { processLockWaitingWriters =
-                                max 0
-                                    (state.processLockWaitingWriters - 1)
+                                state.processLockWaitingWriters + 1
                             }
-        -- Keep the successful handoff masked. A blocked STM transaction is
-        -- still interruptible, so cancellation can unregister the waiter;
-        -- once the transaction commits, no asynchronous exception can land
-        -- between setting writerActive and installing the finalizer below.
-        (atomically do
-                state <- readTVar gatewayCredentialProcessLock
-                if
-                    state.processLockWriterActive
-                        || state.processLockReaders > 0
-                then retry
-                else
-                    writeTVar
-                        gatewayCredentialProcessLock
-                        state
-                            { processLockWriterActive = True
-                            , processLockWaitingWriters =
-                                max 0
-                                    (state.processLockWaitingWriters - 1)
-                            })
-            `onException` unregisterWaitingWriter
-        restore action
-            `finally`
-                atomically do
-                    state <- readTVar gatewayCredentialProcessLock
-                    writeTVar
-                        gatewayCredentialProcessLock
-                        state { processLockWriterActive = False }
+                    pure False
+        if reentrant
+            then
+                throwString
+                    "A gateway credential transition is already in progress."
+            else do
+                let unregisterWaitingWriter =
+                        atomically do
+                            state <- readTVar gatewayCredentialProcessLock
+                            writeTVar
+                                gatewayCredentialProcessLock
+                                state
+                                    { processLockWaitingWriters =
+                                        max 0
+                                            (state.processLockWaitingWriters - 1)
+                                    }
+                -- Keep the successful handoff masked. A blocked STM
+                -- transaction is still interruptible, so cancellation can
+                -- unregister the waiter; once it commits, no async exception
+                -- can land before the finalizer is installed below.
+                (atomically do
+                        state <- readTVar gatewayCredentialProcessLock
+                        if
+                            state.processLockWriterOwner /= Nothing
+                                || state.processLockReaders > 0
+                        then retry
+                        else
+                            writeTVar
+                                gatewayCredentialProcessLock
+                                state
+                                    { processLockWriterOwner = Just thread
+                                    , processLockWaitingWriters =
+                                        max 0
+                                            (state.processLockWaitingWriters - 1)
+                                    })
+                    `onException` unregisterWaitingWriter
+                restore action
+                    `finally`
+                        atomically do
+                            state <- readTVar gatewayCredentialProcessLock
+                            writeTVar
+                                gatewayCredentialProcessLock
+                                state { processLockWriterOwner = Nothing }
 
 loadGatewayCredential :: IO (Either Text (Maybe GatewayCredential))
 loadGatewayCredential = do

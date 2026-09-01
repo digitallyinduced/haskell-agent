@@ -3,6 +3,7 @@ module Agent.CLI.MacOS.BridgeSpec (spec) where
 import Agent.CLI.MacOS.Bridge
     ( TurnStart(..)
     , emitBoundaryChecked
+    , invokeGatewayCallbackOnce
     , nativeExceptionMessage
     , nativeRequestRequiresGatewayLock
     , nativeSessionRouteMatchesBoundary
@@ -19,7 +20,12 @@ import Control.Concurrent
     , withMVar
     )
 import Control.Concurrent.Async (poll, wait, withAsync)
-import Control.Exception.Safe (bracket_, displayException, toException)
+import Control.Exception.Safe
+    ( bracket_
+    , displayException
+    , throwString
+    , toException
+    )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.IORef
@@ -30,6 +36,7 @@ import Test.Hspec
 spec :: Spec
 spec = do
     boundaryCheckedEmissionSpec
+    gatewayTransitionCallbackSpec
     computerUseSpec
     nativeRequestBoundarySpec
     nativeSessionBoundarySpec
@@ -160,6 +167,16 @@ boundaryCheckedEmissionSpec =
                             wait emission `shouldReturn` Right ()
                             wait switch
             readIORef callbackRan `shouldReturn` True
+
+gatewayTransitionCallbackSpec :: Spec
+gatewayTransitionCallbackSpec =
+    describe "native gateway transition callbacks" do
+        it "contains a host exception after one terminal callback attempt" do
+            attempts <- newIORef (0 :: Int)
+            invokeGatewayCallbackOnce do
+                modifyIORef' attempts (+ 1)
+                throwString "host callback failed"
+            readIORef attempts `shouldReturn` 1
 
 nativeRequestBoundarySpec :: Spec
 nativeRequestBoundarySpec =

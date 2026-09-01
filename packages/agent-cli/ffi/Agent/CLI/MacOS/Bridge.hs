@@ -26,6 +26,7 @@ module Agent.CLI.MacOS.Bridge
     , discardStagedTurn
     , discardStagedTurnById
     , emitBoundaryChecked
+    , invokeGatewayCallbackOnce
     , resolvePendingInteraction
     , turnStartCleanupId
     ) where
@@ -3794,7 +3795,8 @@ ha_gateway_connect_poll
                 (pollNativeGatewayAuthorizationAndSaveWith
                     baseUrl
                     deviceCode
-                    (invokeGatewayPollResult callback context))
+                    (invokeGatewayCallbackOnce
+                        . invokeGatewayPollResult callback context))
                 >>= \case
                     Left exception ->
                         invokeGatewayPollError callback context
@@ -3840,8 +3842,9 @@ ha_gateway_connect_exchange
                     code
                     verifier
                     redirectUri
-                    (invokeGatewayResultCallback callback context
-                        0 nullPtr 0))
+                    (invokeGatewayCallbackOnce $
+                        invokeGatewayResultCallback callback context
+                            0 nullPtr 0))
                 >>= \case
                     Left exception ->
                         invokeGatewayResultError callback context
@@ -3859,8 +3862,9 @@ ha_gateway_disconnect callback context
         _ <- forkIO do
             tryAny
                 (removeGatewayCredentialWith
-                    (invokeGatewayResultCallback callback context
-                        0 nullPtr 0)) >>= \case
+                    (invokeGatewayCallbackOnce $
+                        invokeGatewayResultCallback callback context
+                            0 nullPtr 0)) >>= \case
                 Left exception ->
                     invokeGatewayResultError callback context
                         (Text.pack (show exception))
@@ -3937,6 +3941,13 @@ invokeGatewayResultError
 invokeGatewayResultError callback context err =
     withText err $ \errorPtr errorLength ->
         invokeGatewayResultCallback callback context (-1) errorPtr errorLength
+
+-- Credential transition callbacks are terminal. Contain a host exception
+-- after the durable mutation so it cannot be misreported as a failed
+-- transition or retried with a second terminal callback.
+invokeGatewayCallbackOnce :: IO () -> IO ()
+invokeGatewayCallbackOnce callback =
+    void (tryAny callback)
 
 anyNonEmptyNull :: [(Ptr Word8, Word64)] -> Bool
 anyNonEmptyNull = any \(pointer, length) ->
