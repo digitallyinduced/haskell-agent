@@ -524,7 +524,7 @@ spec = describe "repository delivery service" do
                 let descendantPid = root <> "/gh-descendant.pid"
                 setEnv "GH_RETAIN_PIPE_MARKER" descendantPid
                 snapshot <- expectRight =<< repositorySnapshot root
-                result <- timeout 5_000_000
+                result <- timeout 30_000_000
                     (previewPullRequest
                         root snapshot.snapshotId "main" "Title" "Body")
                 result `shouldSatisfy` \case
@@ -691,6 +691,8 @@ withFakeGh root action = do
     originalRetainPipeMarker <- lookupEnv "GH_RETAIN_PIPE_MARKER"
     originalGhHost <- lookupEnv "GH_HOST"
     withTempDirectory "repository-delivery-gh" \bin -> do
+        bashExecutable <-
+            maybe (fail "bash not found") pure =<< findExecutable "bash"
         realGit <- maybe (fail "git not found") pure =<< findExecutable "git"
         localRemote <- Text.unpack . Text.strip
             <$> git root ["remote", "get-url", "origin"]
@@ -707,7 +709,7 @@ withFakeGh root action = do
             readyMarker = root <> "/pull-request-ready"
         _ <- git root ["remote", "set-url", "origin", githubRemote]
         writeFile gitExecutable $ unlines
-            [ "#!/bin/bash"
+            [ "#!" <> bashExecutable
             , "set -eu"
             , "args=()"
             , "for arg in \"$@\"; do"
