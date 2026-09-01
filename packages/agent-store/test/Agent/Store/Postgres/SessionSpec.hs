@@ -638,8 +638,7 @@ spec = describe "PostgreSQL session schema" do
                                     Right (Just page) -> do
                                         map
                                             (\storedTurn ->
-                                                storedTurn.storedTurn
-                                                    .sessionTurnUserText
+                                                storedTurn.storedTurn.sessionTurnUserText
                                             )
                                             (toList page.sessionPageTurns)
                                             `shouldBe`
