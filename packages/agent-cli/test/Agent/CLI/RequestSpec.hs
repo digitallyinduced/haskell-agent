@@ -120,6 +120,43 @@ spec = describe "requestParams" do
             _ -> expectationFailure
                 "expected additional_tools and base-instructions input prefix"
 
+    it "groups the computer harness with ordinary Responses Lite functions" do
+        let computerTool = functionTool computerFunctionName
+            params =
+                requestParams
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    "base instructions"
+                    [webSearchTool, computerTool, functionTool "lookup"]
+                    "high"
+
+        params.tools `shouldBe` Nothing
+        jsonArrayField "tools" (Aeson.toJSON params) `shouldBe` []
+        map toolIdentity (additionalToolValues params)
+            `shouldBe`
+                [ (Just "web_search", Nothing)
+                , (Just "namespace", Just "functions")
+                ]
+        map (jsonTextField "name")
+            (functionsNamespaceTools (additionalToolValues params))
+            `shouldBe` map Just [computerFunctionName, "lookup"]
+
+    it "keeps the computer harness an ordinary standard Responses function" do
+        let computerTool = functionTool computerFunctionName
+            params =
+                requestParams
+                    OpenAIProvider
+                    "gpt-5.6"
+                    "base instructions"
+                    [computerTool]
+                    "high"
+
+        params.tools `shouldBe` Just [computerTool]
+        jsonArrayField "tools" (Aeson.toJSON params)
+            `shouldBe` [Aeson.toJSON computerTool]
+        map toolIdentity (jsonArrayField "tools" (Aeson.toJSON params))
+            `shouldBe` [(Just "function", Just computerFunctionName)]
+
     it "groups function and custom tools into the functions namespace" do
         let params =
                 requestParams
@@ -154,25 +191,37 @@ spec = describe "requestParams" do
             _ -> expectationFailure "expected three top-level Lite tools"
 
     it "refreshes the Lite prefix without dropping pending input" do
-        let pending = userMessage "keep me"
+        let computerTool = functionTool computerFunctionName
+            pending = userMessage "keep me"
             original = appendInputItem pending $
                 requestParams
                     OpenAIProvider
                     "gpt-5.6-sol"
                     "old instructions"
-                    [functionTool "old"]
+                    [functionTool "old", computerTool]
                     "high"
             refreshed =
                 setRequestInstructionsAndTools
                     "new instructions"
-                    (Just [functionTool "new"])
+                    (Just [functionTool "new", computerTool])
                     original
+            instructionsOnly =
+                setRequestInstructionsAndTools
+                    "newer instructions"
+                    Nothing
+                    refreshed
 
         refreshed.instructions `shouldBe` Nothing
         refreshed.tools `shouldBe` Nothing
         map (jsonTextField "name")
             (functionsNamespaceTools (additionalToolValues refreshed))
-            `shouldBe` [Just "new"]
+            `shouldBe` map Just ["new", computerFunctionName]
+        map toolIdentity (additionalToolValues refreshed)
+            `shouldBe` [(Just "namespace", Just "functions")]
+        instructionsOnly.tools `shouldBe` Nothing
+        map (jsonTextField "name")
+            (functionsNamespaceTools (additionalToolValues instructionsOnly))
+            `shouldBe` map Just ["new", computerFunctionName]
         case refreshed.input of
             Just (ResponseInputItems [_additional, base, suffix]) -> do
                 base `shouldSatisfy` isInstructionText "new instructions"
@@ -243,7 +292,8 @@ spec = describe "requestParams" do
             `shouldNotBe` requestToolIdentities old
 
     it "rebuilds request dialect fields when models cross the Lite boundary" do
-        let pending = userMessage "pending"
+        let computerTool = functionTool computerFunctionName
+            pending = userMessage "pending"
             genericText = ResponseTextConfig
                 { format = Just ResponseFormatJsonObject
                 , verbosity = Just "medium"
@@ -255,7 +305,7 @@ spec = describe "requestParams" do
                         OpenAIProvider
                         "gpt-generic"
                         "base instructions"
-                        [webSearchTool, functionTool "lookup"]
+                        [webSearchTool, functionTool "lookup", computerTool]
                         "high"
             lite =
                 setRequestModel OpenAIProvider "gpt-5.6-terra" generic
@@ -264,6 +314,14 @@ spec = describe "requestParams" do
 
         lite.instructions `shouldBe` Nothing
         lite.tools `shouldBe` Nothing
+        map toolIdentity (additionalToolValues lite)
+            `shouldBe`
+                [ (Just "web_search", Nothing)
+                , (Just "namespace", Just "functions")
+                ]
+        map (jsonTextField "name")
+            (functionsNamespaceTools (additionalToolValues lite))
+            `shouldBe` map Just ["lookup", computerFunctionName]
         lite.parallelToolCalls `shouldBe` Just False
         fmap (.context) lite.reasoning `shouldBe` Just (Just "all_turns")
         fmap (.verbosity) lite.text `shouldBe` Just (Just "low")
@@ -271,7 +329,7 @@ spec = describe "requestParams" do
         restored.model `shouldBe` Just "gpt-generic-2"
         restored.instructions `shouldBe` Just "base instructions"
         restored.tools `shouldBe` Just
-            [webSearchTool, functionTool "lookup"]
+            [webSearchTool, functionTool "lookup", computerTool]
         restored.parallelToolCalls `shouldBe` Just True
         fmap (.context) restored.reasoning `shouldBe` Just Nothing
         restored.text `shouldBe` Just

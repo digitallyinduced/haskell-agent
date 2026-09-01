@@ -21,5 +21,5 @@ mkDerivation {
     text time vector
   ];
   description = "PostgreSQL persistence for the agent harness";
-  license = lib.meta.getLicenseFromSpdxId "MIT";
+  license = lib.licenses.mit;
 }

@@ -90,6 +90,52 @@ spec = describe "gateway device authorization" do
                     , pollIntervalSeconds = 5
                     }
 
+    it "requires device verification URLs to stay on the gateway origin" do
+        let device =
+                GatewayDeviceAuthorization
+                    { deviceCode = "had_secret"
+                    , userCode = "ABCD-1234"
+                    , verificationUri =
+                        "https://platform.digitallyinduced.com/connect/agent"
+                    , verificationUriComplete =
+                        "https://platform.digitallyinduced.com/connect/agent?user_code=ABCD-1234"
+                    , expiresInSeconds = 600
+                    , pollIntervalSeconds = 5
+                    }
+        validateGatewayDeviceAuthorization defaultGatewayBaseUrl device
+            `shouldBe` Right device
+        validateGatewayDeviceAuthorization
+            defaultGatewayBaseUrl
+            device
+                { verificationUriComplete =
+                    "https://example.com/connect/agent?user_code=ABCD-1234"
+                }
+            `shouldBe`
+                Left
+                    "The gateway returned a verification URL for a different origin."
+
+    it "rejects malformed native gateway inputs before network access" do
+        startNativeGatewayAuthorization defaultGatewayBaseUrl ""
+            `shouldReturn`
+                Left
+                    "Gateway client name must contain between 1 and 160 characters."
+        pollNativeGatewayAuthorizationAndSave defaultGatewayBaseUrl ""
+            `shouldReturn` Left "Gateway device code is invalid."
+        exchangeNativeGatewayAuthorizationCode
+            defaultGatewayBaseUrl
+            "wrong-client"
+            "authorization-code"
+            "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
+            "haskell-agent-auth://gateway/callback"
+            `shouldReturn` Left "Gateway OAuth client ID is invalid."
+        exchangeNativeGatewayAuthorizationCode
+            defaultGatewayBaseUrl
+            "haskell-agent-macos"
+            "authorization-code"
+            "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
+            "https://example.com/callback"
+            `shouldReturn` Left "Gateway OAuth redirect URI is invalid."
+
     it "decodes pending, slow-down, and successful polls" do
         Hermes.decodeEither gatewayPollDecoder
             "{\"error\":\"authorization_pending\",\"interval\":5}"

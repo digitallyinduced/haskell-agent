@@ -1,7 +1,9 @@
 module Agent.Store.Postgres.Skill.Mapping.Statements.ListRevisions
     ( listRevisionsStatement
+    , listRevisionsLimitedStatement
     ) where
 
+import Data.Int (Int64)
 import Data.Functor.Contravariant ((>$<))
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
@@ -20,6 +22,22 @@ listRevisionsStatement = mkStatement
     \ WHERE s.scope_kind = $1 AND s.scope_id = $2::uuid AND s.slug = $3\
     \ ORDER BY r.revision_number DESC"
     scopeSlugEncoder
+    (Decoders.rowList revisionRowDecoder)
+    True
+
+listRevisionsLimitedStatement
+    :: Statement (ScopeSlugParams, Int64) [RevisionRow]
+listRevisionsLimitedStatement = mkStatement
+    "SELECT r.skill_revision_id::text, r.revision_number, r.title,\
+    \ r.description, r.applies_when, r.instructions_text,\
+    \ r.activation_mode, r.priority, r.status, r.change_summary, r.created_at\
+    \ FROM harness.skill_revisions r\
+    \ JOIN harness.skills s ON s.skill_id = r.skill_id\
+    \ WHERE s.scope_kind = $1 AND s.scope_id = $2::uuid AND s.slug = $3\
+    \ ORDER BY r.revision_number DESC LIMIT $4"
+    ( (fst >$< scopeSlugEncoder)
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
     (Decoders.rowList revisionRowDecoder)
     True
 

@@ -11,8 +11,10 @@ module Agent.CLI.AccountSelection
     , selectAccount
     , selectPreparedProviderAccount
     , selectProviderAccount
+    , selectProviderAccountCached
     ) where
 
+import Agent.CLI.AccountUsageCache (refreshLoginAccountCached)
 import Agent.CLI.Login
     ( AccountBilling(..)
     , AccountUsage(..)
@@ -38,6 +40,7 @@ import Agent.Provider
     , providerSlug
     )
 import Control.Concurrent.Async (mapConcurrently)
+import Agent.Store.Postgres.Connection (StorePool)
 import Data.List (find, sortOn)
 import Data.Ord (Down(..))
 import Data.Text (Text)
@@ -92,9 +95,27 @@ selectProviderAccount
     -> Maybe BillingMode
     -> Maybe (Text, Text)
     -> IO (Either Text SelectedAccount)
-selectProviderAccount provider requiredBilling remembered =
+selectProviderAccount =
+    selectProviderAccountWith refreshLoginAccount
+
+selectProviderAccountCached
+    :: StorePool
+    -> Provider
+    -> Maybe BillingMode
+    -> Maybe (Text, Text)
+    -> IO (Either Text SelectedAccount)
+selectProviderAccountCached pool =
+    selectProviderAccountWith (refreshLoginAccountCached pool)
+
+selectProviderAccountWith
+    :: (LoginAccount -> IO LoginAccount)
+    -> Provider
+    -> Maybe BillingMode
+    -> Maybe (Text, Text)
+    -> IO (Either Text SelectedAccount)
+selectProviderAccountWith refresh provider requiredBilling remembered =
     selectPreparedProviderAccount remembered
-        <$> prepareProviderAccounts provider requiredBilling
+        <$> prepareProviderAccountsWith refresh provider requiredBilling
 
 -- | Usage results prepared independently of project settings. The freshly
 -- checked-out project can apply its remembered account only after Git setup
@@ -108,7 +129,15 @@ prepareProviderAccounts
     :: Provider
     -> Maybe BillingMode
     -> IO PreparedProviderAccounts
-prepareProviderAccounts provider requiredBilling = do
+prepareProviderAccounts =
+    prepareProviderAccountsWith refreshLoginAccount
+
+prepareProviderAccountsWith
+    :: (LoginAccount -> IO LoginAccount)
+    -> Provider
+    -> Maybe BillingMode
+    -> IO PreparedProviderAccounts
+prepareProviderAccountsWith refresh provider requiredBilling = do
     providerAccounts <-
         filter
             ((== provider) . (.loginProvider))
@@ -124,7 +153,9 @@ prepareProviderAccounts provider requiredBilling = do
                                 . billingMode . (.loginBilling))
                             providerAccounts
                 in if null subscription then providerAccounts else subscription
-    checked <- mapConcurrently refreshSelectableAccount billingAccounts
+    checked <- mapConcurrently
+        (refreshSelectableAccountWith refresh)
+        billingAccounts
     pure PreparedProviderAccounts
         { preparedProvider = provider
         , preparedAccounts = checked
@@ -227,13 +258,16 @@ parseAmount :: Text -> Maybe Double
 parseAmount =
     readMaybe . Text.unpack . Text.dropWhile (`elem` ("$ " :: String))
 
-refreshSelectableAccount :: LoginAccount -> IO LoginAccount
-refreshSelectableAccount account =
+refreshSelectableAccountWith
+    :: (LoginAccount -> IO LoginAccount)
+    -> LoginAccount
+    -> IO LoginAccount
+refreshSelectableAccountWith refresh account =
     refreshCredential account >>= \case
         Left err ->
             pure account { loginUsage = UsageUnavailable err }
         Right refreshed ->
-            refreshLoginAccount refreshed
+            refresh refreshed
   where
     refreshCredential candidate = case candidate.loginProvider of
         OpenAIProvider ->

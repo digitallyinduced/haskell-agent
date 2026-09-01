@@ -486,6 +486,33 @@ spec = describe "Agent.CLI.AgentSessions" do
                         sessionLockIsActive (sessionLockPath handle.sessionDir)
                             `shouldReturn` False
 
+    it "tracks active turns separately from idle session ownership" $
+        withTempStoreDir "agent-session-activity-lock-" \pool root -> do
+            handle <- createSession (testCreateAt pool root root)
+            acquireSessionLock
+                handle.sessionDir
+                handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right sessionLock -> do
+                        sessionLockIsActive
+                            (sessionActivityLockPath handle.sessionDir)
+                            `shouldReturn` False
+                        acquireSessionActivityLock
+                            handle.sessionDir
+                            handle.sessionMeta.metaId >>= \case
+                                Left err ->
+                                    expectationFailure (Text.unpack err)
+                                Right activityLock -> do
+                                    sessionLockIsActive
+                                        (sessionActivityLockPath
+                                            handle.sessionDir)
+                                        `shouldReturn` True
+                                    releaseSessionLock activityLock
+                        sessionLockIsActive
+                            (sessionActivityLockPath handle.sessionDir)
+                            `shouldReturn` False
+                        releaseSessionLock sessionLock
+
     it "releases an advisory lock when its process crashes" $
         withTempStoreDir "agent-session-lock-crash-" \pool root -> do
             handle <- createSession (testCreateAt pool root root)

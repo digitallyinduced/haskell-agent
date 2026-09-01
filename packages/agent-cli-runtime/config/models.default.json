@@ -36,6 +36,8 @@
       "connection": "openai",
       "dialect": "codex",
       "label": "default · frontier",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "low",
       "default": true,
       "fallback_priority": 0
     },
@@ -44,6 +46,8 @@
       "connection": "openai",
       "dialect": "codex",
       "label": "balanced",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "medium",
       "fallback_priority": 1
     },
     {
@@ -51,6 +55,8 @@
       "connection": "openai",
       "dialect": "codex",
       "label": "fast · low cost",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "medium",
       "fallback_priority": 2
     },
     {
@@ -59,6 +65,8 @@
       "dialect": "grok-build",
       "context_window": 500000,
       "label": "default",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+      "default_reasoning_effort": "high",
       "default": true,
       "fallback_priority": 10
     },
@@ -113,19 +121,25 @@
       "connection": "claude-code",
       "dialect": "claude-code",
       "label": "default · subscription",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "xhigh",
       "default": true
     },
     {
       "id": "opus",
       "connection": "claude-code",
       "dialect": "claude-code",
-      "label": "previous frontier · subscription"
+      "label": "previous frontier · subscription",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "xhigh"
     },
     {
       "id": "fable",
       "connection": "claude-code",
       "dialect": "claude-code",
-      "label": "frontier · subscription"
+      "label": "frontier · subscription",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "xhigh"
     }
   ]
 }

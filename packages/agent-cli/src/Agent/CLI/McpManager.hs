@@ -15,8 +15,8 @@ module Agent.CLI.McpManager
 import Agent.CLI.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
-    , loadHarnessConfig
-    , saveHarnessConfig
+    , loadHarnessConfigSnapshot
+    , modifyHarnessConfig
     )
 import Agent.CLI.ExternalProgram (parseProgramWords)
 import Agent.CLI.Input (readApprovalLine)
@@ -206,11 +206,11 @@ runMcpManager
     -> [Text]
     -> IO Bool
 runMcpManager color home registrations warnings = do
-    loadHarnessConfig home >>= \case
+    loadHarnessConfigSnapshot home >>= \case
         Left err -> do
             Text.hPutStrLn stderr (roleError color err)
             pure False
-        Right config -> do
+        Right (revision, config) -> do
             tty <- hIsTerminalDevice stdin
             if not tty
                 then do
@@ -220,9 +220,9 @@ runMcpManager color home registrations warnings = do
                                 config registrations warnings Set.empty Nothing)
                     hFlush stderr
                     pure False
-                else loop config Set.empty False Nothing
+                else loop revision config Set.empty False Nothing
   where
-    loop config pending changed notice = do
+    loop revision config pending changed notice = do
         let state =
                 initialMcpManagerState
                     config registrations warnings pending notice
@@ -234,9 +234,10 @@ runMcpManager color home registrations warnings = do
                 Just McpManagerAdd ->
                     promptNewServer config >>= \case
                         Left err ->
-                            loop config pending changed (Just (False, err))
+                            loop revision config pending changed
+                                (Just (False, err))
                         Right Nothing ->
-                            loop config pending changed Nothing
+                            loop revision config pending changed Nothing
                         Right (Just (label, server)) ->
                             persist
                                 (config
@@ -249,7 +250,7 @@ runMcpManager color home registrations warnings = do
                 Just (McpManagerToggle label) ->
                     case Map.lookup label config.configMcpServers of
                         Nothing ->
-                            loop config pending changed
+                            loop revision config pending changed
                                 (Just (False, "MCP server no longer exists"))
                         Just server ->
                             let enabled = not server.mcpEnabled
@@ -270,7 +271,7 @@ runMcpManager color home registrations warnings = do
                         confirm
                             ("Remove MCP server " <> quote label <> "? [y/N] ")
                     if not confirmed
-                        then loop config pending changed Nothing
+                        then loop revision config pending changed Nothing
                         else
                             persist
                                 (config
@@ -281,11 +282,17 @@ runMcpManager color home registrations warnings = do
                                 ("Removed " <> label)
       where
         persist updated pending' message =
-            saveHarnessConfig home updated >>= \case
+            modifyHarnessConfig home
+                (\current _ ->
+                    if current /= revision
+                        then Left
+                            "MCP configuration changed; reopen /mcp and retry"
+                        else Right (updated, ())) >>= \case
                 Left err ->
-                    loop config pending changed (Just (False, err))
-                Right () ->
-                    loop updated pending' True (Just (True, message))
+                    loop revision config pending changed (Just (False, err))
+                Right (nextRevision, _, ()) ->
+                    loop nextRevision updated pending' True
+                        (Just (True, message))
 
 promptNewServer
     :: HarnessConfig

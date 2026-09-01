@@ -14,6 +14,7 @@ module Agent.CLI.Auth
     , grokNeedsRefresh
     , grokOAuthOptionsFromAuthJson
     , gatewayAuthSelectionId
+    , gatewayRouterTokenProvider
     , isGatewayLoadedAuth
     , geminiAuthStateFromJson
     , geminiAuthStateToJson
@@ -96,7 +97,10 @@ import Agent.CLI.GatewayClient
     , loadGatewayCredential
     )
 import Agent.Error (ApiError(..))
-import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
+import Agent.OpenAI.WebSocketClient
+    ( isGatewayWebSocketCredential
+    , validateGatewayWebSocketUrl
+    )
 import qualified Agent.Claude.Auth as ClaudeCode
 import Agent.Provider
     ( AccountFailure(..)
@@ -110,6 +114,7 @@ import Agent.Provider
     , providerSlug
     , seedTokenProvider
     , tokenProvider
+    , tokenProviderWithNextToken
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
 import qualified Agent.Gemini.Auth as GeminiAuth
@@ -206,6 +211,21 @@ credentialForGateway gateway =
         , leaseId = Nothing
         , provider = OpenAIProvider
         }
+
+-- | Refuse any credential that could route an organization model outside the
+-- connected gateway, even if another wrapper accidentally supplies one.
+gatewayRouterTokenProvider :: TokenProvider -> TokenProvider
+gatewayRouterTokenProvider provider =
+    tokenProviderWithNextToken provider \failed ->
+        getNextToken provider failed >>= \case
+            Right credential
+                | isGatewayWebSocketCredential credential ->
+                    pure (Right credential)
+                | otherwise ->
+                    pure $ Left $ CredentialError
+                        "the connected gateway is unavailable; refusing to \
+                        \send an organization model with direct OpenAI credentials"
+            Left err -> pure (Left err)
 
 -- | Load one specific account for providers whose HTTP backends can swap
 -- token sources without reconnecting a long-lived transport.

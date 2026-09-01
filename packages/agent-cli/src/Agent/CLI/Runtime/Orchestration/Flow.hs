@@ -87,8 +87,16 @@ import Agent.CLI.Runtime.Orchestration.Restart
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, setNativeProgress )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AgentProcessRuntime,
-      AgentRunMode(runInBackground, runStdout, runStderr, runCwdHint) )
+    ( AgentProcessRuntime
+    , AgentRunMode
+        ( runInBackground
+        , runStdout
+        , runStderr
+        , runCwdHint
+        , runNativeHooks
+        )
+    , NativeRunHooks(nativeRegisterCancel)
+    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -118,7 +126,8 @@ import Agent.CLI.Session.Runtime.Types
                      startupStderrTty, startupStdinTty, startupStdoutTty,
                      startupFullscreenReused, startupAgentSnapshot, startupAgentSelect,
                      startupRestartEffort, startupStartedAt, startupTimings,
-                     startupSyntaxLoadDuration, startupFinished) )
+                     startupSyntaxLoadDuration, startupFinished,
+                     startupNativeHooks) )
 import Agent.CLI.Session.Selection ()
 import Agent.CLI.SessionAdmin ( managedPostgresConfigForHome )
 import Agent.CLI.SessionEnv ()
@@ -885,6 +894,9 @@ prepareAgentIterationTracked
                 reportTerminalCwd terminal stdoutHandle terminalCwd
                 toolEnv <- defaultToolEnv cwd
                 writeIORef cancelToolRef (requestCancel toolEnv.toolCancel)
+                forM_ runMode.runNativeHooks \hooks ->
+                    hooks.nativeRegisterCancel
+                        (requestCancel toolEnv.toolCancel)
                 forM_ fullscreen \runtime ->
                     setFullscreenSessionActions
                         runtime
@@ -922,6 +934,7 @@ prepareAgentIterationTracked
                         , startupSyntaxLoadDuration = syntaxLoadDurationRef
                         , startupFinished = startupFinishedRef
                         , startupSessionState = sessionState
+                        , startupNativeHooks = runMode.runNativeHooks
                         }
                 runAgentInitialized
                     (runAgentWithRuntime processRuntime)
@@ -950,6 +963,8 @@ prepareAgentIterationTracked
                     (runAction . Just)
             | otherwise = runAction Nothing
         cleanup = do
+            forM_ runMode.runNativeHooks \hooks ->
+                hooks.nativeRegisterCancel (pure ())
             writeIORef uiRuntimeRef Nothing
             writeIORef cancelToolRef (pure ())
             forM_ fullscreen resetFullscreenSessionActions

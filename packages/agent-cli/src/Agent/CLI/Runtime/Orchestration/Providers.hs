@@ -359,9 +359,10 @@ runAgentProviders
                                 httpFallbackActive <- newIORef startsOnHttp
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
-                                let selectAccount
+                                let selectableOpenAiPool
                                         | isGatewayLoadedAuth loaded = Nothing
-                                        | otherwise = case loaded.loadedOpenAiPool of
+                                        | otherwise = loaded.loadedOpenAiPool
+                                    selectAccount = case selectableOpenAiPool of
                                             Nothing -> Nothing
                                             Just pool ->
                                                 Just \selectedAccountId -> do
@@ -389,7 +390,7 @@ runAgentProviders
                                                                             }
                                                                         reply)
                                                                 takeMVar reply
-                                    switchLoop = case loaded.loadedOpenAiPool of
+                                    switchLoop = case selectableOpenAiPool of
                                         Nothing -> pure ()
                                         Just pool ->
                                             readChan switchRequests
@@ -625,7 +626,7 @@ runAgentProviders
                                         (sessionRequest
                                             startupUnavailable
                                             (Just tokenProvider)
-                                            loaded.loadedOpenAiPool
+                                            selectableOpenAiPool
                                             selectAccount
                                             (currentModelContextWindow transportModel)
                                             compactRunner)
@@ -738,7 +739,8 @@ runAgentProviders
                                 startupUnavailable
                                 (Just tokenProvider)
                                 loaded.loadedOpenAiPool
-                                (if isJust customGenericOptions
+                                (if isGatewayLoadedAuth loaded
+                                    || isJust customGenericOptions
                                     then Nothing
                                     else Just selectHttpAccount)
                                 (Just . xaiContextWindow
@@ -820,7 +822,9 @@ runAgentProviders
                                 startupUnavailable
                                 (Just tokenProvider)
                                 loaded.loadedOpenAiPool
-                                (Just selectHttpAccount)
+                                (if isGatewayLoadedAuth loaded
+                                    then Nothing
+                                    else Just selectHttpAccount)
                                 (Just . geminiContextWindow
                                     <$> readIORef paramsRef)
                                 compactRunner)
@@ -1098,7 +1102,9 @@ runAgentProviders
                                 startupUnavailable
                                 (Just tokenProvider)
                                 loaded.loadedOpenAiPool
-                                (Just selectHttpAccount)
+                                (if isGatewayLoadedAuth loaded
+                                    then Nothing
+                                    else Just selectHttpAccount)
                                 (Just . openRouterContextWindow
                                     <$> readIORef paramsRef)
                                 compactRunner)

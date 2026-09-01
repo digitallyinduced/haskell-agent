@@ -204,9 +204,12 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
-        (withLiveTranscript env.sessionConversation \beforeItems ->
-            runOneTurnBusy
-                includeTurnContext env beforeItems promptText inputs)
+        (bracket_
+            env.sessionBeginTurnActivity
+            env.sessionEndTurnActivity
+            (withLiveTranscript env.sessionConversation \beforeItems ->
+                runOneTurnBusy
+                    includeTurnContext env beforeItems promptText inputs))
         `finally` writeIORef env.sessionAutomaticCompaction Nothing
 
 timestampConversationBounds
@@ -565,6 +568,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
+                    let failureMessage = formatLoopErrorAt finishedAt err
                     restorePlanStateAfterIncomplete planMode initialPlanState
                     finishTerminal (isNothing fullscreen)
                         stdoutHandle terminal wallStarted finishedAt 1
@@ -586,7 +590,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                     (UiTurnEnded BlockFailed)
                                 emitUiEvent runtime
                                     (UiErrorMessage
-                                        (formatLoopErrorAt finishedAt err
+                                        (failureMessage
                                             <> "\n"
                                             <> elapsedDetail model))
                         Nothing -> do

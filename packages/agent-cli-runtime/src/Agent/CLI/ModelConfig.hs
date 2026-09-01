@@ -17,6 +17,7 @@ module Agent.CLI.ModelConfig
     , catalogDefaultForProvider
     , catalogGatewayModelById
     , catalogModelById
+    , catalogModelForConnection
     , catalogModelsForConnection
     , connectionSupportsDialect
     , connectionBuiltinProvider
@@ -45,6 +46,7 @@ import Control.Monad (unless, when)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlpha, isAlphaNum, isSpace)
 import Data.Foldable (traverse_)
+import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
@@ -84,6 +86,8 @@ data CatalogModel = CatalogModel
     , catalogModelDialect :: !DialectId
     , catalogModelContextWindow :: !(Maybe Int)
     , catalogModelLabel :: !(Maybe Text)
+    , catalogModelReasoningEfforts :: !(Maybe [Text])
+    , catalogModelDefaultReasoningEffort :: !(Maybe Text)
     , catalogModelDefault :: !Bool
     , catalogModelFallbackPriority :: !(Maybe Int)
     }
@@ -121,6 +125,8 @@ data ModelFile = ModelFile
     , modelFileDialect :: !Text
     , modelFileContextWindow :: !(Maybe Int)
     , modelFileLabel :: !(Maybe Text)
+    , modelFileReasoningEfforts :: !(Maybe [Text])
+    , modelFileDefaultReasoningEffort :: !(Maybe Text)
     , modelFileDefault :: !Bool
     , modelFileFallbackPriority :: !(Maybe Int)
     }
@@ -156,6 +162,9 @@ modelFileDecoder =
             <*> Hermes.atKey "dialect" Hermes.text
             <*> optionalKey "context_window" Hermes.int
             <*> optionalKey "label" Hermes.text
+            <*> optionalKey "reasoning_efforts"
+                (Hermes.list Hermes.text)
+            <*> optionalKey "default_reasoning_effort" Hermes.text
             <*> defaultKey False "default" Hermes.bool
             <*> optionalKey "fallback_priority" Hermes.int
 
@@ -501,6 +510,12 @@ validateConfig source config = do
         let modelId = Text.strip raw.modelFileId
             connectionId = Text.strip raw.modelFileConnection
             wireId = Text.strip (fromMaybe modelId raw.modelFileWireId)
+            reasoningEfforts = fmap
+                (map (Text.toLower . Text.strip))
+                raw.modelFileReasoningEfforts
+            defaultReasoningEffort =
+                Text.toLower . Text.strip
+                    <$> raw.modelFileDefaultReasoningEffort
         when (Text.null modelId || Text.any isSpace modelId) $
             Left ("model id must be nonempty and contain no whitespace: "
                 <> raw.modelFileId)
@@ -561,6 +576,37 @@ validateConfig source config = do
                 Left ("model " <> modelId
                     <> " context_window must be positive"))
             raw.modelFileContextWindow
+        unless
+            ( maybe True
+                (all (`elem` supportedReasoningEfforts))
+                reasoningEfforts
+            ) $
+            Left
+                ( "model " <> modelId
+                    <> " has unsupported reasoning_efforts; expected "
+                    <> Text.intercalate ", " supportedReasoningEfforts
+                )
+        traverse_
+            (\efforts -> do
+                when (null efforts) $
+                    Left
+                        ( "model " <> modelId
+                            <> " reasoning_efforts must not be empty"
+                        )
+                when (length efforts /= length (nub efforts)) $
+                    Left
+                        ( "model " <> modelId
+                            <> " reasoning_efforts must not contain duplicates"
+                        ))
+            reasoningEfforts
+        traverse_
+            (\effort -> unless (maybe False (effort `elem`) reasoningEfforts) $
+                Left
+                    ( "model " <> modelId
+                        <> " default_reasoning_effort must be listed in "
+                        <> "reasoning_efforts"
+                    ))
+            defaultReasoningEffort
         pure CatalogModel
             { catalogModelId = modelId
             , catalogModelConnectionId = connectionId
@@ -570,10 +616,17 @@ validateConfig source config = do
                 raw.modelFileContextWindow
             , catalogModelLabel =
                 nonEmptyText =<< raw.modelFileLabel
+            , catalogModelReasoningEfforts = reasoningEfforts
+            , catalogModelDefaultReasoningEffort =
+                defaultReasoningEffort
             , catalogModelDefault = raw.modelFileDefault
             , catalogModelFallbackPriority =
                 raw.modelFileFallbackPriority
             }
+
+supportedReasoningEfforts :: [Text]
+supportedReasoningEfforts =
+    ["none", "low", "medium", "high", "xhigh", "max"]
 
 validateBuiltinDefault :: [CatalogModel] -> Provider -> Either Text ()
 validateBuiltinDefault models provider =

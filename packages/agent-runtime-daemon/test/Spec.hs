@@ -1,0 +1,1324 @@
+module Main (main) where
+
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (async, cancel, concurrently, wait, waitCatch, withAsync)
+import Control.Concurrent.STM
+    ( TQueue
+    , TMVar
+    , atomically
+    , flushTQueue
+    , newEmptyTMVarIO
+    , newTQueueIO
+    , putTMVar
+    , readTQueue
+    , readTVarIO
+    , takeTMVar
+    , writeTQueue
+    )
+import Control.Exception.Safe (bracket, finally, isAsyncException, uninterruptibleMask_)
+import Data.Aeson (Result (..), Value (..), encode, fromJSON, object, toJSON, (.=))
+import Data.Bits ((.&.))
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Map.Strict as Map
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Time (getCurrentTime)
+import Network.Socket
+import qualified Network.Socket.ByteString as Socket
+import System.Directory
+    ( createDirectory
+    , doesFileExist
+    , removeFile
+    , renamePath
+    )
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory, withTempDirectory)
+import System.Posix.Files
+    ( createSymbolicLink
+    , fileMode
+    , getFileStatus
+    , setFileMode
+    )
+import System.Timeout (timeout)
+import Test.Hspec
+
+import Agent.Runtime.Daemon.Framing
+import Agent.Runtime.Daemon.Journal
+import Agent.Runtime.Daemon.Protocol
+import Agent.Runtime.Daemon.Server
+import Agent.Runtime.Daemon.Socket
+import Agent.Runtime.Daemon.Supervisor
+import Agent.Runtime.Daemon.Task
+import Agent.Runtime.Daemon.TaskAdapter
+
+main :: IO ()
+main = hspec $ do
+    describe "length-framed JSON IPC" $ do
+        it "round trips a typed message over a Unix stream" $
+            withSocketPair $ \(writer, reader) -> do
+                let expected = ClientAck 42
+                (_, actual) <-
+                    concurrently
+                        (sendJSONFrame defaultMaximumFrameBytes writer expected)
+                        (receiveJSONFrame defaultMaximumFrameBytes reader)
+                actual `shouldBe` expected
+
+        it "rejects an outbound frame above the configured bound" $
+            withSocketPair $ \(writer, _) ->
+                sendJSONFrame 8 writer (String "this frame is too long")
+                    `shouldThrow` \case
+                        FrameTooLarge _ 8 -> True
+                        _ -> False
+
+        it "rejects an advertised inbound length before reading its body" $
+            withSocketPair $ \(writer, reader) -> do
+                Socket.sendAll writer (BS.pack [0, 0, 1, 0])
+                (receiveJSONFrame 32 reader :: IO Value)
+                    `shouldThrow` \case
+                        FrameTooLarge 256 32 -> True
+                        _ -> False
+
+    describe "protocol negotiation" $ do
+        it "chooses the current common version" $ do
+            negotiateVersion [ProtocolVersion 99, currentProtocolVersion]
+                `shouldBe` Just currentProtocolVersion
+            negotiateVersion [ProtocolVersion 99] `shouldBe` Nothing
+
+    describe "durable journal" $ do
+        it "keeps sequence numbers monotonic and replays after a cursor" $
+            withSystemTempDirectory "daemon-journal" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                first <- appendEvent journal "one" Null
+                second <- appendEvent journal "two" Null
+                first.sequenceNumber `shouldBe` 1
+                second.sequenceNumber `shouldBe` 2
+                replayAfter journal 1 `shouldReturn` ReplayEvents [second]
+
+        it "falls back to a snapshot when retention has removed the cursor" $
+            withSystemTempDirectory "daemon-retention" $ \directory -> do
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumEvents = 2
+                            , maximumJournalBytes = 1_048_576
+                            }
+                journal <- openJournal config
+                _ <- appendEvent journal "one" Null
+                second <- appendEvent journal "two" Null
+                third <- appendEvent journal "three" Null
+                replayAfter journal 0 >>= (`shouldSatisfy` \case
+                    ReplaySnapshot saved -> saved.lastSequence == 3
+                    ReplayEvents _ -> False)
+                replayAfter journal 1 `shouldReturn` ReplayEvents [second, third]
+                replayAfter journal 99 >>= (`shouldSatisfy` \case
+                    ReplaySnapshot saved -> saved.lastSequence == 3
+                    ReplayEvents _ -> False)
+
+        it "persists a snapshot anchor before dropping an unanchored prefix" $
+            withSystemTempDirectory "daemon-retention-anchor" $ \directory -> do
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumEvents = 1
+                            , maximumJournalBytes = 1_048_576
+                            }
+                firstProcess <- openJournal config
+                _ <- appendEvent firstProcess "one" Null
+                second <- appendEvent firstProcess "two" Null
+                secondProcess <- openJournal config
+                recovered <- snapshot secondProcess
+                recovered.lastSequence `shouldBe` 2
+                replayAfter secondProcess 1 `shouldReturn` ReplayEvents [second]
+                third <- appendEvent secondProcess "three" Null
+                third.sequenceNumber `shouldBe` 3
+
+        it "reopens a compacted replay suffix without requiring sequence one" $
+            withSystemTempDirectory "daemon-reopen-compaction" $ \directory -> do
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumEvents = 2
+                            , maximumJournalBytes = 1_048_576
+                            }
+                firstProcess <- openJournal config
+                _ <- appendEvent firstProcess "one" Null
+                second <- appendEvent firstProcess "two" Null
+                third <- appendEvent firstProcess "three" Null
+                secondProcess <- openJournal config
+                BS.readFile (directory </> "events.jsonl")
+                    `shouldReturn` (LBS.toStrict (encode second) <> "\n" <> LBS.toStrict (encode third) <> "\n")
+                replayAfter secondProcess 1 `shouldReturn` ReplayEvents [second, third]
+                snapshot secondProcess >>= \saved ->
+                    saved.lastSequence `shouldBe` 3
+                thirdProcess <- openJournal config
+                replayAfter thirdProcess 1 `shouldReturn` ReplayEvents [second, third]
+                fourth <- appendEvent thirdProcess "four" Null
+                fourth.sequenceNumber `shouldBe` 4
+
+        it "accepts the snapshot boundary event in a retained replay suffix" $
+            withSystemTempDirectory "daemon-snapshot-boundary" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    boundary = EventEnvelope {sequenceNumber = 4, eventType = "boundary", payload = Null}
+                    next = EventEnvelope {sequenceNumber = 5, eventType = "next", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    (LBS.toStrict (encode boundary) <> "\n" <> LBS.toStrict (encode next) <> "\n")
+                reopened <- openJournal (defaultJournalConfig directory)
+                replayAfter reopened 3 `shouldReturn` ReplayEvents [boundary, next]
+                replayAfter reopened 4 `shouldReturn` ReplayEvents [next]
+
+        it "fails closed on duplicate retained sequence numbers" $
+            withSystemTempDirectory "daemon-duplicate-boundary" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    duplicate = EventEnvelope {sequenceNumber = 4, eventType = "duplicate", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    (LBS.toStrict (encode duplicate) <> "\n" <> LBS.toStrict (encode duplicate) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalEventGap 5 4 -> True
+                        _ -> False
+
+        it "redacts sensitive fields and bounds retained task logs" $
+            withSystemTempDirectory "daemon-redaction" $ \directory -> do
+                now <- getCurrentTime
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumTaskLogLines = 2
+                            , maximumTaskLogCharacters = 20
+                            }
+                    task =
+                        DurableTask
+                            { taskId = TaskId "task"
+                            , sessionId = Nothing
+                            , status = TaskRunning
+                            , description = "test"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = ["old", "authorization: bearer private", "safe"]
+                            }
+                journal <- openJournal config
+                event <- appendEvent journal "credentials" (object ["token" .= ("private" :: Text)])
+                event.payload `shouldBe` object ["token" .= ("[REDACTED]" :: Text)]
+                _ <- persistTask journal task
+                saved <- snapshot journal
+                (.logTail) (saved.tasks Map.! TaskId "task")
+                    `shouldBe` ["[REDACTED]", "safe"]
+                (.description) (saved.tasks Map.! TaskId "task")
+                    `shouldBe` "test"
+
+        it "marks active tasks interrupted on startup without retrying them" $
+            withSystemTempDirectory "daemon-recovery" $ \directory -> do
+                now <- getCurrentTime
+                let config = defaultJournalConfig directory
+                    running =
+                        DurableTask
+                            { taskId = TaskId "active"
+                            , sessionId = Nothing
+                            , status = TaskRunning
+                            , description = "active before crash"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = []
+                            }
+                firstProcess <- openJournal config
+                _ <- persistTask firstProcess running
+                secondProcess <- openJournal config
+                recovered <- snapshot secondProcess
+                (.status) (recovered.tasks Map.! TaskId "active")
+                    `shouldBe` TaskInterrupted
+                let recoveredSequence = recovered.lastSequence
+                thirdProcess <- openJournal config
+                unchanged <- snapshot thirdProcess
+                unchanged.lastSequence `shouldBe` recoveredSequence
+                (.status) (unchanged.tasks Map.! TaskId "active")
+                    `shouldBe` TaskInterrupted
+
+        it "fails closed on corrupt snapshots and event gaps" $
+            withSystemTempDirectory "daemon-corrupt" $ \directory -> do
+                BS.writeFile (directory </> "snapshot.json") "{broken"
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalCorrupt _ _ -> True
+                        _ -> False
+                removeFile (directory </> "snapshot.json")
+                let event sequenceNumber =
+                        EventEnvelope {sequenceNumber, eventType = "test", payload = Null}
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    (LBS.toStrict (encode (event 1)) <> "\n" <> LBS.toStrict (encode (event 3)) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalEventGap 2 3 -> True
+                        _ -> False
+
+        it "rejects a retained suffix that starts after a snapshot gap" $
+            withSystemTempDirectory "daemon-snapshot-gap" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    event = EventEnvelope {sequenceNumber = 6, eventType = "test", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile (directory </> "events.jsonl") (LBS.toStrict (encode event) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalEventGap 5 6 -> True
+                        _ -> False
+
+        it "rejects a nonempty retained suffix that ends before its snapshot" $
+            withSystemTempDirectory "daemon-stale-suffix" $ \directory -> do
+                let saved = JournalSnapshot {lastSequence = 4, tasks = Map.empty}
+                    event = EventEnvelope {sequenceNumber = 3, eventType = "test", payload = Null}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode saved))
+                BS.writeFile (directory </> "events.jsonl") (LBS.toStrict (encode event) <> "\n")
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalCorrupt _ _ -> True
+                        _ -> False
+
+        it "enforces contiguous startup retention and rejects an oversized newest event" $
+            withSystemTempDirectory "daemon-startup-retention" $ \directory -> do
+                original <- openJournal ((defaultJournalConfig directory) {maximumEvents = 10})
+                now <- getCurrentTime
+                _ <-
+                    persistTask original $
+                        DurableTask
+                            { taskId = TaskId "snapshot-anchor"
+                            , sessionId = Nothing
+                            , status = TaskCompleted
+                            , description = "anchor"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = []
+                            }
+                second <- appendEvent original "two" Null
+                third <- appendEvent original "three" Null
+                reopened <- openJournal ((defaultJournalConfig directory) {maximumEvents = 2})
+                replayAfter reopened 1 `shouldReturn` ReplayEvents [second, third]
+                let tinyConfig =
+                        (defaultJournalConfig (directory </> "oversized"))
+                            { maximumJournalBytes = 4
+                            }
+                bounded <- openJournal tinyConfig
+                appendEvent bounded "large" (String "payload")
+                    `shouldThrow` \case
+                        JournalEventTooLarge _ 4 -> True
+                        _ -> False
+                saved <- snapshot bounded
+                saved.lastSequence `shouldBe` 0
+
+        it "poisons the journal after persistence I/O failure instead of reusing a sequence" $
+            withSystemTempDirectory "daemon-poison" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                _ <- appendEvent journal "first" Null
+                renamePath (directory </> "events.jsonl") (directory </> "events.saved")
+                createDirectory (directory </> "events.jsonl")
+                appendEvent journal "second" Null `shouldThrow` anyException
+                appendEvent journal "third" Null
+                    `shouldThrow` \case
+                        JournalPoisoned _ -> True
+                        _ -> False
+
+        it "redacts descriptions, bounds task count, and bounds subscriber queues" $
+            withSystemTempDirectory "daemon-bounds" $ \directory -> do
+                now <- getCurrentTime
+                let config =
+                        (defaultJournalConfig directory)
+                            { maximumTasks = 1
+                            , subscriberQueueSize = 1
+                            }
+                    task name description =
+                        DurableTask
+                            { taskId = TaskId name
+                            , sessionId = Nothing
+                            , status = TaskCompleted
+                            , description
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = []
+                            }
+                journal <- openJournal config
+                _ <- persistTask journal (task "one" "password=private")
+                saved <- snapshot journal
+                (.description) (saved.tasks Map.! TaskId "one") `shouldBe` "[REDACTED]"
+                persistTask journal (task "two" "safe")
+                    `shouldThrow` \case
+                        JournalTaskCapacityExceeded 1 -> True
+                        _ -> False
+                (_, _, _, overflowed, unsubscribe) <- subscribeReplay journal saved.lastSequence
+                _ <- appendEvent journal "a" Null
+                _ <- appendEvent journal "b" Null
+                readTVarIO overflowed `shouldReturn` True
+                unsubscribe
+
+        it "applies task bounds while recovering task_changed events" $
+            withSystemTempDirectory "daemon-recovered-task-bounds" $ \directory -> do
+                now <- getCurrentTime
+                let task =
+                        DurableTask
+                            { taskId = TaskId "recovered"
+                            , sessionId = Nothing
+                            , status = TaskCompleted
+                            , description = "password=private"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = ["token=private"]
+                            }
+                    event =
+                        EventEnvelope
+                            { sequenceNumber = 1
+                            , eventType = "task_changed"
+                            , payload = toJSON task
+                            }
+                    config =
+                        (defaultJournalConfig directory)
+                            { maximumTaskDescriptionCharacters = 64
+                            , maximumTaskLogLines = 0
+                            }
+                BS.writeFile (directory </> "events.jsonl") (LBS.toStrict (encode event) <> "\n")
+                recovered <- openJournal config >>= snapshot
+                let bounded = recovered.tasks Map.! TaskId "recovered"
+                bounded.description `shouldBe` "[REDACTED]"
+                bounded.logTail `shouldBe` []
+
+        it "applies lowered task limits to snapshots and rejects excess old tasks" $
+            withSystemTempDirectory "daemon-lowered-task-limits" $ \directory -> do
+                now <- getCurrentTime
+                let oldTask taskId =
+                        DurableTask
+                            { taskId
+                            , sessionId = Nothing
+                            , status = TaskCompleted
+                            , description = "password=private"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = ["old", "token=private", "new"]
+                            }
+                    oldSnapshot =
+                        JournalSnapshot
+                            { lastSequence = 0
+                            , tasks = Map.singleton (TaskId "old") (oldTask (TaskId "old"))
+                            }
+                    lowered =
+                        (defaultJournalConfig directory)
+                            { maximumTaskDescriptionCharacters = 8
+                            , maximumTaskLogLines = 1
+                            , maximumTaskLogCharacters = 2
+                            }
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode oldSnapshot))
+                first <- openJournal lowered >>= snapshot
+                let bounded = first.tasks Map.! TaskId "old"
+                bounded.description `shouldBe` "[REDACTE"
+                bounded.logTail `shouldBe` ["ne"]
+                second <- openJournal lowered >>= snapshot
+                second `shouldBe` first
+                openJournal (lowered {maximumTasks = 0})
+                    `shouldThrow` \case
+                        JournalTaskCapacityExceeded 0 -> True
+                        _ -> False
+
+        it "retains no events when maximumEvents is zero and preserves the sequence" $
+            withSystemTempDirectory "daemon-zero-retention" $ \directory -> do
+                let config = (defaultJournalConfig directory) {maximumEvents = 0}
+                journal <- openJournal config
+                _ <- appendEvent journal "discarded" Null
+                BS.readFile (directory </> "events.jsonl") `shouldReturn` BS.empty
+                reopened <- openJournal config
+                recovered <- snapshot reopened
+                recovered.lastSequence `shouldBe` 1
+                replayAfter reopened 0 `shouldReturn` ReplaySnapshot recovered
+
+        it "refuses to wrap an exhausted sequence number" $
+            withSystemTempDirectory "daemon-sequence-overflow" $ \directory -> do
+                let exhausted = JournalSnapshot {lastSequence = Sequence maxBound, tasks = Map.empty}
+                BS.writeFile (directory </> "snapshot.json") (LBS.toStrict (encode exhausted))
+                journal <- openJournal (defaultJournalConfig directory)
+                appendEvent journal "wrapped" Null
+                    `shouldThrow` \case
+                        JournalSequenceExhausted sequenceNumber ->
+                            sequenceNumber == Sequence maxBound
+                        _ -> False
+
+        it "rejects maxBound-to-zero sequence wrap during recovery" $
+            withSystemTempDirectory "daemon-recovery-sequence-wrap" $ \directory -> do
+                let event sequenceNumber =
+                        EventEnvelope {sequenceNumber, eventType = "test", payload = Null}
+                BS.writeFile
+                    (directory </> "events.jsonl")
+                    ( LBS.toStrict (encode (event (Sequence maxBound)))
+                        <> "\n"
+                        <> LBS.toStrict (encode (event 0))
+                        <> "\n"
+                    )
+                openJournal (defaultJournalConfig directory)
+                    `shouldThrow` \case
+                        JournalSequenceExhausted sequenceNumber ->
+                            sequenceNumber == Sequence maxBound
+                        _ -> False
+
+        it "rejects symlinked journal directories and files" $
+            withSystemTempDirectory "daemon-symlink" $ \directory -> do
+                let target = directory </> "target"
+                    linked = directory </> "linked"
+                createDirectory target
+                createSymbolicLink target linked
+                openJournal (defaultJournalConfig linked)
+                    `shouldThrow` \case
+                        JournalInsecurePath _ -> True
+                        _ -> False
+                let journalDir = directory </> "journal"
+                createDirectory journalDir
+                BS.writeFile (directory </> "outside") "{}"
+                createSymbolicLink (directory </> "outside") (journalDir </> "snapshot.json")
+                openJournal (defaultJournalConfig journalDir)
+                    `shouldThrow` \case
+                        JournalInsecurePath _ -> True
+                        _ -> False
+
+    describe "secure Unix socket" $ do
+        it "uses private modes and authenticates the same-user peer" $
+            withTempDirectory "/tmp" "daemon-socket" $ \directory -> do
+                let path = directory </> "private" </> "daemon.sock"
+                    config = SocketConfig {path, backlog = 1}
+                withUnixListener config $ \listener ->
+                    withAsync
+                        (bracket (acceptOwnedPeer listener) close verifyPeerOwner)
+                        $ \_ -> do
+                            client <- socket AF_UNIX Stream defaultProtocol
+                            bracket (pure client) close $ \peer -> do
+                                connect peer (SockAddrUnix path)
+                                verifyPeerOwner peer
+                                socketStatus <- getFileStatus path
+                                directoryStatus <- getFileStatus (directory </> "private")
+                                fileMode socketStatus .&. 0o777 `shouldBe` 0o600
+                                fileMode directoryStatus .&. 0o777 `shouldBe` 0o700
+
+        it "does not unlink an active daemon socket" $
+            withTempDirectory "/tmp" "daemon-active" $ \directory -> do
+                let config =
+                        SocketConfig
+                            { path = directory </> "daemon.sock"
+                            , backlog = 1
+                            }
+                withUnixListener config $ \_ ->
+                    withUnixListener config (const (pure ()))
+                        `shouldThrow` anyException
+
+        it "only removes the socket inode created by this listener" $
+            withTempDirectory "/tmp" "daemon-identity" $ \directory -> do
+                let path = directory </> "daemon.sock"
+                    config = SocketConfig {path, backlog = 1}
+                withUnixListener config $ \_ -> do
+                    renamePath path (path <> ".replaced")
+                    BS.writeFile path "replacement"
+                doesFileExist path `shouldReturn` True
+
+    describe "server integration" $ do
+        it "handshakes, sends a snapshot, streams events, and uses the supervisor seam" $
+            withSystemTempDirectory "daemon-server" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                let config =
+                        defaultServerConfig
+                            { heartbeatSeconds = 60
+                            , maximumFrameBytes = 4_096
+                            }
+                    supervisor =
+                        Supervisor
+                            { handleCommand = \_ command -> pure (Right command)
+                            }
+                withSocketPair $ \(serverPeer, clientPeer) ->
+                    withAsync (serveConnection config journal supervisor serverPeer) $ \_ -> do
+                        sendJSONFrame config.maximumFrameBytes clientPeer $
+                            ClientHello
+                                Hello
+                                    { clientId = ClientId "test-client"
+                                    , versions = [currentProtocolVersion]
+                                    , resumeAfter = Nothing
+                                    }
+                        welcome <- receiveJSONFrame config.maximumFrameBytes clientPeer
+                        welcome `shouldSatisfy` \case
+                            ServerWelcome accepted -> accepted.version == currentProtocolVersion
+                            _ -> False
+                        initial <- receiveJSONFrame config.maximumFrameBytes clientPeer
+                        initial `shouldSatisfy` \case
+                            ServerSnapshotChunk 0 0 1 _ -> True
+                            _ -> False
+                        event <- appendEvent journal "changed" (object ["value" .= (1 :: Int)])
+                        receiveJSONFrame config.maximumFrameBytes clientPeer
+                            `shouldReturn` ServerEvent event
+                        sendJSONFrame config.maximumFrameBytes clientPeer $
+                            ClientCommand (CommandId "command") (String "echo")
+                        receiveJSONFrame config.maximumFrameBytes clientPeer
+                            `shouldReturn` ServerCommandResult (CommandId "command") (Right (String "echo"))
+                        sendJSONFrame config.maximumFrameBytes clientPeer (ClientAck event.sequenceNumber)
+
+        it "times out idle clients and preserves async cancellation" $
+            withSystemTempDirectory "daemon-timeout" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                let config = defaultServerConfig {ioTimeoutSeconds = 1}
+                withSocketPair $ \(serverPeer, _) -> do
+                    withAsync (serveConnection config journal unavailableSupervisor serverPeer) $ \server -> do
+                        result <- timeout 2_500_000 (waitCatch server)
+                        result `shouldSatisfy` \case
+                            Just (Left exception) -> not (isAsyncException exception)
+                            _ -> False
+                withTempDirectory "/tmp" "daemon-cancel" $ \socketDirectory -> do
+                    let socketConfig =
+                            SocketConfig
+                                { path = socketDirectory </> "daemon.sock"
+                                , backlog = 1
+                                }
+                    withUnixListener socketConfig $ \listener ->
+                        withAsync (runServerOnListener listener config journal unavailableSupervisor) $ \server -> do
+                            client <- socket AF_UNIX Stream defaultProtocol
+                            bracket (pure client) close $ \peer -> do
+                                connect peer (SockAddrUnix socketConfig.path)
+                                cancel server
+                                outcome <- timeout 2_000_000 (waitCatch server)
+                                outcome `shouldSatisfy` \case
+                                    Just (Left exception) -> isAsyncException exception
+                                    _ -> False
+
+        it "closes an accepted peer when cancellation interrupts full-queue admission" $
+            withSystemTempDirectory "daemon-admission-cancel" $ \directory ->
+                withTempDirectory "/tmp" "daemon-admission" $ \socketDirectory -> do
+                    journal <- openJournal (defaultJournalConfig directory)
+                    let socketConfig =
+                            SocketConfig
+                                { path = socketDirectory </> "daemon.sock"
+                                , backlog = 8
+                                }
+                        config =
+                            defaultServerConfig
+                                { workerCount = 1
+                                , ioTimeoutSeconds = 30
+                                }
+                    withUnixListener socketConfig $ \listener ->
+                        withAsync (runServerOnListener listener config journal unavailableSupervisor) $ \server ->
+                            bracket
+                                (traverse (const (socket AF_UNIX Stream defaultProtocol)) [1 :: Int .. 3])
+                                (mapM_ close)
+                                $ \clients -> do
+                                    mapM_ (`connect` SockAddrUnix socketConfig.path) clients
+                                    threadDelay 200_000
+                                    cancel server
+                                    _ <- waitCatch server
+                                    results <-
+                                        traverse
+                                            (\client -> timeout 1_000_000 (Socket.recv client 1))
+                                            clients
+                                    results `shouldBe` replicate 3 (Just BS.empty)
+
+        it "chunks large snapshots below the configured frame bound" $
+            withSystemTempDirectory "daemon-snapshot-chunks" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                now <- getCurrentTime
+                _ <-
+                    persistTask journal $
+                        DurableTask
+                            { taskId = TaskId "large"
+                            , sessionId = Nothing
+                            , status = TaskCompleted
+                            , description = "large snapshot"
+                            , workingDirectory = "."
+                            , provider = Nothing
+                            , model = Nothing
+                            , effort = Nothing
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = [Text.replicate 2_000 "x"]
+                            }
+                let config =
+                        defaultServerConfig
+                            { maximumFrameBytes = 512
+                            , heartbeatSeconds = 60
+                            }
+                withSocketPair $ \(serverPeer, clientPeer) ->
+                    withAsync (serveConnection config journal unavailableSupervisor serverPeer) $ \_ -> do
+                        sendJSONFrame config.maximumFrameBytes clientPeer $
+                            ClientHello
+                                Hello
+                                    { clientId = ClientId "snapshot-client"
+                                    , versions = [currentProtocolVersion]
+                                    , resumeAfter = Nothing
+                                    }
+                        _ <- receiveJSONFrame config.maximumFrameBytes clientPeer :: IO ServerMessage
+                        first <- receiveJSONFrame config.maximumFrameBytes clientPeer
+                        chunkCount <-
+                            case first of
+                                ServerSnapshotChunk 1 0 count _ -> do
+                                    count `shouldSatisfy` (> 1)
+                                    pure count
+                                _ -> expectationFailure ("unexpected snapshot message: " <> show first) >> pure 0
+                        sequenceNumbers <-
+                            traverse
+                                ( \_ ->
+                                    receiveJSONFrame config.maximumFrameBytes clientPeer >>= \case
+                                        ServerSnapshotChunk 1 index count _ | count == chunkCount -> pure index
+                                        other -> expectationFailure ("unexpected snapshot chunk: " <> show other) >> pure (-1)
+                                )
+                                [1 .. chunkCount - 1]
+                        sequenceNumbers `shouldBe` [1 .. chunkCount - 1]
+
+        it "chunks events that exceed the transport frame bound" $
+            withSystemTempDirectory "daemon-event-chunks" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                event <- appendEvent journal "large" (String (Text.replicate 2_000 "x"))
+                let config =
+                        defaultServerConfig
+                            { maximumFrameBytes = 512
+                            , heartbeatSeconds = 60
+                            }
+                withSocketPair $ \(serverPeer, clientPeer) ->
+                    withAsync (serveConnection config journal unavailableSupervisor serverPeer) $ \_ -> do
+                        sendJSONFrame config.maximumFrameBytes clientPeer $
+                            ClientHello
+                                Hello
+                                    { clientId = ClientId "event-client"
+                                    , versions = [currentProtocolVersion]
+                                    , resumeAfter = Just 0
+                                    }
+                        _ <- receiveJSONFrame config.maximumFrameBytes clientPeer :: IO ServerMessage
+                        first <- receiveJSONFrame config.maximumFrameBytes clientPeer
+                        chunkCount <- case first of
+                            ServerEventChunk sequenceNumber 0 count _ ->
+                                if sequenceNumber == event.sequenceNumber && count > 1
+                                    then pure count
+                                    else expectationFailure ("unexpected event chunk: " <> show first) >> pure 0
+                            _ -> expectationFailure ("unexpected event message: " <> show first) >> pure 0
+                        indices <-
+                            traverse
+                                ( \_ ->
+                                    receiveJSONFrame config.maximumFrameBytes clientPeer >>= \case
+                                        ServerEventChunk sequenceNumber index count _
+                                            | sequenceNumber == event.sequenceNumber
+                                            , count == chunkCount ->
+                                                pure index
+                                        other ->
+                                            expectationFailure ("unexpected event chunk: " <> show other) >> pure (-1)
+                                )
+                                [1 .. chunkCount - 1]
+                        indices `shouldBe` [1 .. chunkCount - 1]
+
+    describe "task adapter IPC" $ do
+        it "submits, queues, cancels, lists, and replays durable task changes" $
+            withSystemTempDirectory "daemon-task-adapter" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                firstGate <- newEmptyTMVarIO
+                secondGate <- newEmptyTMVarIO
+                started <- newTQueueIO
+                let runner =
+                        blockingRunner
+                            started
+                            (Map.fromList
+                                [ (TaskId "first", firstGate)
+                                , (TaskId "second", secondGate)
+                                ])
+                    config =
+                        defaultServerConfig
+                            { heartbeatSeconds = 60
+                            , maximumFrameBytes = 16_384
+                            }
+                withTaskAdapter journal runner $ \supervisor ->
+                    withSocketPair $ \(serverPeer, clientPeer) ->
+                        withAsync (serveConnection config journal supervisor serverPeer) $ \_ -> do
+                            handshake config clientPeer Nothing
+                            sendTaskCommand config clientPeer "limit"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("set_limit" :: Text)
+                                    , "limit" .= (1 :: Int)
+                                    ])
+                                `shouldReturn` Right
+                                    (object ["version" .= (1 :: Int), "limit" .= (1 :: Int)])
+                            sendTaskCommand config clientPeer "submit-first"
+                                (submitCommand "first" "session-a")
+                                >>= shouldSucceed
+                            timeout 1_000_000 (atomically (readTQueue started))
+                                `shouldReturn` Just (TaskId "first")
+                            sendTaskCommand config clientPeer "submit-second"
+                                (submitCommand "second" "session-b")
+                                >>= shouldSucceed
+                            timeout 100_000 (atomically (readTQueue started))
+                                `shouldReturn` Nothing
+                            sendTaskCommand config clientPeer "cancel-second"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("cancel" :: Text)
+                                    , "task_id" .= ("second" :: Text)
+                                    ])
+                                >>= shouldSucceed
+                            sendTaskCommand config clientPeer "list"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("list" :: Text)
+                                    ])
+                                >>= \case
+                                    Right value ->
+                                        value `shouldSatisfy` listContains
+                                            (TaskId "second") TaskCancelled
+                                    Left message ->
+                                        expectationFailure (Text.unpack message)
+                            sendTaskCommand config clientPeer "cancel-first"
+                                (object
+                                    [ "version" .= (1 :: Int)
+                                    , "type" .= ("cancel" :: Text)
+                                    , "task_id" .= ("first" :: Text)
+                                    ])
+                                >>= shouldSucceed
+                            waitForStatus journal (TaskId "first") TaskCancelled
+                saved <- snapshot journal
+                let eventCount =
+                        fromIntegral saved.lastSequence.unSequence :: Int
+                withSocketPair $ \(serverPeer, clientPeer) ->
+                    withAsync
+                        (serveConnection config journal unavailableSupervisor serverPeer)
+                        $ \_ -> do
+                            handshake config clientPeer (Just 0)
+                            replayed <- traverse
+                                (const (receiveJSONFrame config.maximumFrameBytes clientPeer))
+                                [1 .. eventCount]
+                            replayed `shouldSatisfy`
+                                any (messageHasStatus (TaskId "second") TaskCancelled)
+
+        it "interrupts queued and running work and rejects unsafe retry after restart" $
+            withSystemTempDirectory "daemon-task-restart" $ \directory -> do
+                let journalConfig = defaultJournalConfig directory
+                    serverConfig =
+                        defaultServerConfig
+                            { heartbeatSeconds = 60
+                            , maximumFrameBytes = 16_384
+                            }
+                firstJournal <- openJournal journalConfig
+                firstGate <- newEmptyTMVarIO
+                firstStarted <- newTQueueIO
+                let firstRunner =
+                        blockingRunner firstStarted
+                            (Map.singleton (TaskId "restart-task") firstGate)
+                withTaskAdapter firstJournal firstRunner $ \supervisor ->
+                    withSocketPair $ \(serverPeer, clientPeer) ->
+                        withAsync
+                            (serveConnection serverConfig firstJournal supervisor serverPeer)
+                            $ \_ -> do
+                                handshake serverConfig clientPeer Nothing
+                                _ <- sendTaskCommand serverConfig clientPeer "limit" $
+                                    object
+                                        [ "version" .= (1 :: Int)
+                                        , "type" .= ("set_limit" :: Text)
+                                        , "limit" .= (1 :: Int)
+                                        ]
+                                _ <- sendTaskCommand serverConfig clientPeer "submit"
+                                    (submitCommand "restart-task" "restart-session")
+                                timeout 1_000_000 (atomically (readTQueue firstStarted))
+                                    `shouldReturn` Just (TaskId "restart-task")
+                                sendTaskCommand serverConfig clientPeer "approval"
+                                    (object
+                                        [ "version" .= (1 :: Int)
+                                        , "type" .= ("approval" :: Text)
+                                        , "task_id" .= ("restart-task" :: Text)
+                                        , "approval_id" .= ("approval-1" :: Text)
+                                        , "decision" .= ("approve" :: Text)
+                                        ])
+                                    `shouldReturn` Left
+                                        "interactive approval resolution is unsupported by the daemon task adapter"
+                                _ <- sendTaskCommand serverConfig clientPeer "submit-queued"
+                                    (submitCommand "queued-task" "queued-session")
+                                timeout 100_000 (atomically (readTQueue firstStarted))
+                                    `shouldReturn` Nothing
+                restartedJournal <- openJournal journalConfig
+                recovered <- snapshot restartedJournal
+                (.status) (recovered.tasks Map.! TaskId "restart-task")
+                    `shouldBe` TaskInterrupted
+                (.status) (recovered.tasks Map.! TaskId "queued-task")
+                    `shouldBe` TaskInterrupted
+                retryGate <- newEmptyTMVarIO
+                retryStarted <- newTQueueIO
+                let retryRunner =
+                        blockingRunner retryStarted
+                            (Map.singleton (TaskId "restart-task") retryGate)
+                withTaskAdapter restartedJournal retryRunner $ \supervisor ->
+                    withSocketPair $ \(serverPeer, clientPeer) ->
+                        withAsync
+                            (serveConnection serverConfig restartedJournal supervisor serverPeer)
+                            $ \_ -> do
+                                handshake serverConfig clientPeer Nothing
+                                timeout 100_000 (atomically (readTQueue retryStarted))
+                                    `shouldReturn` Nothing
+                                sendTaskCommand serverConfig clientPeer "retry"
+                                    (object
+                                        [ "version" .= (1 :: Int)
+                                        , "type" .= ("retry" :: Text)
+                                        , "task_id" .= ("restart-task" :: Text)
+                                        ])
+                                    `shouldReturn` Left
+                                        "task input is unavailable after daemon restart; submit a new task id"
+                                timeout 100_000 (atomically (readTQueue retryStarted))
+                                    `shouldReturn` Nothing
+                                unchanged <- snapshot restartedJournal
+                                let interrupted =
+                                        unchanged.tasks Map.! TaskId "restart-task"
+                                interrupted.status `shouldBe` TaskInterrupted
+                                interrupted.attempt `shouldBe` 1
+
+        it "keeps submitted prompts out of every durable and public task representation" $
+            withSystemTempDirectory "daemon-task-input-redaction" $ \directory -> do
+                receivedPrompts <- newTQueueIO
+                let rawPrompt = "opaque-violet-7Q9-content"
+                    rawBytes = TextEncoding.encodeUtf8 rawPrompt
+                    command =
+                        object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("submit" :: Text)
+                            , "task_id" .= ("redacted-input" :: Text)
+                            , "session_id" .= ("redacted-session" :: Text)
+                            , "prompt" .= rawPrompt
+                            , "cwd" .= ("/tmp" :: Text)
+                            ]
+                    runner =
+                        TaskRunner
+                            { runTask = \task logLine -> do
+                                atomically (writeTQueue receivedPrompts task.description)
+                                logLine ("runner echoed " <> task.description)
+                                pure (Left ("failed for " <> task.description))
+                            }
+                journal <- openJournal (defaultJournalConfig directory)
+                withTaskAdapter journal runner $ \supervisor -> do
+                    submitted <-
+                        supervisor.handleCommand (CommandId "submit-redacted") command
+                    case submitted of
+                        Left message -> expectationFailure (Text.unpack message)
+                        Right value ->
+                            LBS.toStrict (encode value)
+                                `shouldSatisfy` (not . BS.isInfixOf rawBytes)
+                    timeout 1_000_000 (atomically (readTQueue receivedPrompts))
+                        `shouldReturn` Just rawPrompt
+                    waitForStatus journal (TaskId "redacted-input") TaskFailed
+                    listed <-
+                        supervisor.handleCommand
+                            (CommandId "list-redacted")
+                            (object
+                                [ "version" .= (1 :: Int)
+                                , "type" .= ("list" :: Text)
+                                ])
+                    case listed of
+                        Left message -> expectationFailure (Text.unpack message)
+                        Right value ->
+                            LBS.toStrict (encode value)
+                                `shouldSatisfy` (not . BS.isInfixOf rawBytes)
+                saved <- snapshot journal
+                let durableTask = saved.tasks Map.! TaskId "redacted-input"
+                durableTask.description `shouldBe` "[task input redacted]"
+                Text.concat durableTask.logTail
+                    `shouldSatisfy` (not . Text.isInfixOf rawPrompt)
+                BS.readFile (directory </> "snapshot.json")
+                    >>= (`shouldSatisfy` (not . BS.isInfixOf rawBytes))
+                BS.readFile (directory </> "events.jsonl")
+                    >>= (`shouldSatisfy` (not . BS.isInfixOf rawBytes))
+
+        it "redacts repeated maximum prompts before bounding custom runner logs" $
+            withSystemTempDirectory "daemon-custom-runner-redaction" $ \directory -> do
+                let rawPrompt = Text.replicate 8_192 "x"
+                    runner =
+                        TaskRunner
+                            { runTask = \task logLine -> do
+                                logLine (task.description <> task.description)
+                                threadDelay 100_000
+                                pure (Right ())
+                            }
+                journal <- openJournal (defaultJournalConfig directory)
+                withTaskAdapter journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit-repeated-redaction")
+                        (object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("submit" :: Text)
+                            , "task_id" .= ("repeated-redaction" :: Text)
+                            , "prompt" .= rawPrompt
+                            , "cwd" .= ("/tmp" :: Text)
+                            ])
+                        >>= shouldSucceed
+                    waitForStatus
+                        journal
+                        (TaskId "repeated-redaction")
+                        TaskCompleted
+                saved <- snapshot journal
+                let retained =
+                        Text.concat
+                            (saved.tasks Map.! TaskId "repeated-redaction").logTail
+                retained
+                    `shouldNotSatisfy`
+                        Text.isInfixOf (Text.replicate 128 "x")
+                retained
+                    `shouldSatisfy`
+                        Text.isInfixOf "[task input redacted]"
+
+        it "retains failed input for one-process retry and discards it after completion" $
+            withSystemTempDirectory "daemon-task-input-lifetime" $ \directory -> do
+                received <- newTQueueIO
+                let rawPrompt = "memory-only-retry-input"
+                    runner =
+                        TaskRunner
+                            { runTask = \task _ -> do
+                                atomically (writeTQueue received (task.attempt, task.description))
+                                pure $
+                                    if task.attempt == 1
+                                        then Left "first attempt failed"
+                                        else Right ()
+                            }
+                    retryCommand =
+                        object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("retry" :: Text)
+                            , "task_id" .= ("retry-lifetime" :: Text)
+                            ]
+                journal <- openJournal (defaultJournalConfig directory)
+                withTaskAdapter journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit-retry-lifetime")
+                        (object
+                            [ "version" .= (1 :: Int)
+                            , "type" .= ("submit" :: Text)
+                            , "task_id" .= ("retry-lifetime" :: Text)
+                            , "prompt" .= rawPrompt
+                            , "cwd" .= ("/tmp" :: Text)
+                            ])
+                        >>= shouldSucceed
+                    timeout 1_000_000 (atomically (readTQueue received))
+                        `shouldReturn` Just (1, rawPrompt)
+                    waitForStatus journal (TaskId "retry-lifetime") TaskFailed
+                    supervisor.handleCommand (CommandId "retry-failed") retryCommand
+                        >>= shouldSucceed
+                    timeout 1_000_000 (atomically (readTQueue received))
+                        `shouldReturn` Just (2, rawPrompt)
+                    waitForStatus journal (TaskId "retry-lifetime") TaskCompleted
+                    supervisor.handleCommand (CommandId "retry-completed") retryCommand
+                        `shouldReturn` Left
+                            "completed tasks cannot be retried; task input has been discarded"
+
+        it "uses the actual agent-cli argv shape and bounds process output chunks" $
+            withSystemTempDirectory "daemon-process-runner" $ \directory -> do
+                now <- getCurrentTime
+                let executable = directory </> "agent-cli"
+                    argumentsPath = directory </> "arguments"
+                    task =
+                        DurableTask
+                            { taskId = TaskId "process"
+                            , sessionId = Just "session-id"
+                            , status = TaskRunning
+                            , description = "hello agent"
+                            , workingDirectory = "/tmp/project"
+                            , provider = Just "openai"
+                            , model = Just "gpt-5.6"
+                            , effort = Just "high"
+                            , worktree = False
+                            , attempt = 1
+                            , updatedAt = now
+                            , logTail = []
+                            }
+                    expected =
+                        [ "--prompt"
+                        , "hello agent"
+                        , "--save-session"
+                        , "--no-yolo"
+                        , "--resume"
+                        , "session-id"
+                        , "--cwd"
+                        , "/tmp/project"
+                        , "--provider"
+                        , "openai"
+                        , "--model"
+                        , "gpt-5.6"
+                        , "--effort"
+                        , "high"
+                        ]
+                writeFile executable $
+                    "#!/bin/sh\n"
+                        <> "printf '%s\\n' \"$@\" > "
+                        <> show argumentsPath
+                        <> "\n"
+                        <> "dd if=/dev/zero bs=20000 count=1 2>/dev/null | tr '\\\\0' x\n"
+                setFileMode executable 0o700
+                chunks <- newTQueueIO
+                result <-
+                    (processTaskRunnerFor executable).runTask task $
+                        atomically . writeTQueue chunks
+                result `shouldBe` Right ()
+                lines <$> readFile argumentsPath `shouldReturn` expected
+                captured <- atomically (flushTQueue chunks)
+                captured `shouldSatisfy` (not . null)
+                map Text.length captured `shouldSatisfy` all (<= 4_096)
+                sum (map Text.length captured) `shouldBe` 20_000
+                let longPrompt =
+                        Text.replicate 500 "sensitive"
+                            <> "\n"
+                            <> Text.replicate 500 "private"
+                    longTask = task {description = longPrompt}
+                writeFile executable "#!/bin/sh\nprintf '%s\\n' \"$2\"\n"
+                redactedChunks <- newTQueueIO
+                (processTaskRunnerFor executable).runTask longTask
+                    (atomically . writeTQueue redactedChunks)
+                    `shouldReturn` Right ()
+                redacted <- Text.concat <$> atomically (flushTQueue redactedChunks)
+                redacted
+                    `shouldNotSatisfy`
+                        Text.isInfixOf (Text.replicate 500 "sensitive")
+                redacted
+                    `shouldSatisfy`
+                        Text.isInfixOf "[task input redacted]"
+                writeFile executable "#!/bin/sh\nsleep 30\n"
+                timeout
+                    4_000_000
+                    ((processTaskRunnerForWithTimeout 1 executable).runTask task (const (pure ())))
+                    `shouldReturn` Just (Left "agent-cli exceeded its 1 second runtime limit")
+                writeFile executable "#!/bin/sh\nsleep 30 &\nexit 0\n"
+                timeout
+                    5_000_000
+                    ((processTaskRunnerForWithTimeout 10 executable).runTask task (const (pure ())))
+                    `shouldReturn` Just (Right ())
+                writeFile executable $
+                    "#!/bin/sh\n"
+                        <> "dd if=/dev/zero bs=1048576 count=40 2>/dev/null\n"
+                        <> "dd if=/dev/zero bs=1048576 count=40 1>&2 2>/dev/null\n"
+                timeout
+                    20_000_000
+                    ((processTaskRunnerFor executable).runTask task (const (pure ())))
+                    `shouldThrow` anyException
+
+        it "bounds task-runner output in the durable journal" $
+            withSystemTempDirectory "daemon-runner-log-bound" $ \directory -> do
+                let journalConfig =
+                        (defaultJournalConfig directory)
+                            { maximumTaskLogLines = 3
+                            , maximumTaskLogCharacters = 200
+                            }
+                    runner =
+                        TaskRunner
+                            { runTask = \_ logLine -> do
+                                mapM_ logLine (replicate 10_000 "12345")
+                                pure (Right ())
+                            }
+                journal <- openJournal journalConfig
+                withTaskAdapterQueueSize 1 journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit")
+                        (submitCommand "bounded-log" "bounded-session")
+                        >>= shouldSucceed
+                    waitForStatus journal (TaskId "bounded-log") TaskCompleted
+                saved <- snapshot journal
+                let retained = (.logTail) (saved.tasks Map.! TaskId "bounded-log")
+                length retained `shouldSatisfy` (<= 3)
+                sum (map Text.length retained) `shouldSatisfy` (<= 200)
+                retained `shouldSatisfy`
+                    any (Text.isInfixOf "output truncated")
+
+        it "rejects full command queues and skips requests cancelled before execution" $
+            withSystemTempDirectory "daemon-command-admission" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                runGate <- newEmptyTMVarIO
+                cleanupGate <- newEmptyTMVarIO
+                runnerStarted <- newTQueueIO
+                cleanupStarted <- newTQueueIO
+                let runner =
+                        TaskRunner
+                            { runTask = \_ _ -> do
+                                atomically (writeTQueue runnerStarted ())
+                                _ <- atomically (takeTMVar runGate)
+                                    `finally`
+                                        uninterruptibleMask_
+                                            ( do
+                                                atomically (writeTQueue cleanupStarted ())
+                                                atomically (takeTMVar cleanupGate)
+                                            )
+                                pure (Right ())
+                            }
+                    command kind fields =
+                        object
+                            ( [ "version" .= (1 :: Int)
+                              , "type" .= (kind :: Text)
+                              ]
+                                <> fields
+                            )
+                withTaskAdapterQueueSize 1 journal runner $ \supervisor -> do
+                    supervisor.handleCommand
+                        (CommandId "submit")
+                        (submitCommand "admission-task" "admission-session")
+                        >>= shouldSucceed
+                    timeout 1_000_000 (atomically (readTQueue runnerStarted))
+                        `shouldReturn` Just ()
+                    cancelling <-
+                        async $
+                            supervisor.handleCommand
+                                (CommandId "cancel")
+                                (command "cancel" ["task_id" .= ("admission-task" :: Text)])
+                    timeout 1_000_000 (atomically (readTQueue cleanupStarted))
+                        `shouldReturn` Just ()
+                    ghost <-
+                        async $
+                            supervisor.handleCommand
+                                (CommandId "ghost")
+                                (command "set_limit" ["limit" .= (1 :: Int)])
+                    threadDelay 20_000
+                    cancel ghost
+                    waitCatch ghost >>= (`shouldSatisfy` \case
+                        Left exception -> isAsyncException exception
+                        Right _ -> False)
+                    timeout
+                        200_000
+                        ( supervisor.handleCommand
+                            (CommandId "overflow")
+                            (command "list" [])
+                        )
+                        `shouldReturn` Just (Left "task scheduler command queue is full")
+                    atomically (putTMVar cleanupGate ())
+                    wait cancelling >>= shouldSucceed
+                    threadDelay 20_000
+                    afterCancel <- snapshot journal
+                    supervisor.handleCommand
+                        (CommandId "list")
+                        (command "list" [])
+                        >>= shouldSucceed
+                    afterList <- snapshot journal
+                    afterList.lastSequence `shouldBe` afterCancel.lastSequence
+
+withSocketPair :: ((Socket, Socket) -> IO value) -> IO value
+withSocketPair =
+    bracket
+        (socketPair AF_UNIX Stream defaultProtocol)
+        (\(left, right) -> close left >> close right)
+
+blockingRunner
+    :: TQueue TaskId
+    -> Map.Map TaskId (TMVar ())
+    -> TaskRunner
+blockingRunner started gates =
+    TaskRunner
+        { runTask = \task logLine -> do
+            atomically (writeTQueue started task.taskId)
+            logLine "started"
+            case Map.lookup task.taskId gates of
+                Nothing -> pure (Left "missing test gate")
+                Just gate -> atomically (takeTMVar gate) >> pure (Right ())
+        }
+
+handshake :: ServerConfig -> Socket -> Maybe Sequence -> IO ()
+handshake config peer resumeAfter = do
+    sendJSONFrame config.maximumFrameBytes peer $
+        ClientHello
+            Hello
+                { clientId = ClientId "task-adapter-test"
+                , versions = [currentProtocolVersion]
+                , resumeAfter
+                }
+    receiveJSONFrame config.maximumFrameBytes peer >>= \case
+        ServerWelcome _ -> pure ()
+        other -> expectationFailure ("unexpected handshake: " <> show other)
+    case resumeAfter of
+        Nothing ->
+            receiveJSONFrame config.maximumFrameBytes peer >>= \case
+                ServerSnapshotChunk _ _ _ _ -> pure ()
+                other -> expectationFailure ("unexpected snapshot: " <> show other)
+        Just _ -> pure ()
+
+sendTaskCommand
+    :: ServerConfig
+    -> Socket
+    -> Text
+    -> Value
+    -> IO (Either Text Value)
+sendTaskCommand config peer rawId command = do
+    let commandId = CommandId rawId
+    sendJSONFrame config.maximumFrameBytes peer (ClientCommand commandId command)
+    await commandId
+  where
+    await commandId =
+        receiveJSONFrame config.maximumFrameBytes peer >>= \case
+            ServerCommandResult received result
+                | received == commandId -> pure result
+            ServerEvent _ -> await commandId
+            ServerEventChunk _ _ _ _ -> await commandId
+            ServerHeartbeat sequenceNumber -> do
+                sendJSONFrame config.maximumFrameBytes peer (ClientPong sequenceNumber)
+                await commandId
+            other ->
+                expectationFailure ("unexpected command response: " <> show other)
+                    >> pure (Left "unexpected command response")
+
+shouldSucceed :: Either Text Value -> IO ()
+shouldSucceed = \case
+    Right _ -> pure ()
+    Left message -> expectationFailure (Text.unpack message)
+
+submitCommand :: Text -> Text -> Value
+submitCommand taskId sessionId =
+    object
+        [ "version" .= (1 :: Int)
+        , "type" .= ("submit" :: Text)
+        , "task_id" .= taskId
+        , "session_id" .= sessionId
+        , "prompt" .= ("test prompt" :: Text)
+        , "cwd" .= ("/tmp" :: Text)
+        ]
+
+listContains :: TaskId -> TaskStatus -> Value -> Bool
+listContains taskId status = \case
+    Object value ->
+        case KeyMap.lookup "tasks" value of
+            Just tasksValue ->
+                case fromJSON tasksValue of
+                    Success tasks ->
+                        any
+                            (\task -> task.taskId == taskId && task.status == status)
+                            (tasks :: [DurableTask])
+                    Error _ -> False
+            Nothing -> False
+    _ -> False
+
+messageHasStatus :: TaskId -> TaskStatus -> ServerMessage -> Bool
+messageHasStatus taskId status = \case
+    ServerEvent event
+        | event.eventType == "task_changed" ->
+            case (fromJSON event.payload :: Result DurableTask) of
+                Success task -> task.taskId == taskId && task.status == status
+                Error _ -> False
+    _ -> False
+
+waitForStatus :: Journal -> TaskId -> TaskStatus -> IO ()
+waitForStatus journal taskId status =
+    timeout 2_000_000 loop >>= (`shouldBe` Just ())
+  where
+    loop = do
+        saved <- snapshot journal
+        case Map.lookup taskId saved.tasks of
+            Just task | task.status == status -> pure ()
+            _ -> threadDelay 10_000 >> loop

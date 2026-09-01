@@ -242,6 +242,44 @@ spec = describe "systemPrompt" do
         blocking `shouldSatisfy` Text.isInfixOf
             "Readiness-dependent server instructions"
 
+    it "advertises the macOS sidebar browser only when browser tools exist" do
+        let withBrowser =
+                systemPromptForTools
+                    codexDialect
+                    [ "read_file"
+                    , "browser_navigate"
+                    , "browser_snapshot"
+                    , "browser_click"
+                    , "browser_type"
+                    ]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+            withoutBrowser =
+                systemPromptForTools
+                    codexDialect
+                    ["read_file"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+            unrelatedBrowserPrefix =
+                systemPromptForTools
+                    codexDialect
+                    ["read_file", "browser_export"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        withBrowser `shouldSatisfy` Text.isInfixOf
+            "appears in the right sidebar"
+        withBrowser `shouldSatisfy` Text.isInfixOf
+            "Use the browser_* tools for websites"
+        withoutBrowser `shouldNotSatisfy` Text.isInfixOf "Browser control:"
+        unrelatedBrowserPrefix `shouldNotSatisfy`
+            Text.isInfixOf "Browser control:"
+
     it "renders ghci-only and bash-only root prompts from registered tools" do
         let day = fromGregorian 2026 8 19
             ghciOnly =

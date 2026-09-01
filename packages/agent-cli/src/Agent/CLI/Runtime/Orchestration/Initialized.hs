@@ -21,6 +21,7 @@ import Agent.CLI.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       gatewayAuthSelectionId,
+      gatewayRouterTokenProvider,
       isGatewayLoadedAuth,
       preferredOpenAiTokenProvider,
       loadAuth,
@@ -433,7 +434,8 @@ runAgentInitializedWithLock
                         BuiltinConnection _ -> Nothing
                         OrganizationGatewayConnection -> Nothing
         checkStartupUsageInBackground =
-            isJust fullscreen
+            isNothing connectedGateway
+                && isJust fullscreen
                 && isNothing transition
                 && isNothing resumed
                 && isNothing options.optProvider
@@ -575,6 +577,10 @@ runAgentInitializedWithLock
                                                 , selected.selectedAccountId
                                                 )
                                             ))
+    when (isJust connectedGateway /= isGatewayLoadedAuth loaded) $
+        startupDie startup
+            "gateway model routing and loaded credentials disagree; refusing \
+            \to start with an unsafe transport configuration"
     case (transitionTarget, resumed) of
         (Just target, _)
             | not (isGatewayLoadedAuth loaded)
@@ -621,7 +627,7 @@ runAgentInitializedWithLock
                 (OpenAIProvider, Just (_, accountId))
                     | not (Text.null accountId) -> Just accountId
                 _ -> Nothing
-    let selectableTokenProvider =
+    let unguardedSelectableTokenProvider =
             case loaded.loadedOpenAiPool of
                 Just pool ->
                     preferredOpenAiTokenProvider
@@ -630,6 +636,11 @@ runAgentInitializedWithLock
                         loaded.loadedTokenProvider
                 Nothing ->
                     loaded.loadedTokenProvider
+        selectableTokenProvider
+            | isGatewayLoadedAuth loaded =
+                gatewayRouterTokenProvider unguardedSelectableTokenProvider
+            | otherwise =
+                unguardedSelectableTokenProvider
     initialHttp <- case customResponses of
         Just (connectionId, _) -> do
             writeIORef activeAccountRef connectionId

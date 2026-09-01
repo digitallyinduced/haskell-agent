@@ -10,12 +10,14 @@ module Agent.CLI.Tools
     , xSearchTool
     ) where
 
+import Agent.CLI.ComputerUse (computerFunctionParameters)
 import Agent.Responses.Types.Tools
     ( ResponseTool(..)
     , ResponseToolType(..)
     , FunctionTool(..)
     , CustomTool(..)
     , NamespaceTool(..)
+    , computerFunctionName
     , knownResponseTool
     , responseToolTypeText
     )
@@ -54,10 +56,20 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Info (os)
 
 requireToolRegistry :: [AppTool] -> IO ToolRegistry
-requireToolRegistry tools =
-    either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
+requireToolRegistry tools
+    | any reservesComputerFunction tools =
+        ioError . userError . Text.unpack $
+            "tool name " <> computerFunctionName
+                <> " is reserved for local computer control"
+    | otherwise =
+        either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
+  where
+    reservesComputerFunction tool =
+        canonicalToolName tool.appToolName == computerFunctionName
+            && tool.appToolSchema /= HostedComputerSchema
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name tools =
@@ -129,10 +141,23 @@ isImageGenerationTool tool =
     tool.appToolName == imageGenerationToolName
 
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
-schemaFromAppTool dialect tool
-    | tool.appToolName == "computer" =
-        Just (knownResponseTool ToolComputer)
-    | otherwise = case tool.appToolSchema of
+schemaFromAppTool _ tool
+    | canonicalToolName tool.appToolName == computerFunctionName
+    , tool.appToolSchema /= HostedComputerSchema =
+        Nothing
+schemaFromAppTool dialect tool =
+    case tool.appToolSchema of
+        HostedComputerSchema ->
+            if os == "darwin" && dialectId dialect == CodexDialect
+                then Just (FunctionToolValue FunctionTool
+                    { name = computerFunctionName
+                    , description = Just tool.appToolDescription
+                    , parameters = Just
+                        (rawJsonFromEncoding
+                            (Aeson.toEncoding computerFunctionParameters))
+                    , strict = Just True
+                    })
+                else Nothing
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of
                 NoFunctionSchemas ->
@@ -251,6 +276,7 @@ namespaceTool namespaceName namespaceDescription tools =
         RawJsonFunctionSchema parameters -> parameters
         FreeformApplyPatchSchema -> Aeson.object []
         FreeformGrammarSchema _ _ -> Aeson.object []
+        HostedComputerSchema -> Aeson.object []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

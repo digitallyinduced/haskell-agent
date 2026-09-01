@@ -41,12 +41,15 @@ module Agent.Responses.Types.Items
 import Agent.Responses.Types.Common
 import Agent.Responses.Types.Content
 import Agent.Responses.Types.Items.Known
+import qualified Agent.Json.Decode as Json
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Hermes as Hermes
 import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 
 data ResponseMessage = ResponseMessage
@@ -109,36 +112,121 @@ data ComputerPoint = ComputerPoint { pointX :: !Int, pointY :: !Int }
 instance ToJSON ComputerPoint where
     toJSON ComputerPoint{pointX, pointY} = object ["x" .= pointX, "y" .= pointY]
 
+instance FromJSON ComputerPoint where
+    parseJSON = withObject "ComputerPoint" \object ->
+        ComputerPoint <$> object .: "x" <*> object .: "y"
+
 data ComputerAction
     = ScreenshotAction
-    | ClickAction { clickX :: !Int, clickY :: !Int, clickButton :: !Text }
-    | DoubleClickAction { doubleClickX :: !Int, doubleClickY :: !Int }
+    | ClickAction
+        { clickX :: !Int
+        , clickY :: !Int
+        , clickButton :: !Text
+        , clickKeys :: ![Text]
+        }
+    | DoubleClickAction
+        { doubleClickX :: !Int
+        , doubleClickY :: !Int
+        , doubleClickKeys :: ![Text]
+        }
     | TypeAction !Text
     | KeypressAction ![Text]
-    | ScrollAction { scrollX :: !Int, scrollY :: !Int, scrollDx :: !Int, scrollDy :: !Int }
-    | MoveAction { moveX :: !Int, moveY :: !Int }
-    | WaitAction !Int
-    | DragAction ![ComputerPoint]
+    | ScrollAction
+        { scrollX :: !Int
+        , scrollY :: !Int
+        , scrollDx :: !Int
+        , scrollDy :: !Int
+        , scrollKeys :: ![Text]
+        }
+    | MoveAction
+        { moveX :: !Int
+        , moveY :: !Int
+        , moveKeys :: ![Text]
+        }
+    | WaitAction
+    | DragAction
+        { dragPath :: ![ComputerPoint]
+        , dragKeys :: ![Text]
+        }
     | UnknownComputerAction !TaggedObject
     deriving stock (Eq, Show)
 
 instance ToJSON ComputerAction where
     toJSON = \case
         ScreenshotAction -> object ["type" .= ("screenshot" :: Text)]
-        ClickAction{clickX, clickY, clickButton} -> object
-            ["type" .= ("click" :: Text), "x" .= clickX, "y" .= clickY, "button" .= clickButton]
-        DoubleClickAction{doubleClickX, doubleClickY} -> object
-            ["type" .= ("double_click" :: Text), "x" .= doubleClickX, "y" .= doubleClickY]
+        ClickAction{clickX, clickY, clickButton, clickKeys} -> object
+            [ "type" .= ("click" :: Text)
+            , "x" .= clickX
+            , "y" .= clickY
+            , "button" .= clickButton
+            , "keys" .= clickKeys
+            ]
+        DoubleClickAction{doubleClickX, doubleClickY, doubleClickKeys} -> object
+            [ "type" .= ("double_click" :: Text)
+            , "x" .= doubleClickX
+            , "y" .= doubleClickY
+            , "keys" .= doubleClickKeys
+            ]
         TypeAction text -> object ["type" .= ("type" :: Text), "text" .= text]
         KeypressAction keys -> object ["type" .= ("keypress" :: Text), "keys" .= keys]
-        ScrollAction{scrollX, scrollY, scrollDx, scrollDy} -> object
-            ["type" .= ("scroll" :: Text), "x" .= scrollX, "y" .= scrollY,
-             "scroll_x" .= scrollDx, "scroll_y" .= scrollDy]
-        MoveAction{moveX, moveY} -> object
-            ["type" .= ("move" :: Text), "x" .= moveX, "y" .= moveY]
-        WaitAction ms -> object ["type" .= ("wait" :: Text), "ms" .= ms]
-        DragAction path -> object ["type" .= ("drag" :: Text), "path" .= path]
+        ScrollAction{scrollX, scrollY, scrollDx, scrollDy, scrollKeys} -> object
+            [ "type" .= ("scroll" :: Text)
+            , "x" .= scrollX
+            , "y" .= scrollY
+            , "scroll_x" .= scrollDx
+            , "scroll_y" .= scrollDy
+            , "keys" .= scrollKeys
+            ]
+        MoveAction{moveX, moveY, moveKeys} -> object
+            [ "type" .= ("move" :: Text)
+            , "x" .= moveX
+            , "y" .= moveY
+            , "keys" .= moveKeys
+            ]
+        WaitAction -> object ["type" .= ("wait" :: Text)]
+        DragAction{dragPath, dragKeys} -> object
+            [ "type" .= ("drag" :: Text)
+            , "path" .= dragPath
+            , "keys" .= dragKeys
+            ]
         UnknownComputerAction tagged -> toJSON tagged
+
+instance FromJSON ComputerAction where
+    parseJSON value = withObject "ComputerAction" (\object -> do
+        wireType <- object .: "type"
+        case wireType of
+            "screenshot" -> pure ScreenshotAction
+            "click" ->
+                ClickAction
+                    <$> object .: "x"
+                    <*> object .: "y"
+                    <*> object .:? "button" .!= "left"
+                    <*> object .:? "keys" .!= []
+            "double_click" ->
+                DoubleClickAction
+                    <$> object .: "x"
+                    <*> object .: "y"
+                    <*> object .:? "keys" .!= []
+            "type" -> TypeAction <$> object .: "text"
+            "keypress" -> KeypressAction <$> object .: "keys"
+            "scroll" ->
+                ScrollAction
+                    <$> object .: "x"
+                    <*> object .: "y"
+                    <*> object .:? "scroll_x" .!= 0
+                    <*> object .:? "scroll_y" .!= 0
+                    <*> object .:? "keys" .!= []
+            "move" ->
+                MoveAction
+                    <$> object .: "x"
+                    <*> object .: "y"
+                    <*> object .:? "keys" .!= []
+            "wait" -> pure WaitAction
+            "drag" ->
+                DragAction
+                    <$> object .:? "path" .!= []
+                    <*> object .:? "keys" .!= []
+            _ -> pure (UnknownComputerAction (TaggedObject wireType))) value
 
 data SafetyCheck = SafetyCheck
     { safetyCheckId :: !Text, safetyCheckCode :: !(Maybe Text)
@@ -146,9 +234,21 @@ data SafetyCheck = SafetyCheck
     } deriving stock (Eq, Show)
 
 instance ToJSON SafetyCheck where
-    toJSON SafetyCheck{safetyCheckId, safetyCheckCode, safetyCheckMessage} = objectWith
-        [Just (field "id" safetyCheckId), optionalField "code" safetyCheckCode,
-         optionalField "message" safetyCheckMessage]
+    toJSON SafetyCheck
+        { safetyCheckId, safetyCheckCode, safetyCheckMessage, safetyCheckExtra } =
+            objectWithExtra safetyCheckExtra
+                [ Just (field "id" safetyCheckId)
+                , optionalField "code" safetyCheckCode
+                , optionalField "message" safetyCheckMessage
+                ]
+
+instance FromJSON SafetyCheck where
+    parseJSON = withObject "SafetyCheck" \object ->
+        SafetyCheck
+            <$> object .: "id"
+            <*> object .:? "code"
+            <*> object .:? "message"
+            <*> pure KeyMap.empty
 
 data ComputerCall = ComputerCall
     { computerCallItemId :: !(Maybe Text), computerCallId :: !Text
@@ -158,12 +258,15 @@ data ComputerCall = ComputerCall
 
 instance ToJSON ComputerCall where
     toJSON ComputerCall{computerCallItemId, computerCallId, computerActions,
-            pendingSafetyChecks, computerCallStatus} = objectWith
-        [ Just (field "type" ("computer_call" :: Text))
-        , optionalField "id" computerCallItemId, Just (field "call_id" computerCallId)
-        , Just (field "actions" computerActions)
-        , optionalField "pending_safety_checks" (nonEmpty pendingSafetyChecks)
-        , optionalField "status" computerCallStatus ]
+            pendingSafetyChecks, computerCallStatus, computerCallExtra} =
+        objectWithExtra computerCallExtra
+            [ Just (field "type" ("computer_call" :: Text))
+            , optionalField "id" computerCallItemId
+            , Just (field "call_id" computerCallId)
+            , Just (field "actions" computerActions)
+            , optionalField "pending_safety_checks" (nonEmpty pendingSafetyChecks)
+            , optionalField "status" computerCallStatus
+            ]
       where nonEmpty [] = Nothing; nonEmpty xs = Just xs
 
 data ComputerCallOutput = ComputerCallOutput
@@ -174,13 +277,21 @@ data ComputerCallOutput = ComputerCallOutput
 
 instance ToJSON ComputerCallOutput where
     toJSON ComputerCallOutput{computerOutputItemId, computerOutputCallId,
-            screenshotDataUrl, acknowledgedChecks, computerOutputStatus} = objectWith
-        [ Just (field "type" ("computer_call_output" :: Text))
-        , optionalField "id" computerOutputItemId, Just (field "call_id" computerOutputCallId)
-        , Just (field "output" (object ["type" .= ("computer_screenshot" :: Text),
-            "image_url" .= screenshotDataUrl, "detail" .= ("original" :: Text)]))
-        , optionalField "acknowledged_safety_checks" (nonEmpty acknowledgedChecks)
-        , optionalField "status" computerOutputStatus ]
+            screenshotDataUrl, acknowledgedChecks, computerOutputStatus,
+            computerOutputExtra} =
+        objectWithExtra computerOutputExtra
+            [ Just (field "type" ("computer_call_output" :: Text))
+            , optionalField "id" computerOutputItemId
+            , Just (field "call_id" computerOutputCallId)
+            , Just (field "output" (object
+                [ "type" .= ("computer_screenshot" :: Text)
+                , "image_url" .= screenshotDataUrl
+                , "detail" .= ("original" :: Text)
+                ]))
+            , optionalField "acknowledged_safety_checks"
+                (nonEmpty acknowledgedChecks)
+            , optionalField "status" computerOutputStatus
+            ]
       where nonEmpty [] = Nothing; nonEmpty xs = Just xs
 
 
@@ -687,51 +798,103 @@ computerActionDecoder = Hermes.object do
         "screenshot" -> pure ScreenshotAction
         "click" -> ClickAction <$> intAtKey "x" <*> intAtKey "y"
             <*> (maybe "left" id <$> optionalAtKey "button" Hermes.text)
+            <*> (maybe [] id <$> optionalAtKey "keys" (Hermes.list Hermes.text))
         "double_click" -> DoubleClickAction <$> intAtKey "x" <*> intAtKey "y"
+            <*> (maybe [] id <$> optionalAtKey "keys" (Hermes.list Hermes.text))
         "type" -> TypeAction <$> Hermes.atKey "text" Hermes.text
         "keypress" -> KeypressAction <$> Hermes.atKey "keys" (Hermes.list Hermes.text)
         "scroll" -> ScrollAction <$> intAtKey "x" <*> intAtKey "y"
             <*> optionalIntAtKeyWithDefault "scroll_x" 0
             <*> optionalIntAtKeyWithDefault "scroll_y" 0
+            <*> (maybe [] id <$> optionalAtKey "keys" (Hermes.list Hermes.text))
         "move" -> MoveAction <$> intAtKey "x" <*> intAtKey "y"
-        "wait" -> WaitAction <$> optionalIntAtKeyWithDefault "ms" 1000
-        "drag" -> DragAction . maybe [] id
-            <$> optionalAtKey "path" (Hermes.list computerPointDecoder)
+            <*> (maybe [] id <$> optionalAtKey "keys" (Hermes.list Hermes.text))
+        "wait" -> pure WaitAction
+        "drag" -> DragAction
+            <$> (maybe [] id
+                <$> optionalAtKey "path" (Hermes.list computerPointDecoder))
+            <*> (maybe [] id <$> optionalAtKey "keys" (Hermes.list Hermes.text))
         _ -> pure (UnknownComputerAction (TaggedObject wireType))
 
 safetyCheckDecoder :: Hermes.Decoder SafetyCheck
-safetyCheckDecoder = Hermes.object $
-    SafetyCheck <$> Hermes.atKey "id" Hermes.text
-        <*> optionalAtKey "code" Hermes.text
-        <*> optionalAtKey "message" Hermes.text
-        <*> pure KeyMap.empty
+safetyCheckDecoder = Json.withOwnedRawJson \raw ->
+    Hermes.object $
+        SafetyCheck <$> Hermes.atKey "id" Hermes.text
+            <*> optionalAtKey "code" Hermes.text
+            <*> optionalAtKey "message" Hermes.text
+            <*> pure (extraFieldsFromRaw ["id", "code", "message"] raw)
 
 computerCallDecoder :: Hermes.Decoder ComputerCall
-computerCallDecoder = Hermes.object $
-    ComputerCall <$> optionalAtKey "id" Hermes.text
-        <*> Hermes.atKey "call_id" Hermes.text
-        <*> (maybe [] id <$> optionalAtKey "actions" (Hermes.list computerActionDecoder))
-        <*> (maybe [] id <$> optionalAtKey "pending_safety_checks" (Hermes.list safetyCheckDecoder))
-        <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure KeyMap.empty
+computerCallDecoder = Json.withOwnedRawJson \raw ->
+    Hermes.object $
+        ComputerCall <$> optionalAtKey "id" Hermes.text
+            <*> Hermes.atKey "call_id" Hermes.text
+            <*> (maybe [] id
+                <$> optionalAtKey "actions" (Hermes.list computerActionDecoder))
+            <*> (maybe [] id
+                <$> optionalAtKey
+                    "pending_safety_checks"
+                    (Hermes.list safetyCheckDecoder))
+            <*> optionalAtKey "status" itemStatusDecoder
+            <*> pure (extraFieldsFromRaw
+                [ "type", "id", "call_id", "actions"
+                , "pending_safety_checks", "status"
+                ]
+                raw)
 
 computerScreenshotDataUrlDecoder :: Hermes.Decoder Text
 computerScreenshotDataUrlDecoder = Hermes.object $
     maybe "" id <$> optionalAtKey "image_url" Hermes.text
 
 computerCallOutputDecoder :: Hermes.Decoder ComputerCallOutput
-computerCallOutputDecoder = Hermes.object $
-    ComputerCallOutput <$> optionalAtKey "id" Hermes.text
-        <*> Hermes.atKey "call_id" Hermes.text
-        <*> (maybe "" id <$> optionalAtKey "output" computerScreenshotDataUrlDecoder)
-        <*> (maybe [] id <$> optionalAtKey "acknowledged_safety_checks" (Hermes.list safetyCheckDecoder))
-        <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure KeyMap.empty
+computerCallOutputDecoder = Json.withOwnedRawJson \raw ->
+    Hermes.object $
+        ComputerCallOutput <$> optionalAtKey "id" Hermes.text
+            <*> Hermes.atKey "call_id" Hermes.text
+            <*> (maybe "" id
+                <$> optionalAtKey "output" computerScreenshotDataUrlDecoder)
+            <*> (maybe [] id
+                <$> optionalAtKey
+                    "acknowledged_safety_checks"
+                    (Hermes.list safetyCheckDecoder))
+            <*> optionalAtKey "status" itemStatusDecoder
+            <*> pure (extraFieldsFromRaw
+                [ "type", "id", "call_id", "output"
+                , "acknowledged_safety_checks", "status"
+                ]
+                raw)
 
-intAtKey key = fromIntegral <$> Hermes.atKey key integerDecoder
+objectWithExtra :: Aeson.Object -> [Maybe Field] -> Aeson.Value
+objectWithExtra extra members =
+    case objectWith members of
+        Aeson.Object known -> Aeson.Object (KeyMap.union known extra)
+        value -> value
 
+extraFieldsFromRaw reserved raw =
+    case Aeson.decodeStrict' raw of
+        Just (Aeson.Object object) ->
+            foldr (KeyMap.delete . Key.fromText) object reserved
+        _ -> KeyMap.empty
+
+intAtKey :: Text -> Hermes.FieldsDecoder Int
+intAtKey key =
+    Hermes.atKey key integerDecoder >>= boundedComputerInt key
+
+optionalIntAtKeyWithDefault :: Text -> Int -> Hermes.FieldsDecoder Int
 optionalIntAtKeyWithDefault key fallback =
-    maybe fallback fromIntegral <$> optionalAtKey key integerDecoder
+    optionalAtKey key integerDecoder >>= \case
+        Nothing -> pure fallback
+        Just value -> boundedComputerInt key value
+
+boundedComputerInt :: MonadFail parser => Text -> Integer -> parser Int
+boundedComputerInt key value
+    | value < toInteger (minBound :: Int)
+        || value > toInteger (maxBound :: Int) =
+            fail $
+                "integer at key "
+                    <> Text.unpack key
+                    <> " is outside the platform Int range"
+    | otherwise = pure (fromInteger value)
 
 functionCallDecoder :: Hermes.Decoder FunctionCall
 functionCallDecoder = Hermes.object $

@@ -72,7 +72,10 @@ import Agent.Tools.MultiAgents
     ( multiAgentNamespace
     , multiAgentToolNames
     )
-import Agent.Tools.Types (AppTool(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ToolSchema(..)
+    )
 import Control.Exception.Safe (tryAny)
 import Data.IORef
     ( IORef
@@ -141,14 +144,20 @@ data CodeModeToolProjection = CodeModeToolProjection
 projectCodeModeTools :: ToolMode -> [AppTool] -> CodeModeToolProjection
 projectCodeModeTools mode tools = case mode of
     ConventionalToolMode -> CodeModeToolProjection tools []
-    CodeToolMode -> CodeModeToolProjection tools tools
+    CodeToolMode -> CodeModeToolProjection tools (filter nestable tools)
     CodeOnlyToolMode -> CodeModeToolProjection
-        { directCodeModeTools = filter isDirectShellTool tools
-        , nestedCodeModeTools = tools
+        { directCodeModeTools = filter direct tools
+        , nestedCodeModeTools = filter nestable tools
         }
   where
+    direct tool = isDirectShellTool tool || isHostedComputerTool tool
+    nestable = not . isHostedComputerTool
     isDirectShellTool tool =
         tool.appToolName `elem` ["shell_command", "write_stdin"]
+    isHostedComputerTool tool =
+        case tool.appToolSchema of
+            HostedComputerSchema -> True
+            _ -> False
 
 -- | Resolve catalog metadata for the active model. With ChatGPT credentials
 -- the live @/models@ catalog is fetched at session start (Codex parity:

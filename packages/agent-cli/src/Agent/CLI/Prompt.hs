@@ -113,6 +113,7 @@ systemPromptForTools
             , secretInputGuidance available
             , imageDisplayGuidance available
             , learnedSkillGuidance available
+            , browserControlGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
@@ -159,6 +160,7 @@ systemPromptForCatalogModel dialect info toolNames sessionTmp =
             , secretInputGuidance available
             , imageDisplayGuidance available
             , learnedSkillGuidance available
+            , browserControlGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
@@ -275,6 +277,27 @@ learnedSkillGuidance available
             , "- When the user establishes a durable preference, decision, lesson, or repeatable procedure that will help future sessions, consider promoting it with skill_create or skill_update."
             , "- Store actionable reusable guidance, not ordinary facts or transient task state. Search before creating, prefer updating an existing skill, and choose the narrowest correct scope."
             ]
+
+-- | Explain the host-provided browser surface only when its tools are
+-- registered. Tool availability is authoritative; the macOS browser pane can
+-- be shown or hidden independently by the user.
+browserControlGuidance :: Set Text -> Text
+browserControlGuidance available
+    | not (requiredBrowserTools `Set.isSubsetOf` available) = ""
+    | otherwise =
+        Text.unlines
+            [ "Browser control:"
+            , "- Use the browser_* tools for websites instead of whole-desktop computer control."
+            , "- In Haskell Agent for macOS, the user can show the connected in-app browser with the browser button; it appears in the right sidebar. A configured dedicated Safari tab may be connected when that pane is hidden."
+            , "- Navigate or take a snapshot first, then use selectors returned by browser_snapshot for interaction."
+            ]
+  where
+    requiredBrowserTools = Set.fromList
+        [ "browser_navigate"
+        , "browser_snapshot"
+        , "browser_click"
+        , "browser_type"
+        ]
 
 -- | Prefer GHCI as the general-purpose scripting environment.
 ghciGuidance :: Text

@@ -39,6 +39,9 @@ import Agent.Store.Postgres.Skill
     ( learnedSkillRuntimeGrantStatements
     , learnedSkillSchemaStatements
     )
+import Agent.Store.Postgres.UsageCache
+    ( accountUsageCacheSchemaStatements
+    )
 import Agent.Store.Types
 
 data Migration = Migration
@@ -202,6 +205,42 @@ coreMigrations =
               \ ADD COLUMN IF NOT EXISTS is_active boolean\
               \ NOT NULL DEFAULT TRUE"
             ]
+        }
+    , Migration
+        { migrationVersion = 105
+        , migrationName = "archived sessions"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS archived_at timestamptz"
+            , "DO $ha$\
+              \ BEGIN\
+              \   IF to_regclass('harness.sessions') IS NOT NULL THEN\
+              \     CREATE INDEX IF NOT EXISTS sessions_archived_at_idx\
+              \       ON harness.sessions (archived_at DESC)\
+              \       WHERE deleted_at IS NULL\
+              \         AND archived_at IS NOT NULL;\
+              \   END IF;\
+              \ END\
+              \ $ha$"
+            ]
+        }
+    , Migration
+        { migrationVersion = 106
+        , migrationName = "account usage cache"
+        , migrationStatements =
+            accountUsageCacheSchemaStatements
+            <> [ "DO $ha$\
+                \ BEGIN\
+                \   IF EXISTS (\
+                \     SELECT 1 FROM pg_catalog.pg_roles\
+                \     WHERE rolname = 'ha_runtime'\
+                \   ) THEN\
+                \     GRANT SELECT, INSERT, UPDATE\
+                \       ON harness.account_usage_cache TO ha_runtime;\
+                \   END IF;\
+                \ END\
+                \ $ha$"
+               ]
         }
     ]
 

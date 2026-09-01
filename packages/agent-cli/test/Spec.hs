@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 module Main (main) where
 
 import Test.Hspec (hspec)
@@ -10,10 +12,12 @@ import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
+import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.ClaudeSpec as ClaudeSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.ComputerUseSpec as ComputerUseSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ContextSpec as ContextSpec
@@ -24,6 +28,7 @@ import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.DesktopSpec as DesktopSpec
 import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
+import qualified Agent.CLI.GatewayModelsSpec as GatewayModelsSpec
 import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
@@ -35,6 +40,7 @@ import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
 import qualified Agent.CLI.MetaConsoleRuntimeSpec as MetaConsoleRuntimeSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
+import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
@@ -50,6 +56,9 @@ import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
 import qualified Agent.CLI.RequestSpec as RequestSpec
+import qualified Agent.CLI.RepositoryDeliverySpec as RepositoryDeliverySpec
+import qualified Agent.CLI.RepositoryReviewSpec as RepositoryReviewSpec
+import qualified Agent.CLI.ResourceAdminSpec as ResourceAdminSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
@@ -79,6 +88,15 @@ import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
+import qualified Agent.CLI.MacOS.EngineMailboxSpec as EngineMailboxSpec
+import qualified Agent.CLI.MacOS.NativeLoopEventSpec as NativeLoopEventSpec
+import qualified Agent.CLI.MacOS.TaskSchedulerSpec as TaskSchedulerSpec
+#ifdef darwin_HOST_OS
+import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
+import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
+import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
+import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
+#endif
 
 main :: IO ()
 main = hspec do
@@ -90,10 +108,18 @@ main = hspec do
     ArtifactSpec.spec
     AuthSpec.spec
     BtwSpec.spec
+    BrowserToolsSpec.spec
+#ifdef darwin_HOST_OS
+    BrowserBridgeFFISpec.spec
+    BridgeFFISpec.spec
+    BridgeHeaderSpec.spec
+    BridgeSpec.spec
+#endif
     CancelWatchSpec.spec
     ClipboardSpec.spec
     ClaudeSpec.spec
     CommandSpec.spec
+    ComputerUseSpec.spec
     ConfigSpec.spec
     CompactionSpec.spec
     ContextSpec.spec
@@ -104,6 +130,7 @@ main = hspec do
     DesktopSpec.spec
     ExternalProgramSpec.spec
     FileUriSpec.spec
+    GatewayModelsSpec.spec
     GitDiffSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
@@ -111,6 +138,7 @@ main = hspec do
     LoginSpec.spec
     LearnedSkillsSpec.spec
     MarkdownSpec.spec
+    McpAdminSpec.spec
     McpManagerSpec.spec
     MetaConsoleSpec.spec
     MetaConsoleRuntimeSpec.spec
@@ -130,6 +158,9 @@ main = hspec do
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec
     RequestSpec.spec
+    RepositoryDeliverySpec.spec
+    RepositoryReviewSpec.spec
+    ResourceAdminSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
@@ -159,3 +190,6 @@ main = hspec do
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec
+    EngineMailboxSpec.spec
+    NativeLoopEventSpec.spec
+    TaskSchedulerSpec.spec

@@ -21,6 +21,7 @@ import Agent.OsPath (fromText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
+    , isComputerToolCallKind
     )
 import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode
@@ -100,6 +101,8 @@ planApproval facts =
                 | isPlanFileWrite
                     facts.planActive facts.planPath facts.call ->
                         approved
+                | isComputerToolCallKind facts.call.callKind ->
+                    NeedPermissionPrompt
                 | otherwise -> case facts.allowedForSession of
                     Nothing -> NeedSessionAllowance
                     Just True -> approved
@@ -109,31 +112,38 @@ planApproval facts =
     approved = CompleteApproval (Right True) []
 
 resolveApprovalPrompt :: ToolCall -> Maybe PermissionChoice -> ApprovalPlan
-resolveApprovalPrompt call = \case
-    Nothing -> denied
-    Just PermissionDeny -> denied
-    Just PermissionAllowOnce -> approved
-    Just PermissionAllowAll ->
-        CompleteApproval
-            (Right True)
-            [ SetApprovalPolicy ApproveAll
-            , PersistProjectAutoApprove
-            , ReportApprovalNotice
-                (ApprovalSuccess
-                    (glyphOk <> "auto-approve on (saved for project)"))
-            ]
-    Just PermissionAllowTool ->
-        CompleteApproval
-            (Right True)
-            [ RememberToolForSession (canonicalToolName call.name)
-            , ReportApprovalNotice
-                (ApprovalSuccess
-                    (glyphOk
-                        <> "always allow "
-                        <> call.name
-                        <> " this session"))
-            ]
+resolveApprovalPrompt call choice
+    | isComputerToolCallKind call.callKind =
+        case choice of
+            Nothing -> denied
+            Just PermissionDeny -> denied
+            Just _ -> approved
+    | otherwise = resolveOrdinary choice
   where
+    resolveOrdinary = \case
+        Nothing -> denied
+        Just PermissionDeny -> denied
+        Just PermissionAllowOnce -> approved
+        Just PermissionAllowAll ->
+            CompleteApproval
+                (Right True)
+                [ SetApprovalPolicy ApproveAll
+                , PersistProjectAutoApprove
+                , ReportApprovalNotice
+                    (ApprovalSuccess
+                        (glyphOk <> "auto-approve on (saved for project)"))
+                ]
+        Just PermissionAllowTool ->
+            CompleteApproval
+                (Right True)
+                [ RememberToolForSession (canonicalToolName call.name)
+                , ReportApprovalNotice
+                    (ApprovalSuccess
+                        (glyphOk
+                            <> "always allow "
+                            <> call.name
+                            <> " this session"))
+                ]
     approved = CompleteApproval (Right True) []
     denied = CompleteApproval (Right False) []
 

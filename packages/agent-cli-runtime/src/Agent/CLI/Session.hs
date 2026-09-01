@@ -14,6 +14,9 @@ module Agent.CLI.Session
     , sessionActivityDecoder
     , SessionTransfer(..)
     , sessionTransferDecoder
+    , SessionTransferEnvelope(..)
+    , sessionTransferFormatVersion
+    , validateSessionTransferEnvelope
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -39,18 +42,30 @@ module Agent.CLI.Session
     , rewindSession
     , addSessionUsage
     , deleteSession
+    , renameSession
     , loadSession
     , loadSessions
     , loadActiveSession
     , loadSessionMeta
     , loadRecentSessionTurns
+    , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
+    , loadSessionHistoryTurnsBefore
     , loadSessionTurnsAfter
+    , loadSessionHistoryTurnsRange
+    , loadSessionHistoryTurnsRangeBounded
+    , loadSessionHistoryTurnsAround
+    , loadSessionHistorySnapshot
     , loadSessionResumeStats
     , importSessionTransfer
+    , importSessionTransferRemapped
+    , exportSessionTransfer
+    , streamSessionTransfer
+    , forkSessionAtTurn
     , loadSessionHandle
     , isValidSessionId
     , listSessions
+    , listArchivedSessionIds
     , sessionDirForId
     , sessionTempDirForId
     , sessionTempsRoot
@@ -66,6 +81,7 @@ module Agent.CLI.Session
     , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
+    , setSessionArchived
     , setManualSessionTitle
     , resetSessionTitleToAuto
     , setSessionRecap
@@ -153,13 +169,14 @@ import Control.Monad.Trans.Except
     , throwE
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isHexDigit)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
-import Data.List (sortOn)
-import Data.Maybe (fromMaybe)
+import Data.List (foldl', sortOn)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -211,6 +228,74 @@ sessionSchemaVersion = 1
 -- shell environments, tool outputs, and other scratch data.
 defaultSessionTempKeepCount :: Int
 defaultSessionTempKeepCount = 15
+
+-- | Stable interchange envelope for full-fidelity session transfers.
+data SessionTransferEnvelope = SessionTransferEnvelope
+    { transferFormat :: !Text
+    , transferFormatVersion :: !Int
+    , transferSession :: !SessionTransfer
+    }
+    deriving (Eq, Show)
+
+sessionTransferFormatVersion :: Int
+sessionTransferFormatVersion = 1
+
+sessionTransferFormatName :: Text
+sessionTransferFormatName = "haskell-agent.session-transfer"
+
+instance Aeson.ToJSON SessionTransferEnvelope where
+    toJSON envelope = Aeson.object
+        [ "format" Aeson..= envelope.transferFormat
+        , "version" Aeson..= envelope.transferFormatVersion
+        , "session" Aeson..= envelope.transferSession
+        ]
+
+instance Aeson.FromJSON SessionTransferEnvelope where
+    parseJSON = Aeson.withObject "SessionTransferEnvelope" \object -> do
+        envelope <- SessionTransferEnvelope
+            <$> object Aeson..: "format"
+            <*> object Aeson..: "version"
+            <*> object Aeson..: "session"
+        either (fail . Text.unpack) pure
+            (validateSessionTransferEnvelope envelope)
+
+validateSessionTransferEnvelope
+    :: SessionTransferEnvelope
+    -> Either Text SessionTransferEnvelope
+validateSessionTransferEnvelope envelope
+    | envelope.transferFormat /= sessionTransferFormatName =
+        Left "unsupported session transfer format"
+    | envelope.transferFormatVersion /= sessionTransferFormatVersion =
+        Left
+            ("unsupported session transfer version: "
+                <> Text.pack (show envelope.transferFormatVersion))
+    | not (isValidSessionId meta.metaId) =
+        Left "invalid transferred session id"
+    | meta.metaVersion <= 0 =
+        Left "invalid transferred session schema version"
+    | length turns > maximumTransferTurns =
+        Left "session transfer contains too many turns"
+    | any invalidTurn turns =
+        Left "session transfer contains an oversized turn"
+    | otherwise = Right envelope
+  where
+    transfer = envelope.transferSession
+    meta = transfer.transferMeta
+    turns = transfer.transferTurns
+    invalidTurn turn =
+        Text.length turn.turnUserText > maximumTransferTextLength
+            || maybe False
+                ((> maximumTransferTextLength) . Text.length)
+                turn.turnAssistantText
+            || maybe False
+                ((> maximumTransferTextLength) . Text.length)
+                turn.turnError
+
+maximumTransferTurns :: Int
+maximumTransferTurns = 100000
+
+maximumTransferTextLength :: Int
+maximumTransferTextLength = 16 * 1024 * 1024
 
 data SessionTempCleanupReport = SessionTempCleanupReport
     { tempCleanupRemoved :: ![OsPath]
@@ -1151,6 +1236,16 @@ loadRecentSessionTurns pool root sessionId limit =
     loadSessionTurnPage root pool sessionId
         (\pool' key -> Store.loadRecentSessionTurns pool' key limit)
 
+loadRecentSessionHistoryTurns
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadRecentSessionHistoryTurns pool root sessionId limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key -> Store.loadRecentSessionHistoryTurns pool' key limit)
+
 loadSessionTurnsBefore
     :: StorePool
     -> OsPath
@@ -1160,7 +1255,22 @@ loadSessionTurnsBefore
     -> IO (Either Text SessionTurnPage)
 loadSessionTurnsBefore pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
-        (\pool' key -> Store.loadSessionTurnsBefore pool' key cursor limit)
+        (\pool' key ->
+            Store.loadSessionTurnsBefore
+                pool' key cursor (boundedPageLimit limit))
+
+loadSessionHistoryTurnsBefore
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsBefore pool root sessionId cursor limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key ->
+            Store.loadSessionHistoryTurnsBefore
+                pool' key cursor (boundedPageLimit limit))
 
 loadSessionTurnsAfter
     :: StorePool
@@ -1171,7 +1281,81 @@ loadSessionTurnsAfter
     -> IO (Either Text SessionTurnPage)
 loadSessionTurnsAfter pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
-        (\pool' key -> Store.loadSessionTurnsAfter pool' key cursor limit)
+        (\pool' key ->
+            Store.loadSessionTurnsAfter
+                pool' key cursor (boundedPageLimit limit))
+
+loadSessionHistoryTurnsRange
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsRange pool root sessionId start limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key ->
+            Store.loadSessionHistoryTurnsRange
+                pool' key start (boundedPageLimit limit))
+
+loadSessionHistoryTurnsRangeBounded
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsRangeBounded
+        pool root sessionId start endExclusive limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key ->
+            Store.loadSessionHistoryTurnsRangeBounded
+                pool' key start endExclusive (boundedPageLimit limit))
+
+boundedPageLimit :: Int -> Int
+boundedPageLimit = min 1000 . max 1
+
+-- | Return a bounded full-history window centered on a durable turn index.
+-- The requested turn is included when it exists. Near either edge the result
+-- is intentionally not rebalanced; callers can use the page flags to continue
+-- in either direction without an eager full-session load.
+loadSessionHistoryTurnsAround
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionHistoryTurnsAround pool root sessionId center radius
+    | center < 0 = pure (Left "turn index must be non-negative")
+    | radius < 0 = pure (Left "turn radius must be non-negative")
+    | otherwise =
+        loadSessionHistoryTurnsRange
+            pool
+            root
+            sessionId
+            (max 0 (center - fromIntegral boundedRadius))
+            (boundedRadius * 2 + 1)
+  where
+    boundedRadius = min 500 radius
+
+loadSessionHistorySnapshot
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text (SessionMeta, Int64, Int64))
+loadSessionHistorySnapshot pool root sessionId = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    stored <- loadWithLegacyImport
+        root pool sessionId Store.loadSessionHistorySnapshot
+    meta <- except (fromStoredMetadata stored.sessionSnapshotMetadata)
+    validateSessionMeta sessionSchemaVersion isValidSessionId sessionId meta
+    pure
+        ( meta
+        , stored.sessionSnapshotStart
+        , stored.sessionSnapshotTotal
+        )
 
 loadSessionResumeStats
     :: StorePool
@@ -1338,6 +1522,177 @@ importSessionTransfer pool root cwd transfer = runExceptT do
         _ <- removeSessionTemp root sessionId
         pure ()
 
+-- | Import a validated transfer as a new session. The source id is never
+-- reused, which makes importing the same file safe and preserves the source
+-- transcript as an immutable object.
+importSessionTransferRemapped
+    :: StorePool
+    -> OsPath
+    -> Maybe OsPath
+    -> SessionTransferEnvelope
+    -> IO (Either Text Text)
+importSessionTransferRemapped pool root cwd rawEnvelope =
+    case validateSessionTransferEnvelope rawEnvelope of
+        Left err -> pure (Left err)
+        Right envelope -> do
+            (sessionId, _) <- allocateSessionTemp root
+            now <- normalizePostgresTimestamp <$> getCurrentTime
+            let transfer = envelope.transferSession
+                sourceMeta = transfer.transferMeta
+                meta = sourceMeta
+                    { metaId = sessionId
+                    , metaCreatedAt = now
+                    , metaUpdatedAt = now
+                    }
+            importSessionTransfer pool root cwd
+                transfer { transferMeta = meta }
+
+exportSessionTransfer
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text SessionTransferEnvelope)
+exportSessionTransfer pool root sessionId =
+    loadSession pool root sessionId <&> \result -> do
+        (meta, turns) <- result
+        validateSessionTransferEnvelope SessionTransferEnvelope
+            { transferFormat = sessionTransferFormatName
+            , transferFormatVersion = sessionTransferFormatVersion
+            , transferSession = SessionTransfer meta turns
+            }
+
+-- | Stream a transfer document in bounded turn pages. Callback bytes are
+-- valid only for the duration of the callback. The export captures the turn
+-- count from its first page and ignores later appends, yielding an immutable
+-- prefix without hydrating the full transcript.
+streamSessionTransfer
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> (BS.ByteString -> IO ())
+    -> IO (Either Text ())
+streamSessionTransfer pool root sessionId emit = runExceptT do
+    (meta, snapshotStart, snapshotTotal) <-
+        lift (loadSessionHistorySnapshot pool root sessionId) >>= except
+    let snapshotEnd = snapshotStart + max 0 snapshotTotal
+    lift $ emitLazy
+        ("{\"format\":\"haskell-agent.session-transfer\","
+            <> "\"version\":1,\"session\":{\"meta\":"
+            <> Aeson.encode meta
+            <> ",\"turns\":[")
+    firstPage <- lift
+        (loadSessionHistoryTurnsRangeBounded
+            pool root sessionId snapshotStart snapshotEnd 256)
+        >>= except
+    let total = max 0 snapshotTotal
+    emitted <- lift (emitPage True total 0 firstPage)
+    when (emitted < total) $
+        streamRest snapshotEnd total emitted firstPage
+    lift (emitLazy "]}}")
+  where
+    emitLazy = mapM_ emit . LBS.toChunks
+
+    emitPage first total emitted page = do
+        let remaining = max 0 (total - emitted)
+            selected = take (fromIntegral remaining) page.pageTurns
+        _ <- foldl'
+            (\action (_, turn) -> do
+                isFirst <- action
+                unless isFirst (emit ",")
+                emitLazy (Aeson.encode turn)
+                pure False)
+            (pure first)
+            selected
+        pure (emitted + fromIntegral (length selected))
+
+    streamRest snapshotEnd total emitted previous =
+        case reverse previous.pageTurns of
+            [] -> throwE "session export paging made no progress"
+            (lastIndex, _) : _ -> do
+                page <- lift
+                    (loadSessionHistoryTurnsRangeBounded
+                        pool root sessionId (lastIndex + 1) snapshotEnd 256)
+                    >>= except
+                next <- lift (emitPage False total emitted page)
+                when (next <= emitted) $
+                    throwE "session export paging made no progress"
+                when (next < total) (streamRest snapshotEnd total next page)
+
+-- | Fork a source session through an inclusive durable turn index. The source
+-- remains untouched. Transcript effects are copied verbatim, while derived
+-- usage and continuation metadata are recomputed from the selected prefix.
+forkSessionAtTurn
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> IO (Either Text Text)
+forkSessionAtTurn pool root sourceId throughIndex = runExceptT do
+    when (throughIndex < 0) (throwE "turn index must be non-negative")
+    (sourceMeta, snapshotStart, snapshotTotal) <-
+        lift (loadSessionHistorySnapshot pool root sourceId) >>= except
+    let snapshotEnd = snapshotStart + max 0 snapshotTotal
+    when
+        (throughIndex < snapshotStart || throughIndex >= snapshotEnd) $
+        throwE "turn index is outside the session transcript"
+    turns <- loadPrefix snapshotStart (throughIndex + 1) id
+    let
+        usage = foldl' addUsage
+            (TokenUsage
+                { inputTokens = 0
+                , outputTokens = 0
+                , cachedTokens = 0
+                })
+            (mapMaybe (.turnUsage) turns)
+        meta = sourceMeta
+            { metaLastResponseId = continuationResponseId turns
+            , metaInputTokens = usage.inputTokens
+            , metaOutputTokens = usage.outputTokens
+            , metaCachedTokens = usage.cachedTokens
+            , metaLastRecap = Nothing
+            , metaLastTurnSummary = Nothing
+            , metaLastRecapMainTurns = 0
+            , metaTitleUserTurns =
+                length (filter (not . Text.null . Text.strip . (.turnUserText)) turns)
+            }
+        envelope = SessionTransferEnvelope
+            { transferFormat = sessionTransferFormatName
+            , transferFormatVersion = sessionTransferFormatVersion
+            , transferSession = SessionTransfer meta turns
+            }
+    lift (importSessionTransferRemapped pool root Nothing envelope) >>= except
+  where
+    loadPrefix cursor endExclusive append
+        | cursor >= endExclusive = pure (append [])
+        | otherwise = do
+            page <- lift
+                (loadSessionHistoryTurnsRangeBounded
+                    pool root sourceId cursor endExclusive 256)
+                >>= except
+            case page.pageTurns of
+                [] -> throwE "session fork paging made no progress"
+                values -> do
+                    let lastIndex = fst (last values)
+                        pageTurns = map snd values
+                    loadPrefix
+                        (lastIndex + 1)
+                        endExclusive
+                        (append . (pageTurns <>))
+
+    addUsage left right = TokenUsage
+        { inputTokens = left.inputTokens + right.inputTokens
+        , outputTokens = left.outputTokens + right.outputTokens
+        , cachedTokens = left.cachedTokens + right.cachedTokens
+        }
+
+    continuationResponseId = foldl' step Nothing
+    step previous turn =
+        let base = case turn.turnEffect of
+                TranscriptAppend -> previous
+                TranscriptReplace -> Nothing
+                TranscriptReset -> Nothing
+        in turn.turnResponseId <|> base
+
 deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
 deleteSession pool root sessionId = runExceptT do
     dir <- except (sessionDirForId root sessionId)
@@ -1365,6 +1720,40 @@ deleteSession pool root sessionId = runExceptT do
                     Right () -> pure ()
     tempRemoved <- lift (removeSessionTemp root sessionId)
     except tempRemoved
+
+renameSession
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Text
+    -> IO (Either Text SessionMeta)
+renameSession pool root sessionId rawTitle = runExceptT do
+    let title = Text.unwords (Text.words (Text.strip rawTitle))
+    when (Text.null title) (throwE "session title cannot be empty")
+    _ <- except (sessionDirForId root sessionId)
+    now <- lift getCurrentTime
+    renamed <- lift $
+        Store.setSessionTitle pool sessionId title True 2 now
+    case renamed of
+        Left err -> throwE (renderStoreError err)
+        Right False -> throwE ("session not found: " <> sessionId)
+        Right True -> lift (loadSessionMeta pool root sessionId) >>= except
+
+setSessionArchived
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Bool
+    -> IO (Either Text ())
+setSessionArchived pool root sessionId archived = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    now <- lift getCurrentTime
+    changed <- lift $
+        Store.setSessionArchived pool sessionId archived now
+    case changed of
+        Left err -> throwE (renderStoreError err)
+        Right False -> throwE ("session not found: " <> sessionId)
+        Right True -> pure ()
 
 -- | Session ids are single path components. Keep this deliberately broader
 -- than the current date-plus-hex allocator so older ids remain resumable.
@@ -1419,6 +1808,12 @@ decodeListedSessionMeta value = do
                 <> ")"
     pure meta
 
+listArchivedSessionIds :: StorePool -> IO (Either Text [Text])
+listArchivedSessionIds pool =
+    Store.listSessionArchiveKeys pool >>= \case
+        Left err -> pure (Left (renderStoreError err))
+        Right sessionIds -> pure (Right sessionIds)
+
 writeSessionMeta :: StorePool -> OsPath -> SessionMeta -> IO ()
 writeSessionMeta pool _path meta = do
     Store.replaceSessionMetadata
@@ -1445,7 +1840,34 @@ sessionTitleFromPrompt prompt =
 setGeneratedSessionTitle :: Int -> Text -> SessionHandle -> IO SessionHandle
 setGeneratedSessionTitle refreshIndex rawTitle handle
     | handle.sessionMeta.metaTitleIsManual = pure handle
-    | otherwise = writeTitle False refreshIndex rawTitle handle
+    | otherwise = do
+        let title = Text.unwords (Text.words (Text.strip rawTitle))
+        now <- getCurrentTime
+        Store.setGeneratedSessionTitle
+            handle.sessionPool
+            handle.sessionMeta.metaId
+            title
+            (fromIntegral refreshIndex)
+            now >>= \case
+                Left err ->
+                    fail
+                        ("could not update PostgreSQL session title: "
+                            <> Text.unpack (renderStoreError err))
+                Right True ->
+                    pure handle
+                        { sessionMeta = handle.sessionMeta
+                            { metaTitle = title
+                            , metaTitleIsManual = False
+                            , metaTitleRefreshIndex = refreshIndex
+                            }
+                        }
+                Right False ->
+                    loadSessionMeta
+                        handle.sessionPool
+                        handle.sessionDir
+                        handle.sessionMeta.metaId >>= \case
+                            Left err -> fail (Text.unpack err)
+                            Right meta -> pure handle { sessionMeta = meta }
 
 setManualSessionTitle :: Text -> SessionHandle -> IO SessionHandle
 setManualSessionTitle = writeTitle True 2
@@ -1458,8 +1880,21 @@ writeTitle manual refreshIndex rawTitle handle = do
             , metaTitleIsManual = manual
             , metaTitleRefreshIndex = refreshIndex
             }
-    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
-    pure handle { sessionMeta = meta }
+    now <- getCurrentTime
+    Store.setSessionTitle
+        handle.sessionPool
+        handle.sessionMeta.metaId
+        title
+        manual
+        (fromIntegral refreshIndex)
+        now >>= \case
+            Left err ->
+                fail
+                    ("could not update PostgreSQL session title: "
+                        <> Text.unpack (renderStoreError err))
+            Right False ->
+                fail ("session not found: " <> Text.unpack handle.sessionMeta.metaId)
+            Right True -> pure handle { sessionMeta = meta }
 
 resetSessionTitleToAuto :: SessionHandle -> IO SessionHandle
 resetSessionTitleToAuto handle = do
@@ -1467,8 +1902,21 @@ resetSessionTitleToAuto handle = do
             { metaTitleIsManual = False
             , metaTitleRefreshIndex = 0
             }
-    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
-    pure handle { sessionMeta = meta }
+    now <- getCurrentTime
+    Store.setSessionTitle
+        handle.sessionPool
+        handle.sessionMeta.metaId
+        meta.metaTitle
+        False
+        0
+        now >>= \case
+            Left err ->
+                fail
+                    ("could not reset PostgreSQL session title: "
+                        <> Text.unpack (renderStoreError err))
+            Right False ->
+                fail ("session not found: " <> Text.unpack handle.sessionMeta.metaId)
+            Right True -> pure handle { sessionMeta = meta }
 
 setSessionRecap :: Text -> Int -> SessionHandle -> IO SessionHandle
 setSessionRecap summary mainTurns handle = do

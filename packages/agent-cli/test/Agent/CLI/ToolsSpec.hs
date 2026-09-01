@@ -1,6 +1,7 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeToolProjection(..)
     , imageGenerationCodeModeProjection
@@ -21,7 +22,12 @@ import Agent.Subagents
     , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (taskPathRoot)
-import Agent.ToolDispatch (noArgsTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallKind(..)
+    , ToolCallResult(..)
+    , noArgsTool
+    )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Codex.Dialect.Runtime
@@ -38,6 +44,7 @@ import Agent.Tools.Types
     , defaultToolEnv
     , freeformApplyPatchAppTool
     , jsonAppTool
+    , mkToolRegistry
     , rawJsonAppTool
     )
 import Control.Exception.Safe (bracket)
@@ -45,20 +52,50 @@ import Control.Monad (join)
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Info (os)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
-    it "advertises the reserved computer tool as a built-in" do
-        let computer = jsonAppTool "computer" "Control this computer" []
+    it "advertises computer use as an ordinary strict function" do
+        if os == "darwin"
+            then case schemasFromAppTools codexDialect [computerUseTool] of
+                [_, FunctionToolValue function] -> do
+                    function.name `shouldBe` computerFunctionName
+                    function.strict `shouldBe` Just True
+                    function.parameters `shouldSatisfy` (/= Nothing)
+                other -> expectationFailure
+                    ("expected ordinary computer function, got " <> show other)
+            else schemasFromAppTools codexDialect [computerUseTool]
+                `shouldBe` [webSearchTool]
+
+    it "reserves the model-facing computer_use function identity" do
+        let collision =
+                jsonAppTool computerFunctionName "Unrelated MCP function" []
+                    AlwaysPrompt
+                    (noArgsTool computerFunctionName (pure (Right "ok")))
+        schemasFromAppTools codexDialect [collision]
+            `shouldBe` [webSearchTool]
+        requireToolRegistry [computerUseTool, collision]
+            `shouldThrow` anyIOException
+
+    it "keeps an unrelated function named computer as a function" do
+        let computer = jsonAppTool "computer" "Unrelated MCP function" []
                 AlwaysPrompt
                 (noArgsTool "computer" (pure (Right "ok")))
-        schemasFromAppTools codexDialect [computer]
-            `shouldBe`
-                [ webSearchTool
-                , knownResponseTool ToolComputer
-                ]
+        case schemasFromAppTools codexDialect [computer] of
+            [_, FunctionToolValue function] ->
+                function.name `shouldBe` "computer"
+            other -> expectationFailure
+                ("expected ordinary computer function, got " <> show other)
+
+    it "advertises the local computer function only for the Codex dialect" do
+        schemasFromAppTools grokBuildDialect [computerUseTool]
+            `shouldBe` [webSearchTool, xSearchTool]
+        schemasFromAppTools claudeCodeDialect [computerUseTool]
+            `shouldBe` []
+
     it "keeps native shell tools both direct and nested for code-only models" do
         let tools = map testTool
                 ["read_file", "shell_command", "write_stdin", "apply_patch"]
@@ -67,6 +104,17 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+    it "keeps hosted computer use direct and out of code mode" do
+        let tools =
+                [ testTool "read_file"
+                , testTool "shell_command"
+                , computerUseTool
+                ]
+            projection = projectCodeModeTools CodeOnlyToolMode tools
+        map (.appToolName) projection.directCodeModeTools
+            `shouldBe` ["shell_command", "computer"]
+        map (.appToolName) projection.nestedCodeModeTools
+            `shouldBe` ["read_file", "shell_command"]
     it "nests only imagegen for code-only models when full code mode is off" do
         let tools = map testTool ["read_file", "imagegen", "shell_command"]
         case imageGenerationCodeModeProjection CodeOnlyToolMode tools of
@@ -82,6 +130,7 @@ spec = describe "schemasFromAppTools" do
             Just _ ->
                 expectationFailure
                     "conventional models should keep imagegen direct"
+
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch : _ -> pure ()

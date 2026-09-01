@@ -79,7 +79,8 @@ import Agent.CLI.Models
       ModelTarget(targetProvider, targetConnectionId, targetModelId, targetDialect,
                   targetWireModelId) )
 import Agent.CLI.Options
-    ( defaultEffortFor,
+    ( ApprovalPolicy(ApproveAll, PromptMutating),
+      defaultEffortFor,
       isOneShot,
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
@@ -119,7 +120,11 @@ import Agent.CLI.Runtime.Orchestration.Background
 import Agent.CLI.Runtime.Orchestration.Concurrent
     ( concurrentlyAcquire )
 import Agent.CLI.Runtime.Orchestration.Types
-    (AgentProcessRuntime(..), AgentRunMode)
+    ( AgentProcessRuntime(..)
+    , AgentRunMode
+    , NativeInteractionMode(..)
+    , NativeRunHooks(..)
+    )
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Session ( runAgentSession )
 import Agent.CLI.Runtime.Orchestration.Startup
@@ -153,7 +158,7 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
                      startupFinished, startupDatabaseStore,
-                     startupSessionState) )
+                     startupSessionState, startupNativeHooks) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, loadPrompt, reservedSessionId )
 import Agent.CLI.SessionAdmin ()
@@ -258,11 +263,12 @@ import Agent.Tools.MultiAgents
     , SubagentWorktree(..)
     )
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(planSessionDir),
+    ( PlanModeEnv(planSessionDir, planStateRef),
       activatePlanMode,
       PlanModeHooks(planAskQuestion, PlanModeHooks, planConfirmEnter,
                     planDecideExit),
-      PlanDecision(PlanCancel) )
+      PlanDecision(PlanCancel),
+      PlanModeState(PlanPending) )
 import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
 import Agent.Tools.ShowImage
@@ -292,6 +298,7 @@ import System.Directory.OsPath (getHomeDirectory)
 import System.Environment ()
 import System.Exit ()
 import System.IO (Handle)
+import System.Info (os)
 import System.OsPath (OsPath)
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
@@ -500,6 +507,8 @@ runAgentTools
                                             available)
                                     )
     let basePlanHooks
+            | Just hooks <- startup.startupNativeHooks =
+                hooks.nativePlanHooks
             | startup.startupBackground =
                 PlanModeHooks
                     { planConfirmEnter = \_ -> pure False
@@ -549,14 +558,7 @@ runAgentTools
         rawTarget = (rawModelOption provider model).modelTarget
         inferredTarget0 =
             maybe
-                ( fromMaybe rawTarget $
-                    transitionTarget
-                        <|> configuredOptionTarget
-                        <|> resumedTarget
-                        <|> if isNothing options.optModel
-                            then projectTarget
-                            else Nothing
-                )
+                (fromMaybe rawTarget targetHint)
                 (.modelTarget)
                 gatewaySelection
         transportModel = case customResponses of
@@ -657,11 +659,22 @@ runAgentTools
                         (fst <$> resumed))
                     options.optEffort
         effortText = reasoningEffortText effort
-        policy = resolveApprovalPolicy options isTty
-            projectSettings.settingsAutoApprove
+        policy = case startup.startupNativeHooks of
+            Just hooks -> case hooks.nativeInteractionMode of
+                NativeYolo -> ApproveAll
+                NativeAsk -> PromptMutating
+                NativePlan -> PromptMutating
+            Nothing ->
+                resolveApprovalPolicy options isTty
+                    projectSettings.settingsAutoApprove
         claudeBypassEnabled =
-            not options.optNoYolo
-                && (options.optYolo || projectSettings.settingsAutoApprove)
+            case startup.startupNativeHooks of
+                Just hooks ->
+                    hooks.nativeInteractionMode == NativeYolo
+                Nothing ->
+                    not options.optNoYolo
+                        && (options.optYolo
+                            || projectSettings.settingsAutoApprove)
     -- Plan mode itself is process-local, while the assistant's proposed plan
     -- is durable in the session transcript. Reconstruct the approval phase
     -- before entering the REPL so a resumed Codex session cannot interpret
@@ -1162,8 +1175,14 @@ runAgentTools
         databaseAppTools = databaseTools databaseToolsEnv
         learnedSkillAppTools =
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
+        nativeAppTools =
+            maybe [] (.nativeTools) startup.startupNativeHooks
         computerTools =
-            [ComputerUse.computerUseTool | options.optComputerUse, provider == OpenAIProvider]
+            [ ComputerUse.computerUseTool
+            | options.optComputerUse
+            , provider == OpenAIProvider
+            , os == "darwin"
+            ]
         imageGenerationTools =
             [ imageGenerationTool
                 tokenProvider
@@ -1184,6 +1203,7 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ nativeAppTools
                 ++ imageGenerationTools
                 ++ computerTools
         tools =
@@ -1195,7 +1215,9 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ nativeAppTools
                 ++ imageGenerationTools
+                ++ computerTools
         planMode = coding.codingPlanMode
         resumedPlanPending =
             case resumed of
@@ -1231,6 +1253,9 @@ runAgentTools
                                                         `finally`
                                                             cleanupScratch)))))
     when resumedPlanPending (activatePlanMode planMode)
+    forM_ startup.startupNativeHooks \hooks ->
+        when (hooks.nativeInteractionMode == NativePlan) $
+            writeIORef planMode.planStateRef PlanPending
     runAgentSession
         loaded
         learnAboutUserRequested

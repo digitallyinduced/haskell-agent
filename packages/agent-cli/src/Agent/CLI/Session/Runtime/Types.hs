@@ -35,6 +35,7 @@ import Agent.CLI.Options
     , CliOptions
     )
 import Agent.CLI.ProviderTransition (PendingTurn)
+import Agent.CLI.Runtime.Orchestration.Types (NativeRunHooks)
 import Agent.CLI.PendingInputs (PendingInputs)
 import Agent.CLI.Session
     ( LegacySubagentTarget
@@ -82,7 +83,7 @@ import Agent.Tools.Types
     , ToolEnv
     )
 import Control.Concurrent.STM (STM)
-import Control.Exception.Safe (Exception)
+import Control.Exception.Safe (Exception(..))
 import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
@@ -203,12 +204,14 @@ data StartupRuntime = StartupRuntime
     , startupSyntaxLoadDuration :: !(IORef (Maybe NominalDiffTime))
     , startupFinished :: !(IORef Bool)
     , startupSessionState :: !SessionState
+    , startupNativeHooks :: !(Maybe NativeRunHooks)
     }
 
 newtype StartupFailure = StartupFailure String
     deriving (Show)
 
-instance Exception StartupFailure
+instance Exception StartupFailure where
+    displayException (StartupFailure message) = message
 
 data StartupCancelled = StartupCancelled
     deriving (Show)

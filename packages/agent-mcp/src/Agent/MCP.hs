@@ -49,6 +49,7 @@ module Agent.MCP
     , acquireMcpFleetProgressive
     , releaseMcpFleetLease
     , closeMcpSupervisor
+    , restartMcpSupervisor
     , startMcpFleet
     , startMcpFleetWithProgress
     , startMcpFleetWithProgressHooks
@@ -128,6 +129,7 @@ import Agent.MCP.Supervisor
     , newMcpSupervisor
     , newMcpSupervisorWith
     , releaseMcpFleetLease
+    , restartMcpSupervisor
     )
 import Agent.MCP.Types
     ( McpCompletion(..)

@@ -209,6 +209,25 @@ spec = do
                                         (CredentialError
                                             "static credential was rejected")
 
+        it "refuses a direct credential for an organization model" do
+            let directCredential = Credential
+                    { accessToken = "direct-token"
+                    , accountId = "direct-account"
+                    , leaseId = Nothing
+                    , provider = OpenAIProvider
+                    }
+                guarded =
+                    gatewayRouterTokenProvider
+                        (staticCredentialProvider
+                            SubscriptionBilled
+                            directCredential)
+            getNextToken guarded Nothing
+                `shouldReturn`
+                    Left
+                        (CredentialError
+                            "the connected gateway is unavailable; refusing to \
+                            \send an organization model with direct OpenAI credentials")
+
         it "does not turn a rejected gateway into API-credit spending" $
             withTempHome \home ->
                 withCleanOpenAiEnv do

@@ -461,7 +461,7 @@ runAgentSession
                 dialect
                 (if isGatewayLoadedAuth loaded
                     then Nothing
-                    else Just loaded.loadedTokenProvider)
+                    else Just selectableTokenProvider)
                 model
         let initializeCodeMode =
                 if options.optCodeMode
@@ -574,12 +574,7 @@ runAgentSession
         policyRef <- newIORef policy
         claudeRuntimeSlot <- newClaudeSessionRuntimeSlot
         let claudeBridgeTools =
-                filter isClaudeBridgeTool $
-                    coding.codingAppTools
-                        <> mcpTools
-                        <> sessionTools
-                        <> databaseAppTools
-                        <> learnedSkillAppTools
+                filter isClaudeBridgeTool allTools
             isClaudeBridgeTool tool =
                 canonicalToolName tool.appToolName
                     `notElem`

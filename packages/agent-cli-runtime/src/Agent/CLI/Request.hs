@@ -283,7 +283,11 @@ responsesLiteToolValues tools =
                 , ungrouped
                 )
             Nothing ->
-                (firstPosition, grouped, description, ungrouped <> [encodeTool tool])
+                ( firstPosition
+                , grouped
+                , description
+                , ungrouped <> [encodeTool tool]
+                )
 
 groupedToolValues :: ResponseTool -> Maybe ([RawJson], Maybe Text)
 groupedToolValues tool = case tool of
@@ -352,7 +356,8 @@ liteToolValuesToConventional = concatMap flatten
   where
     flatten value = case decodeTool value of
         Just (NamespaceToolValue namespace)
-            | namespace.name == "functions" -> namespace.tools
+            | namespace.name == "functions" ->
+                namespace.tools
         decoded -> maybe [] pure decoded
 
 decodeTool :: RawJson -> Maybe ResponseTool

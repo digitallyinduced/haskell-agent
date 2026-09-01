@@ -32,9 +32,13 @@ module Agent.Store.Postgres.Skill
     , archiveLearnedSkill
     , rollbackLearnedSkill
     , readLearnedSkill
+    , readLearnedSkillRevision
     , searchLearnedSkills
     , listApplicableLearnedSkills
+    , listAllLearnedSkills
+    , listAllLearnedSkillsLimited
     , listLearnedSkillRevisions
+    , listLearnedSkillRevisionsLimited
     , listLearnedSkillSources
     ) where
 
@@ -356,6 +360,19 @@ readLearnedSkill pool scope slug =
             readSkillStatement)
         >>= pure . decodeMaybeSkillResult
 
+readLearnedSkillRevision
+    :: StorePool
+    -> Scope
+    -> Text
+    -> Int64
+    -> IO (Either StoreError (Maybe LearnedSkillRevision))
+readLearnedSkillRevision pool scope slug revision =
+    withSession pool
+        (HasqlSession.statement
+            (scopeSlugParams scope slug, revision)
+            readRevisionStatement)
+        >>= pure . decodeMaybeRevisionResult
+
 searchLearnedSkills
     :: StorePool
     -> [Scope]
@@ -389,6 +406,43 @@ listApplicableLearnedSkills pool scopes =
                 (HasqlSession.statement applicable listSkillsStatement)
                 >>= pure . decodeSkillListResult
 
+listAllLearnedSkills
+    :: StorePool
+    -> [Scope]
+    -> IO (Either StoreError [LearnedSkill])
+listAllLearnedSkills pool scopes =
+    case applicableScopes scopes of
+        Left err -> pure (Left (StoreDataError err))
+        Right applicable ->
+            withSession pool
+                (HasqlSession.statement applicable listAllSkillsStatement)
+                >>= pure . decodeSkillListResult
+
+-- | List a bounded administration page, optionally restricted to one of the
+-- three applicable scope kinds. Unlike the model-context list this includes
+-- archived rows.
+listAllLearnedSkillsLimited
+    :: StorePool
+    -> [Scope]
+    -> Maybe ScopeKind
+    -> Int
+    -> IO (Either StoreError [LearnedSkill])
+listAllLearnedSkillsLimited pool scopes selectedKind limit =
+    case applicableScopes scopes of
+        Left err -> pure (Left (StoreDataError err))
+        Right applicable ->
+            withSession pool
+                (HasqlSession.statement
+                    SkillListParams
+                        { skillListScopes = applicable
+                        , skillListKind =
+                            scopeKindText <$> selectedKind
+                        , skillListLimit =
+                            fromIntegral (max 1 (min 1000 limit))
+                        }
+                    listAllSkillsLimitedStatement)
+                >>= pure . decodeSkillListResult
+
 listLearnedSkillRevisions
     :: StorePool
     -> Scope
@@ -399,6 +453,21 @@ listLearnedSkillRevisions pool scope slug =
         (HasqlSession.statement
             (scopeSlugParams scope slug)
             listRevisionsStatement)
+        >>= pure . decodeRevisionListResult
+
+listLearnedSkillRevisionsLimited
+    :: StorePool
+    -> Scope
+    -> Text
+    -> Int
+    -> IO (Either StoreError [LearnedSkillRevision])
+listLearnedSkillRevisionsLimited pool scope slug limit =
+    withSession pool
+        (HasqlSession.statement
+            ( scopeSlugParams scope slug
+            , fromIntegral (max 1 (min 1000 limit))
+            )
+            listRevisionsLimitedStatement)
         >>= pure . decodeRevisionListResult
 
 listLearnedSkillSources
@@ -613,6 +682,15 @@ decodeRevisionListResult = \case
     Left err -> Left err
     Right rows ->
         either (Left . StoreDataError) Right (traverse decodeRevisionRow rows)
+
+decodeMaybeRevisionResult
+    :: Either StoreError (Maybe RevisionRow)
+    -> Either StoreError (Maybe LearnedSkillRevision)
+decodeMaybeRevisionResult = \case
+    Left err -> Left err
+    Right Nothing -> Right Nothing
+    Right (Just row) ->
+        either (Left . StoreDataError) (Right . Just) (decodeRevisionRow row)
 
 decodeSearchResult
     :: Either StoreError [(SkillRow, Double)]

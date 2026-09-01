@@ -158,8 +158,10 @@ devMainResume resumeId = do
         Right (Gateway command) -> runGatewayCommand command >> pure DevQuit
         Right (Mcp (McpLogin url scopes)) -> loginMcpWithScopes scopes url >> pure DevQuit
         Right (Mcp (McpLogout url)) -> logoutMcp url >> pure DevQuit
-        Right ListSessions -> runListSessions >> pure DevQuit
-        Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
+        Right (ListSessions outputFormat) ->
+            runListSessions outputFormat >> pure DevQuit
+        Right (ShowSession sessionId outputFormat pageRequest) ->
+            runShowSession sessionId outputFormat pageRequest >> pure DevQuit
         Right (WaitSession sessionId) -> runWaitSession sessionId >> pure DevQuit
         Right (ImportSession cwd) -> runImportSession cwd >> pure DevQuit
         Right (Storage command) ->
@@ -184,8 +186,9 @@ run = do
         Right (Gateway command) -> runGatewayCommand command
         Right (Mcp (McpLogin url scopes)) -> loginMcpWithScopes scopes url
         Right (Mcp (McpLogout url)) -> logoutMcp url
-        Right ListSessions -> runListSessions
-        Right (ShowSession sessionId) -> runShowSession sessionId
+        Right (ListSessions outputFormat) -> runListSessions outputFormat
+        Right (ShowSession sessionId outputFormat pageRequest) ->
+            runShowSession sessionId outputFormat pageRequest
         Right (WaitSession sessionId) -> runWaitSession sessionId
         Right (ImportSession cwd) -> runImportSession cwd
         Right (Storage command) -> runStorageAdmin command

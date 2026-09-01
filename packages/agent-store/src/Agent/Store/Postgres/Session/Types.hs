@@ -13,7 +13,9 @@ module Agent.Store.Postgres.Session.Types
     , StoredTurn(..)
     , LegacySession(..)
     , ConversationSearchResult(..)
+    , NativeConversationSearchResult(..)
     , SessionTurnPage(..)
+    , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
     ) where
 
@@ -29,6 +31,32 @@ data SessionLegacyTarget = SessionLegacyTarget
     , sessionLegacyConnection :: !Text
     , sessionLegacyEffectiveModel :: !Text
     , sessionLegacyDialect :: !Text
+    }
+    deriving (Eq, Show)
+
+data NativeConversationSearchResult = NativeConversationSearchResult
+    { nativeSearchSessionId :: !Text
+    , nativeSearchTitle :: !Text
+    , nativeSearchCwd :: !Text
+    , nativeSearchProvider :: !Text
+    , nativeSearchModel :: !Text
+    , nativeSearchUpdatedAt :: !UTCTime
+    , nativeSearchArchived :: !Bool
+    , nativeSearchTurnIndex :: !(Maybe Int64)
+    , nativeSearchOccurredAt :: !(Maybe UTCTime)
+    , nativeSearchRole :: !(Maybe Text)
+    , nativeSearchUserText :: !(Maybe Text)
+    , nativeSearchAssistantText :: !(Maybe Text)
+    , nativeSearchRank :: !Double
+    }
+    deriving (Eq, Show)
+
+-- | Metadata and immutable raw-history bounds observed in one repeatable-read
+-- transaction. Later appends have indexes at or above start + total.
+data SessionHistorySnapshot = SessionHistorySnapshot
+    { sessionSnapshotMetadata :: !SessionMetadata
+    , sessionSnapshotStart :: !Int64
+    , sessionSnapshotTotal :: !Int64
     }
     deriving (Eq, Show)
 
