@@ -217,24 +217,31 @@ spec = describe "OpenAI transcription" do
                     , "text" .= ("hello world" :: Text)
                     ]
                 sendEvent connection $ Aeson.object
-                    [ "type" .= ("transcript.delta" :: Text)
+                    [ "type" .= ("transcript.final" :: Text)
                     , "sequence_no" .= (5 :: Int)
                     , "utterance_id" .= ("utterance-1" :: Text)
                     , "revision" .= (1 :: Int)
-                    , "text" .= ("stale hypothesis" :: Text)
+                    , "text" .= ("stale final" :: Text)
                     ]
                 sendEvent connection $ Aeson.object
-                    [ "type" .= ("transcript.final" :: Text)
+                    [ "type" .= ("transcript.delta" :: Text)
                     , "sequence_no" .= (6 :: Int)
                     , "utterance_id" .= ("utterance-1" :: Text)
                     , "revision" .= (3 :: Int)
+                    , "text" .= ("" :: Text)
+                    ]
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("transcript.final" :: Text)
+                    , "sequence_no" .= (7 :: Int)
+                    , "utterance_id" .= ("utterance-1" :: Text)
+                    , "revision" .= (4 :: Int)
                     , "text" .= ("hello from stream" :: Text)
                     ]
                 sendEvent connection $ Aeson.object
                     [ "type" .= ("transcript.delta" :: Text)
-                    , "sequence_no" .= (7 :: Int)
+                    , "sequence_no" .= (8 :: Int)
                     , "utterance_id" .= ("utterance-1" :: Text)
-                    , "revision" .= (4 :: Int)
+                    , "revision" .= (5 :: Int)
                     , "text" .= ("late interim" :: Text)
                     ]
                 close <- WS.receiveData connection
@@ -243,7 +250,7 @@ spec = describe "OpenAI transcription" do
                     ]
                 sendEvent connection $ Aeson.object
                     [ "type" .= ("session.updated" :: Text)
-                    , "sequence_no" .= (8 :: Int)
+                    , "sequence_no" .= (9 :: Int)
                     , "session" .= sessionValue "closed"
                     ]
         withWebSocketServer server \port -> do
@@ -266,6 +273,7 @@ spec = describe "OpenAI transcription" do
             `shouldReturn`
                 [ "hello wor"
                 , "hello world"
+                , ""
                 , "hello from stream"
                 ]
 

@@ -684,9 +684,8 @@ receiveChatGPTDictation connection state finished onTranscript =
             Nothing ->
                 pure ()
             Just transcript ->
-                unless (Text.null transcript) $
-                    ignoreSynchronousException
-                        (onTranscript transcript)
+                ignoreSynchronousException
+                    (onTranscript transcript)
 
 receiverFailure :: SomeException -> Either Text ()
 receiverFailure err =
@@ -709,23 +708,14 @@ applyChatGPTDictationEvent event state =
         ChatGPTSpeechStopped utteranceId ->
             ensureChatGPTUtterance utteranceId state
         ChatGPTTranscriptDelta utteranceId revision text ->
-            replaceChatGPTTranscript utteranceId revision text state
+            replaceChatGPTTranscript
+                utteranceId revision text False state
         ChatGPTTranscriptSegment utteranceId revision text ->
-            replaceChatGPTTranscript utteranceId revision text state
+            replaceChatGPTTranscript
+                utteranceId revision text False state
         ChatGPTTranscriptFinal utteranceId revision text ->
-            let withUtterance =
-                    ensureChatGPTUtterance utteranceId state
-            in withUtterance
-                { transcriptByUtterance =
-                    Map.insert
-                        utteranceId
-                        ChatGPTUtteranceTranscript
-                            { revision
-                            , text
-                            , final = True
-                            }
-                        withUtterance.transcriptByUtterance
-                }
+            replaceChatGPTTranscript
+                utteranceId revision text True state
         _ ->
             state
 
@@ -733,9 +723,10 @@ replaceChatGPTTranscript
     :: Text
     -> Int
     -> Text
+    -> Bool
     -> ChatGPTStreamState
     -> ChatGPTStreamState
-replaceChatGPTTranscript utteranceId revision text state =
+replaceChatGPTTranscript utteranceId revision text final state =
     let withUtterance = ensureChatGPTUtterance utteranceId state
     in withUtterance
         { transcriptByUtterance =
@@ -747,7 +738,7 @@ replaceChatGPTTranscript utteranceId revision text state =
                         else ChatGPTUtteranceTranscript
                             { revision
                             , text
-                            , final = False
+                            , final
                             })
                 utteranceId
                 withUtterance.transcriptByUtterance
