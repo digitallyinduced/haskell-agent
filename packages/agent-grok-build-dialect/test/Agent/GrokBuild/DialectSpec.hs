@@ -30,9 +30,13 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.Tools.Scheduling (schedulingPlansConflict)
+import Agent.Tools.Background (setBackgroundTaskHooks)
 import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Types
     ( AppTool(..)
+    , BackgroundTaskHooks(..)
+    , BackgroundTaskNotice(..)
+    , ToolEnv
     , ToolRegistry
     , appToolHandlers
     , defaultToolEnv
@@ -41,7 +45,12 @@ import Agent.Tools.Types
     , toolSchedulingPlanFor
     )
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (readMVar)
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar_
+    , newMVar
+    , readMVar
+    )
 import Control.Exception.Safe (bracket, tryIO)
 import Data.Bits ((.&.))
 import Data.IORef (newIORef)
@@ -364,6 +373,7 @@ spec = describe "Grok Build dialect" do
             createDirectory nextScratch
             env <- defaultToolEnv (unsafeEncodeUtf dir)
             setToolSessionTmp env (Just (unsafeEncodeUtf firstScratch))
+            notices <- installBackgroundNoticeStore env
             bracket (newGrokSession env) closeGrokSession \session -> do
                 started <- startBackground session
                     "while :; do printf x >> \"$TMPDIR/background-output\"; sleep 0.02; done"
@@ -380,6 +390,44 @@ spec = describe "Grok Build dialect" do
                 Text.readFile output `shouldReturn` before
                 readTaskOutput session taskId Nothing
                     `shouldReturn` ("Unknown task_id: " <> taskId)
+                readMVar notices `shouldReturn` Map.empty
+
+    it "reports an unobserved background completion without polling" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            notices <- installBackgroundNoticeStore env
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                started <- startBackground session
+                    "sleep 0.05; printf completion-output"
+                started `shouldSatisfy`
+                    either
+                        (const False)
+                        (Text.isInfixOf "task_id: t1")
+                notice <- waitForBackgroundNotice
+                    notices
+                    "grok-terminal:t1"
+                notice.noticeBody `shouldSatisfy`
+                    Text.isInfixOf "completion-output"
+                notice.noticeBody `shouldSatisfy`
+                    Text.isInfixOf "do not call get_task_output"
+
+    it "retracts a completion notice when output is read explicitly" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            notices <- installBackgroundNoticeStore env
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                started <- startBackground session
+                    "sleep 0.05; printf explicit-output"
+                started `shouldSatisfy`
+                    either
+                        (const False)
+                        (Text.isInfixOf "task_id: t1")
+                _ <- waitForBackgroundNotice notices "grok-terminal:t1"
+                output <- readTaskOutput session "t1" (Just 1000)
+                output `shouldSatisfy` Text.isInfixOf "explicit-output"
+                readMVar notices `shouldReturn` Map.empty
 
     it "formats and neutralizes project instruction reminders" do
         let loaded = LoadedAgentsMd
@@ -438,6 +486,36 @@ waitForFile path = go (100 :: Int)
         doesFileExist path >>= \case
             True -> pure True
             False -> threadDelay 10000 >> go (remaining - 1)
+
+installBackgroundNoticeStore
+    :: ToolEnv
+    -> IO (MVar (Map.Map Text BackgroundTaskNotice))
+installBackgroundNoticeStore env = do
+    notices <- newMVar Map.empty
+    setBackgroundTaskHooks env BackgroundTaskHooks
+        { backgroundTaskCompleted = \notice ->
+            modifyMVar_ notices
+                (pure . Map.insert notice.noticeKey notice)
+                >> pure True
+        , backgroundTaskDismissed = \key ->
+            modifyMVar_ notices $
+                pure . Map.delete key
+        }
+    pure notices
+
+waitForBackgroundNotice
+    :: MVar (Map.Map Text BackgroundTaskNotice)
+    -> Text
+    -> IO BackgroundTaskNotice
+waitForBackgroundNotice notices key = go (200 :: Int)
+  where
+    go 0 = expectationFailure
+        ("timed out waiting for background notice " <> Text.unpack key)
+        >> fail "unreachable"
+    go remaining =
+        Map.lookup key <$> readMVar notices >>= \case
+            Just notice -> pure notice
+            Nothing -> threadDelay 10000 >> go (remaining - 1)
 
 withGrokRegistry
     :: (ToolRegistry -> IO () -> IO a)

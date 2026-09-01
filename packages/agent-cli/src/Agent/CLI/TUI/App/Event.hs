@@ -287,7 +287,11 @@ handleEvent event = do
         AppHistoryLiveStarted -> True
         AppConversationReflow -> True
         AppSyncSubmittedImagePlacements -> True
-        AppMotionTick -> True
+        -- The unfocused scheduler normally uses the one-second MotionOff
+        -- cadence. Let that bounded frame expose accumulated output when a
+        -- terminal tab omits EvGainedFocus, while per-delta events remain
+        -- suppressed below.
+        AppMotionTick -> False
         AppRecapPoll -> True
         _ -> False
 

@@ -22,6 +22,8 @@ import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
 import Agent.CLI.AgentViewport.Runtime
 import Agent.Tools.OutputArtifact
+import Agent.Tools.Background
+    ( setBackgroundTaskHooks )
 import Agent.CLI.SessionTitle
 import Agent.CLI.ManagedTurn
 import Agent.CLI.GatewayBridge
@@ -201,6 +203,20 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
     steeringInputs <- newSteeringInputs
+    setBackgroundTaskHooks toolEnv BackgroundTaskHooks
+        { backgroundTaskCompleted = \notice ->
+            enqueueBackgroundCompletion
+                steeringInputs
+                notice.noticeKey
+                (UserMessage notice.noticeBody) >>= \case
+                    -- Completion callbacks run while their delivery gate is
+                    -- held. Keep this hook non-blocking; UI reporting can
+                    -- backpressure on a full mailbox.
+                    Left _ -> pure False
+                    Right inserted -> pure inserted
+        , backgroundTaskDismissed =
+            dismissBackgroundCompletion steeringInputs
+        }
     let previewIdRef = startup.startupSessionState.sessionPreviewId
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
@@ -361,6 +377,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 Nothing -> pure ()
             clearPendingInputs pendingNotices
             clearSteeringInputs steeringInputs
+            readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
             reloadGeneratedContext
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
@@ -873,6 +890,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure result
         env = SessionEnv
             { sessionLoop = config
+            , sessionSteeringInputs = steeringInputs
             , sessionModelInfo = modelInfo
             , sessionBtwBackend = btwBackend
             , sessionQueueRecap = writeChan recapRequests

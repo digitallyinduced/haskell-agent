@@ -48,6 +48,10 @@ import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.CLI.Models ( catalogModelIds )
 import Agent.CLI.Options ()
 import Agent.CLI.PendingInputs ()
+import Agent.CLI.SteeringInputs
+    ( awaitBackgroundCompletion
+    , hasBackgroundCompletions
+    )
 import Agent.CLI.Plan ()
 import Agent.CLI.Progress ()
 import Agent.CLI.Project ()
@@ -112,7 +116,6 @@ import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( emitUiEvent,
       readFullscreenLineOrWithCatalog,
-      readFullscreenLineWithCatalog,
       setFullscreenImagePreviews )
 import Agent.CLI.Terminal
     ( emitTerminalSequence,
@@ -122,7 +125,7 @@ import Agent.CLI.Terminal
       withSynchronizedOutput,
       TerminalCapabilities(terminalSemanticPrompts) )
 import Agent.CLI.Tools ()
-import Agent.CLI.Turn ()
+import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Usage
     ( formatGrokLimitStatus,
       formatOpenAiLimitStatus,
@@ -132,7 +135,7 @@ import Agent.CLI.Worktree ()
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect ( dialectId )
-import Agent.Error ()
+import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Workflow ()
@@ -157,7 +160,8 @@ import Agent.Store.Postgres ()
 import Agent.Store.Types ()
 import Agent.Subagents ()
 import Agent.Subagents.TaskPath ()
-import Agent.TUI.Model ( UiEvent(UiSetPromptLimitStatus) )
+import Agent.TUI.Model
+    ( UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
 import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
@@ -171,7 +175,7 @@ import Control.Applicative ()
 import Control.Concurrent.Async ( withAsync )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ( withMVar )
-import Control.Concurrent.STM ()
+import Control.Concurrent.STM (orElse, retry)
 import Control.Exception ()
 import Control.Exception.Safe ()
 import Control.Monad ( when, forM_ )
@@ -213,6 +217,10 @@ sessionContinuation =
         { resumeSession = repl
         , resumeSessionWithDraft = replWithDraft
         }
+
+data ReplWake
+    = ProviderUnavailableWake !ApiError
+    | BackgroundCompletionWake
 
 runPendingTurn
     :: PendingTurnPresentation
@@ -300,22 +308,31 @@ replWithDraft env@SessionEnv
                         (isJust selectAccount)
                         usage
                         (length pendingAttachments)
-                readPrompt =
-                    readIORef startupUnavailableRef >>= \case
-                        Nothing ->
-                            Right
-                                <$> readFullscreenLineWithCatalog
-                                    runtime
-                                    slashCatalog
-                                    promptState
-                                    draft
-                        Just unavailable ->
-                            readFullscreenLineOrWithCatalog
-                                runtime
-                                slashCatalog
-                                promptState
-                                draft
-                                unavailable
+                readPrompt = do
+                    startupUnavailable <- readIORef startupUnavailableRef
+                    failedTurn <- readIORef env.sessionLastFailedTurn
+                    let backgroundWake =
+                            case failedTurn of
+                                -- Preserve the user's retry candidate. Its
+                                -- next retry or replacement turn will consume
+                                -- the queued completion through normal
+                                -- steering.
+                                Just _ -> retry
+                                Nothing ->
+                                    BackgroundCompletionWake
+                                        <$ awaitBackgroundCompletion
+                                            env.sessionSteeringInputs
+                        wake = case startupUnavailable of
+                            Nothing -> backgroundWake
+                            Just unavailable ->
+                                (ProviderUnavailableWake <$> unavailable)
+                                    `orElse` backgroundWake
+                    readFullscreenLineOrWithCatalog
+                        runtime
+                        slashCatalog
+                        promptState
+                        draft
+                        wake
             withAsync
                 (refreshAccountLimit (isNothing gatewayAccess) runtime)
                 \_ ->
@@ -387,7 +404,21 @@ replWithDraft env@SessionEnv
             hFlush stdout
             pure result
     case mlineResult of
-        Left apiError -> do
+        Left BackgroundCompletionWake -> do
+            pending <-
+                hasBackgroundCompletions env.sessionSteeringInputs
+            if not pending
+                then replWithDraft env draft
+                else do
+                    forM_ fullscreen \runtime ->
+                        emitUiEvent runtime
+                            (UiSystemMessage
+                                "Background task completed; resuming the agent.")
+                    -- Keep the notice in the normal steering queue so it is
+                    -- acknowledged only after the provider commits it.
+                    result <- runOneTurn env "" []
+                    finishTurn env False result
+        Left (ProviderUnavailableWake apiError) -> do
             -- The startup check is one-shot. If no fallback account is usable,
             -- leave request-time error handling in charge of later submits.
             writeIORef startupUnavailableRef Nothing

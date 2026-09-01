@@ -286,10 +286,18 @@ commitLiveHistoryTurn durableTurn commit state =
                         unarchivedLiveStart
                             state.appUi.uiBlocks
                             durableTurn.historyTurnBlocks
+        -- System blocks emitted between durable turns still belong before the
+        -- turn being committed. Leaving them in 'appUi' makes
+        -- 'drawTranscript' render them after the whole durable history,
+        -- which moves startup diagnostics below the response they preceded.
+        -- Keep reset semantics strict: a reset starts a fresh transcript.
+        precedingBlocks
+            | commit == HistoryCommitReset = Seq.empty
+            | otherwise = Seq.take start state.appUi.uiBlocks
         (nextBlockId, remappedBlocks, blockIdRemap) =
             remapHistoryBlocks
                 state.appNextHistoryBlockId
-                durableTurn.historyTurnBlocks
+                (precedingBlocks <> durableTurn.historyTurnBlocks)
         remappedTurn =
             durableTurn { historyTurnBlocks = remappedBlocks }
         baseWindow =
@@ -323,7 +331,7 @@ commitLiveHistoryTurn durableTurn commit state =
                         (applyHistoryPage replacementPage baseWindow)
                 _ ->
                     appendHistoryTurn remappedTurn baseWindow
-        ui = truncateUiBlocks start state.appUi
+        ui = truncateUiBlocks 0 state.appUi
         remappedPreviews =
             remapSubmittedImagePreviewBlocks
                 blockIdRemap

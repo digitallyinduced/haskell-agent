@@ -45,6 +45,13 @@ import Agent.CLI.Subagents.Runtime.Target
 import Agent.CLI.Subagents.Runtime.OpenAI
     (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
 import Agent.CLI.ModelConfig (connectionSupportsDialect)
+import Agent.CLI.SteeringInputs
+    ( commitSteeringInputs
+    , dismissBackgroundCompletion
+    , enqueueBackgroundCompletion
+    , newSteeringInputs
+    , readSteeringInputs
+    )
 import Agent.CLI.Tools
     (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
@@ -61,11 +68,12 @@ import Agent.Dialect
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
     (Backend(..), BackendSnapshot(..), BackendStateStore(..), LoopConfig(..),
-     LoopError(..), LoopEvent, LoopResult(..), TurnInput(..),
+     LoopError(..), LoopEvent(..), LoopResult(..), TurnInput(..),
      advanceBackendSnapshot, defaultLoopDispatch, emptyBackendSnapshot,
      initialBackendSnapshot, runLoop, runLoopInputs)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
+import Agent.Tools.Background (setBackgroundTaskHooks)
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
     ( openAiBackendWithTransportFallback
@@ -109,6 +117,8 @@ import Agent.Tools.MultiAgents
     )
 import Agent.Tools.Types
     ( AppTool(..)
+    , BackgroundTaskHooks(..)
+    , BackgroundTaskNotice(..)
     , ToolEnv(..)
     , ToolRegistry
     , defaultToolEnv
@@ -1026,6 +1036,21 @@ runPreparedChild
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
 runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChild = do
+    steering <- newSteeringInputs
+    setBackgroundTaskHooks toolEnv BackgroundTaskHooks
+        { backgroundTaskCompleted = \notice ->
+            enqueueBackgroundCompletion
+                steering
+                notice.noticeKey
+                (UserMessage notice.noticeBody)
+                >>= \case
+                    -- Do not report synchronously from the process
+                    -- supervisor: loop event delivery may backpressure.
+                    Left _ -> pure False
+                    Right inserted -> pure inserted
+        , backgroundTaskDismissed =
+            dismissBackgroundCompletion steering
+        }
     let config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
@@ -1053,8 +1078,8 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
                 \call -> do
                     policy <- readIORef runtime.subagentPolicy
                     childApprove policy toolRegistry call
-            , loopReadSteering = pure []
-            , loopCommitSteering = \_ -> pure ()
+            , loopReadSteering = readSteeringInputs steering
+            , loopCommitSteering = commitSteeringInputs steering
             , loopInterrupt = pure ()
             , loopCancel = env.subCancel
             }
