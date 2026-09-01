@@ -69,6 +69,7 @@ spec = describe "PostgreSQL session schema" do
         ddl `shouldContainBytes` "USING gin (assistant_text gin_trgm_ops)"
         ddl `shouldContainBytes` "session_events_immutable"
         ddl `shouldContainBytes` "session_turns_immutable"
+        ddl `shouldContainBytes` "canonical_item_count bigint"
         ddl `shouldContainBytes`
             "CREATE TABLE IF NOT EXISTS harness.session_prompt_epochs"
         ddl `shouldContainBytes` "is_active boolean NOT NULL DEFAULT TRUE"
@@ -97,7 +98,11 @@ spec = describe "PostgreSQL session schema" do
                                 pool = trustedPool store
                                 now = read "2026-08-23 12:00:00 UTC"
                                 metadata = testMetadata now
-                                turn = testTurn now
+                                turn =
+                                    (testTurn now)
+                                        { sessionTurnDisplayItems =
+                                            [displayOnlyStoredItem]
+                                        }
                                 promptMetadata = metadata
                                     { sessionMetadataKey = "session-prompt"
                                     }
@@ -853,6 +858,7 @@ testTurn now = SessionTurn
                     "{\"provider_extension\":\"unknown-tagged\"}"
             }
         ]
+    , sessionTurnDisplayItems = []
     , sessionTurnUsage = Just SessionUsage
         { sessionUsageInputTokens = 10
         , sessionUsageOutputTokens = 5
@@ -872,6 +878,15 @@ isBatchableItem = \case
 
 emptyObject :: StoredOpaqueObject
 emptyObject = StoredOpaqueObject "{}"
+
+displayOnlyStoredItem :: StoredResponseItem
+displayOnlyStoredItem =
+    StoredTaggedResponseItem StoredTaggedItem
+        { storedTaggedItemRepresentation = StoredUnknownRepresentation
+        , storedTaggedItemWireTag = "failed_attempt_display"
+        , storedTaggedItemFields =
+            StoredOpaqueObject "{\"visible\":true}"
+        }
 
 emptyContentPart :: Text -> StoredContentPart
 emptyContentPart partType = StoredContentPart

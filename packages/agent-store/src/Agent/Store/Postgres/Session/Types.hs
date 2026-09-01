@@ -155,7 +155,10 @@ data SessionTurn = SessionTurn
     , sessionTurnError :: !(Maybe Text)
     , sessionTurnResponseId :: !(Maybe Text)
     , sessionTurnEffect :: !TranscriptEffect
+    -- | Canonical model-context items.
     , sessionTurnItems :: ![StoredResponseItem]
+    -- | Failed, uncommitted response items retained for display only.
+    , sessionTurnDisplayItems :: ![StoredResponseItem]
     , sessionTurnUsage :: !(Maybe SessionUsage)
     -- | Provider-neutral telemetry encoded as versioned JSON by the CLI.
     -- The store deliberately keeps this opaque to avoid depending on

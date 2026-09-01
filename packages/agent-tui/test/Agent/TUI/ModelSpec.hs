@@ -322,6 +322,32 @@ spec = describe "fullscreen UI reducer" do
         state.uiActivity `shouldBe` "Writing…"
         state.uiNotice `shouldBe` Just (warningNotice message)
 
+    it "preserves streamed text and tools when the response fails" do
+        let completedCall =
+                functionToolCall "c1" "Read" "{\"file_path\":\"README.md\"}"
+            runningCall =
+                functionToolCall "c2" "TaskOutput" "{\"task_id\":\"ci\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (TextDelta "Work completed before timeout.")
+                    , UiLoop (ToolStarted completedCall)
+                    , UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "c1"
+                                "contents"
+                                FunctionCallKind))
+                    , UiLoop (ToolStarted runningCall)
+                    , UiLoop ResponseAttemptFailed
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockState) blocks
+            `shouldBe` [BlockFailed, BlockComplete, BlockFailed]
+        map (.blockCallId) blocks
+            `shouldBe` [Nothing, Just "c1", Just "c2"]
+        state.uiToolCalls `shouldBe` mempty
+
     it "discards every response attempt when restarting effort after recovery" do
         let initialPrompt =
                 initialUiState.uiPrompt

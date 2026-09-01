@@ -1321,6 +1321,7 @@ rewindSession handle retained = do
             , turnResponseId = Nothing
             , turnEffect = TranscriptReset
             , turnItems = []
+            , turnDisplayItems = []
             , turnUsage = Nothing
             , turnProviderTelemetry = []
             }

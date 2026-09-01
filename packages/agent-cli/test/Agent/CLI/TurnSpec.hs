@@ -13,6 +13,7 @@ import Agent.Error (ApiError(..))
 import Agent.Loop
     ( ImageAttachment(..)
     , LoopError(..)
+    , LoopEvent(..)
     , LoopExecution(..)
     , LoopProgress(..)
     , TokenUsage(..)
@@ -26,6 +27,7 @@ import Agent.Loop
 import Agent.Responses.LoopBackend (toolResultToItem, turnInputsToItems)
 import Agent.Responses.Types
     ( FunctionCall(..)
+    , FunctionCallOutput(..)
     , ItemStatus(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
@@ -64,6 +66,99 @@ spec = do
                     , UserMessage "startup instructions"
                     , UserMessage "fix it"
                     ]
+
+    describe "uncommittedDisplayItems" do
+        it "normalizes failed text, tools, and retry attempts for history only" do
+            let call =
+                    functionToolCall
+                        "c1"
+                        "shell_command"
+                        "{\"command\":\"git status\"}"
+                execution =
+                    (uncommittedExecution prepared)
+                        { executionUncommittedDisplayEvents =
+                            [ TextDelta "first attempt"
+                            , ToolStarted call
+                            , ToolOutputUpdated "c1" "running"
+                            , ToolFinished
+                                (ToolCallResult
+                                    "c1"
+                                    "clean"
+                                    FunctionCallKind)
+                            , ResponseRestarted "retrying"
+                            , TextDelta "second attempt"
+                            ]
+                        }
+            case uncommittedDisplayItems execution of
+                [ MessageItem first
+                    , FunctionCallItem storedCall
+                    , FunctionCallOutputItem output
+                    , boundary
+                    , MessageItem second
+                    ] -> do
+                        first.content
+                            `shouldBe`
+                                MessageContentParts
+                                    [ OutputTextPart
+                                        "first attempt"
+                                        Nothing
+                                        Nothing
+                                    ]
+                        storedCall.callId `shouldBe` "c1"
+                        output.callId `shouldBe` "c1"
+                        output.status `shouldBe` Just ItemCompleted
+                        boundary `shouldSatisfy` isDisplayAttemptBoundary
+                        second.content
+                            `shouldBe`
+                                MessageContentParts
+                                    [ OutputTextPart
+                                        "second attempt"
+                                        Nothing
+                                        Nothing
+                                    ]
+                other ->
+                    expectationFailure
+                        ("unexpected display projection: " <> show other)
+
+        it "keeps reused tool call ids scoped to their retry attempt" do
+            let firstCall =
+                    functionToolCall "same" "shell_command"
+                        "{\"command\":\"first\"}"
+                secondCall =
+                    functionToolCall "same" "shell_command"
+                        "{\"command\":\"second\"}"
+                execution =
+                    (uncommittedExecution prepared)
+                        { executionUncommittedDisplayEvents =
+                            [ ToolStarted firstCall
+                            , ToolFinished
+                                (ToolCallResult
+                                    "same"
+                                    "first output"
+                                    FunctionCallKind)
+                            , ResponseRestarted "retrying"
+                            , ToolStarted secondCall
+                            , ToolOutputUpdated "same" "second output"
+                            ]
+                        }
+                items = uncommittedDisplayItems execution
+                calls =
+                    [ call
+                    | FunctionCallItem call <- items
+                    ]
+                outputs =
+                    [ output
+                    | FunctionCallOutputItem output <- items
+                    ]
+            map (.arguments) calls
+                `shouldBe`
+                    [ "{\"command\":\"first\"}"
+                    , "{\"command\":\"second\"}"
+                    ]
+            map (.status) outputs
+                `shouldBe` [Just ItemCompleted, Just ItemIncomplete]
+            length (filter isDisplayAttemptBoundary items)
+                `shouldBe` 1
 
     describe "finishConversation" do
         it "rolls a restarted turn back and restores consumed startup" do
@@ -273,6 +368,7 @@ spec = do
                         history <> inputs <> [assistantMessage "checking"] <> calls
                     , executionPendingInputs = [CompletedTool result]
                     , executionUncommittedAssistantText = Nothing
+                    , executionUncommittedDisplayEvents = []
                     , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopCancelled [result])
@@ -310,6 +406,7 @@ spec = do
                             <> [assistantMessage "partial", complete, truncated]
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionUncommittedDisplayEvents = []
                     , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopIncomplete turn)
@@ -341,6 +438,7 @@ spec = do
                     { executionState = history <> inputs <> [truncated]
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionUncommittedDisplayEvents = []
                     , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopIncomplete turn)
@@ -359,6 +457,7 @@ spec = do
                     { executionState = history <> inputs <> [call]
                     , executionPendingInputs = [CompletedTool result]
                     , executionUncommittedAssistantText = Nothing
+                    , executionUncommittedDisplayEvents = []
                     , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult =
@@ -383,6 +482,7 @@ spec = do
                             <> [functionCallItem "c1" "read" "{}" Nothing]
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionUncommittedDisplayEvents = []
                     , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult =
@@ -396,6 +496,7 @@ spec = do
                     { executionState = history <> inputOnlyTurnItems prepared
                     , executionPendingInputs = []
                     , executionUncommittedAssistantText = Nothing
+                    , executionUncommittedDisplayEvents = []
                     , executionProviderTelemetry = []
                     , executionProgress = ResponseCommitted
                     , executionResult = Left (LoopCancelled [])
@@ -524,6 +625,7 @@ uncommittedExecution turn = LoopExecution
     { executionState = turn.preparedBeforeItems
     , executionPendingInputs = turn.preparedTurnInputs
     , executionUncommittedAssistantText = Nothing
+    , executionUncommittedDisplayEvents = []
     , executionProviderTelemetry = []
     , executionProgress = NoResponseCommitted
     , executionResult = Left (LoopTransport (ConnectionError "down"))

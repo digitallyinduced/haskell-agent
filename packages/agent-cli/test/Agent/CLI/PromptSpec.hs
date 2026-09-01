@@ -84,6 +84,10 @@ spec = describe "systemPrompt" do
         claude `shouldNotSatisfy` Text.isInfixOf "local Claude Code transcript"
         claude `shouldSatisfy` Text.isInfixOf "/tmp/repo"
         claude `shouldNotSatisfy` Text.isInfixOf "run_ghci"
+        claude `shouldSatisfy` Text.isInfixOf "unbounded polling loop"
+        claude `shouldSatisfy` Text.isInfixOf "at most five minutes"
+        claude `shouldSatisfy` Text.isInfixOf
+            "report its current status and URL"
 
     it "uses a neutral identity for generic Responses models" do
         let generic =

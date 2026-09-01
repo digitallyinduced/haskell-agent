@@ -564,7 +564,7 @@ spec = describe "query" do
                     [ "#!/bin/sh"
                     , "IFS= read -r _query"
                     , "printf '%s\\n' " <> shellQuote firstRecord
-                    , "sleep 0.3"
+                    , "while :; do :; done"
                     , "printf '%s\\n' "
                         <> shellQuote (successResult testSessionId)
                     ]
@@ -596,6 +596,27 @@ spec = describe "query" do
                                     `Text.isInfixOf` message
                             _ -> False)
             [background, unknown]
+
+    it "warns that a turn timeout may have left remote side effects" $
+        withFakeClaude
+            (Text.unpack $ Text.unlines
+                [ "#!/bin/sh"
+                , "IFS= read -r _query"
+                , "while :; do :; done"
+                ])
+            \directory executable -> do
+                result <-
+                    query
+                        ((testOptions executable directory)
+                            { turnTimeoutMicros = 100_000
+                            })
+                        "hello"
+                        (\_ -> pure ())
+                result `shouldSatisfy` \case
+                    Left (CLIConnectionError message) ->
+                        "inspect the workspace, Git history, and pull requests "
+                            `Text.isInfixOf` message
+                    _ -> False
 
     it "returns structured JSON decode errors without publishing buffered messages" do
         (result, messages) <- runQueryLines

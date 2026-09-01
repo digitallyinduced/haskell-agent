@@ -588,6 +588,7 @@ uiEventLogicalBytes = \case
             ToolFinished result -> toolCallResultLogicalBytes result
             ToolRetracted callId -> logicalTextBytes callId
             ResponseAttemptDiscarded -> 128
+            ResponseAttemptFailed -> 128
             NativeAgentStarted agent parent prompt model ->
                 logicalTextsBytes
                     ([agent, prompt] <> maybeToList parent <> maybeToList model)
