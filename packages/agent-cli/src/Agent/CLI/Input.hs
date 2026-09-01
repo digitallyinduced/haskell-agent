@@ -8,6 +8,7 @@ module Agent.CLI.Input
     , readReplLineWithInitial
     , readReplLineWithCatalog
     , readReplLineWithCatalogForProvider
+    , readReplLineWithCatalogForTarget
     , readReplLineWithSkills
     , readReplLineWithSkillsAndModels
     , readModalText
@@ -40,7 +41,8 @@ import Agent.CLI.Clipboard
     , readClipboardText
     )
 import Agent.CLI.Dictation
-    ( dictateForProvider
+    ( DictationTarget(..)
+    , dictateForTarget
     , insertDictation
     )
 import Agent.CLI.Command
@@ -136,20 +138,23 @@ import System.Posix.Terminal
 readReplLine :: InterruptState -> Text -> IO ReplLine
 readReplLine interrupt prompt =
     readReplLineConfigured
-        (Just XAIProvider)
+        (Just (DirectDictation XAIProvider))
         defaultSlashCatalog False interrupt prompt ""
 
 -- | Read a prompt whose dictation backend follows the active model provider.
 readReplLineForProvider :: Provider -> InterruptState -> Text -> IO ReplLine
 readReplLineForProvider provider interrupt prompt =
     readReplLineConfigured
-        (Just provider)
+        (Just (DirectDictation provider))
         defaultSlashCatalog False interrupt prompt ""
 
 -- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
 readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
 readReplLineWithInitial =
-    readReplLineConfigured (Just XAIProvider) defaultSlashCatalog True
+    readReplLineConfigured
+        (Just (DirectDictation XAIProvider))
+        defaultSlashCatalog
+        True
 
 readReplLineWithCatalog
     :: SlashCatalog
@@ -168,7 +173,19 @@ readReplLineWithCatalogForProvider
     -> Text
     -> IO ReplLine
 readReplLineWithCatalogForProvider provider catalog =
-    readReplLineConfigured (Just provider) catalog True
+    readReplLineWithCatalogForTarget
+        (DirectDictation provider)
+        catalog
+
+readReplLineWithCatalogForTarget
+    :: DictationTarget
+    -> SlashCatalog
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO ReplLine
+readReplLineWithCatalogForTarget target catalog =
+    readReplLineConfigured (Just target) catalog True
 
 readReplLineWithSkills
     :: [SkillCommand]
@@ -178,7 +195,7 @@ readReplLineWithSkills
     -> IO ReplLine
 readReplLineWithSkills skills =
     readReplLineConfigured
-        (Just XAIProvider)
+        (Just (DirectDictation XAIProvider))
         (slashCatalogWithSkills skills defaultSlashCatalog)
         True
 
@@ -191,14 +208,14 @@ readReplLineWithSkillsAndModels
     -> IO ReplLine
 readReplLineWithSkillsAndModels skills modelIds =
     readReplLineConfigured
-        (Just XAIProvider)
+        (Just (DirectDictation XAIProvider))
         ((slashCatalogWithSkills skills defaultSlashCatalog)
             { slashCatalogModelIds = modelIds
             })
         True
 
 readReplLineConfigured
-    :: Maybe Provider
+    :: Maybe DictationTarget
     -> SlashCatalog
     -> Bool
     -> InterruptState
@@ -237,7 +254,7 @@ readModalText interrupt prompt initial =
 
 readLineConfigured
     :: Bool
-    -> Maybe Provider
+    -> Maybe DictationTarget
     -> SlashCatalog
     -> Bool
     -> InterruptState
@@ -284,7 +301,7 @@ readLineConfigured
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
     :: Bool
-    -> Maybe Provider
+    -> Maybe DictationTarget
     -> SlashCatalog
     -> Bool
     -> InterruptState
@@ -367,7 +384,7 @@ readInlineEditor
                 result <- tryAny $
                     maybe
                         (fail "Dictation is unavailable in this prompt.")
-                        dictateForProvider
+                        dictateForTarget
                         dictationProvider
                 case result of
                     Left err ->

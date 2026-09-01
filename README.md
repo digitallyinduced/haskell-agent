@@ -281,6 +281,10 @@ credential types are configured. OpenAI credentials can come from
 `OPENAI_API_KEY`, `CODEX_API_KEY`, or a managed OpenAI account.
 For Grok models, dictation uses the configured xAI subscription or API-key
 credential; set `XAI_STT_LANGUAGE` to override xAI's default `en`.
+When an organization gateway is connected, the recording is sent only to the
+gateway's authenticated `/v1/audio/transcriptions` endpoint. The gateway uses
+its organization-managed transcription pool and returns a final transcript
+after recording stops; it never falls back to local provider credentials.
 Dictation is currently unavailable for providers without a speech-to-text
 integration.
 

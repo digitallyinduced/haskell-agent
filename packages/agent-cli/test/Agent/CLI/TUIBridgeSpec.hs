@@ -7,6 +7,7 @@ import Agent.CLI.AgentViewport
     , AgentTarget(..)
     )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Dictation (DictationTarget(..))
 import Agent.CLI.TUI.App
     ( appEventLogicalBytes
     , emitUiEvent
@@ -347,7 +348,7 @@ spec = describe "fullscreen TUI bridge" do
         runtime.runtimeCancel
         setFullscreenSessionActions
             runtime
-            (Just XAIProvider)
+            (Just (DirectDictation XAIProvider))
             (modifyIORef' calls (<> ["new cancel"]))
             (\pasted _ -> do
                 modifyIORef' calls (<> ["new steer"])
@@ -367,7 +368,12 @@ spec = describe "fullscreen TUI bridge" do
         runtime.runtimeAgentSelect AgentRoot
         decision <- runtime.runtimeCtrlC
         actions <- readIORef runtime.runtimeSessionActions
-        actions.sessionProvider `shouldBe` Just XAIProvider
+        case actions.sessionDictationTarget of
+            Just (DirectDictation provider) ->
+                provider `shouldBe` XAIProvider
+            _ ->
+                expectationFailure
+                    "expected direct xAI dictation target"
         readIORef calls `shouldReturn`
             ["old cancel", "new cancel", "new steer", "new btw", "new recap", "new effort", "new agent"]
         decision `shouldBe` SoftCancel

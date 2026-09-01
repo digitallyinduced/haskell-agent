@@ -119,6 +119,34 @@ spec = describe "gateway device authorization" do
             `shouldReturn` Left "gateway unavailable"
         cachedGatewayModels access `shouldReturn` Nothing
 
+    it "keeps gateway dictation behind the opaque model access" do
+        events <- newIORef ([] :: [Text.Text])
+        access <-
+            newGatewayModelAccessWithDictation
+                (pure (Right
+                    [GatewayModel
+                        "company-model"
+                        GatewayResponsesProtocol]))
+                (\produceAudio onTranscript -> do
+                    produceAudio \chunk ->
+                        atomicModifyIORef' events \current ->
+                            (current <> ["audio:" <> Text.pack (show chunk)], ())
+                    onTranscript "gateway transcript"
+                    pure (Right "gateway transcript"))
+        result <-
+            transcribeGatewayPcm
+                access
+                (\send -> send "pcm")
+                (\transcript ->
+                    atomicModifyIORef' events \current ->
+                        (current <> ["text:" <> transcript], ()))
+        result `shouldBe` Right "gateway transcript"
+        atomicModifyIORef' events (\current -> (current, current))
+            `shouldReturn`
+                [ "audio:\"pcm\""
+                , "text:gateway transcript"
+                ]
+
     it "clears cached gateway models when a fetch throws" do
         calls <- newIORef (0 :: Int)
         access <-

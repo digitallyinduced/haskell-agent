@@ -5,7 +5,7 @@ module Agent.CLI.TUI.App.Run where
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
-    , dictateWith
+    , dictateWithTarget
     , insertDictation
     )
 import Agent.CLI.Secret (sanitizeSecretPromptText)
@@ -358,13 +358,13 @@ runFullscreen runtime workerAction = do
     dictationWorker = forever do
         job <- atomically (readTQueue runtime.runtimeDictationJobs)
         actions <- readIORef runtime.runtimeSessionActions
-        result <- case actions.sessionProvider of
+        result <- case actions.sessionDictationTarget of
             Nothing ->
                 pure $ DictationFailed
                     "Dictation is unavailable for the active session"
-            Just provider ->
-                dictateWith
-                    provider
+            Just target ->
+                dictateWithTarget
+                    target
                     DictationControl
                         { dictationWaitForStop =
                             job.dictationJobWaitForStop

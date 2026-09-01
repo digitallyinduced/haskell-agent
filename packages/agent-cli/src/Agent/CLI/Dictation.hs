@@ -3,9 +3,13 @@ module Agent.CLI.Dictation
     ( DictationBackend(..)
     , DictationControl(..)
     , DictationResult(..)
+    , DictationTarget(..)
     , dictate
     , dictateForProvider
+    , dictateForTarget
     , dictateWith
+    , dictateWithTarget
+    , dictationTargetForSession
     , dictationBackendForProvider
     , insertDictation
     , transcribeAudio
@@ -17,6 +21,10 @@ import Agent.CLI.Auth
     , loadOpenAiDictationAuth
     )
 import Agent.CLI.Transcription (transcribeAudio)
+import Agent.CLI.GatewayClient
+    ( GatewayModelAccess
+    , transcribeGatewayPcm
+    )
 import Agent.OpenAI.Transcription
     ( openAITranscriptionSampleRate
     , transcribePcmWithOpenAI
@@ -88,6 +96,23 @@ data DictationBackend
     | XAIDictation
     deriving (Eq, Show)
 
+-- | Dictation is either scoped to the active direct provider or routed
+-- entirely through the organization gateway. Keeping these constructors
+-- distinct prevents a gateway session from falling back to local credentials.
+data DictationTarget
+    = DirectDictation !Provider
+    | GatewayDictation !GatewayModelAccess
+
+-- | Select the only dictation transport allowed by the current session
+-- boundary. A connected gateway is authoritative regardless of the model's
+-- underlying provider.
+dictationTargetForSession
+    :: Provider
+    -> Maybe GatewayModelAccess
+    -> DictationTarget
+dictationTargetForSession provider =
+    maybe (DirectDictation provider) GatewayDictation
+
 -- | Select dictation from the active model provider. Providers without a
 -- speech-to-text integration fail explicitly rather than spending credentials
 -- from an unrelated provider.
@@ -109,11 +134,14 @@ dictate = dictateForProvider XAIProvider
 
 -- | Stream the default microphone using the active model provider.
 dictateForProvider :: Provider -> IO Text
-dictateForProvider provider = do
+dictateForProvider = dictateForTarget . DirectDictation
+
+dictateForTarget :: DictationTarget -> IO Text
+dictateForTarget target = do
     Text.hPutStrLn stderr "● Starting dictation…"
     hFlush stderr
     result <-
-        dictateWith provider
+        dictateWithTarget target
             DictationControl
                 { dictationWaitForStop = do
                     Text.hPutStr stderr "● Listening… press Enter to stop"
@@ -129,20 +157,41 @@ dictateForProvider provider = do
 -- | Record microphone audio until the caller signals stop. Providers that
 -- stream partial transcripts deliver them through the control callback.
 dictateWith :: Provider -> DictationControl -> IO DictationResult
-dictateWith provider control =
+dictateWith provider =
+    dictateWithTarget (DirectDictation provider)
+
+dictateWithTarget
+    :: DictationTarget
+    -> DictationControl
+    -> IO DictationResult
+dictateWithTarget target control =
     try run >>= \case
         Left (err :: SomeException) ->
             pure (DictationFailed (Text.pack (displayException err)))
         Right result ->
             pure result
   where
-    run =
-        case dictationBackendForProvider provider of
-            Left err ->
-                pure (DictationFailed err)
-            Right backend -> do
-                requireExecutable "ffmpeg"
-                runBackend backend
+    run = do
+        requireExecutable "ffmpeg"
+        case target of
+            DirectDictation provider ->
+                case dictationBackendForProvider provider of
+                    Left err ->
+                        pure (DictationFailed err)
+                    Right backend ->
+                        runBackend backend
+            GatewayDictation gateway ->
+                transcribeGatewayPcm
+                    gateway
+                    (streamMicrophone
+                        openAITranscriptionSampleRate
+                        control.dictationWaitForStop)
+                    control.dictationOnTranscript >>= \case
+                        Left err -> pure (DictationFailed err)
+                        Right transcript ->
+                            pure
+                                (DictationTranscript
+                                    (Text.strip transcript))
     runBackend = \case
         OpenAIDictation ->
             loadOpenAiDictationAuth >>= \case

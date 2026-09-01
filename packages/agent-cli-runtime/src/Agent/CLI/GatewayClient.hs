@@ -48,9 +48,11 @@ module Agent.CLI.GatewayClient
     , fetchGatewayModels
     , newGatewayModelAccess
     , newGatewayModelAccessWith
+    , newGatewayModelAccessWithDictation
     , refreshGatewayModels
     , cachedGatewayModels
     , gatewayModelIds
+    , transcribeGatewayPcm
     , runGatewayCommand
     , saveGatewayCredentialAt
     , showGatewayStatus
@@ -59,6 +61,10 @@ module Agent.CLI.GatewayClient
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import Agent.OpenAI.Transcription
+    ( encodePcm16Wav
+    , openAITranscriptionSampleRate
+    )
 import Agent.CLI.Runtime.Options (GatewayCommand (..))
 import Agent.CLI.PrivateFileLock
     ( withPrivateFileLock
@@ -88,7 +94,7 @@ import Control.Exception.Safe
     , throwString
     , tryAny
     )
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson ((.=), (.:))
 import Data.Aeson qualified as Aeson
@@ -100,7 +106,13 @@ import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isDigit, isPrint, isSpace)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef
+    ( IORef
+    , modifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -249,6 +261,10 @@ data GatewayModelAccess = GatewayModelAccess
     { gatewayModelFetch :: !(IO (Either Text [GatewayModel]))
     , gatewayModelCache :: !(IORef (Maybe [GatewayModel]))
     , gatewayModelRefreshLock :: !(MVar ())
+    , gatewayDictation
+        :: !(((BS.ByteString -> IO ()) -> IO ())
+            -> (Text -> IO ())
+            -> IO (Either Text Text))
     }
 
 -- | The hosted gateway selected by the interactive @/login@ flow.
@@ -334,8 +350,10 @@ gatewayCredentialDecoder =
 
 -- | Construct a cached model-list handle for a validated gateway credential.
 newGatewayModelAccess :: GatewayCredential -> IO GatewayModelAccess
-newGatewayModelAccess =
-    newGatewayModelAccessWith . fetchGatewayModels
+newGatewayModelAccess credential =
+    newGatewayModelAccessWithDictation
+        (fetchGatewayModels credential)
+        (transcribeGatewayPcmWith credential)
 
 -- | Injectable constructor used by tests and alternative trusted transports.
 -- The resulting value remains opaque, so the fetch action cannot be read back
@@ -343,14 +361,223 @@ newGatewayModelAccess =
 newGatewayModelAccessWith
     :: IO (Either Text [GatewayModel])
     -> IO GatewayModelAccess
-newGatewayModelAccessWith fetch = do
+newGatewayModelAccessWith fetch =
+    newGatewayModelAccessWithDictation
+        fetch
+        (\_ _ ->
+            pure
+                (Left
+                    "Dictation is not available through this gateway connection."))
+
+-- | Injectable constructor for tests and trusted alternative gateway
+-- transports. The action stays opaque with the credential-bearing model
+-- access handle.
+newGatewayModelAccessWithDictation
+    :: IO (Either Text [GatewayModel])
+    -> (((BS.ByteString -> IO ()) -> IO ())
+        -> (Text -> IO ())
+        -> IO (Either Text Text))
+    -> IO GatewayModelAccess
+newGatewayModelAccessWithDictation fetch dictation = do
     cache <- newIORef Nothing
     refreshLock <- newMVar ()
     pure GatewayModelAccess
         { gatewayModelFetch = fetch
         , gatewayModelCache = cache
         , gatewayModelRefreshLock = refreshLock
+        , gatewayDictation = dictation
         }
+
+-- | Record PCM through the opaque, gateway-bound dictation action.
+transcribeGatewayPcm
+    :: GatewayModelAccess
+    -> ((BS.ByteString -> IO ()) -> IO ())
+    -> (Text -> IO ())
+    -> IO (Either Text Text)
+transcribeGatewayPcm access = access.gatewayDictation
+
+transcribeGatewayPcmWith
+    :: GatewayCredential
+    -> ((BS.ByteString -> IO ()) -> IO ())
+    -> (Text -> IO ())
+    -> IO (Either Text Text)
+transcribeGatewayPcmWith admitted produceAudio onTranscript =
+    withGatewayCredentialTurnLease do
+        loadGatewayCredential >>= \case
+            Right (Just current)
+                | current == admitted ->
+                    captureGatewayWav produceAudio >>= \case
+                        Left err -> pure (Left err)
+                        Right wav ->
+                            postGatewayTranscription current wav >>= \case
+                                Left err -> pure (Left err)
+                                Right transcript -> do
+                                    onTranscript transcript
+                                    pure (Right transcript)
+            _ ->
+                pure $
+                    Left
+                        "The organization gateway changed before dictation started."
+
+captureGatewayWav
+    :: ((BS.ByteString -> IO ()) -> IO ())
+    -> IO (Either Text LBS.ByteString)
+captureGatewayWav produceAudio =
+    tryAny capture >>= \case
+        Left _ ->
+            pure (Left "Gateway dictation audio capture failed.")
+        Right result -> pure result
+  where
+    capture = do
+        chunks <- newIORef []
+        capturedBytes <- newIORef 0
+        produceAudio \chunk ->
+            unless (BS.null chunk) do
+                total <- (+ BS.length chunk) <$> readIORef capturedBytes
+                when (total > gatewayMaxPcmBytes) $
+                    throwString
+                        "gateway dictation audio exceeded the client limit"
+                writeIORef capturedBytes total
+                modifyIORef' chunks (chunk :)
+        pcm <- BS.concat . reverse <$> readIORef chunks
+        pure $
+            case encodePcm16Wav openAITranscriptionSampleRate pcm of
+                Left _ ->
+                    Left "Gateway dictation captured invalid audio."
+                Right wav -> Right wav
+
+gatewayMaxPcmBytes :: Int
+gatewayMaxPcmBytes = 4 * 1024 * 1024 - 4096
+
+postGatewayTranscription
+    :: GatewayCredential
+    -> LBS.ByteString
+    -> IO (Either Text Text)
+postGatewayTranscription credential wav =
+    case validateGatewayCredential credential of
+        Left _ -> pure (Left "Gateway credential is invalid.")
+        Right () -> do
+            boundary <- gatewayTranscriptionBoundary
+            let body = gatewayTranscriptionBody boundary wav
+                endpoint =
+                    Text.dropWhileEnd (== '/')
+                        (Text.strip credential.gatewayBaseUrl)
+                        <> "/v1/audio/transcriptions"
+            outcome <- tryAny do
+                manager <- newTlsManager
+                initial <- HTTP.parseRequest (Text.unpack endpoint)
+                let request =
+                        initial
+                            { HTTP.method = "POST"
+                            , HTTP.requestHeaders =
+                                [ ( hAuthorization
+                                  , "Bearer "
+                                        <> TextEncoding.encodeUtf8
+                                            credential.gatewayAccessToken
+                                  )
+                                , ( hContentType
+                                  , "multipart/form-data; boundary=" <> boundary
+                                  )
+                                , (hAccept, "application/json")
+                                ]
+                            , HTTP.requestBody = HTTP.RequestBodyLBS body
+                            , HTTP.checkResponse = \_ _ -> pure ()
+                            -- Never forward the gateway bearer to a redirect.
+                            , HTTP.redirectCount = 0
+                            , HTTP.responseTimeout =
+                                HTTP.responseTimeoutMicro
+                                    (2 * 60 * 1_000_000)
+                            }
+                HTTP.withResponse request manager \response -> do
+                    responseBody <-
+                        readBoundedBody
+                            gatewayMaxResponseBytes
+                            (HTTP.responseBody response)
+                    pure
+                        ( HTTP.responseStatus response
+                        , responseBody
+                        )
+            pure case outcome of
+                Left _ ->
+                    Left "Could not reach the organization gateway for dictation."
+                Right (_status, Nothing) ->
+                    Left "Gateway dictation returned an oversized response."
+                Right (status, Just responseBody)
+                    | statusIsSuccessful status ->
+                        decodeGatewayTranscript responseBody
+                    | statusCode status == 404 ->
+                        Left
+                            "Dictation is not supported by this organization gateway."
+                    | otherwise ->
+                        Left $
+                            "Gateway dictation returned HTTP "
+                                <> Text.pack (show (statusCode status))
+
+gatewayMaxResponseBytes :: Int
+gatewayMaxResponseBytes = 64 * 1024
+
+readBoundedBody
+    :: Int
+    -> HTTP.BodyReader
+    -> IO (Maybe BS.ByteString)
+readBoundedBody limit = go 0 []
+  where
+    go total chunks reader = do
+        chunk <- HTTP.brRead reader
+        if BS.null chunk
+            then pure (Just (BS.concat (reverse chunks)))
+            else
+                let next = total + BS.length chunk
+                in if next > limit
+                    then pure Nothing
+                    else go next (chunk : chunks) reader
+
+gatewayTranscriptionBoundary :: IO BS.ByteString
+gatewayTranscriptionBoundary =
+    ("----haskell-agent-gateway-" <>)
+        . Base64Url.encodeUnpadded
+        <$> getEntropy 18
+
+gatewayTranscriptionBody
+    :: BS.ByteString
+    -> LBS.ByteString
+    -> LBS.ByteString
+gatewayTranscriptionBody boundary wav =
+    LBS.fromStrict
+        ( "--" <> boundary <> "\r\n"
+        <> "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
+        <> "dictation\r\n"
+        <> "--" <> boundary <> "\r\n"
+        <> "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
+        <> "Content-Type: audio/wav\r\n\r\n"
+        )
+        <> wav
+        <> LBS.fromStrict
+            ("\r\n--" <> boundary <> "--\r\n")
+
+newtype GatewayTranscript =
+    GatewayTranscript { gatewayTranscriptText :: Text }
+
+instance Aeson.FromJSON GatewayTranscript where
+    parseJSON =
+        Aeson.withObject "GatewayTranscript" \object ->
+            GatewayTranscript <$> object .: "text"
+
+decodeGatewayTranscript :: BS.ByteString -> Either Text Text
+decodeGatewayTranscript body =
+    case
+        Aeson.eitherDecodeStrict' body
+            :: Either String GatewayTranscript
+        of
+        Left _ ->
+            Left "Gateway dictation returned an unreadable response."
+        Right response
+            | Text.null transcript ->
+                Left "Gateway dictation returned an empty transcript."
+            | otherwise -> Right transcript
+          where
+            transcript =
+                Text.strip response.gatewayTranscriptText
 
 -- | Refresh the gateway's authorized model aliases.
 --
