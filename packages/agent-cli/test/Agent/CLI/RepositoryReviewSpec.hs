@@ -221,7 +221,8 @@ spec = describe "repository review service" do
                 link = root <> "/pipe-link"
             createNamedPipe untrackedPipe
                 (ownerReadMode `unionFileModes` ownerWriteMode)
-            blocked <- timeout 10_000_000 (repositorySnapshot root)
+            blocked <- timeout specialFileRegressionTimeoutMicros
+                (repositorySnapshot root)
             blocked `shouldSatisfy` \case
                 Just (Left (InvalidRepositoryRequest _)) -> True
                 Just (Right _) -> True
@@ -231,7 +232,8 @@ spec = describe "repository review service" do
             createNamedPipe hiddenPipe
                 (ownerReadMode `unionFileModes` ownerWriteMode)
             createSymbolicLink ".git/hidden-pipe" link
-            linked <- timeout 10_000_000 (repositorySnapshot root)
+            linked <- timeout specialFileRegressionTimeoutMicros
+                (repositorySnapshot root)
             linked `shouldSatisfy` \case
                 Just (Right snapshot) ->
                     any
@@ -240,7 +242,7 @@ spec = describe "repository review service" do
                 _ -> False
             case linked of
                 Just (Right snapshot) ->
-                    timeout 10_000_000
+                    timeout specialFileRegressionTimeoutMicros
                         (repositoryDiff
                             root
                             snapshot.snapshotId
@@ -827,3 +829,9 @@ changePathCase = go
     go (character : rest)
         | isLower character = toUpper character : rest
         | otherwise = character : go rest
+
+-- A loaded Nix check can substantially delay the Git subprocesses that run
+-- before special paths are inspected. Keep this as a deadlock guard rather
+-- than a scheduler-sensitive performance assertion.
+specialFileRegressionTimeoutMicros :: Int
+specialFileRegressionTimeoutMicros = 75_000_000
