@@ -7,7 +7,9 @@ module Agent.CLI.TUI.Render.Transcript
     , drawConversationBlocks
     , quickStartVisible
     , quickStartWideVisible
+    , quickStartCardWidth
     , quickStartRows
+    , drawQuickStartCard
     , startupCapabilityLines
     ) where
 
@@ -31,7 +33,7 @@ import Agent.CLI.Resume ()
 import Agent.CLI.Secret ()
 import Agent.CLI.Status ()
 import Agent.CLI.Startup.Format
-    ( agentBuildInfo, formatBuildInfoCompact )
+    ( BuildInfo(buildVersion), agentBuildInfo )
 import Agent.CLI.Style ()
 import Agent.CLI.TUI.History
     ( HistoryWindow(historyWindowTurns, historyWindowTotalTurns,
@@ -42,15 +44,11 @@ import Agent.CLI.TUI.History
       HistoryCursor(HistoryCursor) )
 import Agent.CLI.TUI.ImagePreview ()
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
-import Agent.CLI.TUI.Motion
-    ( motionModeForTerminalFocus, userActionPending )
 import Agent.TUI.Accent ()
 import Agent.CLI.TUI.Types
-    ( AppState(appConversationAnchor, appTerminalFocus,
-               appMotionElapsedMillis, appRuntime, appHoveredControl,
+    ( AppState(appConversationAnchor, appHoveredControl,
                appAgentEntries, appSlashCatalog, appHistoryWindow, appUi,
                appAgentSelected),
-      FullscreenRuntime(runtimeColor, runtimeMotionMode),
       Name(QuickStartModel, CodeCopy, ConversationChunkCache,
            ConversationReserve, QuickStartWorktree, QuickStartResume,
            QuickStartCommands) )
@@ -63,14 +61,11 @@ import Agent.TUI.Model
     ( Focus(FocusScrollback),
       UiBlock,
       UiState(uiBlocks, uiFocus, uiSelectedBlock) )
-import Agent.TUI.Motion
-    ( MotionMode(MotionOff, MotionFull, MotionReduced) )
 import Agent.TUI.Presentation ()
 import Agent.TUI.TextWidth ( displayTerminalText )
 import Agent.ToolDispatch ()
 import Brick
-    ( getContext,
-      cached,
+    ( cached,
       clickable,
       fill,
       forceAttr,
@@ -92,12 +87,10 @@ import Brick
       withBorderStyle,
       Location(Location),
       Context(availHeight, availWidth),
-      Result(image),
-      Size(Greedy),
-      Widget(render, Widget),
+      Widget,
       Padding(Pad) )
 import Brick.BChan ()
-import Brick.Widgets.Border ( borderWithLabel, vBorder )
+import Brick.Widgets.Border ( border )
 import Brick.Widgets.Border.Style ( unicodeRounded )
 import Brick.Widgets.Center ( center, hCenter )
 import Codec.Picture ()
@@ -129,9 +122,7 @@ import System.Info ()
 import System.Posix.Process ()
 import System.Process ()
 import qualified Brick.Types as B
-    ( getContext, Size(Greedy), Widget(render, Widget) )
-import qualified Brick.Widgets.Border as Border
-    ( borderAttr )
+    ( getContext, Size(Greedy), Widget(Widget), render )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
     ( controlInteractionAttr )
@@ -150,19 +141,11 @@ import qualified Data.Text as Text
       pack )
 import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
-    ( controlLinkAttr,
-      headingAttr,
-      mutedAttr,
+    ( mutedAttr,
       strongAttr,
-      toolAttr,
       userAttr )
 import qualified Agent.CLI.TUI.Transcript as Transcript
     ( transcriptChunks, transcriptChunkCacheKey )
-import qualified Graphics.Vty as V
-    ( backgroundFill,
-      imageHeight,
-      imageWidth,
-      horizCat )
 import qualified Graphics.Vty.CrossPlatform as Vty ()
 
 
@@ -381,71 +364,28 @@ drawEmptyConversation state =
         context <- B.getContext
         let width = context.availWidth
             height = context.availHeight
-            capabilityRows = quickStartCapabilityRows height
-            panelWidth = quickStartPanelWidth width
+            cardWidth = quickStartCardWidth width
         B.render $
             if not (quickStartVisible width height)
-                then center (lambdaArtWidget colorEnabled frame)
+                then center drawQuickStartLogo
                 else
-                    if quickStartWideVisible width height
-                        then
-                            center $
-                                drawQuickStartDashboard
-                                    state
-                                    panelWidth
-                                    height
-                                    colorEnabled
-                                    frame
-                        else
-                            center $
-                                vBox
-                                    [ vLimit
-                                        (max 8
-                                            (height
-                                                - quickStartReservedRows
-                                                    capabilityRows))
-                                        (hCenter
-                                            (lambdaArtWidget
-                                                colorEnabled
-                                                frame))
-                                    , hCenter
-                                        (drawQuickStartPanel
-                                            state
-                                            panelWidth
-                                            capabilityRows)
-                                    ]
-  where
-    colorEnabled = state.appRuntime.runtimeColor
-    frame
-        | userActionPending state = 0
-        | otherwise =
-            case motionModeForTerminalFocus
-                state.appTerminalFocus
-                state.appRuntime.runtimeMotionMode of
-                MotionFull -> state.appMotionElapsedMillis
-                MotionReduced -> 0
-                MotionOff -> 0
+                    center $
+                        drawQuickStartCard
+                            state
+                            cardWidth
+                            (quickStartWideVisible width height)
 
-quickStartReservedRows :: Int -> Int
-quickStartReservedRows capabilityRows =
-    11 + 2 * capabilityRows
-
-quickStartCapabilityRows :: Int -> Int
-quickStartCapabilityRows height
-    | height >= 34 = 2
-    | otherwise = 1
-
-quickStartPanelWidth :: Int -> Int
-quickStartPanelWidth width =
-    max 44 (width - 4)
+quickStartCardWidth :: Int -> Int
+quickStartCardWidth width =
+    max 1 (min 112 (width - 4))
 
 quickStartVisible :: Int -> Int -> Bool
 quickStartVisible width height =
-    width >= 48 && height >= 22
+    width >= 48 && height >= 13
 
 quickStartWideVisible :: Int -> Int -> Bool
 quickStartWideVisible width height =
-    width >= 104 && height >= 29
+    width >= 88 && height >= 14
 
 quickStartRows :: [(Name, Text, Text)]
 quickStartRows =
@@ -455,217 +395,72 @@ quickStartRows =
     , (QuickStartModel, "Manage models", "/model")
     ]
 
-drawQuickStartDashboard
-    :: AppState
-    -> Int
-    -> Int
-    -> Bool
-    -> Int
-    -> Widget Name
-drawQuickStartDashboard
-    state
-    panelWidth
-    availableHeight
-    colorEnabled
-    frame =
-    vLimit dashboardHeight $
-        hLimit panelWidth $
-            withBorderStyle unicodeRounded $
-                borderWithLabel
-                    (withAttr Theme.headingAttr (txt " haskell-agent ")) $
-                    padAll 1 $
-                        hBox
-                            [ hLimit leftWidth $
-                                vBox
-                                    [ vLimit artHeight $
-                                        hCenter
-                                            (lambdaArtWidget
-                                                colorEnabled
-                                                frame)
-                                    , withAttr Theme.mutedAttr $
-                                        hCenter
-                                            (txt
-                                                (formatBuildInfoCompact
-                                                    agentBuildInfo))
-                                    , padTop (Pad 1) $
-                                        hCenter $
-                                            hLimit leftWidth
-                                                (drawQuickStartActions state)
-                                    ]
-                            , withAttr Border.borderAttr vBorder
-                            , padLeft (Pad 2) $
-                                hLimit capabilityWidth $
-                                    padRightWithBackground $
-                                        drawDashboardCapabilities
-                                            capabilityWidth
-                                            toolRows
-                                            skillRows
-                                            toolNames
-                                            skillNames
-                            ]
+drawQuickStartCard :: AppState -> Int -> Bool -> Widget Name
+drawQuickStartCard state cardWidth showLogo =
+    hLimit cardWidth $
+        withBorderStyle unicodeRounded $
+            border $
+                padAll 1 $
+                    if showLogo
+                        then
+                            hBox
+                                [ drawQuickStartLogo
+                                , padLeft (Pad logoGap) $
+                                    hLimit contentWidth $
+                                        drawQuickStartContent
+                                            state
+                                            contentWidth
+                                            2
+                                ]
+                        else
+                            hLimit innerWidth $
+                                drawQuickStartContent state innerWidth 1
   where
-    innerWidth = max 1 (panelWidth - 4)
-    leftWidth =
-        min 48 (max 38 (innerWidth `div` 3))
-    capabilityWidth =
-        max 1 (innerWidth - leftWidth - 3)
-    artHeight
-        | availableHeight >= 35 = 21
-        | otherwise = 16
-    dashboardHeight
-        | availableHeight >= 35 = 32
-        | otherwise = 27
-    toolRows
-        | availableHeight >= 38 = 7
-        | otherwise = 5
-    skillRows
-        | availableHeight >= 38 = 5
-        | otherwise = 3
-    toolNames = startupToolNames state
-    skillNames = startupSkillNames state
+    innerWidth = max 1 (cardWidth - 4)
+    logoWidth = 14
+    logoGap = 3
+    contentWidth =
+        max 1 (innerWidth - logoWidth - logoGap)
 
--- | Make a widget greedily occupy its available width without painting a
--- rectangle of explicit space glyphs. Some terminals expose those glyphs as
--- dotted whitespace; Vty background cells remain visually blank while still
--- giving the surrounding border the intended width.
-padRightWithBackground :: Widget n -> Widget n
-padRightWithBackground widget@(Widget _ verticalSize _) =
-    Widget Greedy verticalSize do
-        context <- getContext
-        result <- render (hLimit context.availWidth widget)
-        let missingWidth =
-                max 0 (context.availWidth - V.imageWidth result.image)
-            padding =
-                V.backgroundFill
-                    missingWidth
-                    (V.imageHeight result.image)
-        pure result
-            { image = V.horizCat [result.image, padding]
-            }
+drawQuickStartLogo :: Widget Name
+drawQuickStartLogo =
+    hLimit 14 $
+        vLimit 9 $
+            center $
+                forceAttr Theme.mutedAttr $
+                    hLimit 12 $
+                        vLimit 9 $
+                            lambdaArtWidget False 0
 
-drawDashboardCapabilities
-    :: Int
-    -> Int
-    -> Int
-    -> [Text]
-    -> [Text]
-    -> Widget Name
-drawDashboardCapabilities
-    width
-    toolRows
-    skillRows
-    toolNames
-    skillNames =
+drawQuickStartContent :: AppState -> Int -> Int -> Widget Name
+drawQuickStartContent state width toolRows =
     vBox
-        [ drawSection
-            Theme.toolAttr
-            "Available Tools"
-            toolRows
-            toolNames
+        [ drawQuickStartIdentity width
         , padTop (Pad 1) $
-            drawSection
-                Theme.controlLinkAttr
-                "Available Skills"
-                skillRows
-                skillNames
+            drawQuickStartActions state
         , padTop (Pad 1) $
-            withAttr Theme.mutedAttr $
-                txt $
-                    truncateDisplayText width $
-                        Text.pack (show (length toolNames))
-                            <> " tools · "
-                            <> Text.pack (show (length skillNames))
-                            <> " skills · Type / to browse all."
+            drawQuickStartCapabilities state width toolRows
         ]
-  where
-    drawSection valueAttr label maxRows names =
-        vBox
-            [ withAttr Theme.strongAttr $
-                txt
-                    (label
-                        <> " ("
-                        <> Text.pack (show (length names))
-                        <> ")")
-            , padTop (Pad 1) $
-                padLeft (Pad 2) $
-                    vBox
-                        (map
-                            (withAttr valueAttr . txt)
-                            (startupCapabilityLines
-                                (max 1 (width - 2))
-                                maxRows
-                                names))
-            ]
 
-drawQuickStartPanel :: AppState -> Int -> Int -> Widget Name
-drawQuickStartPanel state panelWidth capabilityRows =
-    hLimit panelWidth $
-        vBox
-            [ withAttr Theme.headingAttr $
-                hCenter (txt "haskell-agent")
-            , withAttr Theme.mutedAttr $
-                hCenter (txt (formatBuildInfoCompact agentBuildInfo))
-            , padTop (Pad 1) $
-                vBox
-                    [ drawCapability
-                        Theme.toolAttr
-                        "Tools"
-                        toolNames
-                    , drawCapability
-                        Theme.controlLinkAttr
-                        "Skills"
-                        skillNames
-                    ]
-            , padTop (Pad 1) $
-                hCenter $
-                    hLimit 44 $
-                        drawQuickStartActions state
-            , padTop (Pad 1) $
-                withAttr Theme.mutedAttr $
-                    hCenter (txt "Tip: Type / to browse commands and skills.")
-            ]
-  where
-    toolNames = startupToolNames state
-    skillNames = startupSkillNames state
-    capabilityLabelWidth = 14
-    capabilityTextWidth = max 1 (panelWidth - capabilityLabelWidth)
-
-    drawCapability valueAttr label names =
-        vBox $
-            zipWith
-                (drawCapabilityLine valueAttr heading)
-                [0 :: Int ..]
-                (startupCapabilityLines
-                    capabilityTextWidth
-                    capabilityRows
-                    names)
-      where
-        heading =
-            label <> " (" <> Text.pack (show (length names)) <> ")"
-
-    drawCapabilityLine valueAttr heading lineIndex line =
+drawQuickStartIdentity :: Int -> Widget Name
+drawQuickStartIdentity width =
+    hLimit width $
         hBox
-            [ hLimit capabilityLabelWidth $
-                if lineIndex == 0
-                    then
-                        withAttr Theme.strongAttr $
-                            txt $
-                                Text.justifyLeft capabilityLabelWidth ' ' $
-                                    truncateDisplayText
-                                        capabilityLabelWidth
-                                        heading
-                    else fill ' '
-            , hLimit capabilityTextWidth $
-                withAttr valueAttr (txt line)
+            [ withAttr Theme.strongAttr (txt productName)
+            , txt "  "
+            , withAttr Theme.mutedAttr $
+                txt $
+                    truncateDisplayText versionWidth $
+                        "v" <> agentBuildInfo.buildVersion
             ]
+  where
+    productName = "haskell-agent"
+    versionWidth =
+        max 1 (width - terminalTextWidth productName - 2)
 
 drawQuickStartActions :: AppState -> Widget Name
 drawQuickStartActions state =
-    vBox
-        [ withAttr Theme.headingAttr $
-            hCenter (txt "What would you like to do?")
-        , vBox (map drawQuickStartRow quickStartRows)
-        ]
+    vBox (map drawQuickStartRow quickStartRows)
   where
     drawQuickStartRow (name, label, command) =
         clickable name $
@@ -675,11 +470,44 @@ drawQuickStartActions state =
       where
         row =
             hBox
-                [ withAttr Theme.controlLinkAttr (txt ("  " <> label))
+                [ withAttr Theme.strongAttr (txt label)
                 , vLimit 1 (fill ' ')
                 , withAttr Theme.mutedAttr (txt command)
-                , txt "  "
                 ]
+
+drawQuickStartCapabilities :: AppState -> Int -> Int -> Widget Name
+drawQuickStartCapabilities state width toolRows =
+    vBox
+        [ drawCapability "Tools" toolRows (startupToolNames state)
+        , drawCapability "Skills" 1 (startupSkillNames state)
+        ]
+  where
+    labelWidth = min 13 (max 1 (width `div` 3))
+    valueWidth = max 1 (width - labelWidth)
+
+    drawCapability label maxRows names =
+        vBox $
+            zipWith
+                (drawCapabilityLine heading)
+                [0 :: Int ..]
+                (startupCapabilityLines valueWidth maxRows names)
+      where
+        heading =
+            label <> " (" <> Text.pack (show (length names)) <> ")"
+
+    drawCapabilityLine heading lineIndex line =
+        hBox
+            [ hLimit labelWidth $
+                if lineIndex == 0
+                    then
+                        withAttr Theme.strongAttr $
+                            txt $
+                                Text.justifyLeft labelWidth ' ' $
+                                    truncateDisplayText labelWidth heading
+                    else vLimit 1 (fill ' ')
+            , hLimit valueWidth $
+                withAttr Theme.mutedAttr (txt line)
+            ]
 
 startupToolNames :: AppState -> [Text]
 startupToolNames state =

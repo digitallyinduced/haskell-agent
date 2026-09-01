@@ -10,7 +10,9 @@ module Agent.CLI.TUI.Render.Internal
     , filterChoiceRowLimit
     , quickStartVisible
     , quickStartWideVisible
+    , quickStartCardWidth
     , quickStartRows
+    , drawQuickStartCard
     , startupCapabilityLines
     , repositoryHeaderText
     , selectedAgentConversation
@@ -195,7 +197,7 @@ import Agent.CLI.TUI.Render.Overlays
     , resumeSearchCursorColumn )
 import Agent.CLI.TUI.Render.Transcript
     ( stickyPromptLayers, quickStartVisible, quickStartWideVisible
-    , quickStartRows
+    , quickStartCardWidth, quickStartRows, drawQuickStartCard
     , startupCapabilityLines )
 import Agent.CLI.TUI.Render.Workspace
     ( drawWorkspace, agentPopoverLayers, agentEntryWindow, agentPaneVisible

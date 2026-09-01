@@ -35,6 +35,8 @@ module Agent.CLI.TUI.App
     , quickStartRows
     , quickStartVisible
     , quickStartWideVisible
+    , quickStartCardWidth
+    , drawQuickStartCard
     , startupCapabilityLines
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
