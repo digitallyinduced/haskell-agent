@@ -28,7 +28,11 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))
 import Agent.CLI.Error ()
-import Agent.CLI.GatewayClient (GatewayCredential, GatewayModelAccess)
+import Agent.CLI.GatewayClient
+    ( GatewayCredential
+    , GatewayModelAccess
+    , gatewayCredentialIdentity
+    )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
@@ -118,7 +122,8 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
                      gatewayModelsRef, modelInfo,
-                     connectionId, options, provider, dialect, policyRef, allTools,
+                     connectionId, gatewayIdentity,
+                     options, provider, dialect, policyRef, allTools,
                      claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, resetToolSessionTemp, grokRuntime,
@@ -750,6 +755,9 @@ runAgentSession
                                 , modelInfo = codexModelInfo
                                 , connectionId =
                                     inferredTarget.targetConnectionId
+                                , gatewayIdentity =
+                                    gatewayCredentialIdentity
+                                        <$> connectedGateway
                                 , options
                                 , provider
                                 , dialect

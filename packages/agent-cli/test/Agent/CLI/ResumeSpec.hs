@@ -75,6 +75,35 @@ spec = do
             entry.resumeTranscript
                 `shouldSatisfy` any (Text.isInfixOf "later question")
 
+    describe "filterResumeSessionsForBoundary" do
+        let direct = sampleMeta "direct" "direct"
+            gateway identity sessionId =
+                (sampleMeta sessionId sessionId)
+                    { metaConnection = "organization-gateway"
+                    , metaGatewayIdentity = Just identity
+                    }
+            legacyGateway =
+                (gateway "gateway-a" "legacy")
+                    { metaGatewayIdentity = Nothing }
+            sessions =
+                [ direct
+                , gateway "gateway-a" "allowed"
+                , gateway "gateway-b" "other"
+                , legacyGateway
+                ]
+
+        it "offers direct sessions only while disconnected" do
+            map (.metaId)
+                (filterResumeSessionsForBoundary Nothing sessions)
+                `shouldBe` ["direct"]
+
+        it "offers only sessions from the exact gateway credential" do
+            map (.metaId)
+                (filterResumeSessionsForBoundary
+                    (Just "gateway-a")
+                    sessions)
+                `shouldBe` ["allowed"]
+
     describe "resumeNeedsGeneratedContext" do
         it "requeues context after compact, clear, and new boundaries" do
             map

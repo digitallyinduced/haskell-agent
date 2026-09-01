@@ -27,6 +27,7 @@ module Agent.CLI.Resume
     , resumeEntryFromMeta
     , resumeEntriesFrom
     , resumeSearchEntries
+    , filterResumeSessionsForBoundary
     , resumeRelativeAge
     , resumeSourceLabel
     , selectedResumeBrowser
@@ -38,6 +39,7 @@ module Agent.CLI.Resume
     ) where
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
+import Agent.CLI.Models (validateResumedGatewayBoundary)
 import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
@@ -152,6 +154,23 @@ resumeEntriesFrom = map (uncurry entryFrom)
 
 resumeEntryFromMeta :: SessionMeta -> ResumeEntry
 resumeEntryFromMeta meta = entryFromWith False meta []
+
+-- | Keep the resume surface on the same direct/gateway credential boundary
+-- as the active session. Startup validates again before loading any history.
+filterResumeSessionsForBoundary
+    :: Maybe Text
+    -> [SessionMeta]
+    -> [SessionMeta]
+filterResumeSessionsForBoundary gatewayIdentity =
+    filter \meta ->
+        case
+            validateResumedGatewayBoundary
+                gatewayIdentity
+                meta.metaConnection
+                meta.metaGatewayIdentity
+        of
+            Right () -> True
+            Left _ -> False
 
 loadResumeEntry :: StorePool -> OsPath -> Text -> IO (Either Text ResumeEntry)
 loadResumeEntry pool root sessionId =

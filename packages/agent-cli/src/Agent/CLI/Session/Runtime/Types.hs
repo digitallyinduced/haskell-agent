@@ -109,6 +109,7 @@ data SessionRequest = SessionRequest
     , claudeBridgeTools :: ![AppTool]
     , modelInfo :: !(Maybe ModelInfo)
     , connectionId :: !Text
+    , gatewayIdentity :: !(Maybe Text)
     , options :: !CliOptions
     , provider :: !Provider
     , dialect :: !Dialect

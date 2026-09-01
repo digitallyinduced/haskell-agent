@@ -898,6 +898,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionRender = render
             , sessionProvider = provider
             , sessionConnection = connectionId
+            , sessionGatewayIdentity = gatewayIdentity
             , sessionModelCatalog = catalog
             , sessionGatewayModels = gatewayModelsRef
             , sessionDialect = dialect
