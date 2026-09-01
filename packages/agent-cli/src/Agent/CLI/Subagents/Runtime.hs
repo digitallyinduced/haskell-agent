@@ -44,6 +44,7 @@ import Agent.CLI.Subagents.Runtime.Target
      validatePersistedSubagentTarget)
 import Agent.CLI.Subagents.Runtime.OpenAI
     (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
+import Agent.CLI.ModelConfig (connectionSupportsDialect)
 import Agent.CLI.Tools
     (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
@@ -56,8 +57,7 @@ import Agent.CLI.Dialects
 import Agent.Codex.Dialect.Subagent (codexSubagentSuffix)
 import Agent.Dialect
     (ChildAgentProtocol(..), Dialect, DialectId, codexDialect,
-     dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel,
-     providerSupportsDialect)
+     dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
     (Backend(..), BackendSnapshot(..), BackendStateStore(..), LoopConfig(..),
@@ -334,7 +334,8 @@ restoreAgentFromDisk
             Right storedTarget
                 | Nothing <- resolvedTarget
                 , not
-                    (providerSupportsDialect
+                    (connectionSupportsDialect
+                        storedTarget.targetConnection
                         storedTarget.targetProvider
                         storedTarget.targetDialect) ->
                     pure $ Left $
@@ -1201,7 +1202,8 @@ ensureSubagentSessionResidentLocked
                         throwIO (userError (Text.unpack err))
                     Right storedTarget
                         | not
-                            (providerSupportsDialect
+                            (connectionSupportsDialect
+                                session.subSessionConnection
                                 session.subSessionProvider
                                 storedTarget.targetDialect) ->
                             throwIO $

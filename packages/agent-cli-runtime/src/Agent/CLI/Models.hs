@@ -38,6 +38,7 @@ import Agent.CLI.ModelConfig
     , organizationGatewayConnectionId
     , catalogConnection
     , catalogDefaultForProvider
+    , catalogGatewayModelById
     , catalogModelById
     )
 import Agent.Dialect
@@ -100,11 +101,14 @@ data PickerEvent
 modelOptionFromCatalog :: ModelCatalog -> CatalogModel -> Maybe ModelOption
 modelOptionFromCatalog catalog model = do
     connection <- catalogConnection catalog model.catalogModelConnectionId
-    let provider = case connection.connectionKind of
-            BuiltinConnection value -> value
+    provider <- case connection.connectionKind of
+            BuiltinConnection value -> Just value
             -- Custom endpoints currently reuse the provider-independent
             -- Responses plumbing hosted under the OpenRouter runtime branch.
-            CustomResponsesConnection _ -> OpenRouterProvider
+            CustomResponsesConnection _ -> Just OpenRouterProvider
+            -- Gateway-only entries provide protocol and presentation metadata
+            -- for live aliases. They must never enter the direct model catalog.
+            OrganizationGatewayConnection -> Nothing
     pure ModelOption
         { modelTarget = ModelTarget
             { targetProvider = provider
@@ -221,14 +225,12 @@ gatewayModelOptions catalog provider =
   where
     gatewayOption modelId =
         let configured =
-                resolveConfiguredModel catalog modelId >>= \option ->
-                    let target = option.modelTarget
-                    in if target.targetProvider == provider
-                        && target.targetConnectionId
-                            == builtinConnectionId provider
-                        then Just option
-                        else Nothing
-            configuredTarget = (.modelTarget) <$> configured
+                catalogGatewayModelById catalog modelId >>= \model ->
+                    if provider == OpenAIProvider
+                        && model.catalogModelConnectionId
+                            == organizationGatewayConnectionId
+                    then Just model
+                    else Nothing
         in ModelOption
             { modelTarget = ModelTarget
                 { targetProvider = provider
@@ -238,14 +240,14 @@ gatewayModelOptions catalog provider =
                 , targetDialect =
                     maybe
                         (dialectIdForModel provider modelId)
-                        (.targetDialect)
-                        configuredTarget
+                        (.catalogModelDialect)
+                        configured
                 }
             , modelContextWindow =
-                configured >>= (.modelContextWindow)
-            , modelLabel = configured >>= (.modelLabel)
+                configured >>= (.catalogModelContextWindow)
+            , modelLabel = configured >>= (.catalogModelLabel)
             , modelFallbackPriority =
-                configured >>= (.modelFallbackPriority)
+                configured >>= (.catalogModelFallbackPriority)
             }
 
 -- | Prepend @current@ when it is missing so the active model stays visible.

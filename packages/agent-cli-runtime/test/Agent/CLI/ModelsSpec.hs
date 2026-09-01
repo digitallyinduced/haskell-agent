@@ -4,9 +4,10 @@ module Agent.CLI.ModelsSpec (spec) where
 
 import Agent.CLI.Models
 import Agent.CLI.ModelConfig
-    ( CatalogModel(..)
-    , ModelCatalog(..)
+    ( ModelCatalog
+    , catalogContextWindowFor
     , decodeModelConfig
+    , mergeModelConfigs
     , organizationGatewayConnectionId
     , packagedModelCatalogPath
     )
@@ -17,8 +18,8 @@ import Agent.Dialect
 import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.List (find, nub)
-import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -223,39 +224,79 @@ spec = do
                     Left
                         "saved model organization-gateway/company-private requires an active organization gateway"
 
-        it "pins mapped aliases to the gateway while retaining safe metadata" do
-            let known =
-                    CatalogModel
-                        { catalogModelId = "company-known"
-                        , catalogModelConnectionId = "openai"
-                        , catalogModelWireId = "upstream-mapped-known"
-                        , catalogModelDialect = GenericResponsesDialect
-                        , catalogModelContextWindow = Nothing
-                        , catalogModelLabel = Just "company label"
-                        , catalogModelDefault = False
-                        , catalogModelFallbackPriority = Just 9
+        it "loads only valid gateway-scoped alias metadata" do
+            defaults <- readPackagedDefaults
+            let overlay = LBS8.pack $ unlines
+                    [ "{"
+                    , "  \"version\": 1,"
+                    , "  \"models\": ["
+                    , "    {"
+                    , "      \"id\": \"company-known\","
+                    , "      \"connection\": \"organization-gateway\","
+                    , "      \"dialect\": \"generic-responses\","
+                    , "      \"label\": \"company label\","
+                    , "      \"fallback_priority\": 9"
+                    , "    },"
+                    , "    {"
+                    , "      \"id\": \"company-foreign\","
+                    , "      \"connection\": \"xai\","
+                    , "      \"dialect\": \"grok-build\","
+                    , "      \"label\": \"foreign label\""
+                    , "    },"
+                    , "    {"
+                    , "      \"id\": \"gpt-5.6-sol\","
+                    , "      \"connection\": \"organization-gateway\","
+                    , "      \"dialect\": \"generic-responses\","
+                    , "      \"context_window\": 777777,"
+                    , "      \"label\": \"company standard alias\""
+                    , "    }"
+                    , "  ]"
+                    , "}"
+                    ]
+            mappedCatalog <- case
+                mergeModelConfigs
+                    ("models.default.json", defaults)
+                    (Just ("models.json", overlay))
+                of
+                    Left err -> expectationFailure (Text.unpack err) >> pure catalog
+                    Right loaded -> pure loaded
+            resolveConfiguredModel mappedCatalog "company-known"
+                `shouldBe` Nothing
+            map (.modelTarget.targetModelId) (modelCatalog mappedCatalog)
+                `shouldSatisfy` notElem "company-known"
+            fmap (.modelTarget)
+                (resolveConfiguredModel mappedCatalog "gpt-5.6-sol")
+                `shouldBe`
+                    Just
+                        (ModelTarget
+                            OpenAIProvider
+                            "openai"
+                            "gpt-5.6-sol"
+                            "gpt-5.6-sol"
+                            CodexDialect)
+            catalogContextWindowFor
+                mappedCatalog
+                organizationGatewayConnectionId
+                "gpt-5.6-sol"
+                `shouldBe` Just 777_777
+            gatewayModelOptions
+                mappedCatalog
+                OpenAIProvider
+                ["gpt-5.6-sol"]
+                `shouldBe`
+                    [ ModelOption
+                        { modelTarget =
+                            ModelTarget
+                                OpenAIProvider
+                                organizationGatewayConnectionId
+                                "gpt-5.6-sol"
+                                "gpt-5.6-sol"
+                                GenericResponsesDialect
+                        , modelContextWindow = Just 777_777
+                        , modelLabel = Just "company standard alias"
+                        , modelFallbackPriority = Nothing
                         }
-                conflicting =
-                    known
-                        { catalogModelId = "company-foreign"
-                        , catalogModelConnectionId = "xai"
-                        , catalogModelWireId = "upstream-mapped-foreign"
-                        , catalogModelDialect = GrokBuildDialect
-                        , catalogModelLabel = Just "foreign label"
-                        }
-                mappedCatalog =
-                    catalog
-                        { catalogModels =
-                            known : conflicting : catalog.catalogModels
-                        , catalogModelsById =
-                            Map.insert
-                                known.catalogModelId
-                                known
-                                (Map.insert
-                                    conflicting.catalogModelId
-                                    conflicting
-                                    catalog.catalogModelsById)
-                        }
+                    ]
             case
                 gatewayModelOptions
                     mappedCatalog
@@ -586,8 +627,12 @@ withEnv name value action =
 
 readPackagedCatalog :: IO ModelCatalog
 readPackagedCatalog = do
-    path <- packagedModelCatalogPath
-    bytes <- LBS.readFile path
+    bytes <- readPackagedDefaults
     case decodeModelConfig "models.default.json" bytes of
         Left err -> fail (Text.unpack err)
         Right catalog -> pure catalog
+
+readPackagedDefaults :: IO LBS.ByteString
+readPackagedDefaults = do
+    path <- packagedModelCatalogPath
+    LBS.readFile path

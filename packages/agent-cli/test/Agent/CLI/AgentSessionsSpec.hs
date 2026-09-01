@@ -2,6 +2,7 @@ module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
@@ -120,7 +121,8 @@ spec = describe "Agent.CLI.AgentSessions" do
             let gatewayOption model dialect = ModelOption
                     { modelTarget = ModelTarget
                         { targetProvider = OpenAIProvider
-                        , targetConnectionId = "openai"
+                        , targetConnectionId =
+                            organizationGatewayConnectionId
                         , targetModelId = model
                         , targetWireModelId = model
                         , targetDialect = dialect
@@ -166,6 +168,8 @@ spec = describe "Agent.CLI.AgentSessions" do
             accepted `shouldSatisfy` Text.isInfixOf "Status: running"
             [(handle, _)] <- readIORef launched
             handle.sessionMeta.metaModel `shouldBe` "company-b"
+            handle.sessionMeta.metaConnection
+                `shouldBe` organizationGatewayConnectionId
             handle.sessionMeta.metaDialect `shouldBe` GenericResponsesDialect
 
     it "inherits the active dialect and resolves explicit model overrides" $

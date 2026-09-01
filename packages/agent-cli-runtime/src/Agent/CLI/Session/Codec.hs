@@ -18,9 +18,10 @@ module Agent.CLI.Session.Codec
 
 import Agent.CLI.Session.StoreCodec (fromStoredResponseItem, toStoredResponseItem)
 import Agent.CLI.Session.Types
+import Agent.CLI.ModelConfig (connectionSupportsDialect)
 import Agent.CLI.Json (decodeLazy)
 import qualified Agent.Json.Decode as Hermes
-import Agent.Dialect (dialectSlug, parseDialect, providerSupportsDialect)
+import Agent.Dialect (dialectSlug, parseDialect)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Loop (TokenUsage(..))
 import Agent.Telemetry
@@ -169,7 +170,11 @@ fromStoredPromptSnapshot stored = do
             <> stored.sessionPromptDialect))
         Right
         (parseDialect stored.sessionPromptDialect)
-    unless (providerSupportsDialect provider dialect) $
+    unless
+        (connectionSupportsDialect
+            stored.sessionPromptConnection
+            provider
+            dialect) $
         Left
             ( "stored prompt dialect "
                 <> stored.sessionPromptDialect
@@ -213,7 +218,11 @@ fromStoredMetadata stored = do
         (Left ("unknown stored dialect: " <> stored.sessionMetadataDialect))
         Right
         (parseDialect stored.sessionMetadataDialect)
-    unless (providerSupportsDialect provider dialect) $
+    unless
+        (connectionSupportsDialect
+            stored.sessionMetadataConnection
+            provider
+            dialect) $
         Left
             ( "stored dialect "
                 <> stored.sessionMetadataDialect
@@ -279,7 +288,11 @@ fromStoredLegacyTarget stored = do
         (Left ("unknown stored legacy dialect: " <> stored.sessionLegacyDialect))
         Right
         (parseDialect stored.sessionLegacyDialect)
-    unless (providerSupportsDialect provider dialect) $
+    unless
+        (connectionSupportsDialect
+            stored.sessionLegacyConnection
+            provider
+            dialect) $
         Left
             ( "stored legacy dialect "
                 <> stored.sessionLegacyDialect

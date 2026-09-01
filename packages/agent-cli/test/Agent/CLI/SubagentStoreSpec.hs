@@ -1,6 +1,7 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
 import Agent.CLI.Compaction (estimatedOccupancy)
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.SubagentStore
 import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.Dialect (DialectId(..))
@@ -336,7 +337,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                 let agentId = SubagentId "agent-gateway-restored"
                     resolved = CollaborationModelTarget
                         { collaborationTargetProvider = OpenAIProvider
-                        , collaborationTargetConnection = "openai"
+                        , collaborationTargetConnection =
+                            organizationGatewayConnectionId
                         , collaborationTargetEffectiveModel = "company-model"
                         , collaborationTargetDialect =
                             GenericResponsesDialect
@@ -346,7 +348,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                             [messageItem RoleUser "gateway"]
                             (Completed (Just "OK"))
                             OpenAIProvider
-                            "openai"
+                            organizationGatewayConnectionId
                             "company-model"
                             GenericResponsesDialect)
                             { snapshotAgentModel = Just "company-model" }
@@ -380,6 +382,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                             `shouldReturn` Right ()
                         Just session <-
                             Map.lookup agentId <$> readIORef sessionsRef
+                        session.subSessionConnection
+                            `shouldBe` organizationGatewayConnectionId
                         session.subSessionEffectiveModel
                             `shouldBe` "company-model"
                         session.subSessionDialect

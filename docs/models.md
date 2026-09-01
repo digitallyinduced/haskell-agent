@@ -66,8 +66,32 @@ Supported dialects are:
 
 Custom connections are selected manually and are not considered for automatic
 billing fallback. Shipped connection names (`openai`, `xai`, `openrouter`,
-`meta`, `gemini`, and `claude-code`) are reserved. Invalid catalogs are
-reported at startup.
+`meta`, `gemini`, `claude-code`, and `organization-gateway`) are reserved.
+Invalid catalogs are reported at startup.
+
+When an organization gateway advertises a private alias that uses a
+non-default model protocol, add gateway-only metadata without defining a
+connection:
+
+```json
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "company-coder",
+      "connection": "organization-gateway",
+      "dialect": "generic-responses",
+      "context_window": 131072,
+      "label": "company"
+    }
+  ]
+}
+```
+
+Gateway-only entries are never added to direct-provider catalogs or pickers,
+and they cannot remap the alias sent over the wire. The live `/v1/models`
+response remains authoritative: metadata is used only when the gateway
+advertises the same alias.
 
 The built-in `add-model` skill handles requests such as “use the model running
 at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.

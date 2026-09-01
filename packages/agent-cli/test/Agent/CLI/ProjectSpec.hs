@@ -2,6 +2,7 @@ module Agent.CLI.ProjectSpec (spec) where
 
 import Agent.CLI.Project
 import Agent.CLI.Models (ModelTarget(..))
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
@@ -152,6 +153,22 @@ spec = describe "Agent.CLI.Project" do
                 updated.settingsAutoApprove `shouldBe` False
                 projectModelFor OpenAIProvider updated
                     `shouldBe` Just "gpt-project"
+
+        it "round-trips an organization gateway model dialect" $
+            withTempDir "agent-project-" \root -> do
+                let gatewayTarget =
+                        target
+                            OpenAIProvider
+                            organizationGatewayConnectionId
+                            "company-coder"
+                            "company-coder"
+                            GenericResponsesDialect
+                saveProjectModel root gatewayTarget
+                settings <- loadProjectSettings root
+                settings.settingsLastModel
+                    `shouldBe`
+                        Just ProjectModel
+                            { projectModelTarget = gatewayTarget }
 
         it "writes a top-level model switch to the checkout and user home" $
             withTempDir "agent-project-" \project ->

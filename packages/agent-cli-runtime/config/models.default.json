@@ -17,6 +17,9 @@
       "api": "builtin",
       "provider": "openrouter"
     },
+    "organization-gateway": {
+      "api": "gateway"
+    },
     "meta": {
       "api": "responses",
       "base_url": "https://api.meta.ai/v1",

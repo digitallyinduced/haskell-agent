@@ -39,6 +39,7 @@ import Agent.CLI.Error
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
+    , connectionSupportsDialect
     , loadModelCatalogAt
     )
 import Agent.CLI.Models
@@ -100,7 +101,6 @@ import Agent.Claude
 import Agent.Dialect
     ( DialectId
     , dialectSlug
-    , providerSupportsDialect
     )
 import Agent.Error
     ( ApiError(..)
@@ -809,7 +809,8 @@ loadValidatedProviderTarget
     -> IO (Either Text LoadedAuth)
 loadValidatedProviderTarget probeAvailability choice =
     if not
-        (providerSupportsDialect
+        (connectionSupportsDialect
+            choice.modelTarget.targetConnectionId
             choice.modelTarget.targetProvider
             choice.modelTarget.targetDialect)
     then

@@ -56,7 +56,9 @@ import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig
     ( catalogConnection,
       loadModelCatalogAt,
-      ConnectionKind(BuiltinConnection, CustomResponsesConnection),
+      organizationGatewayConnectionId,
+      ConnectionKind(BuiltinConnection, CustomResponsesConnection,
+                     OrganizationGatewayConnection),
       ModelConnection(connectionId, connectionKind),
       ResponsesConnection(responsesApiKeyEnv, responsesApiKeyOptional) )
 import Agent.CLI.Models
@@ -379,8 +381,7 @@ runAgentInitializedWithLock
                     meta.metaTransportModel
                     meta.metaDialect
         projectTargetResult
-            | isJust connectedGateway
-                || isJust transitionTarget
+            | isJust transitionTarget
                 || isJust options.optModel
                 || isJust resumed =
                     Right Nothing
@@ -388,13 +389,18 @@ runAgentInitializedWithLock
             Nothing -> Right Nothing
             Just remembered ->
                 let target = remembered.projectModelTarget
-                in
-                Just <$> savedTarget
-                    target.targetProvider
-                    target.targetConnectionId
-                    target.targetModelId
-                    (Just target.targetWireModelId)
-                    target.targetDialect
+                in if isJust connectedGateway
+                then Right (Just target)
+                else if target.targetConnectionId
+                    == organizationGatewayConnectionId
+                then Right Nothing
+                else
+                    Just <$> savedTarget
+                        target.targetProvider
+                        target.targetConnectionId
+                        target.targetModelId
+                        (Just target.targetWireModelId)
+                        target.targetDialect
     resumedTarget <-
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
@@ -425,6 +431,7 @@ runAgentInitializedWithLock
                         CustomResponsesConnection responses -> Just
                             (connection.connectionId, responses)
                         BuiltinConnection _ -> Nothing
+                        OrganizationGatewayConnection -> Nothing
         checkStartupUsageInBackground =
             isJust fullscreen
                 && isNothing transition
