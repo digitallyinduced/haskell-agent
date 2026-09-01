@@ -487,7 +487,8 @@ legacyTypedToolOutputMigrations =
 legacyPromptEpochPrerequisiteStatements :: [ByteString]
 legacyPromptEpochPrerequisiteStatements =
     [ "CREATE TABLE harness.sessions (\
-      \ session_id uuid PRIMARY KEY\
+      \ session_id uuid PRIMARY KEY,\
+      \ deleted_at timestamptz\
       \ )"
     , "CREATE OR REPLACE FUNCTION\
       \ harness.reject_session_fact_mutation()\
