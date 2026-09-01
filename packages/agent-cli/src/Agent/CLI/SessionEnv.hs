@@ -20,6 +20,7 @@ import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
+import Agent.CLI.SteeringInputs (SteeringInputs)
 import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
@@ -43,6 +44,7 @@ import Control.Concurrent.STM (STM)
 
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
+    , sessionSteeringInputs :: !SteeringInputs
     , sessionModelInfo :: !(Maybe ModelInfo)
     , sessionBtwBackend :: !BtwBackendFactory
     , sessionQueueRecap :: !(RecapRequest -> IO ())

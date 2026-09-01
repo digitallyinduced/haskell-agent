@@ -238,7 +238,7 @@ backgroundTasksForTools tools available
         toolLine tools.grokExecute
             ( "- Run long-lived commands as background commands in `"
                 <> tools.grokExecute
-                <> "` and continue independent work."
+                <> "` and continue independent work; completion is reported automatically."
             )
             <> toolLine tools.grokGetOutput
                 ( "- Use `"
@@ -382,7 +382,7 @@ subagentBackgroundTasks tools available
         "<background_tasks>\n\
         \For long-running commands, use `background: true` in `"
             <> tools.grokExecute
-            <> "`, then continue independent work; use `"
+            <> "`, then continue independent work; completion is reported automatically while this agent remains active. Before finishing, use one bounded wait if an owned task is still running. Use `"
             <> tools.grokGetOutput
             <> "` for a snapshot or one bounded wait — do not poll repeatedly.\n\
         \</background_tasks>"

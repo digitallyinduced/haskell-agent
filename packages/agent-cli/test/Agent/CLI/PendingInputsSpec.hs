@@ -15,8 +15,12 @@ import Agent.CLI.PendingInputs
     , withPendingInputs
     )
 import Agent.CLI.SteeringInputs
-    ( commitSteeringInputs
+    ( awaitBackgroundCompletion
+    , commitSteeringInputs
+    , dismissBackgroundCompletion
+    , enqueueBackgroundCompletion
     , enqueueSteeringInputs
+    , hasBackgroundCompletions
     , newSteeringInputs
     , readSteeringInputs
     , steeringInputCountLimit
@@ -45,9 +49,11 @@ import Control.Concurrent
     , takeMVar
     )
 import Control.Exception.Safe (tryAny)
+import Control.Concurrent.STM (atomically)
 import Data.Either (isLeft)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Text as Text
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -369,3 +375,32 @@ spec = do
             `shouldReturn` Right ()
         readSteeringInputs steering `shouldReturn`
             drop 2 queued <> [UserMessage "new-1", UserMessage "new-2"]
+
+    it "wakes only for keyed background completions and dismisses them" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "ordinary"]
+            `shouldReturn` Right ()
+        timeout 10000 (atomically (awaitBackgroundCompletion steering))
+            `shouldReturn` Nothing
+
+        enqueueBackgroundCompletion
+            steering
+            "task-1"
+            (UserMessage "completed")
+            `shouldReturn` Right True
+        enqueueBackgroundCompletion
+            steering
+            "task-1"
+            (UserMessage "duplicate")
+            `shouldReturn` Right False
+        hasBackgroundCompletions steering `shouldReturn` True
+        timeout 100000 (atomically (awaitBackgroundCompletion steering))
+            `shouldReturn` Just ()
+        timeout 10000 (atomically (awaitBackgroundCompletion steering))
+            `shouldReturn` Nothing
+        readSteeringInputs steering `shouldReturn`
+            [UserMessage "ordinary", UserMessage "completed"]
+
+        dismissBackgroundCompletion steering "task-1"
+        hasBackgroundCompletions steering `shouldReturn` False
+        readSteeringInputs steering `shouldReturn` [UserMessage "ordinary"]
