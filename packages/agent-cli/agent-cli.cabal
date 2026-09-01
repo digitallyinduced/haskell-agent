@@ -180,6 +180,12 @@ library
                     , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
+                    , Agent.CLI.Mail.Imap
+                    , Agent.CLI.Mail.Mime
+                    , Agent.CLI.Mail.OAuth
+                    , Agent.CLI.Mail.Store
+                    , Agent.CLI.Mail.Tools
+                    , Agent.CLI.Mail.Transport
                     , Agent.CLI.MetaConsole
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
@@ -284,6 +290,7 @@ library
                     , bytestring
                     , colour >= 2.3
                     , containers
+                    , crypton-connection
                     , crypton
                     , directory
                     , entropy
@@ -308,6 +315,7 @@ library
                     , tagsoup
                     , text >= 2.0 && < 2.2
                     , time
+                    , tls
                     , transformers
                     , unix
                     , vector
@@ -478,6 +486,11 @@ test-suite agent-cli-test
                     , Agent.CLI.ContextSpec
                     , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
+                    , Agent.CLI.MailMimeSpec
+                    , Agent.CLI.MailOAuthSpec
+                    , Agent.CLI.MailStoreSpec
+                    , Agent.CLI.MailToolsSpec
+                    , Agent.CLI.MailTransportSpec
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.DesktopSpec
@@ -574,6 +587,9 @@ test-suite agent-cli-test
                     , http-client
                     , http-types
                     , JuicyPixels
+                    , http-types
+                    , network
+                    , network-uri
                     , process
                     , QuickCheck >= 2.14 && < 2.16
                     , safe-exceptions
@@ -588,6 +604,7 @@ test-suite agent-cli-test
     if os(darwin)
         c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
                     , test/cbits/HaskellAgentBridgeImageSmoke.c
+                    , test/cbits/HaskellAgentBridgeMailSmoke.c
                     , test/cbits/HaskellAgentBridgeTaskSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
         other-modules: Agent.CLI.MacOS.Bridge

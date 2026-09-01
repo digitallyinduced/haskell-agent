@@ -5,11 +5,11 @@
 , agent-responses-types, agent-runtime-daemon, agent-store
 , agent-syntax, agent-tui, agent-xai, ansi-terminal, async, base
 , base64-bytestring, brick, bytestring, colour, containers, crypton
-, deepseq, directory, entropy, filelock, filepath, haskeline
-, hasql-pool, hspec, http-client, http-client-tls, http-types
-, JuicyPixels, lib, memory, mtl, network, network-uri
+, crypton-connection, deepseq, directory, entropy, filelock, filepath
+, haskeline, hasql-pool, hspec, http-client, http-client-tls
+, http-types, JuicyPixels, lib, memory, mtl, network, network-uri
 , optparse-applicative, process, QuickCheck, retry, safe-exceptions
-, scientific, stm, tagsoup, text, time, transformers, unix, vector
+, scientific, stm, tagsoup, text, time, tls, transformers, unix, vector
 , vty, vty-crossplatform, wai, warp
 }:
 mkDerivation {
@@ -28,11 +28,11 @@ mkDerivation {
     agent-runtime-daemon
     agent-responses-types agent-store agent-syntax agent-tui agent-xai
     ansi-terminal async base base64-bytestring brick bytestring colour
-    containers crypton directory entropy filelock filepath haskeline
-    hasql-pool http-client http-client-tls http-types JuicyPixels
-    memory mtl network network-uri optparse-applicative process retry
-    safe-exceptions scientific stm tagsoup text time transformers unix
-    vector vty vty-crossplatform wai warp
+    containers crypton crypton-connection directory entropy filelock
+    filepath haskeline hasql-pool http-client http-client-tls http-types
+    JuicyPixels memory mtl network network-uri optparse-applicative
+    process retry safe-exceptions scientific stm tagsoup text time tls
+    transformers unix vector vty vty-crossplatform wai warp
   ];
   executableHaskellDepends = [
     aeson agent-cli-runtime agent-responses agent-responses-types
@@ -45,8 +45,8 @@ mkDerivation {
     agent-openai agent-openrouter agent-responses agent-responses-types
     agent-runtime-daemon agent-store agent-tui agent-xai ansi-terminal
     async base brick bytestring colour containers directory filepath
-    haskeline hspec JuicyPixels process QuickCheck safe-exceptions stm
-    text time transformers unix vty
+    haskeline hspec http-types JuicyPixels network network-uri process
+    QuickCheck safe-exceptions stm text time transformers unix vty
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types

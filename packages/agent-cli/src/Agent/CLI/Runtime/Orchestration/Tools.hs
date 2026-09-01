@@ -55,6 +55,8 @@ import Agent.CLI.LearnedSkills.Store
 import Agent.CLI.Login ()
 import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
+import Agent.CLI.Mail.Tools ( mailToolsForStore )
+import Agent.CLI.Mail.Transport ( productionMailTransport )
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
@@ -839,6 +841,7 @@ runAgentTools
                 (sessionId, tempDir) <- allocateSessionTemp root
                 pure (tempDir, Just sessionId)
     setToolSessionTmp baseToolEnv (Just sessionTmp)
+    mailAppTools <- mailToolsForStore baseToolEnv productionMailTransport
     imageGenerationHistory <- newImageGenerationHistory
     forM_ resumed \(_, turns) ->
         recordImageGenerationResponseItems
@@ -1061,7 +1064,8 @@ runAgentTools
     mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
     let lspRuntime = lspStartup.lspStartupRuntime
         extraTools =
-            maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
+            mailAppTools
+                <> maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
         closeExtraTools =
             concurrently_

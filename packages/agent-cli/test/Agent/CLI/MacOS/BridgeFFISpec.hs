@@ -76,6 +76,9 @@ spec = describe "native bridge FFI" do
     it "does not retry a terminal callback that throws" do
         Bridge.repositoryTerminalThrowSmoke `shouldReturn` True
 
+    it "rejects invalid mail ABI calls before launching workers" do
+        Bridge.mailABISynchronousValidationSmoke `shouldReturn` True
+
     it "validates the typed repository-review ABI from native code" do
 #ifdef darwin_HOST_OS
         repositoryReviewAbiSmoke `shouldReturn` 0
