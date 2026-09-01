@@ -12,6 +12,8 @@ module Agent.CLI.Options
     , StorageCommand(..)
     , defaultCliOptions
     , defaultEffortFor
+    , freshSessionOptions
+    , gatewayRoutingChanged
     , isOneShot
     , parseApprovalAnswer
     , parseArgs
@@ -181,6 +183,27 @@ defaultCliOptions = CliOptions
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
+
+-- | Drop provider-visible routing and conversation inputs when a gateway
+-- credential change creates a new trust boundary.
+freshSessionOptions :: CliOptions -> OsPath -> CliOptions
+freshSessionOptions options cwd =
+    options
+        { optProvider = Nothing
+        , optModel = Nothing
+        , optCwd = Just cwd
+        , optWorktree = False
+        , optEffort = Nothing
+        , optPrompt = Nothing
+        , optPromptFile = Nothing
+        , optManagedTurnFile = Nothing
+        , optResume = Nothing
+        }
+
+-- | Compare complete loaded gateway states so connect, disconnect, endpoint,
+-- and credential changes all create a new routing boundary.
+gatewayRoutingChanged :: Eq gateway => gateway -> gateway -> Bool
+gatewayRoutingChanged before after = before /= after
 
 isOneShot :: CliOptions -> Bool
 isOneShot options =

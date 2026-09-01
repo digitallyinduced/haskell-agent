@@ -9,7 +9,7 @@ import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..), picosecondsToDiffTime)
+import Data.Time.Clock (UTCTime(..), addUTCTime, picosecondsToDiffTime)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
@@ -235,6 +235,10 @@ spec = describe "PostgreSQL session schema" do
                                 `shouldReturn` Right True
                             appendSessionTurns pool [turn2, turn3] metadata2
                                 `shouldReturn` Right True
+                            loadSessionMetadataMany
+                                pool
+                                ["session-2", "missing", "session-1"]
+                                `shouldReturn` Right [metadata2, metadata]
                             appendSessionTurns
                                 pool
                                 []
@@ -374,6 +378,99 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected conversation search: " <> show other)
+                            let boundaryQuery = "boundary needle"
+                                boundaryTurn occurredAt =
+                                    turn
+                                        { sessionTurnOccurredAt = occurredAt
+                                        , sessionTurnUserText = boundaryQuery
+                                        , sessionTurnAssistantText = Nothing
+                                        }
+                                authorizedMetadata = metadata
+                                    { sessionMetadataKey =
+                                        "boundary-authorized"
+                                    }
+                                unauthorizedMetadata = metadata
+                                    { sessionMetadataKey =
+                                        "boundary-unauthorized"
+                                    , sessionMetadataGatewayIdentity =
+                                        Just "gateway-sha256:other-tenant"
+                                    }
+                                directMetadata = metadata
+                                    { sessionMetadataKey = "boundary-direct"
+                                    , sessionMetadataConnection = "openai"
+                                    , sessionMetadataGatewayIdentity = Nothing
+                                    }
+                                boundaryFixtures =
+                                    [ ( authorizedMetadata
+                                      , boundaryTurn (addUTCTime 1 now)
+                                      )
+                                    , ( unauthorizedMetadata
+                                      , boundaryTurn (addUTCTime 2 now)
+                                      )
+                                    , ( directMetadata
+                                      , boundaryTurn (addUTCTime 3 now)
+                                      )
+                                    ]
+                            mapM_
+                                (\(boundaryMetadata, matchingTurn) -> do
+                                    createSession pool boundaryMetadata
+                                        `shouldReturn` Right True
+                                    appendSessionTurn
+                                        pool matchingTurn boundaryMetadata
+                                        `shouldReturn` Right True)
+                                boundaryFixtures
+                            searchConversationTurnsForBoundary
+                                pool
+                                "organization-gateway"
+                                (Just "gateway-sha256:test-tenant")
+                                boundaryQuery
+                                1 >>= \case
+                                    Right [match] ->
+                                        match.searchSessionId
+                                            `shouldBe` "boundary-authorized"
+                                    other ->
+                                        expectationFailure
+                                            ("unexpected gateway-bound search: "
+                                                <> show other)
+                            searchConversationTurnsForBoundary
+                                pool
+                                "organization-gateway"
+                                Nothing
+                                boundaryQuery
+                                1 >>= \case
+                                    Right [match] ->
+                                        match.searchSessionId
+                                            `shouldBe` "boundary-direct"
+                                    other ->
+                                        expectationFailure
+                                            ("unexpected direct-bound search: "
+                                                <> show other)
+                            searchNativeConversationsForBoundary
+                                pool
+                                "organization-gateway"
+                                (Just "gateway-sha256:test-tenant")
+                                boundaryQuery
+                                1 >>= \case
+                                    Right [match] ->
+                                        match.nativeSearchSessionId
+                                            `shouldBe` "boundary-authorized"
+                                    other ->
+                                        expectationFailure
+                                            ("unexpected native gateway search: "
+                                                <> show other)
+                            searchNativeConversationsForBoundary
+                                pool
+                                "organization-gateway"
+                                Nothing
+                                boundaryQuery
+                                1 >>= \case
+                                    Right [match] ->
+                                        match.nativeSearchSessionId
+                                            `shouldBe` "boundary-direct"
+                                    other ->
+                                        expectationFailure
+                                            ("unexpected native direct search: "
+                                                <> show other)
                             setSessionArchived pool "session-2" True now
                                 `shouldReturn` Right True
                             searchNativeConversations pool "second" 10 >>= \case
@@ -673,7 +770,8 @@ testMetadata now = SessionMetadata
     , sessionMetadataCreatedAt = now
     , sessionMetadataUpdatedAt = now
     , sessionMetadataProvider = "openai"
-    , sessionMetadataConnection = "openai"
+    , sessionMetadataConnection = "organization-gateway"
+    , sessionMetadataGatewayIdentity = Just "gateway-sha256:test-tenant"
     , sessionMetadataModel = "gpt-test"
     , sessionMetadataTransportModel = Just "gpt-test"
     , sessionMetadataDialect = "openai"

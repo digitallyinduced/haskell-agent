@@ -22,6 +22,7 @@ sessionSchemaStatements =
       \ updated_at timestamptz NOT NULL,\
       \ provider text NOT NULL CHECK (length(btrim(provider)) > 0),\
       \ connection_id text NOT NULL CHECK (length(btrim(connection_id)) > 0),\
+      \ gateway_identity text,\
       \ model_id text NOT NULL CHECK (length(btrim(model_id)) > 0),\
       \ transport_model_id text,\
       \ dialect text NOT NULL CHECK (length(btrim(dialect)) > 0),\

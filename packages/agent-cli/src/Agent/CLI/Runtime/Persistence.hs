@@ -45,6 +45,7 @@ preparePersistence
     -> CliOptions
     -> OsPath
     -> ModelTarget
+    -> Maybe Text
     -> Bool
     -> OsPath
     -> Text
@@ -53,7 +54,7 @@ preparePersistence
     -> IO Persistence
 preparePersistence
         sessionPool startup options root target
-        retargetResumed cwd effort prompt resumed =
+        gatewayIdentity retargetResumed cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
             now <- getCurrentTime
@@ -133,6 +134,7 @@ preparePersistence
                     { createPool = sessionPool
                     , createRoot = root
                     , createTarget = target
+                    , createGatewayIdentity = gatewayIdentity
                     , createCwd = cwd
                     , createEffort = effort
                     , createTitleHint = sessionTitleFromPrompt <$> prompt

@@ -31,6 +31,9 @@ data DevResult
 data RunResult
     = RunQuit
     | RunRestart Text
+    | RunFreshSession OsPath
+      -- ^ Start without resuming any conversation after a routing boundary
+      -- changes, preserving only the working directory.
     | RunUpdateAndRestart Text
     | RunEnableCodeMode Text
     | RunReload Text

@@ -31,6 +31,7 @@ module Agent.Store.Postgres.Session
     , loadSession
     , loadSessionWithImplementation
     , loadSessions
+    , loadSessionMetadataMany
     , loadSessionMetadata
     , loadLatestSessionPromptEpoch
     , loadActiveSession
@@ -52,7 +53,9 @@ module Agent.Store.Postgres.Session
     , listSessionArchiveKeys
     , setSessionArchived
     , searchConversationTurns
+    , searchConversationTurnsForBoundary
     , searchNativeConversations
+    , searchNativeConversationsForBoundary
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock

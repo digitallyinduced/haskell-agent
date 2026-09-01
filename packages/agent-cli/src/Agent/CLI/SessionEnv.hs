@@ -53,6 +53,7 @@ data SessionEnv = SessionEnv
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
     , sessionConnection :: !Text
+    , sessionGatewayIdentity :: !(Maybe Text)
     , sessionModelCatalog :: !ModelCatalog
     , sessionGatewayModels :: !(IORef (Maybe GatewayModelAccess))
     , sessionDialect :: !Dialect

@@ -154,7 +154,7 @@ spec =
                         withSession
                             (provisioningPool store)
                             (Session.statement () upgradedSchemaStatement)
-                            `shouldReturn` Right (True, True, True)
+                            `shouldReturn` Right (True, True, True, True)
                         ) >>= \case
                             Left err ->
                                 expectationFailure
@@ -640,7 +640,7 @@ migratedTranscriptEffectsStatement = Statement.preparable
     (Decoders.rowList $
         Decoders.column (Decoders.nonNullable Decoders.text))
 
-upgradedSchemaStatement :: Statement () (Bool, Bool, Bool)
+upgradedSchemaStatement :: Statement () (Bool, Bool, Bool, Bool)
 upgradedSchemaStatement = Statement.preparable
     "SELECT\
     \ EXISTS (\
@@ -655,10 +655,17 @@ upgradedSchemaStatement = Statement.preparable
     \     AND table_name = 'sessions'\
     \     AND column_name = 'metadata_value_id'\
     \ ),\
+    \ EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'sessions'\
+    \     AND column_name = 'gateway_identity'\
+    \ ),\
     \ to_regclass('harness.structured_values') IS NULL"
     Encoders.noParams
     (Decoders.singleRow $
-        (,,)
+        (,,,)
             <$> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))

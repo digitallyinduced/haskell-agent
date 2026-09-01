@@ -121,6 +121,7 @@ sessionForPrompt runtime key prompt = do
                 { createPool = runtime.runtimePool
                 , createRoot = runtime.runtimeSessionsRoot
                 , createTarget = runtime.runtimeTarget
+                , createGatewayIdentity = Nothing
                 , createCwd = runtime.runtimeCwd
                 , createEffort = runtime.runtimeEffort
                 , createTitleHint = Just (sessionTitleFromPrompt prompt)

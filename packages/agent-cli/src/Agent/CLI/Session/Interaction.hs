@@ -48,6 +48,7 @@ import Agent.CLI.Session.History
     , readLiveTranscript
     )
 import Agent.CLI.Style (roleError)
+import Agent.CLI.Status (formatFooterAccount)
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
     ( emitUiEvent
@@ -140,7 +141,7 @@ buildPromptState activeDialect params planState policy account accountSelectable
                 (reasoningEffortsForDialect activeDialect)
         , promptMode =
             replModeLabel (replModeFromState planState policy)
-        , promptAccount = account
+        , promptAccount = formatFooterAccount account
         , promptAccountSelectable = accountSelectable
         , promptUsage = usage
         , promptLimitStatus = Nothing

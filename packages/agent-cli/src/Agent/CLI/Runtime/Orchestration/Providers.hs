@@ -33,7 +33,7 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
-import Agent.CLI.GatewayClient (loadGatewayCredential)
+import Agent.CLI.GatewayClient (GatewayCredential)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.LearnedSkills ()
@@ -254,6 +254,7 @@ import qualified Agent.Gemini.Options as Gemini
 runAgentProviders
     :: ModelSwitchScope
     -> LoadedAuth
+    -> Maybe GatewayCredential
     -> (Maybe (STM ApiError)
         -> Maybe TokenProvider
         -> Maybe Pool
@@ -305,6 +306,7 @@ runAgentProviders
 runAgentProviders
     modelSwitchScope
     loaded
+    connectedGateway
     sessionRequest
     activeAccountIdRef
     activeAccountRef
@@ -839,6 +841,7 @@ runAgentProviders
                                 }
                     ClaudeCodeProvider ->
                         withSelectedClaudeAuth
+                            connectedGateway
                             loaded
                             (startupDie startup . Text.unpack)
                             \claudeAuth -> do
@@ -1126,23 +1129,24 @@ runAgentProviders
 
 
 withSelectedClaudeAuth
-    :: LoadedAuth
+    :: Maybe GatewayCredential
+    -> LoadedAuth
     -> (Text -> IO value)
     -> (ClaudeCodeAuth -> IO value)
     -> IO value
-withSelectedClaudeAuth loaded onError action
+withSelectedClaudeAuth connectedGateway loaded onError action
+    -- Use the same immutable credential snapshot that selected the catalog,
+    -- auth, and session boundary. Reloading here could cross organizations.
     | not (isGatewayLoadedAuth loaded) =
         loadClaudeCodeAuth >>= either onError action
-    | otherwise =
-        loadGatewayCredential >>= \case
-            Left err -> onError err
-            Right Nothing ->
-                onError "No organization gateway credential is connected."
-            Right (Just credential) -> do
-                result <- withClaudeGatewayProxy credential \transport ->
-                    loadClaudeCodeGatewayAuth transport
-                        >>= either onError action
-                either onError pure result
+    | otherwise = case connectedGateway of
+        Nothing ->
+            onError "No organization gateway credential is connected."
+        Just credential -> do
+            result <- withClaudeGatewayProxy credential \transport ->
+                loadClaudeCodeGatewayAuth transport
+                    >>= either onError action
+            either onError pure result
 
 sessionRunnerContinuation :: SessionRunner.SessionRunnerContinuation
 sessionRunnerContinuation =

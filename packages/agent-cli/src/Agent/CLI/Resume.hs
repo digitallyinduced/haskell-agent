@@ -19,6 +19,7 @@ module Agent.CLI.Resume
     , moveResumeBrowser
     , pickResumeEntries
     , pickResumeSession
+    , publishResumeHistoryAfterBoundary
     , removeResumeEntry
     , renderResumeFrame
     , renderResumeFrameFor
@@ -27,17 +28,20 @@ module Agent.CLI.Resume
     , resumeEntryFromMeta
     , resumeEntriesFrom
     , resumeSearchEntries
+    , filterResumeSessionsForBoundary
     , resumeRelativeAge
     , resumeSourceLabel
     , selectedResumeBrowser
     , setResumeDeletePending
     , setResumeNotice
     , toggleResumeExpanded
+    , validateResumeMetaForBoundary
     , visibleResumeBrowser
     , visibleResume
     ) where
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
+import Agent.CLI.Models (validateResumedGatewayBoundary)
 import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
@@ -152,6 +156,42 @@ resumeEntriesFrom = map (uncurry entryFrom)
 
 resumeEntryFromMeta :: SessionMeta -> ResumeEntry
 resumeEntryFromMeta meta = entryFromWith False meta []
+
+-- | Keep the resume surface on the same direct/gateway credential boundary
+-- as the active session. Startup validates again before loading any history.
+filterResumeSessionsForBoundary
+    :: Maybe Text
+    -> [SessionMeta]
+    -> [SessionMeta]
+filterResumeSessionsForBoundary gatewayIdentity =
+    filter \meta ->
+        case validateResumeMetaForBoundary gatewayIdentity meta of
+            Right () -> True
+            Left _ -> False
+
+-- | Validate loaded resume metadata before any of its cwd, repository, model,
+-- or transcript state is allowed to reach startup surfaces.
+validateResumeMetaForBoundary
+    :: Maybe Text
+    -> SessionMeta
+    -> Either Text ()
+validateResumeMetaForBoundary gatewayIdentity meta =
+    validateResumedGatewayBoundary
+        gatewayIdentity
+        meta.metaConnection
+        meta.metaGatewayIdentity
+
+-- | Keep transcript publication behind the same fail-closed boundary used by
+-- startup. In particular, a fullscreen resume must not enqueue history before
+-- startup has accepted the active gateway credential identity.
+publishResumeHistoryAfterBoundary
+    :: Either Text ()
+    -> IO ()
+    -> IO (Either Text ())
+publishResumeHistoryAfterBoundary boundaryResult publish =
+    case boundaryResult of
+        Left err -> pure (Left err)
+        Right () -> publish >> pure (Right ())
 
 loadResumeEntry :: StorePool -> OsPath -> Text -> IO (Either Text ResumeEntry)
 loadResumeEntry pool root sessionId =

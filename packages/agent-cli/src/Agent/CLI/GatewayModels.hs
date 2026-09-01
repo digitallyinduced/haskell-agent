@@ -2,12 +2,14 @@
 -- gateway for native clients that do not own a long-running CLI session.
 module Agent.CLI.GatewayModels
     ( loadGatewayModelOptionsAt
+    , loadGatewayModelOptionsWithCredentialAt
     , modelOptionsForGatewayModels
     , modelOptionsForGatewayState
     ) where
 
 import Agent.CLI.GatewayClient
-    ( GatewayModel(..)
+    ( GatewayCredential
+    , GatewayModel(..)
     , GatewayModelProtocol(..)
     , loadGatewayCredentialAt
     , newGatewayModelAccess
@@ -33,29 +35,41 @@ loadGatewayModelOptionsAt
     -> OsPath
     -> IO (Either Text (ModelCatalog, Maybe [ModelOption]))
 loadGatewayModelOptionsAt home cwd =
+    loadGatewayCredentialAt home >>= \case
+        Left err ->
+            pure (Left ("cannot load gateway credential: " <> err))
+        Right credential ->
+            loadGatewayModelOptionsWithCredentialAt home cwd credential
+
+-- | Load native model options from one immutable credential snapshot. Callers
+-- that already established a gateway boundary must not reload gateway.json
+-- while deriving the authoritative catalog.
+loadGatewayModelOptionsWithCredentialAt
+    :: OsPath
+    -> OsPath
+    -> Maybe GatewayCredential
+    -> IO (Either Text (ModelCatalog, Maybe [ModelOption]))
+loadGatewayModelOptionsWithCredentialAt home cwd credential =
     loadModelCatalogAt home cwd >>= \case
         Left err -> pure (Left err)
-        Right catalog ->
-            loadGatewayCredentialAt home >>= \case
-                Left err ->
-                    pure (Left ("cannot load gateway credential: " <> err))
-                Right Nothing -> pure (Right (catalog, Nothing))
-                Right (Just credential) -> do
-                    access <- newGatewayModelAccess credential
-                    refreshGatewayModels access >>= \case
-                        Left err -> pure (Left err)
-                        Right [] ->
-                            pure
-                                (Left
-                                    "The organization gateway does not offer any models.")
-                        Right models ->
-                            pure
-                                (Right
-                                    ( catalog
-                                    , Just
-                                        (modelOptionsForGatewayModels
-                                            catalog models)
-                                    ))
+        Right catalog -> case credential of
+            Nothing -> pure (Right (catalog, Nothing))
+            Just connected -> do
+                access <- newGatewayModelAccess connected
+                refreshGatewayModels access >>= \case
+                    Left err -> pure (Left err)
+                    Right [] ->
+                        pure
+                            (Left
+                                "The organization gateway does not offer any models.")
+                    Right models ->
+                        pure
+                            (Right
+                                ( catalog
+                                , Just
+                                    (modelOptionsForGatewayModels
+                                        catalog models)
+                                ))
 
 modelOptionsForGatewayModels
     :: ModelCatalog

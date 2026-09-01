@@ -13,6 +13,7 @@ module Agent.CLI.Models
     , defaultModelOptionFor
     , resolveConfiguredModel
     , resolveSavedModelTarget
+    , validateResumedGatewayBoundary
     , resolveModelOptionById
     , rawModelOption
     , gatewayModelOptions
@@ -172,6 +173,46 @@ resolveSavedModelTarget
         , targetWireModelId = fromMaybe model transport
         , targetDialect = dialect
         }
+
+-- | Refuse to carry provider-visible conversation history across gateway
+-- routing boundaries. This check is independent of model overrides: changing
+-- the selected alias must never authorize a local or differently-routed
+-- session to enter the currently connected organization.
+validateResumedGatewayBoundary
+    :: Maybe Text
+    -- ^ Identity of the currently connected gateway credential.
+    -> Text
+    -- ^ Persisted session connection.
+    -> Maybe Text
+    -- ^ Persisted gateway identity.
+    -> Either Text ()
+validateResumedGatewayBoundary currentIdentity connection savedIdentity =
+    case currentIdentity of
+        Nothing
+            | connection == organizationGatewayConnectionId ->
+                Left
+                    "This session belongs to an organization gateway. \
+                    \Reconnect the same gateway before resuming it."
+            | savedIdentity /= Nothing ->
+                Left
+                    "This session has inconsistent organization gateway \
+                    \routing metadata and cannot be resumed."
+            | otherwise -> Right ()
+        Just current
+            | connection /= organizationGatewayConnectionId ->
+                Left
+                    "This session was created outside the connected \
+                    \organization gateway. Start a new session or disconnect \
+                    \the gateway before resuming it."
+            | savedIdentity == Nothing ->
+                Left
+                    "This gateway session predates organization identity \
+                    \binding and cannot be resumed safely. Start a new session."
+            | savedIdentity /= Just current ->
+                Left
+                    "This session belongs to a different organization gateway \
+                    \credential and cannot be resumed. Start a new session."
+            | otherwise -> Right ()
 
 catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =
