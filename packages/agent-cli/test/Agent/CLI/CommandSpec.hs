@@ -491,6 +491,7 @@ spec = do
                     , "copy-path"
                     , "copy-session"
                     , "terminal"
+                    , "changelog"
                     , "agents"
                     , "mcp"
                     , "loop"

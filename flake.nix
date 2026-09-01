@@ -610,6 +610,7 @@
                                         [ "lib/libhaskell-agent-bridge.dylib" ];
                             }))
                             [
+                                pkgs.bash
                                 pkgs.coreutils
                                 pkgs.git
                                 bun_1_4

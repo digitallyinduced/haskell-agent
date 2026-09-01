@@ -8,6 +8,7 @@ module Agent.CLI.TUI.Render.Internal
     , conversationScrollbarRenderer
     , choiceRowColumns
     , filterChoiceRowLimit
+    , quickStartCardHeight
     , quickStartVisible
     , quickStartWideVisible
     , quickStartCardWidth
@@ -196,7 +197,8 @@ import Agent.CLI.TUI.Render.Overlays
     , normalizeTextOverlayInsertion, maskedSecretText, textOverlayDisplayText
     , resumeSearchCursorColumn )
 import Agent.CLI.TUI.Render.Transcript
-    ( stickyPromptLayers, quickStartVisible, quickStartWideVisible
+    ( stickyPromptLayers, quickStartCardHeight
+    , quickStartVisible, quickStartWideVisible
     , quickStartCardWidth, quickStartRows, drawQuickStartCard
     , startupCapabilityLines )
 import Agent.CLI.TUI.Render.Workspace
