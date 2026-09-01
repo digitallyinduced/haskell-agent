@@ -564,7 +564,7 @@ spec = describe "query" do
                     [ "#!/bin/sh"
                     , "IFS= read -r _query"
                     , "printf '%s\\n' " <> shellQuote firstRecord
-                    , "sleep 0.3"
+                    , "while :; do :; done"
                     , "printf '%s\\n' "
                         <> shellQuote (successResult testSessionId)
                     ]
@@ -602,7 +602,7 @@ spec = describe "query" do
             (Text.unpack $ Text.unlines
                 [ "#!/bin/sh"
                 , "IFS= read -r _query"
-                , "sleep 5"
+                , "while :; do :; done"
                 ])
             \directory executable -> do
                 result <-
