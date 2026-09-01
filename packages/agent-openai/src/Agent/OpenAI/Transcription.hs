@@ -154,9 +154,9 @@ data ChatGPTDictationEvent
     | ChatGPTSessionUpdated !Text
     | ChatGPTSpeechStarted !Text
     | ChatGPTSpeechStopped !Text
-    | ChatGPTTranscriptDelta !Text !Text
-    | ChatGPTTranscriptSegment !Text !Text
-    | ChatGPTTranscriptFinal !Text !Text
+    | ChatGPTTranscriptDelta !Text !Int !Text
+    | ChatGPTTranscriptSegment !Text !Int !Text
+    | ChatGPTTranscriptFinal !Text !Int !Text
     | ChatGPTTranscriptFailed !Text
     | ChatGPTSessionError !Bool !Text
     | ChatGPTEventUnknown
@@ -184,16 +184,19 @@ chatGPTDictationEventDecoder = Json.discriminatedObject "type" \case
         Json.object $
             ChatGPTTranscriptDelta
                 <$> Json.atKey "utterance_id" Json.text
+                <*> Json.atKey "revision" Json.int
                 <*> Json.atKey "text" Json.text
     "transcript.segment" ->
         Json.object $
             ChatGPTTranscriptSegment
                 <$> Json.atKey "utterance_id" Json.text
+                <*> Json.atKey "revision" Json.int
                 <*> Json.atKey "text" Json.text
     "transcript.final" ->
         Json.object $
             ChatGPTTranscriptFinal
                 <$> Json.atKey "utterance_id" Json.text
+                <*> Json.atKey "revision" Json.int
                 <*> Json.atKey "text" Json.text
     "transcript.failed" ->
         Json.object $
@@ -401,13 +404,20 @@ data ChatGPTStreamEndpoint = ChatGPTStreamEndpoint
 
 data ChatGPTStreamState = ChatGPTStreamState
     { utteranceOrder :: ![Text]
-    , textByUtterance :: !(Map.Map Text Text)
+    , transcriptByUtterance ::
+        !(Map.Map Text ChatGPTUtteranceTranscript)
+    }
+
+data ChatGPTUtteranceTranscript = ChatGPTUtteranceTranscript
+    { revision :: !Int
+    , text :: !Text
+    , final :: !Bool
     }
 
 emptyChatGPTStreamState :: ChatGPTStreamState
 emptyChatGPTStreamState = ChatGPTStreamState
     { utteranceOrder = []
-    , textByUtterance = Map.empty
+    , transcriptByUtterance = Map.empty
     }
 
 streamChatGPTDictation
@@ -643,11 +653,11 @@ receiveChatGPTDictation connection state finished onTranscript =
                         pure (Left message)
                     ChatGPTSessionError True message ->
                         pure (Left message)
-                    ChatGPTTranscriptDelta _ _ ->
+                    ChatGPTTranscriptDelta _ _ _ ->
                         updateTranscript event >> loop
-                    ChatGPTTranscriptSegment _ _ ->
+                    ChatGPTTranscriptSegment _ _ _ ->
                         updateTranscript event >> loop
-                    ChatGPTTranscriptFinal _ _ ->
+                    ChatGPTTranscriptFinal _ _ _ ->
                         updateTranscript event >> loop
                     _ -> do
                         modifyMVar state \previous ->
@@ -659,16 +669,24 @@ receiveChatGPTDictation connection state finished onTranscript =
                                 )
                         loop
     updateTranscript event = do
-        current <- modifyMVar state \previous ->
+        notification <- modifyMVar state \previous ->
             let next =
                     applyChatGPTDictationEvent
                         event
                         previous
-            in pure (next, next)
-        let transcript = renderChatGPTTranscript current
-        unless (Text.null transcript) $
-            ignoreSynchronousException
-                (onTranscript transcript)
+                before = renderChatGPTTranscript previous
+                after = renderChatGPTTranscript next
+            in pure
+                ( next
+                , if after == before then Nothing else Just after
+                )
+        case notification of
+            Nothing ->
+                pure ()
+            Just transcript ->
+                unless (Text.null transcript) $
+                    ignoreSynchronousException
+                        (onTranscript transcript)
 
 receiverFailure :: SomeException -> Either Text ()
 receiverFailure err =
@@ -690,37 +708,49 @@ applyChatGPTDictationEvent event state =
             ensureChatGPTUtterance utteranceId state
         ChatGPTSpeechStopped utteranceId ->
             ensureChatGPTUtterance utteranceId state
-        ChatGPTTranscriptDelta utteranceId text ->
-            appendChatGPTTranscript utteranceId text state
-        ChatGPTTranscriptSegment utteranceId text ->
-            appendChatGPTTranscript utteranceId text state
-        ChatGPTTranscriptFinal utteranceId text ->
+        ChatGPTTranscriptDelta utteranceId revision text ->
+            replaceChatGPTTranscript utteranceId revision text state
+        ChatGPTTranscriptSegment utteranceId revision text ->
+            replaceChatGPTTranscript utteranceId revision text state
+        ChatGPTTranscriptFinal utteranceId revision text ->
             let withUtterance =
                     ensureChatGPTUtterance utteranceId state
             in withUtterance
-                { textByUtterance =
+                { transcriptByUtterance =
                     Map.insert
                         utteranceId
-                        text
-                        withUtterance.textByUtterance
+                        ChatGPTUtteranceTranscript
+                            { revision
+                            , text
+                            , final = True
+                            }
+                        withUtterance.transcriptByUtterance
                 }
         _ ->
             state
 
-appendChatGPTTranscript
+replaceChatGPTTranscript
     :: Text
+    -> Int
     -> Text
     -> ChatGPTStreamState
     -> ChatGPTStreamState
-appendChatGPTTranscript utteranceId text state =
+replaceChatGPTTranscript utteranceId revision text state =
     let withUtterance = ensureChatGPTUtterance utteranceId state
     in withUtterance
-        { textByUtterance =
-            Map.insertWith
-                (\new previous -> previous <> new)
+        { transcriptByUtterance =
+            Map.adjust
+                (\previous ->
+                    if previous.final
+                        || revision < previous.revision
+                        then previous
+                        else ChatGPTUtteranceTranscript
+                            { revision
+                            , text
+                            , final = False
+                            })
                 utteranceId
-                text
-                withUtterance.textByUtterance
+                withUtterance.transcriptByUtterance
         }
 
 ensureChatGPTUtterance
@@ -728,24 +758,31 @@ ensureChatGPTUtterance
     -> ChatGPTStreamState
     -> ChatGPTStreamState
 ensureChatGPTUtterance utteranceId state
-    | Map.member utteranceId state.textByUtterance =
+    | Map.member utteranceId state.transcriptByUtterance =
         state
     | otherwise =
         state
             { utteranceOrder = state.utteranceOrder <> [utteranceId]
-            , textByUtterance =
-                Map.insert utteranceId "" state.textByUtterance
+            , transcriptByUtterance =
+                Map.insert
+                    utteranceId
+                    ChatGPTUtteranceTranscript
+                        { revision = -1
+                        , text = ""
+                        , final = False
+                        }
+                    state.transcriptByUtterance
             }
 
 renderChatGPTTranscript :: ChatGPTStreamState -> Text
 renderChatGPTTranscript state =
     Text.unwords
-        [ transcript
+        [ transcript.text
         | utteranceId <- state.utteranceOrder
         , Just transcript <- [Map.lookup
             utteranceId
-            state.textByUtterance]
-        , not (Text.null (Text.strip transcript))
+            state.transcriptByUtterance]
+        , not (Text.null (Text.strip transcript.text))
         ]
 
 chatGPTSessionStartMessage :: Int -> Text

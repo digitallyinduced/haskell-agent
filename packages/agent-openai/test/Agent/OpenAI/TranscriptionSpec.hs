@@ -83,13 +83,13 @@ spec = describe "OpenAI transcription" do
                 <> "\"utterance_id\":\"utterance-1\",\"revision\":1,"
                 <> "\"text\":\"hello \"}")
             `shouldBe` Right
-                (ChatGPTTranscriptDelta "utterance-1" "hello ")
+                (ChatGPTTranscriptDelta "utterance-1" 1 "hello ")
         decodeChatGPTDictationEvent
             ("{\"type\":\"transcript.final\",\"sequence_no\":3,"
                 <> "\"utterance_id\":\"utterance-1\",\"revision\":1,"
                 <> "\"text\":\"hello world\"}")
             `shouldBe` Right
-                (ChatGPTTranscriptFinal "utterance-1" "hello world")
+                (ChatGPTTranscriptFinal "utterance-1" 1 "hello world")
         decodeChatGPTDictationEvent
             ("{\"type\":\"session.error\",\"sequence_no\":2,\"fatal\":true,"
                 <> "\"error\":{\"code\":\"failed\",\"message\":\"bad audio\","
@@ -207,21 +207,35 @@ spec = describe "OpenAI transcription" do
                     , "sequence_no" .= (3 :: Int)
                     , "utterance_id" .= ("utterance-1" :: Text)
                     , "revision" .= (1 :: Int)
-                    , "text" .= ("hello " :: Text)
+                    , "text" .= ("hello wor" :: Text)
                     ]
                 sendEvent connection $ Aeson.object
                     [ "type" .= ("transcript.delta" :: Text)
                     , "sequence_no" .= (4 :: Int)
                     , "utterance_id" .= ("utterance-1" :: Text)
                     , "revision" .= (2 :: Int)
-                    , "text" .= ("from " :: Text)
+                    , "text" .= ("hello world" :: Text)
+                    ]
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("transcript.delta" :: Text)
+                    , "sequence_no" .= (5 :: Int)
+                    , "utterance_id" .= ("utterance-1" :: Text)
+                    , "revision" .= (1 :: Int)
+                    , "text" .= ("stale hypothesis" :: Text)
                     ]
                 sendEvent connection $ Aeson.object
                     [ "type" .= ("transcript.final" :: Text)
-                    , "sequence_no" .= (5 :: Int)
+                    , "sequence_no" .= (6 :: Int)
                     , "utterance_id" .= ("utterance-1" :: Text)
                     , "revision" .= (3 :: Int)
                     , "text" .= ("hello from stream" :: Text)
+                    ]
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("transcript.delta" :: Text)
+                    , "sequence_no" .= (7 :: Int)
+                    , "utterance_id" .= ("utterance-1" :: Text)
+                    , "revision" .= (4 :: Int)
+                    , "text" .= ("late interim" :: Text)
                     ]
                 close <- WS.receiveData connection
                 decodeValue close `shouldBe` Aeson.object
@@ -229,7 +243,7 @@ spec = describe "OpenAI transcription" do
                     ]
                 sendEvent connection $ Aeson.object
                     [ "type" .= ("session.updated" :: Text)
-                    , "sequence_no" .= (6 :: Int)
+                    , "sequence_no" .= (8 :: Int)
                     , "session" .= sessionValue "closed"
                     ]
         withWebSocketServer server \port -> do
@@ -250,8 +264,8 @@ spec = describe "OpenAI transcription" do
         readIORef captures `shouldReturn` 1
         readIORef callbacks
             `shouldReturn`
-                [ "hello "
-                , "hello from "
+                [ "hello wor"
+                , "hello world"
                 , "hello from stream"
                 ]
 
