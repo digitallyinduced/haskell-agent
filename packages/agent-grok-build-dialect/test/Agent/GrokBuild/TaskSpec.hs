@@ -1,8 +1,10 @@
 module Agent.GrokBuild.TaskSpec (spec) where
 
 import Agent.GrokBuild.Dialect.Task
+import Agent.Dialect (DialectId(..))
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
 import Agent.InterAgentMessage (interAgentMessagePayload)
+import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Subagents
 import Agent.ToolDispatch
@@ -13,7 +15,12 @@ import Agent.ToolDispatch
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Subagents.TaskPath (taskPathRoot)
-import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
+import Agent.Tools.MultiAgents
+    ( CollaborationModelTarget(..)
+    , CollaborationSpawnOptions(..)
+    , MultiAgentContext(..)
+    , SubagentWorktree(..)
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -22,7 +29,7 @@ import Agent.Tools.Types
     , jsonToolParameters
     )
 import Control.Concurrent.MVar
-import Data.Either (isLeft)
+import Data.Either (isLeft, isRight)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -42,6 +49,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
             parameters = fromMaybe [] (jsonToolParameters tool)
         let isolationTypes =
@@ -108,6 +117,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
                     (pure Nothing) Nothing Nothing Nothing Nothing Nothing
                     (Just (grokRootChildModels True))
+                    Nothing
+                    Nothing
                 tool = taskTool cwd ctx typesRef
             tool.appToolDescription `shouldSatisfy`
                 Text.isInfixOf "gpt-5.6-luna"
@@ -136,6 +147,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
                 (Just (grokRootChildModels True))
+                Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -144,6 +157,166 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             Text.isInfixOf "Unknown spawn_subagent model"
         Map.null <$> readIORef typesRef `shouldReturn` True
         closeSubagentRegistry registry
+
+    it "carries an authoritative live target through task preparation" do
+        withSystemTempDirectory "agent-grok-task" \dir -> do
+            let cwd = fromFilePath dir
+                target = CollaborationModelTarget
+                    { collaborationTargetProvider = OpenAIProvider
+                    , collaborationTargetConnection = "organization-gateway"
+                    , collaborationTargetEffectiveModel = "company-grok"
+                    , collaborationTargetDialect = GrokBuildDialect
+                    }
+            registry <- completedRegistry cwd
+            typesRef <- newIORef Map.empty
+            resolverCalls <- newIORef []
+            validatorCalls <- newIORef (0 :: Int)
+            prepared <- newIORef []
+            let resolve model = do
+                    modifyIORef' resolverCalls (model :)
+                    pure (if model == "company-grok" then Just target else Nothing)
+                validate _ = do
+                    modifyIORef' validatorCalls (+ 1)
+                    pure False
+                ctx = (testContext registry cwd)
+                    { multiPrepareSpawn = Just
+                        (\_ options -> modifyIORef' prepared (options :))
+                    , multiAllowedChildModels = Just ["stale-alias"]
+                    , multiResolveChildModel = Just resolve
+                    , multiChildModelAllowed = Just validate
+                    }
+                tool = taskTool cwd ctx typesRef
+            result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                (functionToolCall "c1" "task"
+                    "{\"prompt\":\"hello\",\"description\":\"gateway child\",\
+                    \\"subagent_type\":\"explore\",\"model\":\"company-grok\"}")
+            result.output `shouldSatisfy`
+                Text.isInfixOf "Subagent started in background"
+            readIORef resolverCalls `shouldReturn` ["company-grok"]
+            readIORef validatorCalls `shouldReturn` 0
+            readIORef prepared `shouldReturn`
+                [ CollaborationSpawnOptions
+                    { collaborationModel = Just "company-grok"
+                    , collaborationResolvedModel = Just target
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Just "none"
+                    }
+                ]
+            specs <- Map.elems <$> readIORef typesRef
+            specs `shouldBe`
+                [ GrokSubagentSpec
+                    { agentType = "explore"
+                    , modelOverride = Just "company-grok"
+                    , reasoningEffortOverride = Nothing
+                    }
+                ]
+            closeSubagentRegistry registry
+
+    it "prepares inherited task children without resolving an alias" do
+        withSystemTempDirectory "agent-grok-task" \dir -> do
+            let cwd = fromFilePath dir
+            registry <- completedRegistry cwd
+            typesRef <- newIORef Map.empty
+            resolverCalls <- newIORef (0 :: Int)
+            prepared <- newIORef []
+            let ctx = (testContext registry cwd)
+                    { multiPrepareSpawn = Just
+                        (\_ options -> modifyIORef' prepared (options :))
+                    , multiResolveChildModel = Just
+                        (\_ -> modifyIORef' resolverCalls (+ 1) >> pure Nothing)
+                    }
+                tool = taskTool cwd ctx typesRef
+            result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                (functionToolCall "c1" "task"
+                    "{\"prompt\":\"hello\",\"description\":\"inherit target\"}")
+            result.output `shouldSatisfy`
+                Text.isInfixOf "Subagent started in background"
+            readIORef resolverCalls `shouldReturn` 0
+            readIORef prepared `shouldReturn`
+                [ CollaborationSpawnOptions
+                    { collaborationModel = Nothing
+                    , collaborationResolvedModel = Nothing
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Just "none"
+                    }
+                ]
+            closeSubagentRegistry registry
+
+    it "rejects an unknown live alias before task preparation" do
+        registry <- completedRegistry (fromFilePath "/tmp")
+        typesRef <- newIORef Map.empty
+        prepared <- newIORef False
+        let ctx = (testContext registry (fromFilePath "/tmp"))
+                { multiPrepareSpawn = Just
+                    (\_ _ -> writeIORef prepared True)
+                , multiResolveChildModel = Just (const (pure Nothing))
+                }
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+        result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+            (functionToolCall "c1" "task"
+                "{\"prompt\":\"hello\",\"description\":\"denied\",\
+                \\"model\":\"removed-company-model\"}")
+        result.output `shouldSatisfy`
+            Text.isInfixOf "not allowed by this organization"
+        readIORef prepared `shouldReturn` False
+        Map.null <$> readIORef typesRef `shouldReturn` True
+        null <$> listAgents registry Nothing `shouldReturn` True
+        closeSubagentRegistry registry
+
+    it "leaves unresolved explicit Luna routing to the direct provider runtime" do
+        withSystemTempDirectory "agent-grok-task" \dir -> do
+            let cwd = fromFilePath dir
+            registry <- completedRegistry cwd
+            typesRef <- newIORef Map.empty
+            prepared <- newIORef False
+            let ctx = (testContext registry cwd)
+                    { multiPrepareSpawn = Just
+                        (\_ _ -> writeIORef prepared True)
+                    , multiAllowedChildModels =
+                        Just (grokRootChildModels True)
+                    }
+                tool = taskTool cwd ctx typesRef
+            result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+                (functionToolCall "c1" "task"
+                    "{\"prompt\":\"hello\",\"description\":\"direct luna\",\
+                    \\"model\":\"luna\"}")
+            result.output `shouldSatisfy`
+                Text.isInfixOf "Subagent started in background"
+            readIORef prepared `shouldReturn` False
+            closeSubagentRegistry registry
+
+    it "prepares inherited managed children for scheduler and workflow use" do
+        withSystemTempDirectory "agent-grok-task" \dir -> do
+            let cwd = fromFilePath dir
+            registry <- completedRegistry cwd
+            typesRef <- newIORef Map.empty
+            prepared <- newIORef []
+            resolverCalls <- newIORef (0 :: Int)
+            let ctx = (testContext registry cwd)
+                    { multiPrepareSpawn = Just
+                        (\_ options -> modifyIORef' prepared (options :))
+                    , multiResolveChildModel = Just
+                        (\_ -> modifyIORef' resolverCalls (+ 1) >> pure Nothing)
+                    }
+                managedSpec = GrokSubagentSpec
+                    { agentType = runtimeSubagentType
+                    , modelOverride = Nothing
+                    , reasoningEffortOverride = Nothing
+                    }
+            spawned <-
+                spawnManagedGrokSubagent
+                    cwd ctx typesRef managedSpec "scheduled work" Nothing
+            spawned `shouldSatisfy` isRight
+            readIORef resolverCalls `shouldReturn` 0
+            readIORef prepared `shouldReturn`
+                [ CollaborationSpawnOptions
+                    { collaborationModel = Nothing
+                    , collaborationResolvedModel = Nothing
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Just "none"
+                    }
+                ]
+            closeSubagentRegistry registry
 
     it "defaults run_in_background and spawns a background agent" do
         withSystemTempDirectory "agent-grok-task" \dir -> do
@@ -159,6 +332,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             typesRef <- newIORef Map.empty
             let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
                     (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                    Nothing
+                    Nothing
                 tool = taskTool cwd ctx typesRef
             result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
                 (functionToolCall "c1" "task"
@@ -179,6 +354,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                 (\_ _ -> pure ())
             let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
                     (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                    Nothing
+                    Nothing
                 tool = taskTool cwd ctx typesRef
             _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
                 (functionToolCall "c1" "task" raceArgs)
@@ -209,6 +386,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                 pure (Left "persisted subagent dialect is incompatible")
             ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) (Just restore) Nothing Nothing Nothing Nothing Nothing
+                Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -244,6 +423,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         let childId = SubagentId "agent-child"
             ctx = MultiAgentContext registry (fromFilePath "/tmp") (Just childId) 1 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
+                Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         expectAlwaysReadOnly tool.appToolApproval
         closeSubagentRegistry registry
@@ -256,7 +437,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let createIsolated = cleanupLease cleaned
             ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot (pure Nothing)
-                Nothing (Just createIsolated) Nothing Nothing Nothing Nothing
+                Nothing (Just createIsolated) Nothing Nothing Nothing Nothing Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -278,6 +460,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing Nothing Nothing
+                Nothing
+                Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" worktreeArgs)
@@ -343,3 +527,32 @@ cleanupLease cleaned _ =
         , subagentWorktreeCleanup =
             writeIORef cleaned True >> pure (Right ())
         }
+
+testContext :: SubagentRegistry -> OsPath -> MultiAgentContext
+testContext registry cwd = MultiAgentContext
+    { multiRegistry = registry
+    , multiCwd = cwd
+    , multiSelfId = Nothing
+    , multiDepth = 0
+    , multiTaskPath = taskPathRoot
+    , multiRootTurnId = pure Nothing
+    , multiResumeFromDisk = Nothing
+    , multiCreateWorktree = Nothing
+    , multiPrepareSpawn = Nothing
+    , multiSendToRoot = Nothing
+    , multiSpawnModelGuidance = Nothing
+    , multiAllowedChildModels = Nothing
+    , multiResolveChildModel = Nothing
+    , multiChildModelAllowed = Nothing
+    }
+
+completedRegistry :: OsPath -> IO SubagentRegistry
+completedRegistry cwd =
+    newSubagentRegistry defaultSubagentConfig cwd
+        (\_ _ prompt _ -> pure $ Right LoopResult
+            { finalResponseId = "c"
+            , finalText = Just ("done:" <> interAgentMessagePayload prompt)
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            })
+        (\_ _ -> pure ())

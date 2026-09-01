@@ -361,7 +361,7 @@ runFullscreen runtime workerAction = do
         result <- case actions.sessionProvider of
             Nothing ->
                 pure $ DictationFailed
-                    "Dictation is unavailable while the model is changing"
+                    "Dictation is unavailable for the active session"
             Just provider ->
                 dictateWith
                     provider

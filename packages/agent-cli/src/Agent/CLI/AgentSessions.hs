@@ -95,7 +95,7 @@ import Control.Exception.Safe
 import Control.Monad (void)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
@@ -108,6 +108,8 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsModel :: !Text
     , toolsTransportModel :: !Text
     , toolsDialect :: !DialectId
+    , toolsAllowedModels :: !(Maybe [Text])
+    , toolsResolveModelOption :: !(Maybe (Text -> IO (Maybe ModelOption)))
     , toolsCwd :: !OsPath
     , toolsEffort :: !Text
     , toolsCurrentSessionId :: !(IO (Maybe Text))
@@ -305,8 +307,8 @@ createAgentSessionTool env = jsonTool
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
         "Optional session title. Defaults to a title derived from the message."
-    , PropertySchema "model" PropertyString False $ Just
-        "Optional model override. Defaults to the current session model."
+    , PropertySchema "model" modelPropertyType False $ Just
+        modelPropertyDescription
     , PropertySchema "reasoning_effort" PropertyString False $ Just
         "Optional reasoning-effort override. Defaults to the current session effort."
     ]
@@ -314,6 +316,21 @@ createAgentSessionTool env = jsonTool
     TurnSequential
     (typedTool "create_agent_session" createAgentSessionArgsDecoder
         (runCreateAgentSession env))
+  where
+    modelPropertyType =
+        if isJust env.toolsResolveModelOption
+            then PropertyString
+            else
+                maybe
+                    PropertyString
+                    (PropertyEnum . normalizedAllowedModels)
+                    env.toolsAllowedModels
+    modelPropertyDescription =
+        case env.toolsAllowedModels of
+            Nothing ->
+                "Optional model override. Defaults to the current session model."
+            Just _ ->
+                "Optional organization-approved model override. Defaults to the current session model."
 
 runCreateAgentSession
     :: AgentSessionToolsEnv
@@ -325,54 +342,100 @@ runCreateAgentSession env args
     | maybe False ((> 100) . Text.length . Text.strip) args.title =
         pure (Left "create_agent_session title must be at most 100 characters")
     | otherwise = do
-        let model = fromMaybe env.toolsModel args.model
-        target <- case args.model of
-            Nothing ->
-                pure ModelOption
-                    { modelTarget = ModelTarget
-                        { targetProvider = env.toolsProvider
-                        , targetConnectionId = env.toolsConnection
-                        , targetModelId = model
-                        , targetWireModelId = env.toolsTransportModel
-                        , targetDialect = env.toolsDialect
+        let model = fromMaybe env.toolsModel normalizedOverride
+        resolveSessionTarget env normalizedOverride model >>= \case
+            Left err -> pure (Left err)
+            Right target -> do
+                let title = case Text.strip <$> args.title of
+                        Just value | not (Text.null value) -> value
+                        _ -> sessionTitleFromPrompt args.message
+                    spec = SessionCreate
+                        { createPool = env.toolsPool
+                        , createRoot = env.toolsRoot
+                        , createTarget = target.modelTarget
+                        , createCwd = env.toolsCwd
+                        , createEffort =
+                            fromMaybe env.toolsEffort args.reasoningEffort
+                        , createTitleHint = Just title
+                        , createTitleIsManual =
+                            maybe False
+                                (not . Text.null . Text.strip)
+                                args.title
                         }
-                    , modelContextWindow = Nothing
-                    , modelLabel = Nothing
-                    , modelFallbackPriority = Nothing
-                    }
-            Just _ ->
-                resolveModelOptionDialect ModelOption
-                    { modelTarget = ModelTarget
-                        { targetProvider = env.toolsProvider
-                        , targetConnectionId = env.toolsConnection
-                        , targetModelId = model
-                        , targetWireModelId = model
-                        , targetDialect =
-                            dialectIdForModel env.toolsProvider model
-                        }
-                    , modelContextWindow = Nothing
-                    , modelLabel = Nothing
-                    , modelFallbackPriority = Nothing
-                    }
-        let title = case Text.strip <$> args.title of
-                Just value | not (Text.null value) -> value
-                _ -> sessionTitleFromPrompt args.message
-            spec = SessionCreate
-                { createPool = env.toolsPool
-                , createRoot = env.toolsRoot
-                , createTarget = target.modelTarget
-                , createCwd = env.toolsCwd
-                , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
-                , createTitleHint = Just title
-                , createTitleIsManual =
-                    maybe False (not . Text.null . Text.strip) args.title
-                }
-        handle <- createSession spec
-        launchToolSessionTurn env handle args.message >>= \case
-            Left err -> pure $ Left $
-                "created session " <> handle.sessionMeta.metaId
-                    <> " but failed to start it: " <> err
-            Right result -> pure (Right result)
+                handle <- createSession spec
+                launchToolSessionTurn env handle args.message >>= \case
+                    Left err -> pure $ Left $
+                        "created session " <> handle.sessionMeta.metaId
+                            <> " but failed to start it: " <> err
+                    Right result -> pure (Right result)
+  where
+    normalizedOverride = normalizeModelOverride args.model
+
+resolveSessionTarget
+    :: AgentSessionToolsEnv
+    -> Maybe Text
+    -> Text
+    -> IO (Either Text ModelOption)
+resolveSessionTarget env normalizedOverride model =
+    case normalizedOverride of
+        Just requested
+            | Just resolve <- env.toolsResolveModelOption ->
+                resolve requested >>= \case
+                    Nothing -> pure (Left notAllowed)
+                    Just option -> pure (Right option)
+        _ -> do
+            modelAllowed <- case env.toolsResolveModelOption of
+                Just resolve -> isJust <$> resolve model
+                Nothing -> pure
+                    (case normalizedOverride of
+                        Nothing -> True
+                        Just requested ->
+                            maybe
+                                True
+                                (elem requested . normalizedAllowedModels)
+                                env.toolsAllowedModels)
+            if not modelAllowed
+                then pure (Left notAllowed)
+                else Right <$> case normalizedOverride of
+                    Nothing ->
+                        pure ModelOption
+                            { modelTarget = ModelTarget
+                                { targetProvider = env.toolsProvider
+                                , targetConnectionId = env.toolsConnection
+                                , targetModelId = model
+                                , targetWireModelId = env.toolsTransportModel
+                                , targetDialect = env.toolsDialect
+                                }
+                            , modelContextWindow = Nothing
+                            , modelLabel = Nothing
+                            , modelFallbackPriority = Nothing
+                            }
+                    Just _ ->
+                        resolveModelOptionDialect ModelOption
+                            { modelTarget = ModelTarget
+                                { targetProvider = env.toolsProvider
+                                , targetConnectionId = env.toolsConnection
+                                , targetModelId = model
+                                , targetWireModelId = model
+                                , targetDialect =
+                                    dialectIdForModel env.toolsProvider model
+                                }
+                            , modelContextWindow = Nothing
+                            , modelLabel = Nothing
+                            , modelFallbackPriority = Nothing
+                            }
+  where
+    notAllowed =
+        "The requested session model is not allowed by this organization."
+
+normalizeModelOverride :: Maybe Text -> Maybe Text
+normalizeModelOverride requested = do
+    stripped <- Text.strip <$> requested
+    if Text.null stripped then Nothing else Just stripped
+
+normalizedAllowedModels :: [Text] -> [Text]
+normalizedAllowedModels =
+    filter (not . Text.null) . map Text.strip
 
 data ReadAgentSessionArgs = ReadAgentSessionArgs
     { sessionId :: Text

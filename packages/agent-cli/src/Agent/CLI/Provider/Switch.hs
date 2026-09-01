@@ -27,10 +27,9 @@ import Agent.CLI.Session.History
     )
 import Agent.CLI.Auth
     ( LoadedAuth(..)
+    , gatewayAuthSelectionId
     , loadAuth
-    , loadDirectOpenAiAuth
     , loadAuthForAccount
-    , preferredOpenAiTokenProvider
     )
 import Agent.CLI.Error
     ( formatApiErrorAt
@@ -40,8 +39,9 @@ import Agent.CLI.Error
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
+    , connectionSupportsDialect
+    , loadModelCatalogAt
     )
-import Agent.CLI.GatewayModels (loadGatewayModelCatalogAt)
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
@@ -101,7 +101,6 @@ import Agent.Claude
 import Agent.Dialect
     ( DialectId
     , dialectSlug
-    , providerSupportsDialect
     )
 import Agent.Error
     ( ApiError(..)
@@ -165,22 +164,11 @@ loadSelectedAccountAuth
 loadSelectedAccountAuth provider selectionId accountId =
     case provider of
         OpenAIProvider ->
-            loadDirectOpenAiAuth >>= \case
-                Left err -> pure (Left err)
-                Right loaded -> case loaded.loadedOpenAiPool of
-                    Nothing ->
-                        pure (Left
-                            "OpenAI account selection requires a live account pool")
-                    Just pool -> do
-                        preferred <- newIORef (Just accountId)
-                        pure $ Right loaded
-                            { loadedTokenProvider =
-                                preferredOpenAiTokenProvider
-                                    preferred
-                                    pool
-                                    loaded.loadedTokenProvider
-                            , loadedSelectionId = Just accountId
-                            }
+            loadAuthForAccount
+                OpenAIProvider
+                (if selectionId == gatewayAuthSelectionId
+                    then selectionId
+                    else accountId)
         ClaudeCodeProvider ->
             loadAuth (Just ClaudeCodeProvider)
         _ -> loadAuthForAccount provider selectionId
@@ -482,49 +470,55 @@ requestAutomaticProviderFallback
     -> PendingTurn
     -> IO (Maybe ProviderTransition)
 requestAutomaticProviderFallback env apiError pending = do
-    forM_ env.sessionFullscreen \runtime ->
-        emitUiEvent runtime UiTurnRestarted
-    sessionId <- ensureTransitionSessionId env.sessionPersist
-    unavailable <- readIORef env.sessionUnavailableProviders
-    currentModel <-
-        fromMaybe "" . (.model) <$> readIORef env.sessionParams
-    case env.sessionTokenProvider of
-        Nothing -> pure Nothing
-        Just tokenProvider ->
-            chooseAutomaticProviderTransition
-                env.sessionModelCatalog
-                env.sessionCwd
-                env.sessionRender.renderStderr
-                env.sessionFullscreen
-                (tokenProviderBillingMode tokenProvider)
-                env.sessionProvider
-                currentModel
-                unavailable
-                sessionId
-                pending
-                apiError
+    readIORef env.sessionGatewayModels >>= \case
+        Just _ -> pure Nothing
+        Nothing -> do
+            forM_ env.sessionFullscreen \runtime ->
+                emitUiEvent runtime UiTurnRestarted
+            sessionId <- ensureTransitionSessionId env.sessionPersist
+            unavailable <- readIORef env.sessionUnavailableProviders
+            currentModel <-
+                fromMaybe "" . (.model) <$> readIORef env.sessionParams
+            case env.sessionTokenProvider of
+                Nothing -> pure Nothing
+                Just tokenProvider ->
+                    chooseAutomaticProviderTransition
+                        env.sessionModelCatalog
+                        env.sessionCwd
+                        env.sessionRender.renderStderr
+                        env.sessionFullscreen
+                        (tokenProviderBillingMode tokenProvider)
+                        env.sessionProvider
+                        currentModel
+                        unavailable
+                        sessionId
+                        pending
+                        apiError
 
 requestStartupProviderFallback
     :: SessionEnv
     -> ApiError
     -> IO (Maybe ProviderTransition)
 requestStartupProviderFallback env apiError = do
-    unavailable <- readIORef env.sessionUnavailableProviders
-    currentModel <-
-        fromMaybe "" . (.model) <$> readIORef env.sessionParams
-    case env.sessionTokenProvider of
-        Nothing -> pure Nothing
-        Just tokenProvider ->
-            chooseStartupProviderTransition
-                env.sessionModelCatalog
-                env.sessionCwd
-                env.sessionFullscreen
-                (tokenProviderBillingMode tokenProvider)
-                env.sessionProvider
-                currentModel
-                unavailable
-                Nothing
-                apiError
+    readIORef env.sessionGatewayModels >>= \case
+        Just _ -> pure Nothing
+        Nothing -> do
+            unavailable <- readIORef env.sessionUnavailableProviders
+            currentModel <-
+                fromMaybe "" . (.model) <$> readIORef env.sessionParams
+            case env.sessionTokenProvider of
+                Nothing -> pure Nothing
+                Just tokenProvider ->
+                    chooseStartupProviderTransition
+                        env.sessionModelCatalog
+                        env.sessionCwd
+                        env.sessionFullscreen
+                        (tokenProviderBillingMode tokenProvider)
+                        env.sessionProvider
+                        currentModel
+                        unavailable
+                        Nothing
+                        apiError
 
 continueAutomaticFallback
     :: Maybe OsPath
@@ -540,7 +534,7 @@ continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
         (Just billing, Just pending) -> do
             home <- getHomeDirectory
             cwd <- maybe getCurrentDirectory pure cwdHint
-            loadGatewayModelCatalogAt home cwd >>= \case
+            loadModelCatalogAt home cwd >>= \case
                 Left _ -> pure Nothing
                 Right catalog ->
                     chooseAutomaticProviderTransition
@@ -815,7 +809,8 @@ loadValidatedProviderTarget
     -> IO (Either Text LoadedAuth)
 loadValidatedProviderTarget probeAvailability choice =
     if not
-        (providerSupportsDialect
+        (connectionSupportsDialect
+            choice.modelTarget.targetConnectionId
             choice.modelTarget.targetProvider
             choice.modelTarget.targetDialect)
     then

@@ -5,6 +5,8 @@ module Agent.CLI.ModelPicker
     , pickModel
     , pickModelWithOptions
     , pickModelWithEffort
+    , pickModelState
+    , pickModelStateWithEffort
     , formatCatalogListing
     , initialModelPickerState
     , applyModelPickerEvent
@@ -153,16 +155,33 @@ pickModelWithEffort
         current
         currentDialect
         currentEffort = do
-    isTty <- hIsTerminalDevice stdin
     models <-
         initialPickerStateResolvedWith
             catalog discovered connectionId provider current currentDialect
+    pickModelStateWithEffort color currentEffort models
+
+-- | Open a picker for a pre-scoped, authoritative option list.
+pickModelState :: Bool -> PickerState -> IO (Maybe ModelOption)
+pickModelState color models =
+    fmap (fmap (.modelPickerOption)) $
+        pickModelStateWithEffort
+            color
+            (defaultEffortFor models.pickerProvider)
+            models
+
+-- | Open the integrated model/effort picker for a pre-scoped option list.
+pickModelStateWithEffort
+    :: Bool
+    -> ReasoningEffort
+    -> PickerState
+    -> IO (Maybe ModelPickerSelection)
+pickModelStateWithEffort color currentEffort models = do
+    isTty <- hIsTerminalDevice stdin
     let state0 = initialModelPickerState currentEffort models
     if not isTty
         then do
             Text.hPutStrLn stderr
-                (formatCatalogListingState
-                    color current currentDialect models)
+                (formatCatalogListingState color models)
             hFlush stderr
             pure Nothing
         else do
@@ -249,32 +268,28 @@ formatCatalogListing
     state <-
         initialPickerStateResolved
             catalog connectionId provider current currentDialect
-    pure (formatCatalogListingState
-        color current currentDialect state)
+    pure (formatCatalogListingState color state)
 
 formatCatalogListingState
     :: Bool
-    -> Text
-    -> DialectId
     -> PickerState
     -> Text
-formatCatalogListingState color current currentDialect state =
+formatCatalogListingState color state =
     let header =
             roleMuted color
                 (glyphSessionLike
                     <> "model: "
-                    <> displayPickerText state.pickerConnectionId
-                    <> "/"
-                    <> displayPickerText current
-                    <> " · all providers")
+                    <> pickerCurrentLabel state
+                    <> " · "
+                    <> state.pickerScopeLabel)
         rows =
             map
                 (\opt ->
                     let mark
                             | isCurrent
                                 state.pickerConnectionId
-                                current
-                                currentDialect
+                                state.pickerCurrent
+                                state.pickerCurrentDialect
                                 opt =
                                 roleSuccess color
                                     (glyphOk <> formatOptionName opt)
@@ -355,10 +370,10 @@ renderModelPickerFrame color state =
         rolePrompt color "Models"
             <> roleMuted color
                 (displayPickerText
-                    (" · current "
-                        <> models.pickerConnectionId
-                        <> "/"
-                        <> models.pickerCurrent))
+                    (" · "
+                        <> models.pickerScopeLabel
+                        <> " · current "
+                        <> pickerCurrentLabel models))
     searchLine
         | Text.null models.pickerFilter =
             roleMuted color "/ Type to search"
@@ -368,6 +383,18 @@ renderModelPickerFrame color state =
     scrollIndicator visible_ label
         | visible_ = roleMuted color ("    " <> label)
         | otherwise = ""
+
+pickerCurrentLabel :: PickerState -> Text
+pickerCurrentLabel state
+    | any
+        (\option ->
+            option.modelTarget.targetConnectionId
+                == state.pickerConnectionId
+                && option.modelTarget.targetModelId
+                    == state.pickerCurrent)
+        state.pickerAll =
+            state.pickerConnectionId <> "/" <> state.pickerCurrent
+    | otherwise = "(not offered in this scope)"
 
 pickerViewportSize :: Int
 pickerViewportSize = 12

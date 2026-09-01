@@ -132,9 +132,9 @@ import qualified Agent.OpenRouter.Usage as OpenRouter
 import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ModelCatalog
-    , catalogModelById
+    , catalogModelForConnection
     )
-import Agent.CLI.GatewayModels (loadGatewayModelCatalogAt)
+import Agent.CLI.GatewayModels (loadGatewayModelOptionsAt)
 import Agent.CLI.Database (DatabaseScope(..))
 import Agent.CLI.Database.Store
     ( DatabaseBrowsePage(..)
@@ -149,9 +149,11 @@ import Agent.CLI.Models
     , ModelTarget(..)
     , PickerState(..)
     , defaultModelOptionFor
+    , initialPickerStateForOptions
     , initialPickerStateResolved
     , modelCatalog
     , resolveConfiguredModel
+    , resolveModelOptionById
     , resolveModelOptionDialect
     , selectedOption
     )
@@ -5669,9 +5671,30 @@ loadNativeModelCatalog store root request = do
     case contextResult of
         Left err -> pure (Left err)
         Right (cwd, maybeTarget) ->
-            loadGatewayModelCatalogAt home cwd >>= \case
+            loadGatewayModelOptionsAt home cwd >>= \case
                 Left err -> pure (Left err)
-                Right catalog -> do
+                Right (catalog, Just gatewayOptions) ->
+                    case gatewayOptions of
+                        [] -> pure
+                            (Left
+                                "The organization gateway does not offer any models.")
+                        firstAvailable : _ -> do
+                            let selected =
+                                    fromMaybe firstAvailable $ do
+                                        target <- maybeTarget
+                                        resolveModelOptionById
+                                            gatewayOptions
+                                            target.targetModelId
+                                target = selected.modelTarget
+                            picker <- initialPickerStateForOptions
+                                "organization gateway"
+                                gatewayOptions
+                                target.targetConnectionId
+                                target.targetProvider
+                                target.targetModelId
+                                target.targetDialect
+                            pure (Right (modelPickerJSON catalog picker))
+                Right (catalog, Nothing) -> do
                     let configuredTarget = do
                             target <- maybeTarget
                             option <-
@@ -5701,14 +5724,16 @@ loadNativeModelCatalog store root request = do
                                 target.targetProvider
                                 target.targetModelId
                                 target.targetDialect
-                            pure $ Right $ Aeson.object
-                                [ "options" Aeson..=
-                                    map (modelOptionJSON catalog)
-                                        picker.pickerAll
-                                , "current" Aeson..=
-                                    fmap (modelOptionJSON catalog)
-                                        (selectedOption picker)
-                                ]
+                            pure (Right (modelPickerJSON catalog picker))
+
+modelPickerJSON :: ModelCatalog -> PickerState -> Aeson.Value
+modelPickerJSON catalog picker =
+    Aeson.object
+        [ "options" Aeson..=
+            map (modelOptionJSON catalog) picker.pickerAll
+        , "current" Aeson..=
+            fmap (modelOptionJSON catalog) (selectedOption picker)
+        ]
 
 currentModelContext
     :: Store
@@ -5744,7 +5769,10 @@ modelOptionJSON :: ModelCatalog -> ModelOption -> Aeson.Value
 modelOptionJSON catalog option =
     let target = option.modelTarget
         configured =
-            catalogModelById catalog target.targetModelId
+            catalogModelForConnection
+                catalog
+                target.targetConnectionId
+                target.targetModelId
     in Aeson.object
         [ "id" Aeson..= target.targetModelId
         , "provider" Aeson..= providerSlug target.targetProvider

@@ -10,12 +10,16 @@ module Agent.CLI.ModelConfig
     , ModelConnection(..)
     , ResponsesConnection(..)
     , builtinConnectionId
+    , organizationGatewayConnectionId
     , catalogConnection
     , catalogContextWindowFor
     , catalogContextWindowForTransport
     , catalogDefaultForProvider
+    , catalogGatewayModelById
     , catalogModelById
+    , catalogModelForConnection
     , catalogModelsForConnection
+    , connectionSupportsDialect
     , connectionBuiltinProvider
     , decodeModelConfig
     , loadModelCatalog
@@ -27,7 +31,7 @@ module Agent.CLI.ModelConfig
     ) where
 
 import Agent.Dialect
-    ( DialectId
+    ( DialectId(..)
     , parseDialect
     , providerSupportsDialect
     )
@@ -66,6 +70,7 @@ data ResponsesConnection = ResponsesConnection
 data ConnectionKind
     = BuiltinConnection !Provider
     | CustomResponsesConnection !ResponsesConnection
+    | OrganizationGatewayConnection
     deriving (Eq, Show)
 
 data ModelConnection = ModelConnection
@@ -92,6 +97,7 @@ data ModelCatalog = ModelCatalog
     { catalogConnections :: !(Map Text ModelConnection)
     , catalogModels :: ![CatalogModel]
     , catalogModelsById :: !(Map Text CatalogModel)
+    , catalogGatewayModelsById :: !(Map Text CatalogModel)
     }
     deriving (Eq, Show)
 
@@ -169,13 +175,20 @@ modelCatalogUserPath home =
 builtinConnectionId :: Provider -> Text
 builtinConnectionId = providerSlug
 
+-- | Reserved persisted routing identity for organization-gateway sessions.
+--
+-- Gateway requests currently use the OpenAI transport, but must not be
+-- indistinguishable from direct OpenAI sessions after the gateway is removed.
+organizationGatewayConnectionId :: Text
+organizationGatewayConnectionId = "organization-gateway"
+
 catalogConnection :: ModelCatalog -> Text -> Maybe ModelConnection
 catalogConnection catalog connectionId =
     Map.lookup connectionId catalog.catalogConnections
 
 catalogContextWindowFor :: ModelCatalog -> Text -> Text -> Maybe Int
 catalogContextWindowFor catalog connectionId modelId = do
-    model <- catalogModelById catalog modelId
+    model <- catalogModelForConnection catalog connectionId modelId
     if model.catalogModelConnectionId == connectionId
         then model.catalogModelContextWindow
         else Nothing
@@ -191,7 +204,7 @@ catalogContextWindowForTransport
     -> Text
     -> Maybe Int
 catalogContextWindowForTransport catalog connectionId modelId wireModelId = do
-    selected <- catalogModelById catalog modelId
+    selected <- catalogModelForConnection catalog connectionId modelId
     if selected.catalogModelConnectionId /= connectionId
         then Nothing
         else
@@ -215,6 +228,21 @@ catalogModelById :: ModelCatalog -> Text -> Maybe CatalogModel
 catalogModelById catalog modelId =
     Map.lookup modelId catalog.catalogModelsById
 
+catalogGatewayModelById :: ModelCatalog -> Text -> Maybe CatalogModel
+catalogGatewayModelById catalog modelId =
+    Map.lookup modelId catalog.catalogGatewayModelsById
+
+catalogModelForConnection
+    :: ModelCatalog
+    -> Text
+    -> Text
+    -> Maybe CatalogModel
+catalogModelForConnection catalog connectionId modelId
+    | connectionId == organizationGatewayConnectionId =
+        catalogGatewayModelById catalog modelId
+    | otherwise =
+        catalogModelById catalog modelId
+
 catalogModelsForConnection :: Text -> ModelCatalog -> [CatalogModel]
 catalogModelsForConnection wanted =
     filter ((== wanted) . (.catalogModelConnectionId)) . (.catalogModels)
@@ -223,6 +251,16 @@ connectionBuiltinProvider :: ModelConnection -> Maybe Provider
 connectionBuiltinProvider connection = case connection.connectionKind of
     BuiltinConnection provider -> Just provider
     CustomResponsesConnection _ -> Nothing
+    OrganizationGatewayConnection -> Nothing
+
+-- | Validate persisted model-facing protocol identity against its routing
+-- connection. Organization gateways use the OpenAI transport while supporting
+-- any Responses-hostable agent dialect.
+connectionSupportsDialect :: Text -> Provider -> DialectId -> Bool
+connectionSupportsDialect connection provider dialect
+    | connection == organizationGatewayConnectionId =
+        provider == OpenAIProvider && gatewaySupportsDialect dialect
+    | otherwise = providerSupportsDialect provider dialect
 
 catalogDefaultForProvider :: ModelCatalog -> Provider -> Maybe CatalogModel
 catalogDefaultForProvider catalog provider =
@@ -344,7 +382,9 @@ decodeConfigFile source bytes =
 mergeConfigFiles :: ConfigFile -> Maybe ConfigFile -> Either Text ConfigFile
 mergeConfigFiles defaults Nothing = Right defaults
 mergeConfigFiles defaults (Just user) = do
-    let reserved = map builtinConnectionId allBuiltinProviders
+    let reserved =
+            organizationGatewayConnectionId
+                : map builtinConnectionId allBuiltinProviders
         overriddenReserved =
             filter (`Map.member` user.configConnections) reserved
     unless (null overriddenReserved) $
@@ -353,22 +393,22 @@ mergeConfigFiles defaults (Just user) = do
                 <> plural overriddenReserved <> ": "
                 <> Text.intercalate ", " overriddenReserved
             )
-    ensureUniqueModelIds "shipped model config" defaults.configModels
-    ensureUniqueModelIds "user model config" user.configModels
-    let defaultIds = map (.modelFileId) defaults.configModels
-        userById = Map.fromList
-            [ (model.modelFileId, model)
+    ensureUniqueModelRoutes "shipped model config" defaults.configModels
+    ensureUniqueModelRoutes "user model config" user.configModels
+    let defaultKeys = map modelMergeKey defaults.configModels
+        userByKey = Map.fromList
+            [ (modelMergeKey model, model)
             | model <- user.configModels
             ]
         replacedDefaults =
             map
                 (\model ->
                     fromMaybe model
-                        (Map.lookup model.modelFileId userById))
+                        (Map.lookup (modelMergeKey model) userByKey))
                 defaults.configModels
         appendedModels =
             filter
-                ((`notElem` defaultIds) . (.modelFileId))
+                ((`notElem` defaultKeys) . modelMergeKey)
                 user.configModels
     pure ConfigFile
         { configVersion = 1
@@ -379,7 +419,7 @@ mergeConfigFiles defaults (Just user) = do
 
 validateConfig :: Text -> ConfigFile -> Either Text ModelCatalog
 validateConfig source config = do
-    ensureUniqueModelIds source config.configModels
+    ensureUniqueModelRoutes source config.configModels
     connections <- Map.traverseWithKey validateConnection
         config.configConnections
     models <- traverse (validateModel connections) config.configModels
@@ -391,6 +431,15 @@ validateConfig source config = do
             Map.fromList
                 [ (model.catalogModelId, model)
                 | model <- models
+                , model.catalogModelConnectionId
+                    /= organizationGatewayConnectionId
+                ]
+        , catalogGatewayModelsById =
+            Map.fromList
+                [ (model.catalogModelId, model)
+                | model <- models
+                , model.catalogModelConnectionId
+                    == organizationGatewayConnectionId
                 ]
         }
   where
@@ -444,6 +493,14 @@ validateConfig source config = do
                     , responsesRequestTimeoutSeconds =
                         raw.connectionRequestTimeoutSeconds
                     }
+            "gateway" -> do
+                when (connectionId /= organizationGatewayConnectionId) $
+                    Left
+                        ( "gateway connection " <> connectionId
+                            <> " must use the reserved id "
+                            <> organizationGatewayConnectionId
+                        )
+                pure OrganizationGatewayConnection
             other ->
                 Left ("connection " <> connectionId
                     <> " has unsupported api " <> other)
@@ -491,6 +548,24 @@ validateConfig source config = do
                             <> connectionId
                         )
             CustomResponsesConnection _ -> pure ()
+            OrganizationGatewayConnection -> do
+                when (wireId /= modelId) $
+                    Left
+                        ( "model " <> modelId
+                            <> " cannot override its wire model on organization gateway connection "
+                            <> connectionId
+                        )
+                unless
+                    (connectionSupportsDialect
+                        connectionId
+                        OpenAIProvider
+                        dialect) $
+                    Left
+                        ( "model " <> modelId <> " uses dialect "
+                            <> raw.modelFileDialect
+                            <> " which is incompatible with connection "
+                            <> connectionId
+                        )
         traverse_
             (\priority -> when (priority < 0) $
                 Left ("model " <> modelId
@@ -605,8 +680,8 @@ validateEnvName connectionId raw =
             Left ("connection " <> connectionId
                 <> " has invalid api_key_env " <> raw)
 
-ensureUniqueModelIds :: Text -> [ModelFile] -> Either Text ()
-ensureUniqueModelIds source models =
+ensureUniqueModelRoutes :: Text -> [ModelFile] -> Either Text ()
+ensureUniqueModelRoutes source models =
     case duplicateIds of
         [] -> Right ()
         duplicates ->
@@ -615,15 +690,29 @@ ensureUniqueModelIds source models =
   where
     counts = foldl'
         (\current model ->
-            Map.insertWith (+) (Text.strip model.modelFileId) (1 :: Int) current)
+            Map.insertWith (+) (modelMergeKey model) (1 :: Int) current)
         Map.empty
         models
     duplicateIds =
-        Map.keys (Map.filter (> 1) counts)
+        map snd (Map.keys (Map.filter (> 1) counts))
+
+modelMergeKey :: ModelFile -> (Bool, Text)
+modelMergeKey model =
+    ( Text.strip model.modelFileConnection
+        == organizationGatewayConnectionId
+    , Text.strip model.modelFileId
+    )
 
 allBuiltinProviders :: [Provider]
 allBuiltinProviders =
     [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider]
+
+gatewaySupportsDialect :: DialectId -> Bool
+gatewaySupportsDialect = \case
+    CodexDialect -> True
+    GrokBuildDialect -> True
+    GenericResponsesDialect -> True
+    ClaudeCodeDialect -> False
 
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value

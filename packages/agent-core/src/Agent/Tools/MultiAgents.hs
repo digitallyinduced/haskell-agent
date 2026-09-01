@@ -4,6 +4,7 @@
 -- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2).
 module Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
+    , CollaborationModelTarget(..)
     , CollaborationSpawnOptions(..)
     , SubagentWorktree(..)
     , multiAgentTools
@@ -44,6 +45,8 @@ import Agent.InterAgentMessage
     , plainInterAgentContent
     )
 import Agent.OsPath (toText)
+import Agent.Dialect (DialectId)
+import Agent.Provider (Provider)
 import System.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
@@ -85,8 +88,16 @@ data SubagentWorktree = SubagentWorktree
     , subagentWorktreeCleanup :: !(IO (Either Text ()))
     }
 
+data CollaborationModelTarget = CollaborationModelTarget
+    { collaborationTargetProvider :: !Provider
+    , collaborationTargetConnection :: !Text
+    , collaborationTargetEffectiveModel :: !Text
+    , collaborationTargetDialect :: !DialectId
+    } deriving (Eq, Show)
+
 data CollaborationSpawnOptions = CollaborationSpawnOptions
     { collaborationModel :: !(Maybe Text)
+    , collaborationResolvedModel :: !(Maybe CollaborationModelTarget)
     , collaborationReasoningEffort :: !(Maybe Text)
     , collaborationForkTurns :: !(Maybe Text)
     } deriving (Eq, Show)
@@ -114,6 +125,15 @@ data MultiAgentContext = MultiAgentContext
     , multiSpawnModelGuidance :: !(Maybe Text)
       -- | When set, spawn_subagent may only use these model slugs (or inherit).
     , multiAllowedChildModels :: !(Maybe [Text])
+      -- | Optional live resolver for organization-scoped model aliases.
+      -- Unknown explicit aliases are denied and resolved transport metadata is
+      -- carried atomically into spawn preparation.
+    , multiResolveChildModel
+        :: !(Maybe (Text -> IO (Maybe CollaborationModelTarget)))
+      -- | Optional live policy used instead of the advertised snapshot above.
+      -- This lets hosts enforce organization catalog refreshes without
+      -- rebuilding every tool definition in an active session.
+    , multiChildModelAllowed :: !(Maybe (Text -> IO Bool))
     }
 
 multiAgentNamespace :: Text
@@ -197,7 +217,8 @@ spawnAgentParameters ctx encryptMessage =
             [ "Model override for the new agent. Omit unless an explicit override is needed."
             , "Model or reasoning-effort overrides require `fork_turns` to be `none` or a positive integer."
             ]
-                <> maybe [] pure ctx.multiSpawnModelGuidance)
+                <> maybe [] pure ctx.multiSpawnModelGuidance
+                <> allowedModelGuidance ctx.multiAllowedChildModels)
     , PropertySchema "reasoning_effort" PropertyString False $ Just
         "Reasoning effort override for the new agent. Omit to inherit the parent effort. Overrides require `fork_turns` to be `none` or a positive integer."
     , PropertySchema "fork_turns" PropertyString False $ Just
@@ -237,11 +258,16 @@ runSpawn ctx workspace call args
             "full-history forks inherit the parent model and reasoning effort; \
             \set fork_turns to none or a positive integer when overriding \
             \model or reasoning_effort")
-    | otherwise = mask \restore ->
-        resolveSpawnWorkspace ctx workspace >>= \case
+    | otherwise = do
+        resolveChildModelOverride ctx args.model >>= \case
             Left err -> pure (Left err)
-            Right (childCwd, worktree) ->
-                restore (spawnInWorkspace ctx call args childCwd worktree)
+            Right resolvedModel -> mask \restore ->
+                resolveSpawnWorkspace ctx workspace >>= \case
+                    Left err -> pure (Left err)
+                    Right (childCwd, worktree) ->
+                        restore
+                            (spawnInWorkspace
+                                ctx call args resolvedModel childCwd worktree)
 
 -- | Spawn a tracked child in the caller's shared workspace.
 --
@@ -281,14 +307,16 @@ spawnInWorkspace
     :: MultiAgentContext
     -> ToolCall
     -> SpawnAgentArgs
+    -> Maybe CollaborationModelTarget
     -> OsPath
     -> Maybe SubagentWorktree
     -> IO (Either Text Text)
-spawnInWorkspace ctx call args childCwd worktree = mask \restore -> do
+spawnInWorkspace ctx call args resolvedModel childCwd worktree = mask \restore -> do
     ownedWorktree <- traverse makeIdempotentWorktree worktree
     rootTurnId <- ctx.multiRootTurnId
     let spawnOptions = CollaborationSpawnOptions
             { collaborationModel = sanitizeOverride args.model
+            , collaborationResolvedModel = resolvedModel
             , collaborationReasoningEffort =
                 sanitizeOverride args.reasoningEffort
             , collaborationForkTurns = normalizeForkTurns args.forkTurns
@@ -392,6 +420,60 @@ sanitizeOverride :: Maybe Text -> Maybe Text
 sanitizeOverride value = value >>= \raw ->
     let stripped = Text.strip raw
     in if Text.null stripped then Nothing else Just stripped
+
+allowedModelOverride :: Maybe [Text] -> Maybe Text -> Bool
+allowedModelOverride allowed override =
+    case sanitizeOverride override of
+        Nothing -> True
+        Just requested ->
+            maybe
+                True
+                (elem requested . map Text.strip)
+                allowed
+
+resolveChildModelOverride
+    :: MultiAgentContext
+    -> Maybe Text
+    -> IO (Either Text (Maybe CollaborationModelTarget))
+resolveChildModelOverride ctx override =
+    case sanitizeOverride override of
+        Nothing -> pure (Right Nothing)
+        Just requested ->
+            case ctx.multiResolveChildModel of
+                Just resolve ->
+                    resolve requested >>= \case
+                        Nothing -> pure (Left notAllowed)
+                        Just target -> pure (Right (Just target))
+                Nothing -> do
+                    allowed <- case ctx.multiChildModelAllowed of
+                        Just isAllowed -> isAllowed requested
+                        Nothing ->
+                            pure
+                                (allowedModelOverride
+                                    ctx.multiAllowedChildModels
+                                    (Just requested))
+                    pure
+                        (if allowed
+                            then Right Nothing
+                            else Left notAllowed)
+  where
+    notAllowed =
+        "The requested child model is not allowed by this organization."
+
+allowedModelGuidance :: Maybe [Text] -> [Text]
+allowedModelGuidance = \case
+    Nothing -> []
+    Just rawAllowed ->
+        let allowed = filter (not . Text.null) (map Text.strip rawAllowed)
+            rendered =
+                if null allowed
+                    then "(none)"
+                    else Text.intercalate ", " allowed
+        in
+            [ "Allowed child model IDs: "
+                <> rendered
+                <> ". Omit to inherit the parent model."
+            ]
 
 normalizeForkTurns :: Maybe Text -> Maybe Text
 normalizeForkTurns value =

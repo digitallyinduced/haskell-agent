@@ -40,8 +40,7 @@ import Agent.CLI.Clipboard
     , readClipboardText
     )
 import Agent.CLI.Dictation
-    ( dictate
-    , dictateForProvider
+    ( dictateForProvider
     , insertDictation
     )
 import Agent.CLI.Command
@@ -65,7 +64,7 @@ import Agent.CLI.Interrupt
     , InterruptState
     , noteIdleCtrlC
     )
-import Agent.Provider (Provider)
+import Agent.Provider (Provider(XAIProvider))
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
@@ -137,7 +136,7 @@ import System.Posix.Terminal
 readReplLine :: InterruptState -> Text -> IO ReplLine
 readReplLine interrupt prompt =
     readReplLineConfigured
-        Nothing
+        (Just XAIProvider)
         defaultSlashCatalog False interrupt prompt ""
 
 -- | Read a prompt whose dictation backend follows the active model provider.
@@ -150,7 +149,7 @@ readReplLineForProvider provider interrupt prompt =
 -- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
 readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
 readReplLineWithInitial =
-    readReplLineConfigured Nothing defaultSlashCatalog True
+    readReplLineConfigured (Just XAIProvider) defaultSlashCatalog True
 
 readReplLineWithCatalog
     :: SlashCatalog
@@ -179,7 +178,7 @@ readReplLineWithSkills
     -> IO ReplLine
 readReplLineWithSkills skills =
     readReplLineConfigured
-        Nothing
+        (Just XAIProvider)
         (slashCatalogWithSkills skills defaultSlashCatalog)
         True
 
@@ -192,7 +191,7 @@ readReplLineWithSkillsAndModels
     -> IO ReplLine
 readReplLineWithSkillsAndModels skills modelIds =
     readReplLineConfigured
-        Nothing
+        (Just XAIProvider)
         ((slashCatalogWithSkills skills defaultSlashCatalog)
             { slashCatalogModelIds = modelIds
             })
@@ -366,7 +365,10 @@ readInlineEditor
             DictateIntoEditor -> do
                 finishEditorLine prompt next
                 result <- tryAny $
-                    maybe dictate dictateForProvider dictationProvider
+                    maybe
+                        (fail "Dictation is unavailable in this prompt.")
+                        dictateForProvider
+                        dictationProvider
                 case result of
                     Left err ->
                         Text.putStrLn

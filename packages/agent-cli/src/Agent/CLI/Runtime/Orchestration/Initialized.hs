@@ -38,13 +38,13 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ( deriveDatabaseScopes )
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
-import Agent.CLI.GatewayBridge ()
-import Agent.CLI.GatewayModels
-    ( catalogUsesGateway
-    , gatewayDefaultModelId
-    , isGatewayModelId
-    , loadGatewayModelCatalogAt
+import Agent.CLI.GatewayClient
+    ( GatewayModelAccess
+    , loadGatewayCredential
+    , newGatewayModelAccess
+    , refreshGatewayModels
     )
+import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
@@ -55,16 +55,19 @@ import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig
-    ( builtinConnectionId,
-      catalogConnection,
-      ConnectionKind(BuiltinConnection, CustomResponsesConnection),
+    ( catalogConnection,
+      loadModelCatalogAt,
+      organizationGatewayConnectionId,
+      ConnectionKind(BuiltinConnection, CustomResponsesConnection,
+                     OrganizationGatewayConnection),
       ModelConnection(connectionId, connectionKind),
       ResponsesConnection(responsesApiKeyEnv, responsesApiKeyOptional) )
 import Agent.CLI.Models
     ( resolveConfiguredModel,
+      resolveSavedModelTarget,
       ModelOption(modelTarget),
-      ModelTarget(targetWireModelId, ModelTarget, targetConnectionId,
-                  targetProvider, targetModelId, targetDialect) )
+      ModelTarget(targetWireModelId, targetConnectionId, targetProvider,
+                  targetModelId, targetDialect) )
 import Agent.CLI.Options ( CliOptions(optModel, optProvider, optYolo) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -339,7 +342,7 @@ runAgentInitializedWithLock
                 (loadProjectSettings projectRoot)
                 (loadUserSettings home))
             (concurrently
-                (loadGatewayModelCatalogAt home cwd)
+                (loadModelCatalogAt home cwd)
                 (detectGitBranch cwd))
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
@@ -349,55 +352,36 @@ runAgentInitializedWithLock
         catalogResult
     setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
-    let gatewayMode = catalogUsesGateway catalog
-        transitionTarget = (.transitionTarget) <$> transition
+    connectedGateway <-
+        loadGatewayCredential >>= \case
+            Left err ->
+                startupDie startup
+                    ("Could not load gateway credentials: " <> Text.unpack err)
+            Right credential -> pure credential
+    let transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         unavailableProviders =
             maybe Set.empty (.transitionUnavailableProviders) transition
         configuredOptionTarget =
             (.modelTarget)
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
-        gatewayDefaultTarget =
-            (.modelTarget)
-                <$> resolveConfiguredModel catalog gatewayDefaultModelId
-        savedTarget provider connection model transport dialect =
-            case resolveConfiguredModel catalog model of
-                Just option
-                    | option.modelTarget.targetConnectionId == connection ->
-                        Right option.modelTarget
-                _
-                    | connection == builtinConnectionId provider ->
-                        Right ModelTarget
-                            { targetProvider = provider
-                            , targetConnectionId = connection
-                            , targetModelId = model
-                            , targetWireModelId = fromMaybe model transport
-                            , targetDialect = dialect
-                            }
-                    | otherwise ->
-                        Left $
-                            "saved model "
-                                <> connection <> "/" <> model
-                                <> " is not present in ~/.haskell-agent/models.json"
+        savedTarget =
+            resolveSavedModelTarget catalog False
         resumedTargetResult
-            | gatewayMode =
-                Right Nothing
             | isJust transitionTarget || isJust options.optModel =
                 Right Nothing
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
-            Just meta
-                | isGatewayModelId meta.metaModel -> Right Nothing
             Just meta ->
-                Just <$> savedTarget
+                Just <$> resolveSavedModelTarget
+                    catalog
+                    (isJust connectedGateway)
                     meta.metaProvider
                     meta.metaConnection
                     meta.metaModel
                     meta.metaTransportModel
                     meta.metaDialect
         projectTargetResult
-            | gatewayMode =
-                Right Nothing
             | isJust transitionTarget
                 || isJust options.optModel
                 || isJust resumed =
@@ -406,88 +390,51 @@ runAgentInitializedWithLock
             Nothing -> Right Nothing
             Just remembered ->
                 let target = remembered.projectModelTarget
-                in if isGatewayModelId target.targetModelId
-                    then Right Nothing
-                    else
-                        Just <$> savedTarget
-                            target.targetProvider
-                            target.targetConnectionId
-                            target.targetModelId
-                            (Just target.targetWireModelId)
-                            target.targetDialect
-    when
-        ( gatewayMode
-            && isJust options.optModel
-            && isNothing configuredOptionTarget
-        ) $
-        startupDie startup
-            "the connected gateway accepts router-default, router-codex, or \
-            \router-grok; direct provider model ids are unavailable"
-    when
-        ( gatewayMode
-            && maybe
-                False
-                (not . isGatewayModelId . (.targetModelId))
-                transitionTarget
-        ) $
-        startupDie startup
-            "the connected gateway cannot apply a direct-provider transition; \
-            \select router-default, router-codex, or router-grok"
-    when
-        ( not gatewayMode
-            && maybe False isGatewayModelId options.optModel
-        ) $
-        startupDie startup
-            "gateway router models require an active gateway connection"
-    when
-        ( not gatewayMode
-            && maybe
-                False
-                (isGatewayModelId . (.targetModelId))
-                transitionTarget
-        ) $
-        startupDie startup
-            "the requested gateway transition is unavailable after disconnect"
+                in if isJust connectedGateway
+                then Right (Just target)
+                else if target.targetConnectionId
+                    == organizationGatewayConnectionId
+                then Right Nothing
+                else
+                    Just <$> savedTarget
+                        target.targetProvider
+                        target.targetConnectionId
+                        target.targetModelId
+                        (Just target.targetWireModelId)
+                        target.targetDialect
     resumedTarget <-
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
         either (startupDie startup . Text.unpack) pure projectTargetResult
-    let gatewayTarget candidate =
-            candidate >>= \target ->
-                if isGatewayModelId target.targetModelId
-                    then
-                        (.modelTarget)
-                            <$> resolveConfiguredModel
-                                catalog
-                                target.targetModelId
-                    else Nothing
-        targetHint
-            | gatewayMode =
-                gatewayTarget transitionTarget
-                    <|> configuredOptionTarget
-                    <|> gatewayDefaultTarget
-            | otherwise =
-                transitionTarget
-                    <|> configuredOptionTarget
-                    <|> resumedTarget
-                    <|> if isNothing options.optModel
-                        then projectTarget
-                        else Nothing
-        requestedProvider =
-            (.targetProvider) <$> targetHint
-                <|> options.optProvider
+    let targetHint =
+            transitionTarget
+                <|> configuredOptionTarget
+                <|> resumedTarget
                 <|> if isNothing options.optModel
-                    then projectModelProvider projectSettings
+                    then projectTarget
                     else Nothing
+        requestedProvider
+            | isJust connectedGateway =
+                options.optProvider <|> Just OpenAIProvider
+            | otherwise =
+                (.targetProvider) <$> targetHint
+                    <|> options.optProvider
+                    <|> if isNothing options.optModel
+                        then projectModelProvider projectSettings
+                        else Nothing
         targetConnection =
             targetHint >>= catalogConnection catalog . (.targetConnectionId)
-        customResponses = targetConnection >>= \connection ->
-            case connection.connectionKind of
-                CustomResponsesConnection responses -> Just
-                    (connection.connectionId, responses)
-                BuiltinConnection _ -> Nothing
+        customResponses
+            | isJust connectedGateway = Nothing
+            | otherwise =
+                targetConnection >>= \connection ->
+                    case connection.connectionKind of
+                        CustomResponsesConnection responses -> Just
+                            (connection.connectionId, responses)
+                        BuiltinConnection _ -> Nothing
+                        OrganizationGatewayConnection -> Nothing
         checkStartupUsageInBackground =
-            not gatewayMode
+            isNothing connectedGateway
                 && isJust fullscreen
                 && isNothing transition
                 && isNothing resumed
@@ -558,9 +505,8 @@ runAgentInitializedWithLock
     (loaded, startupAccountIds) <- case customResponses of
         Just _ -> pure (initialLoaded, Nothing)
         Nothing
-            | gatewayMode ->
-                pure (initialLoaded, Nothing)
-            | Just active <- transition
+            | not (isGatewayLoadedAuth initialLoaded)
+            , Just active <- transition
             , Just selectionId <- active.transitionAccountSelectionId ->
                 pure
                     ( initialLoaded
@@ -631,20 +577,20 @@ runAgentInitializedWithLock
                                                 , selected.selectedAccountId
                                                 )
                                             ))
-    when (gatewayMode /= isGatewayLoadedAuth loaded) $
+    when (isJust connectedGateway /= isGatewayLoadedAuth loaded) $
         startupDie startup
             "gateway model routing and loaded credentials disagree; refusing \
             \to start with an unsafe transport configuration"
     case (transitionTarget, resumed) of
         (Just target, _)
-            | not gatewayMode
+            | not (isGatewayLoadedAuth loaded)
             , loaded.loadedProvider /= target.targetProvider ->
                 startupDie startup $ "provider transition requested "
                     <> Text.unpack (providerSlug target.targetProvider)
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         (Nothing, Just (meta, _))
-            | not gatewayMode
+            | not (isGatewayLoadedAuth loaded)
             , loaded.loadedProvider /= meta.metaProvider ->
                 startupDie startup $ "session provider is "
                     <> Text.unpack (providerSlug meta.metaProvider)
@@ -661,6 +607,11 @@ runAgentInitializedWithLock
                     "automatic provider fallback would cross from subscription \
                     \billing to API-credit billing"
         _ -> pure ()
+    initialGatewayModels <-
+        loadGatewayModelAccess loaded >>= either
+            (startupDie startup . Text.unpack)
+            pure
+    gatewayModelsRef <- newIORef initialGatewayModels
     activeAccountRef <- newIORef ""
     activeAccountIdRef <-
         newIORef (maybe "" snd startupAccountIds)
@@ -686,7 +637,7 @@ runAgentInitializedWithLock
                 Nothing ->
                     loaded.loadedTokenProvider
         selectableTokenProvider
-            | gatewayMode =
+            | isGatewayLoadedAuth loaded =
                 gatewayRouterTokenProvider unguardedSelectableTokenProvider
             | otherwise =
                 unguardedSelectableTokenProvider
@@ -796,12 +747,19 @@ runAgentInitializedWithLock
                         resolveActiveAccountLabel
                         selectableTokenProvider
                 _ -> switchableTokenProvider
-        selectHttpAccount selectedSelectionId =
-            loadAuthForAccount loaded.loadedProvider selectedSelectionId
-                >>= \case
+        selectHttpAccount selectedSelectionId
+            | isGatewayLoadedAuth loaded =
+                pure $ Left $ CredentialError
+                    "Account switching is unavailable while connected to the organization gateway. Disconnect the gateway first."
+            | otherwise =
+                loadAuthForAccount loaded.loadedProvider selectedSelectionId
+                    >>= \case
                     Left err ->
                         pure (Left (CredentialError err))
                     Right selected
+                        | selected.loadedProvider /= loaded.loadedProvider ->
+                            pure $ Left $ CredentialError
+                                "selected account belongs to a different provider"
                         | tokenProviderBillingMode
                             selected.loadedTokenProvider
                             /= tokenProviderBillingMode
@@ -809,43 +767,58 @@ runAgentInitializedWithLock
                             pure $ Left $ CredentialError
                                 "selected account uses a different billing mode"
                         | otherwise ->
-                            probeLoadedAuthCredential selected >>= \case
-                                Left err -> pure (Left err)
-                                Right (credential, usable) -> do
-                                    label <-
-                                        usable.loadedAccountLabel credential
-                                    when
-                                        (loaded.loadedProvider
-                                            == OpenAIProvider) $
-                                        writeIORef
-                                            preferredOpenAiAccountRef
-                                            (if selectedSelectionId
-                                                    == gatewayAuthSelectionId
-                                                then Nothing
-                                                else Just credential.accountId)
-                                    let selectionId =
-                                            fromMaybe
-                                                selectedSelectionId
-                                                usable.loadedSelectionId
-                                    modifyMVar_ activeHttpAuth \current -> do
-                                        writeIORef
-                                            activeAccountIdRef
-                                            credential.accountId
-                                        writeIORef
-                                            activeSelectionRef
-                                            selectionId
-                                        writeIORef activeAccountRef label
-                                        pure ActiveHttpAuth
-                                            { activeHttpGeneration =
-                                                current.activeHttpGeneration + 1
-                                            , activeHttpProvider =
-                                                usable.loadedTokenProvider
-                                            , activeHttpResolveLabel =
+                            loadGatewayModelAccess selected >>= \case
+                                Left err ->
+                                    pure (Left (CredentialError err))
+                                Right selectedGatewayModels ->
+                                    probeLoadedAuthCredential selected >>= \case
+                                        Left err -> pure (Left err)
+                                        Right (credential, usable) -> do
+                                            label <-
                                                 usable.loadedAccountLabel
-                                            , activeHttpAccountId =
-                                                credential.accountId
-                                            }
-                                    pure (Right label)
+                                                    credential
+                                            when
+                                                (loaded.loadedProvider
+                                                    == OpenAIProvider) $
+                                                writeIORef
+                                                    preferredOpenAiAccountRef
+                                                    (if selectedSelectionId
+                                                            == gatewayAuthSelectionId
+                                                        then Nothing
+                                                        else
+                                                            Just
+                                                                credential.accountId)
+                                            let selectionId =
+                                                    fromMaybe
+                                                        selectedSelectionId
+                                                        usable.loadedSelectionId
+                                            modifyMVar_
+                                                activeHttpAuth
+                                                \current -> do
+                                                    writeIORef
+                                                        gatewayModelsRef
+                                                        selectedGatewayModels
+                                                    writeIORef
+                                                        activeAccountIdRef
+                                                        credential.accountId
+                                                    writeIORef
+                                                        activeSelectionRef
+                                                        selectionId
+                                                    writeIORef
+                                                        activeAccountRef
+                                                        label
+                                                    pure ActiveHttpAuth
+                                                        { activeHttpGeneration =
+                                                            current.activeHttpGeneration
+                                                                + 1
+                                                        , activeHttpProvider =
+                                                            usable.loadedTokenProvider
+                                                        , activeHttpResolveLabel =
+                                                            usable.loadedAccountLabel
+                                                        , activeHttpAccountId =
+                                                            credential.accountId
+                                                        }
+                                            pure (Right label)
 
     runAgentTools
         runAgentChild
@@ -857,6 +830,7 @@ runAgentInitializedWithLock
         activeSelectionRef
         baseToolEnv
         catalog
+        gatewayModelsRef
         (checkStartupUsageInBackground && isNothing preparedAccountUsage)
         configuredOptionTarget
         customResponses
@@ -957,3 +931,24 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
                     writeIORef selectionRef credential.accountId
                 resolveLabel credential >>= writeIORef accountRef
                 pure (Right credential)
+
+loadGatewayModelAccess
+    :: LoadedAuth
+    -> IO (Either Text (Maybe GatewayModelAccess))
+loadGatewayModelAccess loaded
+    | not (isGatewayLoadedAuth loaded) = pure (Right Nothing)
+    | otherwise =
+        loadGatewayCredential >>= \case
+            Left err ->
+                pure (Left ("Could not load gateway credentials: " <> err))
+            Right Nothing ->
+                pure (Left "No organization gateway credential is connected.")
+            Right (Just credential) -> do
+                access <- newGatewayModelAccess credential
+                refreshGatewayModels access >>= \case
+                    Left err -> pure (Left err)
+                    Right [] ->
+                        pure
+                            (Left
+                                "The organization gateway does not offer any models.")
+                    Right _ -> pure (Right (Just access))

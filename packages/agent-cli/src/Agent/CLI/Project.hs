@@ -28,12 +28,12 @@ import Agent.CLI.Json (decodeLazy)
 import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.CLI.Models (ModelTarget(..))
+import Agent.CLI.ModelConfig (connectionSupportsDialect)
 import Agent.Dialect
     ( DialectId
     , dialectSlug
     , legacyDialectIdForProvider
     , parseDialect
-    , providerSupportsDialect
     )
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
@@ -155,7 +155,7 @@ projectModelDecoder = Hermes.object do
             Just text -> case parseDialect text of
                 Just parsed -> pure parsed
                 Nothing -> fail ("unknown dialect: " <> Text.unpack text)
-        unless (providerSupportsDialect provider dialect) $
+        unless (connectionSupportsDialect connection provider dialect) $
             fail
                 ( "dialect "
                     <> Text.unpack (dialectSlug dialect)

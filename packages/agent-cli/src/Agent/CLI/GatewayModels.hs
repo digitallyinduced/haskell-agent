@@ -1,105 +1,63 @@
--- | Canonical model aliases exposed by the Digitally Induced LLM gateway.
---
--- Gateway credentials are process-wide, so the active catalog is deliberately
--- exclusive: direct provider models disappear while connected and gateway
--- aliases disappear while disconnected. This prevents a direct model id from
--- being sent to the gateway (or a router alias from reaching a provider).
+-- | Load the authoritative model options exposed by a connected organization
+-- gateway for native clients that do not own a long-running CLI session.
 module Agent.CLI.GatewayModels
-    ( catalogForGatewayState
-    , catalogUsesGateway
-    , gatewayDefaultModelId
-    , gatewayModelIds
-    , isGatewayModelId
-    , loadGatewayModelCatalogAt
+    ( loadGatewayModelOptionsAt
+    , modelOptionsForGatewayState
     ) where
 
-import Agent.CLI.GatewayClient (loadGatewayCredentialAt)
+import Agent.CLI.GatewayClient
+    ( loadGatewayCredentialAt
+    , newGatewayModelAccess
+    , refreshGatewayModels
+    )
 import Agent.CLI.ModelConfig
-    ( CatalogModel(..)
-    , ModelCatalog(..)
-    , builtinConnectionId
+    ( ModelCatalog
     , loadModelCatalogAt
     )
-import Agent.Dialect (DialectId (CodexDialect))
+import Agent.CLI.Models
+    ( ModelOption
+    , gatewayModelOptions
+    , modelCatalog
+    )
 import Agent.Provider (Provider (OpenAIProvider))
-import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import System.OsPath (OsPath)
 
-gatewayDefaultModelId :: Text
-gatewayDefaultModelId = "router-default"
-
-gatewayModelIds :: [Text]
-gatewayModelIds =
-    [ gatewayDefaultModelId
-    , "router-codex"
-    , "router-grok"
-    ]
-
-isGatewayModelId :: Text -> Bool
-isGatewayModelId modelId = modelId `elem` gatewayModelIds
-
-catalogUsesGateway :: ModelCatalog -> Bool
-catalogUsesGateway catalog =
-    not (null catalog.catalogModels)
-        && all (isGatewayModelId . (.catalogModelId)) catalog.catalogModels
-
-catalogForGatewayState :: Bool -> ModelCatalog -> ModelCatalog
-catalogForGatewayState connected catalog
-    | connected = withModels canonicalGatewayModels
-    | otherwise =
-        withModels $
-            filter
-                (not . isGatewayModelId . (.catalogModelId))
-                catalog.catalogModels
-  where
-    withModels models =
-        catalog
-            { catalogModels = models
-            , catalogModelsById =
-                Map.fromList
-                    [ (model.catalogModelId, model)
-                    | model <- models
-                    ]
-            }
-
-loadGatewayModelCatalogAt
+loadGatewayModelOptionsAt
     :: OsPath
     -> OsPath
-    -> IO (Either Text ModelCatalog)
-loadGatewayModelCatalogAt home cwd =
+    -> IO (Either Text (ModelCatalog, Maybe [ModelOption]))
+loadGatewayModelOptionsAt home cwd =
     loadModelCatalogAt home cwd >>= \case
         Left err -> pure (Left err)
         Right catalog ->
             loadGatewayCredentialAt home >>= \case
                 Left err ->
                     pure (Left ("cannot load gateway credential: " <> err))
-                Right credential ->
-                    pure
-                        (Right
-                            (catalogForGatewayState
-                                (maybe False (const True) credential)
-                                catalog))
+                Right Nothing -> pure (Right (catalog, Nothing))
+                Right (Just credential) -> do
+                    access <- newGatewayModelAccess credential
+                    refreshGatewayModels access >>= \case
+                        Left err -> pure (Left err)
+                        Right [] ->
+                            pure
+                                (Left
+                                    "The organization gateway does not offer any models.")
+                        Right modelIds ->
+                            pure
+                                (Right
+                                    ( catalog
+                                    , Just
+                                        (modelOptionsForGatewayState
+                                            catalog
+                                            (Just modelIds))
+                                    ))
 
-canonicalGatewayModels :: [CatalogModel]
-canonicalGatewayModels =
-    [ gatewayModel gatewayDefaultModelId "Gateway · Default" True
-    , gatewayModel "router-codex" "Gateway · Codex" False
-    , gatewayModel "router-grok" "Gateway · Grok" False
-    ]
-
-gatewayModel :: Text -> Text -> Bool -> CatalogModel
-gatewayModel modelId label isDefault =
-    CatalogModel
-        { catalogModelId = modelId
-        , catalogModelConnectionId = builtinConnectionId OpenAIProvider
-        , catalogModelWireId = modelId
-        , catalogModelDialect = CodexDialect
-        , catalogModelContextWindow = Nothing
-        , catalogModelLabel = Just label
-        , catalogModelReasoningEfforts =
-            Just ["low", "medium", "high", "xhigh", "max"]
-        , catalogModelDefaultReasoningEffort = Just "medium"
-        , catalogModelDefault = isDefault
-        , catalogModelFallbackPriority = Nothing
-        }
+modelOptionsForGatewayState
+    :: ModelCatalog
+    -> Maybe [Text]
+    -> [ModelOption]
+modelOptionsForGatewayState catalog = \case
+    Nothing -> modelCatalog catalog
+    Just modelIds ->
+        gatewayModelOptions catalog OpenAIProvider modelIds

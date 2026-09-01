@@ -15,7 +15,11 @@ import Agent.Loop (BackendSnapshot)
 import Agent.Provider (Provider, TokenProvider)
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Subagents (SubagentId, SubagentRegistry)
-import Agent.Tools.MultiAgents (MultiAgentContext, SubagentWorktree)
+import Agent.Tools.MultiAgents
+    ( CollaborationModelTarget
+    , MultiAgentContext
+    , SubagentWorktree
+    )
 import Agent.Tools.PlanMode (PlanModeHooks)
 import Agent.Tools.Types (AppTool, ToolEnv)
 import Agent.Dialect (DialectId)
@@ -72,6 +76,9 @@ data SubagentRuntime = SubagentRuntime
         :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
     , subagentSpawnModelGuidance :: !(Maybe Text)
     , subagentAllowedChildModels :: !(Maybe [Text])
+    , subagentResolveChildModel
+        :: !(Maybe (Text -> IO (Maybe CollaborationModelTarget)))
+    , subagentChildModelAllowed :: !(Maybe (Text -> IO Bool))
     , subagentOpenAiChild :: !(Maybe TokenProvider)
     }
 

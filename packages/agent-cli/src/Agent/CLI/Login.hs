@@ -876,9 +876,9 @@ loginAccountDetail account
                 <> markdownText 160 account.loginAccountId
             , "Status: " <> gatewayStatus
             , ""
-            , "The gateway is preferred for OpenAI requests. If its saved "
-                <> "authorization is rejected, compatible local ChatGPT "
-                <> "accounts remain available as fallbacks."
+            , "The gateway controls provider, model, and account routing for "
+                <> "this organization. Local accounts are unavailable until "
+                <> "the gateway is disconnected."
             ]
       where
         gatewayStatus = case account.loginUsage of

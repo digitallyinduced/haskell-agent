@@ -11,8 +11,7 @@ import Agent.CLI.AgentSessions ()
 import Agent.CLI.AgentViewport ()
 import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
-import Agent.CLI.Auth (isGatewayLoadedAuth)
-import Agent.CLI.Auth.Types (LoadedAuth(..))
+import Agent.CLI.Auth.Types (LoadedAuth(..), isGatewayLoadedAuth)
 import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
 import Agent.CLI.Command ()
@@ -34,7 +33,6 @@ import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
 import Agent.CLI.GatewayBridge ()
-import Agent.CLI.GatewayModels (catalogUsesGateway)
 import Agent.CLI.Input ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -362,12 +360,12 @@ runAgentProviders
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
                                 let selectableOpenAiPool
-                                        | catalogUsesGateway catalog = Nothing
+                                        | isGatewayLoadedAuth loaded = Nothing
                                         | otherwise = loaded.loadedOpenAiPool
                                     selectAccount = case selectableOpenAiPool of
-                                        Nothing -> Nothing
-                                        Just pool ->
-                                            Just \selectedAccountId -> do
+                                            Nothing -> Nothing
+                                            Just pool ->
+                                                Just \selectedAccountId -> do
                                                     _ <- OpenAI.discoverAccounts pool
                                                     OpenAI.getAccessTokenForAccount
                                                         pool
@@ -653,6 +651,7 @@ runAgentProviders
                                                 pure (RunProviderStartFailed err)
                                         _
                                             | shouldProbeAtStartup
+                                            , not (isGatewayLoadedAuth loaded)
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
                                                     catalog

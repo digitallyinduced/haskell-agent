@@ -18,6 +18,11 @@ import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
+import Agent.CLI.GatewayClient
+    ( GatewayModelAccess
+    , loadGatewayCredential
+    , newGatewayModelAccess
+    )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
@@ -31,7 +36,7 @@ import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpStatus ()
-import Agent.CLI.GatewayModels ( loadGatewayModelCatalogAt )
+import Agent.CLI.ModelConfig ( loadModelCatalogAt )
 import Agent.CLI.Models
     ( defaultModelOptionFor,
       resolveConfiguredModel,
@@ -442,6 +447,17 @@ withRestoredCurrentDirectory action = do
     originalCwd <- getCurrentDirectory
     action `finally` setCurrentDirectory originalCwd
 
+recoveryGatewayAccess
+    :: Provider
+    -> Maybe ProviderTransition
+    -> IO (Either Text (Maybe GatewayModelAccess))
+recoveryGatewayAccess _ _ =
+    loadGatewayCredential >>= \case
+        Left err -> pure (Left ("Could not load gateway credentials: " <> err))
+        Right Nothing -> pure (Right Nothing)
+        Right (Just credential) ->
+            Right . Just <$> newGatewayModelAccess credential
+
 runAgent
     :: AgentProcessRuntime
     -> AgentRunMode
@@ -469,7 +485,7 @@ runAgent
                         cwd <- case nextOptions.optCwd <|> runMode.runCwdHint of
                             Nothing -> getCurrentDirectory
                             Just path -> makeAbsolute path
-                        loadGatewayModelCatalogAt home cwd >>= \case
+                        loadModelCatalogAt home cwd >>= \case
                             Left err -> pure (Left err)
                             Right catalog -> do
                                 color <- resolveColor runMode.runStderr
@@ -496,31 +512,39 @@ runAgent
                                             (Left
                                                 "No configured models are available.")
                                     Just current ->
-                                        modelChoiceWithEffort
-                                            catalog
-                                            (Just runtime)
-                                            color
-                                            current.targetConnectionId
+                                        recoveryGatewayAccess
                                             current.targetProvider
-                                            current.targetModelId
-                                            current.targetDialect
-                                            (fromMaybe
-                                                (defaultEffortFor
-                                                    current.targetProvider)
-                                                ( (nextTransition
-                                                        >>= (.transitionEffort))
-                                                    <|> nextOptions.optEffort
-                                                ))
-                                            >>= \case
-                                                Nothing ->
-                                                    pure (Right Nothing)
-                                                Just selection ->
-                                                    pure $ Right $ Just $
-                                                        recoveryModelTransition
-                                                            nextOptions
-                                                            nextTransition
-                                                            selection.modelPickerOption.modelTarget
-                                                            selection.modelPickerEffort
+                                            nextTransition >>= \case
+                                                Left err -> pure (Left err)
+                                                Right gatewayAccess ->
+                                                    modelChoiceWithEffort
+                                                        catalog
+                                                        gatewayAccess
+                                                        (Just runtime)
+                                                        color
+                                                        current.targetConnectionId
+                                                        current.targetProvider
+                                                        current.targetModelId
+                                                        current.targetDialect
+                                                        (fromMaybe
+                                                            (defaultEffortFor
+                                                                current.targetProvider)
+                                                            ( (nextTransition
+                                                                    >>= (.transitionEffort))
+                                                                <|> nextOptions.optEffort
+                                                            ))
+                                                        >>= \case
+                                                            Left err ->
+                                                                pure (Left err)
+                                                            Right Nothing ->
+                                                                pure (Right Nothing)
+                                                            Right (Just selection) ->
+                                                                pure $ Right $ Just $
+                                                                    recoveryModelTransition
+                                                                        nextOptions
+                                                                        nextTransition
+                                                                        selection.modelPickerOption.modelTarget
+                                                                        selection.modelPickerEffort
                     recoveryModelTransition
                             nextOptions nextTransition target selectedEffort =
                         case nextTransition of
