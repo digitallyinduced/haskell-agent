@@ -810,7 +810,7 @@ genAction =
         , (1, pure RestartTurn)
         , (2, pure ClearConversation)
         , (3, ShowChoice
-                <$> elements [ChoiceDialog, ChoiceOnboarding]
+                <$> elements [ChoiceDialog, ChoiceDocument, ChoiceOnboarding]
                 <*> genLineText
                 <*> genBodyText
                 <*> genChoiceRows

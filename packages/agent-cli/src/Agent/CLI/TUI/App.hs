@@ -60,6 +60,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenDocument
     , requestFullscreenFilterChoice
     , requestFullscreenAdjustableFilterChoice
     , requestFullscreenOnboarding

@@ -105,6 +105,7 @@ data Name
     | QuickStartResume
     | QuickStartCommands
     | QuickStartModel
+    | QuickStartChangelog
     | ChoiceRow !Int
     | ResumeViewport
     | ResumeRow !Text
@@ -383,6 +384,7 @@ data AgentHover = AgentHover
 
 data ChoicePresentation
     = ChoiceDialog
+    | ChoiceDocument
     | ChoiceOnboarding
     deriving (Eq, Show)
 

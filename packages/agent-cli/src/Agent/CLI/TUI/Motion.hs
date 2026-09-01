@@ -24,6 +24,8 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.TUI.Types
     ( AppState(..)
+    , ChoiceOverlay(choicePresentation)
+    , ChoicePresentation(ChoiceDocument)
     , FullscreenRuntime(..)
     , TerminalFocus(..)
     )
@@ -170,7 +172,10 @@ appNextDeadlineMillis state =
 userActionPending :: AppState -> Bool
 userActionPending state =
     isJust state.appTextPrompt
-        || isJust state.appChoice
+        || maybe False
+            (\choice ->
+                choice.choicePresentation /= ChoiceDocument)
+            state.appChoice
         || isJust state.appResume
         || isJust state.appMetaConsole
         || isJust state.appUi.uiPermission

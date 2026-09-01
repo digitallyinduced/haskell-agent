@@ -53,7 +53,7 @@ import Agent.CLI.TUI.Types
       FullscreenRuntime(runtimeColor, runtimeMotionMode),
       Name(QuickStartModel, CodeCopy, ConversationChunkCache,
            ConversationReserve, QuickStartWorktree, QuickStartResume,
-           QuickStartCommands) )
+           QuickStartCommands, QuickStartChangelog) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
 import Agent.Loop ()
@@ -453,6 +453,7 @@ quickStartRows =
     , (QuickStartResume, "Resume session", "/resume")
     , (QuickStartCommands, "Browse commands", "/")
     , (QuickStartModel, "Manage models", "/model")
+    , (QuickStartChangelog, "View changelog", "/changelog")
     ]
 
 drawQuickStartDashboard

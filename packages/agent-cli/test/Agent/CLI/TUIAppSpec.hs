@@ -135,6 +135,7 @@ import Control.Concurrent.STM
     , newEmptyTMVarIO
     , newTChanIO
     , retry
+    , tryReadTMVar
     )
 import Control.Monad (replicateM_)
 import qualified Data.ByteString as ByteString
@@ -455,6 +456,34 @@ spec = do
                 `shouldBe` Composer.fullscreenInputCountLimit
 
     describe "choice overlay lifecycle" do
+        it "renders and dismisses changelog release notes without choice rows" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let marker = "Bundled release note"
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+                script =
+                    [ FullscreenScriptApp
+                        (AppAskChoice
+                            ChoiceDocument
+                            "Release Notes"
+                            marker
+                            0
+                            []
+                            reply)
+                    , FullscreenScriptVty (V.EvKey V.KDown [])
+                    , FullscreenScriptVty (V.EvKey V.KEsc [])
+                    , FullscreenScriptHalt
+                    ]
+            (rendered, finalState) <-
+                runFullscreenScriptWithState initialState script
+            rendered
+                `shouldSatisfy`
+                    ByteString.isInfixOf (encoded marker)
+            finalState.appChoice `shouldBe` Nothing
+            atomically (tryReadTMVar reply)
+                `shouldReturn` Just Nothing
+
         it "closes a running-turn choice on success or cancellation" do
             let running =
                     reduceUi (UiLoop TurnStarted) initialUiState
@@ -812,13 +841,14 @@ spec = do
             quickStartWideVisible 103 35 `shouldBe` False
             quickStartWideVisible 140 28 `shouldBe` False
 
-        it "surfaces the existing high-value startup commands" do
+        it "surfaces the high-value startup commands including changelog" do
             quickStartRows
                 `shouldBe`
                     [ (QuickStartWorktree, "New worktree", "/worktree")
                     , (QuickStartResume, "Resume session", "/resume")
                     , (QuickStartCommands, "Browse commands", "/")
                     , (QuickStartModel, "Manage models", "/model")
+                    , (QuickStartChangelog, "View changelog", "/changelog")
                     ]
 
         it "packs capability names into bounded startup rows" do
