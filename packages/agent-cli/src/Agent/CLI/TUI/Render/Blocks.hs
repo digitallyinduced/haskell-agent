@@ -72,6 +72,7 @@ import Agent.TUI.Presentation
     ( TodoDisplayLine(todoLineText, todoLineStatus),
       parseTodoList,
       todoStatusGlyph,
+      toolOutputCodeLanguage,
       TodoDisplayStatus(..) )
 import Agent.TUI.TextWidth ( displayTerminalText )
 import Agent.ToolDispatch ()
@@ -257,7 +258,10 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
-                    (bodySections (visibleBody block)
+                    (toolBodySections
+                        state.appSyntaxHighlighter
+                        block.blockBody
+                        (visibleBody block)
                         <> toolImageSections state target block)
             BlockInspect ->
                 accentBlockWithSections
@@ -270,7 +274,10 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
-                    (bodySections (visibleBody block)
+                    (toolBodySections
+                        state.appSyntaxHighlighter
+                        block.blockBody
+                        (visibleBody block)
                         <> toolImageSections state target block)
             BlockTodo ->
                 accentBlockWithSections
@@ -611,6 +618,17 @@ bodySections :: Text -> [Widget Name]
 bodySections body
     | Text.null (Text.strip body) = []
     | otherwise = [terminalTxtWrap body]
+
+toolBodySections
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> Text
+    -> [Widget Name]
+toolBodySections syntaxHighlighter completeBody visible
+    | Text.null (Text.strip visible) = []
+    | Just language <- toolOutputCodeLanguage completeBody =
+        [codeWidgetWithSyntaxHighlighting syntaxHighlighter language visible]
+    | otherwise = bodySections visible
 
 editBodyWidgets :: Text -> [Widget Name]
 editBodyWidgets body

@@ -34,6 +34,7 @@ module Agent.TUI.Presentation
     , toolCallDiff
     , toolCallDiffs
     , toolDetail
+    , toolOutputCodeLanguage
     , toolPathArgument
     , toolVerb
     , workspaceRelativeDisplayPath
@@ -425,6 +426,16 @@ beautifyJson text =
         Just value@Aeson.Object{} -> prettyJsonValue value
         Just value@Aeson.Array{} -> prettyJsonValue value
         _ -> text
+
+-- | Select syntax highlighting for structured tool output. Primitive JSON
+-- values stay as ordinary text; objects and arrays benefit from JSON token
+-- colors without changing the retained transcript body.
+toolOutputCodeLanguage :: Text -> Maybe Text
+toolOutputCodeLanguage text =
+    case decodeJsonValue text of
+        Just Aeson.Object{} -> Just "json"
+        Just Aeson.Array{} -> Just "json"
+        _ -> Nothing
 
 decodeJsonValue :: Text -> Maybe Aeson.Value
 decodeJsonValue =

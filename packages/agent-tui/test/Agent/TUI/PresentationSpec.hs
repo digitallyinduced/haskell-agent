@@ -207,6 +207,11 @@ spec = describe "tool presentation" do
                 \    ]\n\
                 \}"
         formatToolOutput call "plain text" `shouldBe` "plain text"
+        toolOutputCodeLanguage
+            (formatToolOutput call "{\"ok\":true,\"rows\":[1,2]}")
+            `shouldBe` Just "json"
+        toolOutputCodeLanguage "plain text" `shouldBe` Nothing
+        toolOutputCodeLanguage "42" `shouldBe` Nothing
 
     it "extracts tool details from function and custom calls" do
         toolDetail
