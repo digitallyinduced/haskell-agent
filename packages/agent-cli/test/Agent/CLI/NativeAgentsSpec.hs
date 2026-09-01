@@ -3,7 +3,11 @@ module Agent.CLI.NativeAgentsSpec (spec) where
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.NativeAgents
 import Agent.Json (rawJsonFromEncoding)
-import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
+import Agent.Loop
+    ( LoopEvent(..)
+    , NativeAgentStatus(..)
+    , emptyTurnOutput
+    )
 import Agent.Responses.Types
     ( FunctionCall(..)
     , FunctionCallOutput(..)
@@ -70,6 +74,44 @@ spec = describe "provider-native agent tracking" do
         view.nativeAgentStatus `shouldBe` "cancelled"
         states `shouldSatisfy` all (/= BlockRunning)
 
+    it "does not carry reused child output across response-attempt boundaries" do
+        let beforeRetry =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ TurnStarted
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "old live"
+                        Nothing
+                    , NativeAgentOutput "reused" "old result"
+                    ]
+            reuseAfter boundary =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    beforeRetry
+                    [ boundary
+                    , NativeAgentOutput "reused" "new result"
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing
+                    ]
+            views =
+                map
+                    (lookupView "reused" . reuseAfter)
+                    [ ResponseRestarted "retrying"
+                    , ResponseAttemptDiscarded
+                    ]
+        map nativeAgentTranscript views
+            `shouldBe` [["new result"], ["new result"]]
+        map (.nativeAgentLabel) views
+            `shouldBe` ["new live", "new live"]
+        map (.nativeAgentStatus) views
+            `shouldBe` ["running", "running"]
+
     it "settles stale running children before the next turn starts" do
         let tracked =
                 foldl
@@ -128,6 +170,54 @@ spec = describe "provider-native agent tracking" do
         view.nativeAgentModel `shouldBe` Just "sonnet"
         view.nativeAgentStatus `shouldBe` "done"
         nativeAgentTranscript view `shouldBe` ["review complete"]
+
+    it "replaces live parent snapshots with canonical state on every restore" do
+        let live =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ NativeAgentStarted
+                        "parent" Nothing "Live parent" Nothing
+                    , NativeAgentStarted
+                        "child" (Just "parent") "Child" Nothing
+                    ]
+            call = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "parent"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments =
+                    "{\"description\":\"Persisted parent\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "parent"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding $
+                        Aeson.toEncoding ("persisted" :: String)
+                , status = Just ItemCompleted
+                }
+            restore =
+                restoreNativeAgents AgentRoot [call, output]
+            restored =
+                iterate restore live
+                    !! (nativeAgentMaxEntries * 4)
+            parent = lookupView "parent" restored
+            child =
+                find
+                    ((== AgentNative "child") . (.agentTarget))
+                    (nativeAgentEntries AgentRoot restored)
+        nativeAgentStoreSize restored `shouldBe` 2
+        parent.nativeAgentLabel `shouldBe` "Persisted parent"
+        parent.nativeAgentStatus `shouldBe` "done"
+        (.agentPath) <$> child
+            `shouldBe` Just "/native/Persisted parent/Child"
 
     it "does not restore unpaired or non-Claude canonical calls" do
         let call identifier provider = FunctionCallItem FunctionCall
@@ -197,6 +287,245 @@ spec = describe "provider-native agent tracking" do
             `shouldSatisfy` maybe False
                 ((== "done") . (.nativeAgentStatus))
 
+    it "does not let paired non-native outputs hide an older native pair" do
+        let call name identifier = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = identifier
+                , name
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output identifier = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = identifier
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding
+                        (Aeson.toEncoding ("done" :: String))
+                , status = Just ItemCompleted
+                }
+            unrelated =
+                concat
+                    [ [call "Read" identifier, output identifier]
+                | index <- [1 .. nativeAgentMaxEntries + 16]
+                    , let identifier = Text.pack ("other-" <> show index)
+                    ]
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    ([call "Agent" "native", output "native"] <> unrelated)
+                    emptyNativeAgentStore
+        nativeAgentLookup "native" restored
+            `shouldSatisfy` maybe False
+                ((== "done") . (.nativeAgentStatus))
+
+    it "keeps only the newest canonical pair for a reused call id" do
+        let pair index =
+                [ FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "reused"
+                    , name = "Agent"
+                    , namespace = Nothing
+                    , provider = Just "claude-code"
+                    , arguments =
+                        Text.pack
+                            ("{\"description\":\"revision-"
+                                <> show index
+                                <> "\"}")
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    }
+                , FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing
+                    , callId = "reused"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Just "claude-code"
+                    , output =
+                        rawJsonFromEncoding $
+                            Aeson.toEncoding $
+                                Text.pack ("result-" <> show index)
+                    , status = Just ItemCompleted
+                    }
+                ]
+            pairCount = nativeAgentMaxEntries * 4
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    (concatMap pair [1 .. pairCount])
+                    emptyNativeAgentStore
+            view = lookupView "reused" restored
+        nativeAgentStoreSize restored `shouldBe` 1
+        view.nativeAgentLabel
+            `shouldBe` Text.pack ("revision-" <> show pairCount)
+        nativeAgentTranscript view
+            `shouldBe` [Text.pack ("result-" <> show pairCount)]
+
+    it "keeps a newer live reuse when its canonical call is still unpaired" do
+        let call description = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "reused"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments =
+                    "{\"description\":\"" <> description <> "\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            oldOutput = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "reused"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding $
+                        Aeson.toEncoding ("old result" :: String)
+                , status = Just ItemCompleted
+                }
+            live =
+                applyNativeAgentEvent
+                    (NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing)
+                    emptyNativeAgentStore
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    [call "old canonical", oldOutput, call "new canonical"]
+                    live
+            view = lookupView "reused" restored
+        view.nativeAgentLabel `shouldBe` "new live"
+        view.nativeAgentStatus `shouldBe` "running"
+
+    it "keeps current-turn live reuse ahead of older canonical history until turn finishes" do
+        let oldCall = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "reused"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments = "{\"description\":\"old canonical\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            oldOutput = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "reused"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding $
+                        Aeson.toEncoding ("old result" :: String)
+                , status = Just ItemCompleted
+                }
+            persisted =
+                restoreNativeAgents
+                    AgentRoot
+                    [oldCall, oldOutput]
+                    emptyNativeAgentStore
+            live =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    persisted
+                    [ TurnStarted
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing
+                    , NativeAgentOutput "reused" "new result"
+                    ]
+            outputBeforeStart =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    persisted
+                    [ TurnStarted
+                    , NativeAgentOutput "reused" "new result"
+                    , NativeAgentStarted
+                        "reused"
+                        Nothing
+                        "new live"
+                        Nothing
+                    ]
+            outputFirstView = lookupView "reused" outputBeforeStart
+            finishedBeforeStart =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    persisted
+                    [ TurnStarted
+                    , NativeAgentFinished "reused" NativeAgentCompleted
+                    ]
+            finishedBeforeStartView =
+                lookupView "reused" finishedBeforeStart
+            restored =
+                restoreNativeAgents AgentRoot [oldCall, oldOutput] live
+            view = lookupView "reused" restored
+            afterFinish =
+                restoreNativeAgents
+                    AgentRoot
+                    [oldCall, oldOutput]
+                    (applyNativeAgentEvent
+                        (TurnFinished
+                            (emptyTurnOutput "root" [] Nothing))
+                        restored)
+            finishedView = lookupView "reused" afterFinish
+        view.nativeAgentLabel `shouldBe` "new live"
+        view.nativeAgentStatus `shouldBe` "running"
+        nativeAgentTranscript view `shouldBe` ["new result"]
+        outputFirstView.nativeAgentLabel `shouldBe` "new live"
+        outputFirstView.nativeAgentStatus `shouldBe` "running"
+        nativeAgentTranscript outputFirstView `shouldBe` ["new result"]
+        finishedBeforeStartView.nativeAgentStatus `shouldBe` "done"
+        nativeAgentTranscript finishedBeforeStartView `shouldBe` []
+        finishedView.nativeAgentLabel `shouldBe` "old canonical"
+        finishedView.nativeAgentStatus `shouldBe` "done"
+
+    it "does not decode oversized canonical call arguments for metadata" do
+        let call = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "oversized-arguments"
+                , name = "Agent"
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , arguments =
+                    "{\"description\":\"untrusted\",\"model\":\"huge\","
+                        <> "\"prompt\":\""
+                        <> Text.replicate (128 * 1024) "x"
+                        <> "\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                }
+            output = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "oversized-arguments"
+                , name = Nothing
+                , namespace = Nothing
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding
+                        (Aeson.toEncoding ("done" :: String))
+                , status = Just ItemCompleted
+                }
+            restored =
+                restoreNativeAgents
+                    AgentRoot
+                    [call, output]
+                    emptyNativeAgentStore
+            view = lookupView "oversized-arguments" restored
+        view.nativeAgentLabel `shouldBe` "Agent"
+        view.nativeAgentModel `shouldBe` Nothing
+        nativeAgentTranscript view `shouldBe` ["done"]
+
     it "bounds terminal rows and retained output" do
         let payload = Text.replicate (nativeAgentPreviewBytes `div` 2) "x"
             tracked =
@@ -230,6 +559,62 @@ spec = describe "provider-native agent tracking" do
             (Text.pack ("running-" <> show (nativeAgentMaxEntries + 16)))
             tracked
             `shouldSatisfy` maybe False (const True)
+
+    it "bounds and accounts provider-controlled lifecycle metadata" do
+        let huge = Text.replicate (2 * 1024 * 1024) "x"
+            tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    [ NativeAgentStarted
+                        identifier
+                        Nothing
+                        (huge <> Text.pack (show index))
+                        (Just huge)
+                    | index <- [1 .. nativeAgentMaxEntries]
+                    , let identifier = Text.pack ("metadata-" <> show index)
+                    ]
+            views =
+                [ view
+                | identifier <- nativeAgentTargets tracked
+                , AgentNative nativeId <- [identifier]
+                , Just view <- [nativeAgentLookup nativeId tracked]
+                ]
+        nativeAgentStoreSize tracked `shouldBe` nativeAgentMaxEntries
+        nativeAgentStoreBytes tracked `shouldSatisfy` (> 0)
+        nativeAgentStoreBytes tracked
+            `shouldSatisfy` (<= nativeAgentAggregateBytes)
+        views `shouldSatisfy`
+            all
+                (\view ->
+                    Text.length view.nativeAgentLabel
+                        <= nativeAgentPreviewBytes `div` 4
+                        && maybe True
+                            ((<= nativeAgentPreviewBytes `div` 4) . Text.length)
+                            view.nativeAgentModel)
+
+    it "ignores identifiers too large to retain as map keys" do
+        let hugeIdentifier = Text.replicate (2 * 1024 * 1024) "x"
+            tracked =
+                applyNativeAgentEvent
+                    (NativeAgentStarted
+                        hugeIdentifier
+                        Nothing
+                        "untrusted"
+                        Nothing)
+                    emptyNativeAgentStore
+        nativeAgentStoreSize tracked `shouldBe` 0
+        nativeAgentStoreBytes tracked `shouldBe` 0
+
+    it "charges per-delta overhead for fragmented output" do
+        let deltas = replicate 1024 (NativeAgentOutput "fragmented" "x")
+            tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    emptyNativeAgentStore
+                    deltas
+        nativeAgentStoreBytes tracked
+            `shouldSatisfy` (> 1024 * 4)
 
     it "retains only a bounded tail of one oversized native output" do
         let suffix = "newest-tail"
