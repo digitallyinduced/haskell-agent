@@ -134,9 +134,8 @@
       "default_reasoning_effort": "xhigh"
     },
     {
-      "id": "fable",
+      "id": "claude-fable-5-1",
       "connection": "claude-code",
-      "model": "claude-fable-5-1",
       "dialect": "claude-code",
       "context_window": 1048576,
       "label": "5.1 · frontier · subscription · 1M context",
