@@ -28,11 +28,10 @@ import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (renderStoreError)
-import Control.Concurrent
-    ( newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay )
+import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Concurrent.Async
-    ( cancelWith, concurrently, mapConcurrently, withAsync )
-import Control.Exception (AsyncException(UserInterrupt))
+    ( cancelWith, concurrently, mapConcurrently, waitCatch, withAsync )
+import Control.Exception (AsyncException(UserInterrupt), fromException)
 import Control.Exception.Safe (bracket)
 import Control.Monad (replicateM)
 import qualified Data.Aeson as Aeson
@@ -1527,7 +1526,7 @@ spec = describe "Agent.CLI.Session" do
                 loadSession pool root reservedId
                     `shouldReturn` Right (handle.sessionMeta, [])
 
-        it "cleans an interrupted pending materialization" $
+        it "keeps committed materialization retryable across interrupts" $
             withTempStore \store root -> do
                 let pool = trustedPool store
                 persist@(PersistenceEnabled slot) <-
@@ -1536,32 +1535,90 @@ spec = describe "Agent.CLI.Session" do
                 let
                     sessionDir =
                         root </> unsafeEncodeUtf (Text.unpack reservedId)
-                    waitForSessionDir 0 =
-                        expectationFailure
-                            "session materialization did not create its directory"
-                    waitForSessionDir attempts =
-                        doesDirectoryExist sessionDir >>= \case
-                            True -> pure ()
-                            False -> do
-                                threadDelay 1000
-                                waitForSessionDir (attempts - 1)
-                withAsync (ensurePersistenceSessionId persist) \worker -> do
-                    waitForSessionDir (5000 :: Int)
-                    cancelWith worker UserInterrupt
+                stored <- newEmptyMVar
+                release <- newEmptyMVar
+                let afterStored = putMVar stored () >> takeMVar release
+                    interruptMaterialization =
+                        withAsync
+                            (ensurePersistenceSessionIdWithMaterializationHook
+                                afterStored
+                                persist)
+                            \worker -> do
+                                takeMVar stored
+                                cancelWith worker UserInterrupt
+                                waitCatch worker >>= \case
+                                    Left exception ->
+                                        (fromException exception
+                                            :: Maybe AsyncException)
+                                            `shouldBe` Just UserInterrupt
+                                    Right sessionId ->
+                                        expectationFailure
+                                            ("interrupted materialization returned: "
+                                                <> show sessionId)
+                interruptMaterialization
+                interruptMaterialization
                 readIORef slot >>= \case
-                    PersistencePending _ actualId actualTempDir -> do
+                    PersistencePending _ actualId _ ->
                         actualId `shouldBe` reservedId
-                        actualTempDir `shouldBe` tempDir
                     PersistenceActive handle ->
                         expectationFailure
-                            ("interrupted session became active: "
+                            ("interrupted session published before retry: "
                                 <> Text.unpack handle.sessionMeta.metaId)
-                doesDirectoryExist sessionDir `shouldReturn` False
+                let recoveryPath =
+                        sessionTempsRoot root
+                            </> unsafeEncodeUtf
+                                (".materialization-"
+                                    <> Text.unpack reservedId
+                                    <> ".json")
+                doesFileExist recoveryPath `shouldReturn` True
+                ensurePersistenceSessionId persist
+                    `shouldReturn` Just reservedId
+                readIORef slot >>= \case
+                    PersistenceActive handle -> do
+                        handle.sessionMeta.metaId `shouldBe` reservedId
+                        handle.sessionTempDir `shouldBe` tempDir
+                        loadSession pool root reservedId
+                            `shouldReturn` Right (handle.sessionMeta, [])
+                    PersistencePending _ actualId _ ->
+                        expectationFailure
+                            ("committed session remained pending: "
+                                <> Text.unpack actualId)
+                doesDirectoryExist sessionDir `shouldReturn` True
                 doesDirectoryExist tempDir `shouldReturn` True
-                Store.loadSessionMetadata pool reservedId
-                    `shouldReturn` Right Nothing
-                cleanupPendingPersistence persist
-                doesDirectoryExist tempDir `shouldReturn` False
+                doesFileExist recoveryPath `shouldReturn` False
+
+        it "persists a prompt snapshot after interrupted materialization" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                persist@(PersistenceEnabled slot) <-
+                    newPendingPersistence (testCreate pool root)
+                PersistencePending _ reservedId _ <- readIORef slot
+                stored <- newEmptyMVar
+                release <- newEmptyMVar
+                let afterStored = putMVar stored () >> takeMVar release
+                withAsync
+                    (ensurePersistenceSessionIdWithMaterializationHook
+                        afterStored
+                        persist)
+                    \worker -> do
+                        takeMVar stored
+                        cancelWith worker UserInterrupt
+                        waitCatch worker >>= \case
+                            Left exception ->
+                                (fromException exception :: Maybe AsyncException)
+                                    `shouldBe` Just UserInterrupt
+                            Right sessionId ->
+                                expectationFailure
+                                    ("interrupted materialization returned: "
+                                        <> show sessionId)
+                let candidate = testPromptSnapshot reservedId
+                handle <- ensureSessionWithPromptSnapshot slot candidate
+                handle.sessionMeta.metaPromptSnapshot
+                    `shouldBe` Just candidate
+                promptEpoch <-
+                    Store.loadLatestSessionPromptEpoch pool reservedId
+                fmap (fmap (.sessionPromptEpochIndex)) promptEpoch
+                    `shouldBe` Right (Just 0)
 
         it "creates and advances immutable prompt epochs before first use" $
             withTempStore \store root -> do

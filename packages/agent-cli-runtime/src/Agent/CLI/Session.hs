@@ -93,6 +93,7 @@ module Agent.CLI.Session
     , compatibleSessionPromptSnapshot
     , ensureSession
     , ensurePersistenceSessionId
+    , ensurePersistenceSessionIdWithMaterializationHook
     , ensureSessionWithPromptSnapshot
     , resumeHint
     , sessionUsageFromTurns
@@ -536,7 +537,7 @@ forkSessionAt root source turns requestedTitle targetCwd
                             cleanupFiles =
                                 cleanupForkFiles root sessionId (Just dir)
                             cleanupOwned = do
-                                cleanupSessionDatabaseIfOwned
+                                cleanupForkDatabaseIfOwned
                                     source.sessionPool
                                     storedMeta
                                 cleanupFiles
@@ -690,19 +691,24 @@ symbolicLinkStatusMaybe path =
             | otherwise -> ioError err
         Right status -> pure (Just status)
 
-cleanupSessionDatabaseIfOwned
+sessionDatabaseIsOwned
+    :: StorePool
+    -> Store.SessionMetadata
+    -> IO Bool
+sessionDatabaseIsOwned pool expected = do
+    loaded <- Store.loadSessionMetadata pool expected.sessionMetadataKey
+    pure (loaded == Right (Just expected))
+
+cleanupForkDatabaseIfOwned
     :: StorePool
     -> Store.SessionMetadata
     -> IO ()
-cleanupSessionDatabaseIfOwned pool expected = do
-    loaded <- Store.loadSessionMetadata pool expected.sessionMetadataKey
-    case loaded of
-        Right (Just actual)
-            | actual == expected -> do
-                now <- getCurrentTime
-                _ <- Store.deleteSession pool expected.sessionMetadataKey now
-                pure ()
-        _ -> pure ()
+cleanupForkDatabaseIfOwned pool expected = do
+    owned <- sessionDatabaseIsOwned pool expected
+    when owned do
+        now <- getCurrentTime
+        _ <- Store.deleteSession pool expected.sessionMetadataKey now
+        pure ()
 
 cleanupForkFiles :: OsPath -> Text -> Maybe OsPath -> IO ()
 cleanupForkFiles root sessionId dir = do
@@ -726,34 +732,41 @@ createReservedSession spec sessionId tempDir promptSnapshot =
         sessionId
         tempDir
         promptSnapshot
-        (const (pure ()))
+        (pure ())
+        Nothing
 
--- | Create a durable session and run its ownership handoff while async
--- exceptions remain masked. The PostgreSQL write is interruptible, but any
--- ambiguous partial commit is removed before the exception is rethrown.
+-- | Create a durable session and publish it while async exceptions remain
+-- masked. Stable metadata in host-owned recovery state makes the
+-- interruptible PostgreSQL write idempotent: a later attempt can adopt an
+-- exact committed row or retry the same reservation.
 createReservedSessionWithHandoff
     :: SessionCreate
     -> Text
     -> OsPath
     -> Maybe SessionPromptSnapshot
-    -> (SessionHandle -> IO ())
+    -> IO ()
+    -> Maybe (SessionHandle -> IO ())
     -> IO SessionHandle
 createReservedSessionWithHandoff
         spec
         sessionId
         tempDir
         promptSnapshot
-        handoff =
+        afterStored
+        publication =
     mask \restore -> do
         let pool = spec.createPool
         ensurePrivateDir spec.createRoot
         dir <- either (fail . Text.unpack) pure
             (sessionDirForId spec.createRoot sessionId)
+        recoveredMeta <- case publication of
+            Nothing -> pure Nothing
+            Just _ -> loadMaterializationMeta spec.createRoot sessionId
         now <- normalizePostgresTimestamp <$> getCurrentTime
         let title = case spec.createTitleHint of
                 Just hint | not (Text.null hint) -> hint
                 _ -> "untitled"
-            meta = SessionMeta
+            generatedMeta = SessionMeta
                 { metaVersion = sessionSchemaVersion
                 , metaId = sessionId
                 , metaCreatedAt = now
@@ -785,6 +798,7 @@ createReservedSessionWithHandoff
                 , metaLastRecapMainTurns = 0
                 , metaPromptSnapshot = promptSnapshot
                 }
+            meta = fromMaybe generatedMeta recoveredMeta
             handle = SessionHandle
                 { sessionPool = pool
                 , sessionDir = dir
@@ -793,44 +807,153 @@ createReservedSessionWithHandoff
                 , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
                 , sessionMeta = meta
                 }
-        let createStored = case promptSnapshot of
+            storedMeta = toStoredMetadata meta
+            recoveryPath =
+                sessionMaterializationMetaPath spec.createRoot sessionId
+        case (publication, recoveredMeta) of
+            (Just _, Nothing) ->
+                writeLazyFileAtomically recoveryPath 0o600 (Aeson.encode meta)
+            _ -> pure ()
+        let createStored = case meta.metaPromptSnapshot of
                 Nothing -> Store.createSession pool (toStoredMetadata meta)
                 Just snapshot ->
                     Store.createSessionWithInitialPromptEpoch
                         pool
-                        (toStoredMetadata meta)
+                        storedMeta
                         (toStoredPromptSnapshot snapshot)
             cleanupCreated =
-                cleanupSessionDatabaseIfOwned pool (toStoredMetadata meta)
+                cleanupForkDatabaseIfOwned pool storedMeta
                     `finally` cleanupDirectory
             cleanupDirectory = do
                 _ <- tryIO (removePathForcibly dir)
                 pure ()
-        -- Directory creation acquires ownership while masked. Every subsequent
-        -- interruptible operation is covered by cleanupCreated.
-        createDirectory dir
-        created <-
-            restore
-                (setFileMode (unsafeToFilePath dir) 0o700 >> createStored)
-                `onException` cleanupCreated
-        handle' <- case created of
-            Left err -> do
-                cleanupCreated
+            publish = do
+                -- The pending-to-active handoff remains masked after durable
+                -- creation.
+                case publication of
+                    Nothing -> pure ()
+                    Just handoff -> do
+                        handoff handle
+                        removeSessionMaterializationMeta
+                            spec.createRoot
+                            sessionId
+                pure handle
+            publishConfirmed = case publication of
+                Nothing -> publish
+                Just _ -> restore afterStored >> publish
+            failStored err =
                 fail
                     ("could not create PostgreSQL session: "
                         <> Text.unpack (renderStoreError err))
-            Right False -> do
-                -- The conflicting database row is not ours.
-                cleanupDirectory
+            failConflict =
                 fail "could not allocate a unique PostgreSQL session id"
-            Right True -> pure handle
-        -- The pending-to-active handoff remains masked after durable creation.
-        handoff handle'
-        pure handle'
+            adoptStored onMissing onConflict =
+                restore
+                    (Store.loadSessionMetadata pool sessionId) >>= \case
+                        Right (Just actual)
+                            | actual == storedMeta -> publishConfirmed
+                        Right Nothing -> onMissing
+                        Right (Just _) -> onConflict
+                        Left err -> failStored err
+            createAndPublish = do
+                let exceptionCleanup = case publication of
+                        Nothing -> cleanupCreated
+                        Just _ -> pure ()
+                created <-
+                    restore
+                        (do
+                            setFileMode (unsafeToFilePath dir) 0o700
+                            createStored)
+                        `onException` exceptionCleanup
+                case created of
+                    Left err -> case publication of
+                        Nothing -> cleanupCreated >> failStored err
+                        Just _ ->
+                            adoptStored
+                                (failStored err)
+                                (cleanupDirectory >> failConflict)
+                    Right False -> case publication of
+                        Nothing -> do
+                            cleanupDirectory
+                            failConflict
+                        Just _ ->
+                            adoptStored
+                                (cleanupDirectory >> failConflict)
+                                (cleanupDirectory >> failConflict)
+                    Right True -> publishConfirmed
+        case recoveredMeta of
+            Nothing ->
+                tryIO (createDirectory dir) >>= \case
+                    Left err -> do
+                        removeSessionMaterializationMeta
+                            spec.createRoot
+                            sessionId
+                        ioError err
+                    Right () -> createAndPublish
+            Just _ -> do
+                -- A previous attempt may have committed before interruption.
+                -- Reuse its exact metadata so a missing row can be retried and
+                -- an existing exact-match row can be adopted.
+                ensureMaterializationDirectory dir
+                adoptStored
+                    createAndPublish
+                    (cleanupDirectory >> failConflict)
+
+sessionMaterializationMetaPath :: OsPath -> Text -> OsPath
+sessionMaterializationMetaPath root sessionId =
+    sessionTempsRoot root
+        </> unsafeEncodeUtf
+            (".materialization-" <> Text.unpack sessionId <> ".json")
+
+removeSessionMaterializationMeta :: OsPath -> Text -> IO ()
+removeSessionMaterializationMeta root sessionId = do
+    _ <- tryIO (removeFile (sessionMaterializationMetaPath root sessionId))
+    pure ()
+
+ensureMaterializationDirectory :: OsPath -> IO ()
+ensureMaterializationDirectory dir =
+    symbolicLinkStatusMaybe dir >>= \case
+        Nothing -> do
+            createDirectory dir
+            setFileMode (unsafeToFilePath dir) 0o700
+        Just status
+            | isDirectory status && not (isSymbolicLink status) ->
+                setFileMode (unsafeToFilePath dir) 0o700
+            | otherwise ->
+                fail "reserved session path is not a private directory"
+
+loadMaterializationMeta
+    :: OsPath
+    -> Text
+    -> IO (Maybe SessionMeta)
+loadMaterializationMeta root sessionId = do
+    let path = sessionMaterializationMetaPath root sessionId
+    symbolicLinkStatusMaybe path >>= \case
+        Nothing -> pure Nothing
+        Just status
+            | isRegularFile status && not (isSymbolicLink status) -> do
+                bytes <-
+                    retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
+                meta <- either (fail . Text.unpack) pure
+                    (decodeLazy sessionMetaDecoder bytes)
+                unless (meta.metaId == sessionId) $
+                    fail
+                        "materialization metadata session id does not match reservation"
+                unless (meta.metaVersion == sessionSchemaVersion) $
+                    fail "unsupported materialization metadata version"
+                pure (Just meta)
+            | otherwise ->
+                fail "materialization metadata is not a private regular file"
 
 -- | Create the session directory on first use when persistence is still pending.
 ensureSession :: IORef PersistenceState -> IO SessionHandle
-ensureSession slotRef = do
+ensureSession = ensureSessionWithMaterializationHook (pure ())
+
+ensureSessionWithMaterializationHook
+    :: IO ()
+    -> IORef PersistenceState
+    -> IO SessionHandle
+ensureSessionWithMaterializationHook afterStored slotRef = do
     slot <- readIORef slotRef
     case slot of
         PersistenceActive handle -> pure handle
@@ -840,13 +963,26 @@ ensureSession slotRef = do
                 sessionId
                 tempDir
                 Nothing
-                (writeIORef slotRef . PersistenceActive)
+                afterStored
+                (Just (writeIORef slotRef . PersistenceActive))
 
 -- | Return a durable, resumable session ID, materializing pending persistence.
 ensurePersistenceSessionId :: Persistence -> IO (Maybe Text)
-ensurePersistenceSessionId PersistenceDisabled = pure Nothing
-ensurePersistenceSessionId (PersistenceEnabled slotRef) = do
-    handle <- ensureSession slotRef
+ensurePersistenceSessionId =
+    ensurePersistenceSessionIdWithMaterializationHook (pure ())
+
+-- | Instrument the boundary after durable ownership is confirmed and before
+-- the masked pending-to-active handoff.
+ensurePersistenceSessionIdWithMaterializationHook
+    :: IO ()
+    -> Persistence
+    -> IO (Maybe Text)
+ensurePersistenceSessionIdWithMaterializationHook _ PersistenceDisabled =
+    pure Nothing
+ensurePersistenceSessionIdWithMaterializationHook
+        afterStored
+        (PersistenceEnabled slotRef) = do
+    handle <- ensureSessionWithMaterializationHook afterStored slotRef
     pure (Just handle.sessionMeta.metaId)
 
 -- | Ensure the durable session exists and atomically persist the
@@ -859,44 +995,45 @@ ensureSessionWithPromptSnapshot
     -> IO SessionHandle
 ensureSessionWithPromptSnapshot slotRef candidate = do
     slot <- readIORef slotRef
-    case slot of
+    handle <- case slot of
         PersistencePending spec sessionId tempDir ->
             createReservedSessionWithHandoff
                 spec
                 sessionId
                 tempDir
                 (Just candidate)
-                (writeIORef slotRef . PersistenceActive)
-        PersistenceActive handle -> do
-            let snapshot =
-                    maybe candidate
-                        (`mergePromptSnapshotContext` candidate)
-                        handle.sessionMeta.metaPromptSnapshot
-            case handle.sessionMeta.metaPromptSnapshot of
-                Just previous
-                    | promptSnapshotsEquivalent previous snapshot ->
-                        pure handle
-                _ -> do
-                    Store.appendSessionPromptEpoch
-                        handle.sessionPool
-                        handle.sessionMeta.metaId
-                        (toStoredPromptSnapshot snapshot) >>= \case
-                            Left err ->
-                                fail
-                                    ("could not persist PostgreSQL prompt epoch: "
-                                        <> Text.unpack (renderStoreError err))
-                            Right Nothing ->
-                                fail
-                                    ("session not found: "
-                                        <> Text.unpack handle.sessionMeta.metaId)
-                            Right (Just _) -> do
-                                let next = handle
-                                        { sessionMeta = handle.sessionMeta
-                                            { metaPromptSnapshot = Just snapshot
-                                            }
-                                        }
-                                writeIORef slotRef (PersistenceActive next)
-                                pure next
+                (pure ())
+                (Just (writeIORef slotRef . PersistenceActive))
+        PersistenceActive active -> pure active
+    let snapshot =
+            maybe candidate
+                (`mergePromptSnapshotContext` candidate)
+                handle.sessionMeta.metaPromptSnapshot
+    case handle.sessionMeta.metaPromptSnapshot of
+        Just previous
+            | promptSnapshotsEquivalent previous snapshot ->
+                pure handle
+        _ -> do
+            Store.appendSessionPromptEpoch
+                handle.sessionPool
+                handle.sessionMeta.metaId
+                (toStoredPromptSnapshot snapshot) >>= \case
+                    Left err ->
+                        fail
+                            ("could not persist PostgreSQL prompt epoch: "
+                                <> Text.unpack (renderStoreError err))
+                    Right Nothing ->
+                        fail
+                            ("session not found: "
+                                <> Text.unpack handle.sessionMeta.metaId)
+                    Right (Just _) -> do
+                        let next = handle
+                                { sessionMeta = handle.sessionMeta
+                                    { metaPromptSnapshot = Just snapshot
+                                    }
+                                }
+                        writeIORef slotRef (PersistenceActive next)
+                        pure next
 
 mergePromptSnapshotContext
     :: SessionPromptSnapshot
@@ -2019,7 +2156,11 @@ allocateSessionTemp root = do
             durableExists <-
                 maybe False (const True)
                     <$> symbolicLinkStatusMaybe durableDir
-            if durableExists
+            recoveryExists <-
+                maybe False (const True)
+                    <$> symbolicLinkStatusMaybe
+                        (sessionMaterializationMetaPath root sessionId)
+            if durableExists || recoveryExists
                 then go tempRoot now (attempt + 1)
                 else tryIO (createDirectory tempDir) >>= \case
                     Left _ -> go tempRoot now (attempt + 1)
@@ -2185,7 +2326,11 @@ cleanupStaleSessionTemp root candidate =
                             Just status
                                 | isSymbolicLink status -> pure False
                                 | otherwise ->
-                                    removePathForcibly candidate >> pure True)
+                                    removePathForcibly candidate
+                                        >> removeSessionMaterializationMeta
+                                            root
+                                            (toText sessionId)
+                                        >> pure True)
                         `finally` FileLock.unlockFile lock
                 pure case removed of
                     Left exception ->
@@ -2267,6 +2412,7 @@ removeSessionTemp root sessionId =
     case sessionTempDirForId root sessionId of
         Left err -> pure (Left err)
         Right tempDir -> do
+            removeSessionMaterializationMeta root sessionId
             exists <- doesDirectoryExist tempDir
             if not exists
                 then pure (Right ())

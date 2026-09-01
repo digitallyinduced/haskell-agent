@@ -897,12 +897,16 @@ printResumeHint
     -> Persistence
     -> IO ()
 printResumeHint progName persist =
-    ensurePersistenceSessionId persist >>= \case
-        Nothing -> pure ()
-        Just sessionId -> do
-            -- Drop an in-place "Thinking…" status so the hint is its own line.
-            Text.hPutStr stderr "\r\ESC[K"
-            clearNativeProgress stderr
-            color <- resolveColor stderr
-            putTextLn stderr
-                (roleMuted color (resumeHint progName sessionId))
+    catchUserInterrupt
+        (ensurePersistenceSessionId persist >>= \case
+            Nothing -> pure ()
+            Just sessionId -> do
+                -- Drop an in-place "Thinking…" status so the hint is its own line.
+                Text.hPutStr stderr "\r\ESC[K"
+                clearNativeProgress stderr
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color (resumeHint progName sessionId)))
+        -- A repeated Ctrl-C may arrive while the pending session or footer is
+        -- being written. Retry the stable reservation before cleanup runs.
+        (printResumeHint progName persist)
