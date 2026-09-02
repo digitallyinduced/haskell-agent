@@ -1023,6 +1023,7 @@ class ClaudeChainIndex:
             "(uuid, sequence, parent_uuid, sort_time, payload) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(uuid) DO UPDATE SET "
+            "sequence = excluded.sequence, "
             "parent_uuid = excluded.parent_uuid, "
             "sort_time = excluded.sort_time, "
             "payload = excluded.payload",
@@ -1043,13 +1044,13 @@ class ClaudeChainIndex:
             "SELECT 1 FROM claude_messages AS children "
             "WHERE children.parent_uuid = messages.uuid"
             ") "
-            "ORDER BY messages.sort_time DESC, messages.sequence ASC "
+            "ORDER BY messages.sort_time DESC, messages.sequence DESC "
             "LIMIT 1"
         ).fetchone()
         if leaf is None:
             leaf = self.database.execute(
                 "SELECT uuid FROM claude_messages "
-                "ORDER BY sort_time DESC, sequence ASC LIMIT 1"
+                "ORDER BY sort_time DESC, sequence DESC LIMIT 1"
             ).fetchone()
         if leaf is None:
             return
@@ -1860,10 +1861,11 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                             "or non-JSON and were not inferred.",
                         )
                     )
-            except (ReaderError, sqlite3.Error) as exc:
+            except (ReaderError, sqlite3.Error, UnicodeError, ValueError) as exc:
                 warnings.append(warning("cursor_store_error", one_line(exc, 200)))
     else:
         try:
+            unavailable = 0
             query = (
                 "SELECT value FROM cursorDiskKV "
                 "WHERE key = ? OR key LIKE ? ORDER BY key"
@@ -1875,9 +1877,19 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
             with closing(open_sqlite_readonly(path)) as db:
                 for row in db.execute(query, parameters):
                     value = decode_jsonish(row[0])
-                    if value is not None:
+                    if value is None:
+                        unavailable += 1
+                    else:
                         consume_value(value)
-        except (ReaderError, sqlite3.Error) as exc:
+            if unavailable:
+                warnings.append(
+                    warning(
+                        "binary_content_unavailable",
+                        f"{unavailable} Cursor row(s) were binary, protobuf, "
+                        "or non-JSON and were not inferred.",
+                    )
+                )
+        except (ReaderError, sqlite3.Error, UnicodeError, ValueError) as exc:
             warnings.append(warning("cursor_store_error", one_line(exc, 200)))
     turns = bounded.recent()
     if not turns:

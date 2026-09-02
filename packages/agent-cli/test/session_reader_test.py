@@ -651,6 +651,45 @@ class SessionReaderTest(unittest.TestCase):
             {entry["code"] for entry in result["warnings"]},
         )
 
+    def test_claude_prefers_latest_leaf_when_timestamps_tie(self):
+        transcript = self.root / "claude-tied-leaves.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "type": "user",
+                    "uuid": "root",
+                    "parentUuid": None,
+                    "message": {"content": "Original request"},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "stale-leaf",
+                    "parentUuid": "root",
+                    "message": {"content": "Stale branch"},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "latest-leaf",
+                    "parentUuid": "root",
+                    "message": {"content": "Latest branch"},
+                },
+            ],
+        )
+        item = reader.candidate(
+            "claude",
+            "claude-code",
+            "claude-tied-leaves",
+            transcript,
+            "Original request",
+            str(self.cwd),
+        )
+        result = reader.read_claude(item, 100)
+        rendered = json.dumps(result)
+        self.assertIn("Latest branch", rendered)
+        self.assertNotIn("Stale branch", rendered)
+        self.assertEqual(result["last_assistant_action"], "Latest branch")
+
     def test_harness_wrapper_uses_prior_request_when_current_request_is_empty(self):
         wrapped = (
             "Instructions supplied by the outer agent harness:\n"
@@ -718,6 +757,47 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIn("Updated Main.hs", rendered)
         self.assertNotIn("unsafe instruction", rendered)
         self.assertNotIn("instruction-like metadata", rendered)
+
+    def test_cursor_desktop_warns_about_partially_unavailable_rows(self):
+        home = self.root / "cursor-desktop"
+        database = self.root / "state.vscdb"
+        session_id = "desktop-partial"
+        db = sqlite3.connect(database)
+        db.execute("CREATE TABLE cursorDiskKV (key TEXT, value BLOB)")
+        db.execute(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)",
+            (
+                "composerData:" + session_id,
+                json.dumps(
+                    {
+                        "messages": [
+                            {"role": "user", "text": "Recovered desktop work"}
+                        ]
+                    }
+                ),
+            ),
+        )
+        db.execute(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)",
+            ("bubbleId:" + session_id + ":binary", sqlite3.Binary(b"\xff\x00")),
+        )
+        db.commit()
+        db.close()
+        item = reader.candidate(
+            "cursor",
+            "cursor-desktop",
+            session_id,
+            database,
+            "Desktop task",
+            str(self.cwd),
+        )
+        with patch.dict(os.environ, {"CURSOR_HOME": str(home)}):
+            result = reader.read_cursor(item, 100)
+        self.assertEqual(result["last_user_request"], "Recovered desktop work")
+        self.assertIn(
+            "binary_content_unavailable",
+            {entry["code"] for entry in result["warnings"]},
+        )
 
     def test_grok_discovers_encoded_cwd_and_drops_reasoning(self):
         home = self.root / "grok"
