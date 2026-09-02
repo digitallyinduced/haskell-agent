@@ -81,6 +81,28 @@ spec = do
             lookup "x-compaction-at" sent.headers `shouldBe` Just "450000"
             lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
 
+        it "applies the threshold resolved from an expanded context window" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "hello")
+                    , completedEvent "resp-expanded-context" []
+                    ]
+                resolvedThreshold =
+                    grokAutoCompactTokenLimit "grok-4.6" 1_000_000
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                        { autoCompactTokenLimit =
+                            Just resolvedThreshold
+                        }
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "800000"
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+
         it "omits x-compaction-at after a local compaction checkpoint" do
             recorded <- newIORef []
             let handler _request = pure $ sseResponse

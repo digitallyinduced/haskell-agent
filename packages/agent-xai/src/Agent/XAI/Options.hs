@@ -52,9 +52,11 @@ grokAutoCompactTokenLimit model contextWindow =
     max 1 $
         contextWindow * grokAutoCompactThresholdPercent model `div` 100
 
--- | Server hint enabled by the current Grok model catalog. Unknown future
--- models keep the global client-side fallback but do not receive metadata that
--- their server configuration has not opted into.
+-- | Baseline server hint enabled by the current Grok model catalog. Callers
+-- with a resolved catalog context window override this through
+-- 'ClientOptions.autoCompactTokenLimit'. Unknown future models keep the
+-- global client-side fallback but do not receive metadata that their server
+-- configuration has not opted into.
 grokServerCompactionAtTokens :: Text -> Maybe Int
 grokServerCompactionAtTokens model
     | model `elem` ["grok-4.5", "grok-4.6"] =

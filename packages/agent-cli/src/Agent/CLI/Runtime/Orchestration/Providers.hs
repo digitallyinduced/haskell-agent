@@ -194,7 +194,7 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
-import Agent.XAI.LoopBackend ( xaiBackend )
+import Agent.XAI.LoopBackend ( xaiBackendWithClientOptions )
 import Control.Applicative ()
 import Control.Concurrent.Async ( link, withAsync )
 import Control.Concurrent.Chan
@@ -685,12 +685,8 @@ runAgentProviders
                                             startupFailure err
                                 Right result -> pure result
                     XAIProvider -> do
-                        baseXaiOptions <- XAI.clientOptionsFromEnv
-                        let xaiOptions = baseXaiOptions
-                                { XAI.autoCompactTokenLimit =
-                                    options.optCompactThreshold
-                                }
-                            xaiContextWindow =
+                        xaiOptions <- XAI.clientOptionsFromEnv
+                        let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
                                     XAI.grokDefaultContextWindow
@@ -698,18 +694,26 @@ runAgentProviders
                                 maybe xaiOptions.defaultModel
                                     (XAIRequest.mapModel xaiOptions)
                                     params.model
-                            xaiCompactThreshold = do
-                                currentParams <- readIORef paramsRef
+                            xaiCompactThresholdFor currentParams =
                                 let contextWindow =
                                         xaiContextWindow currentParams
-                                pure $
-                                    max 1 $
-                                        min contextWindow $
-                                            fromMaybe
-                                                (XAI.grokAutoCompactTokenLimit
-                                                    (xaiWireModel currentParams)
-                                                    contextWindow)
-                                                options.optCompactThreshold
+                                in max 1 $
+                                    min contextWindow $
+                                        fromMaybe
+                                            (XAI.grokAutoCompactTokenLimit
+                                                (xaiWireModel currentParams)
+                                                contextWindow)
+                                            options.optCompactThreshold
+                            xaiOptionsFor currentParams =
+                                xaiOptions
+                                    { XAI.autoCompactTokenLimit =
+                                        Just
+                                            (xaiCompactThresholdFor
+                                                currentParams)
+                                    }
+                            xaiCompactThreshold =
+                                xaiCompactThresholdFor
+                                    <$> readIORef paramsRef
                             protectXaiOverflow occupancy getParams backend =
                                 boundCompletedToolContinuations
                                     xaiContextWindow
@@ -727,11 +731,15 @@ runAgentProviders
                                             protectXaiOverflow
                                                 contextTokensRef
                                                 (pure childParams)
-                                                (xaiBackend xaiOptions tokenProvider
+                                                (xaiBackendWithClientOptions
+                                                    xaiOptionsFor
+                                                    tokenProvider
                                                     (pure childParams)))
                             Nothing -> pure ()
                         let btwBackend privateParams =
-                                xaiBackend xaiOptions tokenProvider
+                                xaiBackendWithClientOptions
+                                    xaiOptionsFor
+                                    tokenProvider
                                     (pure privateParams)
                             compactHistory history _inputs = do
                                 currentParams <- readIORef paramsRef
@@ -751,7 +759,9 @@ runAgentProviders
                                     protectXaiOverflow
                                         contextTokensRef
                                         (readIORef paramsRef)
-                                        (xaiBackend xaiOptions tokenProvider
+                                        (xaiBackendWithClientOptions
+                                            xaiOptionsFor
+                                            tokenProvider
                                             (readIORef paramsRef))
                             compactingBackend =
                                 autoCompactBackendWith
@@ -780,7 +790,7 @@ runAgentProviders
                                             runWithTokenProvider tokenProvider
                                                 \credential ->
                                                     XAIClient.createResponseWith
-                                                        xaiOptions
+                                                        (xaiOptionsFor request)
                                                         credential
                                                         request)
                                         recordCompactionUsage

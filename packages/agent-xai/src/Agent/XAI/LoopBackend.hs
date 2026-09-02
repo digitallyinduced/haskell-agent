@@ -7,6 +7,7 @@
 -- resumed session can seed it and the CLI can persist it.
 module Agent.XAI.LoopBackend
     ( xaiBackend
+    , xaiBackendWithClientOptions
     , xaiBackendWith
     ) where
 
@@ -31,9 +32,25 @@ xaiBackend
     -> TokenProvider
     -> IO ResponseCreateParams
     -> Backend
-xaiBackend options provider =
+xaiBackend options =
+    xaiBackendWithClientOptions (const options)
+
+-- | Resolve transport options from the final request. This lets callers keep
+-- request metadata such as the server compaction hint aligned with model
+-- catalog values that can change during a session.
+xaiBackendWithClientOptions
+    :: (ResponseCreateParams -> ClientOptions)
+    -> TokenProvider
+    -> IO ResponseCreateParams
+    -> Backend
+xaiBackendWithClientOptions optionsForRequest provider =
     tokenProviderStatelessResponsesBackend provider
-        (createResponseWithEvents options)
+        (\credential request onEvent ->
+            createResponseWithEvents
+                (optionsForRequest request)
+                credential
+                request
+                onEvent)
 
 -- | Same mapping as 'xaiBackend', with an injectable transport for tests and
 -- downstream integrations.
