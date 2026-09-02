@@ -129,7 +129,8 @@ import Agent.CLI.Session.Runtime.Types
                      suspendGhci, resetToolSessionTemp, grokRuntime,
                      mcpRegistrations, mcpWarnings,
                      mcpInstructions, mcpFleet,
-                     ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
+                     ghciEnabledRef, bashEnabledRef, toolEnv, planMode, taskPlan,
+                     startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
                      conversationRef, needsInitialContext, queueInitialContext,
@@ -781,6 +782,7 @@ runAgentSession
                                 , bashEnabledRef
                                 , toolEnv
                                 , planMode
+                                , taskPlan = coding.codingTaskPlan
                                 , startup
                                 , learnAboutUserRequested
                                 , databaseScopes
@@ -875,6 +877,7 @@ runAgentSession
                         dialect
                         fullscreen
                         automaticCompactionHookRef
+                        coding.codingTaskPlan
                         home
                         initialPrevious
                         model
