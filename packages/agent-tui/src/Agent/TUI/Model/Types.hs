@@ -9,6 +9,8 @@ module Agent.TUI.Model.Types
     , PermissionOverlay(..)
     , PromptLimitStatus(..)
     , PromptState(..)
+    , InspectionGroup(..)
+    , InspectionItem(..)
     , UiBlock(..)
     , UiEvent(..)
     , UiNotice(..)
@@ -72,6 +74,22 @@ data BlockState
     | BlockDenied
     deriving (Eq, Show)
 
+data InspectionItem = InspectionItem
+    { inspectionCallId :: !Text
+    , inspectionToolName :: !Text
+    , inspectionTitle :: !Text
+    , inspectionDetail :: !Text
+    , inspectionBody :: !Text
+    , inspectionState :: !BlockState
+    }
+    deriving (Eq, Show)
+
+data InspectionGroup = InspectionGroup
+    { inspectionGroupOpen :: !Bool
+    , inspectionGroupItems :: ![InspectionItem]
+    }
+    deriving (Eq, Show)
+
 data UiBlock = UiBlock
     { blockId :: !BlockId
     , blockKind :: !BlockKind
@@ -82,6 +100,9 @@ data UiBlock = UiBlock
     , blockState :: !BlockState
     , blockExpanded :: !Bool
     , blockCallId :: !(Maybe Text)
+    -- | Whether restored adjacent blocks may be folded into an inspection
+    -- burst. This preserves the reducer's explicit tool eligibility decision.
+    , blockInspectionGroupable :: !Bool
     }
     deriving (Eq, Show)
 
@@ -145,6 +166,8 @@ data UiState = UiState
     , uiTurnStartBlock :: !Int
     , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
+    -- | Live metadata for compact read/list/search bursts.
+    , uiInspectionGroups :: !(Map.Map BlockId InspectionGroup)
     -- | Background shell session IDs mapped to the block that owns their
     -- lifecycle. Empty write_stdin calls update that block instead of adding
     -- one retained block per poll.

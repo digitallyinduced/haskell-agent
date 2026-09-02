@@ -166,7 +166,7 @@ spec = describe "tool presentation" do
         formatToolDiffRelative ""
             (functionToolCall "w" "Write"
                 "{\"file_path\":\"src/New.hs\",\"content\":\"main = pure ()\\n\"}")
-            `shouldBe` "  write src/New.hs\n  1 +main = pure ()"
+            `shouldBe` "  write src/New.hs\n        1 │ +main = pure ()"
         todoListFromToolArguments
             "{\"todos\":[{\"content\":\"Find repos\",\"status\":\"in_progress\",\
             \\"activeForm\":\"Finding repos\"},{\"content\":\"Fix\",\"status\":\"pending\"}]}"
@@ -380,11 +380,11 @@ spec = describe "tool presentation" do
                 \Changed lines start at 95."
         formatToolDiffRelativeWithOutput "/workspace" call output
             `shouldBe`
-                "  95 -old one\n\
-                \  96 -old two\n\
-                \  95 +new one\n\
-                \  96 +new two\n\
-                \  97 +new three"
+                "   95     │ -old one\n\
+                \   96     │ -old two\n\
+                \       95 │ +new one\n\
+                \       96 │ +new two\n\
+                \       97 │ +new three"
 
     it "formats compact multi-file apply_patch diffs" do
         let workspace = "/workspace"
@@ -417,14 +417,114 @@ spec = describe "tool presentation" do
                 ]
         formatToolDiffRelative workspace call
             `shouldBe`
-                "  -old\n\
-                \  +new\n\
+                "          │  *** Add File: this-is-context\n\
+                \          │ -old\n\
+                \          │ +new\n\
                 \  create src/B.hs\n\
-                \  1 +one\n\
+                \        1 │ +one\n\
                 \  move src/Old.hs → src/New.hs\n\
-                \  -before\n\
-                \  +after\n\
+                \          │ -before\n\
+                \          │ +after\n\
                 \  delete src/C.hs"
+
+    it "keeps changed rows inside capped apply_patch previews" do
+        let contexts =
+                [ " context-" <> Text.pack (show number)
+                | number <- [1 :: Int .. 25]
+                ]
+            patch =
+                Text.unlines $
+                    [ "*** Begin Patch"
+                    , "*** Update File: src/Main.hs"
+                    , "@@"
+                    ]
+                        <> contexts
+                        <> [ "-old"
+                           , "+new"
+                           , "*** End Patch"
+                           ]
+        case parseApplyPatchDiffs patch of
+            [parsed] -> do
+                length
+                    (filter
+                        (\case
+                            SearchReplaceOmitted{} -> False
+                            _ -> True)
+                        parsed.diffLines)
+                    `shouldBe` 20
+                parsed.diffHiddenLines `shouldBe` 7
+                parsed.diffLines `shouldSatisfy`
+                    elem (SearchReplaceOmitted 7 7 7)
+                parsed.diffLines `shouldSatisfy`
+                    elem (SearchReplaceRemoved "old")
+                parsed.diffLines `shouldSatisfy`
+                    elem (SearchReplaceAdded "new")
+            _ -> expectationFailure "expected one parsed patch"
+
+    it "marks every omitted region inside capped patch previews" do
+        let contexts =
+                [ " context-" <> Text.pack (show number)
+                | number <- [1 :: Int .. 30]
+                ]
+            patch =
+                Text.unlines $
+                    [ "*** Begin Patch"
+                    , "*** Update File: src/Main.hs"
+                    , "@@"
+                    , "-first-old"
+                    , "+first-new"
+                    ]
+                        <> contexts
+                        <> [ "-last-old"
+                           , "+last-new"
+                           , "*** End Patch"
+                           ]
+        case parseApplyPatchDiffs patch of
+            [parsed] -> do
+                parsed.diffHiddenLines `shouldBe` 14
+                case break
+                    (== SearchReplaceOmitted 14 14 14)
+                    parsed.diffLines of
+                    (before, _ : after) -> do
+                        before `shouldSatisfy`
+                            elem (SearchReplaceAdded "first-new")
+                        after `shouldSatisfy`
+                            elem (SearchReplaceRemoved "last-old")
+                    _ ->
+                        expectationFailure
+                            "expected an internal omission marker"
+                formatToolDiffRelative "" (customToolCall "patch" "apply_patch" patch)
+                    `shouldSatisfy` Text.isInfixOf "  … 14 omitted"
+            _ -> expectationFailure "expected one parsed patch"
+
+    it "decodes semantic diff headers and numbered rows for rich rendering" do
+        diffHeaderParts "  update src/Main.hs"
+            `shouldBe` Just ("update", "src/Main.hs")
+        diffHeaderParts "    1     │ -old" `shouldBe` Nothing
+        parseDiffDisplayLine "    3     │ -old"
+            `shouldBe`
+                Just
+                    (DiffDisplayLine
+                        "    3    "
+                        "-"
+                        "old"
+                        DiffLineRemoved)
+        parseDiffDisplayLine "        4 │ +new"
+            `shouldBe`
+                Just
+                    (DiffDisplayLine
+                        "        4"
+                        "+"
+                        "new"
+                        DiffLineAdded)
+        parseDiffDisplayLine "    5   5 │  context"
+            `shouldBe`
+                Just
+                    (DiffDisplayLine
+                        "    5   5"
+                        " "
+                        "context"
+                        DiffLineContext)
 
     it "formats structured collaboration output" do
         let call = functionToolCall

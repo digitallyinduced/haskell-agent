@@ -55,6 +55,7 @@ initialUiState = UiState
     , uiTurnStartBlock = 0
     , uiAttemptStartBlock = 0
     , uiToolCalls = Map.empty
+    , uiInspectionGroups = Map.empty
     , uiShellProcesses = Map.empty
     , uiShellPolls = Map.empty
     , uiTodos = []

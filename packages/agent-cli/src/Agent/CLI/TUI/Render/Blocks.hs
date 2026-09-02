@@ -60,10 +60,11 @@ import Agent.TUI.Model
       BlockState(BlockComplete, BlockFailed, BlockCancelled, BlockDenied,
                  BlockRunning, BlockStreaming),
       Focus(FocusScrollback),
+      InspectionGroup(inspectionGroupOpen),
       RetryCountdown(retryCountdownBlockId),
       UiBlock(blockId, blockTimestamp, blockTitle, blockKind, blockState,
               blockDetail, blockExpanded, blockBody),
-      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus) )
+      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus, uiInspectionGroups) )
 import Agent.TUI.Motion
     ( foregroundIndicator,
       nativeProgressAnimationEnabled,
@@ -141,12 +142,14 @@ import qualified Brick.Widgets.Border as Border
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
     ( controlAttr )
-import qualified Data.Map.Strict as Map ( findWithDefault, member )
+import qualified Data.Map.Strict as Map ( findWithDefault, lookup, member )
 import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( length,
+    ( breakOn,
+      drop,
+      length,
       lines,
       null,
       strip,
@@ -321,7 +324,7 @@ drawBlock state target ui block =
                     block.blockDetail
                     [ diffWidgetWithSyntaxHighlighting
                         state.appSyntaxHighlighter
-                        block.blockDetail
+                        (editInitialPath block)
                         (visibleBody block)
                     | not (Text.null (Text.strip (visibleBody block)))
                     ]
@@ -557,6 +560,15 @@ cacheableBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool
 cacheableBlock state target ui block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+        -- A completed tail inspection can still accept another adjacent call.
+        -- Keep it out of Brick's cache until the reducer closes the group.
+        && not
+            ( block.blockKind == BlockInspect
+                && maybe
+                    False
+                    (.inspectionGroupOpen)
+                    (Map.lookup block.blockId ui.uiInspectionGroups)
+            )
         && maybe
             True
             ((/= block.blockId) . (.retryCountdownBlockId))
@@ -648,6 +660,13 @@ shellBlockTitle block
             Text.unwords $
                 Text.words $
                     Text.take 512 block.blockDetail
+
+editInitialPath :: UiBlock -> Text
+editInitialPath block
+    | Text.null (Text.strip block.blockDetail) =
+        let (_, suffix) = Text.breakOn " " block.blockTitle
+        in Text.strip (Text.drop 1 suffix)
+    | otherwise = block.blockDetail
 
 bodySections :: Text -> [Widget Name]
 bodySections body

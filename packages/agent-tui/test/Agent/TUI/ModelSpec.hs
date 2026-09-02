@@ -1377,7 +1377,7 @@ spec = describe "fullscreen UI reducer" do
         case Foldable.toList finished.uiBlocks of
             [block] -> do
                 block.blockBody
-                    `shouldBe` "  -old\n  +new"
+                    `shouldBe` "          │ -old\n          │ +new"
                 block.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected one completed edit block"
 
@@ -1405,6 +1405,7 @@ spec = describe "fullscreen UI reducer" do
                 block.blockState `shouldBe` BlockComplete
                 block.blockTitle `shouldBe` "Read"
                 block.blockDetail `shouldBe` "src/Main.hs"
+                block.blockInspectionGroupable `shouldBe` True
             _ -> expectationFailure "expected one completed inspection block"
 
     it "keeps non-filesystem inspection labels intact" do
@@ -1425,6 +1426,241 @@ spec = describe "fullscreen UI reducer" do
                     `shouldBe` "Read agent session session-1"
                 block.blockDetail `shouldBe` ""
             _ -> expectationFailure "expected one inspection block"
+
+    it "groups consecutive read, list, and search calls into one burst" do
+        let readA =
+                functionToolCall
+                    "read-a"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}"
+            readB =
+                functionToolCall
+                    "read-b"
+                    "read_file"
+                    "{\"target_file\":\"src/B.hs\"}"
+            listSrc =
+                functionToolCall
+                    "list-src"
+                    "list_dir"
+                    "{\"target_directory\":\"src\"}"
+            finish callId output =
+                UiLoop
+                    (ToolFinished
+                        ToolCallResult
+                            { callId
+                            , output
+                            , callKind = FunctionCallKind
+                            })
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted readA)
+                    , finish "read-a" "module A where"
+                    , UiLoop (ToolStarted readB)
+                    , finish "read-b" "module B where"
+                    , UiLoop (ToolStarted listSrc)
+                    , finish "list-src" "A.hs\nB.hs"
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockInspect
+                block.blockTitle `shouldBe` "Read 2 items, Listed 1 item"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "Read src/A.hs"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "module B where"
+                block.blockState `shouldBe` BlockComplete
+                block.blockInspectionGroupable `shouldBe` False
+            _ -> expectationFailure "expected one grouped inspection block"
+
+    it "retracts completed inspection-group calls independently" do
+        let readA =
+                functionToolCall
+                    "read-a"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}"
+            readB =
+                functionToolCall
+                    "read-b"
+                    "read_file"
+                    "{\"target_file\":\"src/B.hs\"}"
+            finish callId output =
+                UiLoop
+                    (ToolFinished
+                        ToolCallResult
+                            { callId
+                            , output
+                            , callKind = FunctionCallKind
+                            })
+            completed =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted readA)
+                    , finish "read-a" "module A where"
+                    , UiLoop (ToolStarted readB)
+                    , finish "read-b" "module B where"
+                    , UiSystemMessage "Checking the result"
+                    ]
+            withoutB =
+                reduceUi (UiLoop (ToolRetracted "read-b")) completed
+            withoutEither =
+                reduceUi (UiLoop (ToolRetracted "read-a")) withoutB
+        completed.uiToolCalls `shouldBe` Map.empty
+        case Foldable.toList withoutB.uiBlocks of
+            [inspection, systemMessage] -> do
+                inspection.blockBody `shouldSatisfy`
+                    Text.isInfixOf "module A where"
+                inspection.blockBody `shouldNotSatisfy`
+                    Text.isInfixOf "module B where"
+                inspection.blockCallId `shouldBe` Just "read-a"
+                systemMessage.blockBody `shouldBe` "Checking the result"
+            _ -> expectationFailure "expected inspection and system blocks"
+        map (.blockBody) (Foldable.toList withoutEither.uiBlocks)
+            `shouldBe` ["Checking the result"]
+        withoutEither.uiInspectionGroups `shouldBe` Map.empty
+
+    it "keeps a parallel inspection burst running and exposes failures" do
+        let readCall =
+                functionToolCall
+                    "read-a"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}"
+            searchCall =
+                functionToolCall
+                    "search-a"
+                    "grep"
+                    "{\"pattern\":\"needle\",\"path\":\"src\"}"
+            started =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted readCall)
+                    , UiLoop (ToolStarted searchCall)
+                    ]
+            firstFinished =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "read-a"
+                                "module A where"
+                                FunctionCallKind)))
+                    started
+            failed =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "search-a"
+                                "Error: search failed"
+                                FunctionCallKind)))
+                    firstFinished
+        map (.blockState) (Foldable.toList firstFinished.uiBlocks)
+            `shouldBe` [BlockRunning]
+        case Foldable.toList failed.uiBlocks of
+            [block] -> do
+                block.blockState `shouldBe` BlockFailed
+                block.blockTitle `shouldSatisfy`
+                    Text.isSuffixOf "· 1 failed"
+                block.blockBody `shouldSatisfy`
+                    Text.isInfixOf "✗ Searched needle"
+                block.blockBody `shouldSatisfy`
+                    Text.isInfixOf "Error: search failed"
+            _ -> expectationFailure "expected one failed inspection burst"
+
+    it "preserves denied inspection state separately from failures" do
+        let readA =
+                functionToolCall
+                    "read-a"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}"
+            readB =
+                functionToolCall
+                    "read-b"
+                    "read_file"
+                    "{\"target_file\":\"src/B.hs\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted readA)
+                    , UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "read-a"
+                                "module A where"
+                                FunctionCallKind))
+                    , UiLoop (ToolStarted readB)
+                    , UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "read-b"
+                                "Tool call rejected by user"
+                                FunctionCallKind))
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockState `shouldBe` BlockDenied
+                block.blockTitle `shouldSatisfy`
+                    Text.isSuffixOf "· 1 denied"
+                block.blockTitle `shouldNotSatisfy`
+                    Text.isInfixOf "failed"
+            _ -> expectationFailure "expected one denied inspection burst"
+
+    it "does not group inspections across an intervening visible event" do
+        let first =
+                functionToolCall
+                    "read-a"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}"
+            second =
+                functionToolCall
+                    "read-b"
+                    "read_file"
+                    "{\"target_file\":\"src/B.hs\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted first)
+                    , UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "read-a"
+                                "module A where"
+                                FunctionCallKind))
+                    , UiSystemMessage "Checking another source"
+                    , UiLoop (ToolStarted second)
+                    ]
+        map (.blockKind) (Foldable.toList state.uiBlocks)
+            `shouldBe` [BlockInspect, BlockSystem, BlockInspect]
+
+    it "keeps lifecycle-sensitive inspections outside compact bursts" do
+        let taskOutput =
+                functionToolCall
+                    "task-output"
+                    "get_task_output"
+                    "{\"task_id\":\"task-1\"}"
+            session =
+                functionToolCall
+                    "session-read"
+                    "read_agent_session"
+                    "{\"session_id\":\"session-1\"}"
+            finish callId =
+                UiLoop
+                    (ToolFinished
+                        (ToolCallResult
+                            callId
+                            "done"
+                            FunctionCallKind))
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted taskOutput)
+                    , finish "task-output"
+                    , UiLoop (ToolStarted session)
+                    , finish "session-read"
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockKind) blocks
+            `shouldBe` [BlockInspect, BlockInspect]
+        map (.blockInspectionGroupable) blocks
+            `shouldBe` [False, False]
 
     it "shows an apply_patch diff while running and after completion" do
         let call =
@@ -1460,7 +1696,8 @@ spec = describe "fullscreen UI reducer" do
             _ -> expectationFailure "expected one running edit block"
         case Foldable.toList finished.uiBlocks of
             [block] -> do
-                block.blockBody `shouldBe` "  -old\n  +new"
+                block.blockBody
+                    `shouldBe` "          │ -old\n          │ +new"
                 block.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected one completed edit block"
 

@@ -741,9 +741,15 @@ adjustableChoiceDetail choice =
 choiceFooter :: ChoiceOverlay -> Text
 choiceFooter choice
     | isJust choice.choiceAdjustments =
-        "↑↓ select · ←→ reasoning effort · ↵ confirm · esc cancel"
+        "↑↓ select · ←→ reasoning effort · ↵ confirm · "
+            <> escapeHint
     | otherwise =
-        "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
+        "type to filter  │  ↑↓ navigate  │  Enter choose  │  "
+            <> escapeHint
+  where
+    escapeHint
+        | Text.null choice.choiceQuery = "Esc cancel"
+        | otherwise = "Esc clear search"
 
 listAt :: Int -> [a] -> Maybe a
 listAt index values

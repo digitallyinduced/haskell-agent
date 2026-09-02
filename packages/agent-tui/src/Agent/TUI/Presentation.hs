@@ -3,6 +3,8 @@ module Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
     , SearchReplaceLine(..)
+    , DiffDisplayLine(..)
+    , DiffLineKind(..)
     , TodoDisplayLine(..)
     , TodoDisplayStatus(..)
     , formatSearchReplaceDiff
@@ -12,9 +14,11 @@ module Agent.TUI.Presentation
     , formatTodoList
     , formatToolOutput
     , formatToolOutputRelative
+    , diffHeaderParts
     , isInspectionTool
     , liveTodoPanelLines
     , parseApplyPatchDiffs
+    , parseDiffDisplayLine
     , parseSearchReplaceDiff
     , parseWriteFileDiff
     , parseTodoList
@@ -56,8 +60,8 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isDigit, isSpace)
 import qualified Data.Foldable as Foldable
-import Data.List (mapAccumL)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.List (sortOn)
+import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -164,6 +168,22 @@ data SearchReplaceAction
 data SearchReplaceLine
     = SearchReplaceRemoved !Text
     | SearchReplaceAdded !Text
+    | SearchReplaceContext !Text
+    | SearchReplaceOmitted !Int !Int !Int
+    deriving (Eq, Show)
+
+data DiffLineKind
+    = DiffLineRemoved
+    | DiffLineAdded
+    | DiffLineContext
+    deriving (Eq, Show)
+
+data DiffDisplayLine = DiffDisplayLine
+    { diffDisplayGutter :: !Text
+    , diffDisplayMarker :: !Text
+    , diffDisplayCode :: !Text
+    , diffDisplayKind :: !DiffLineKind
+    }
     deriving (Eq, Show)
 
 data SearchReplaceDiff = SearchReplaceDiff
@@ -255,13 +275,85 @@ parseApplyPatchDiffs patch =
         diffs -> diffs
 
     makeDiff path action raw =
-        let shown = take 20 raw
+        let shown = cappedPatchPreview 20 raw
+            shownRows =
+                length (filter (not . isOmission) shown)
         in SearchReplaceDiff
             { diffPath = path
             , diffAction = action
             , diffLines = shown
-            , diffHiddenLines = length raw - length shown
+            , diffHiddenLines = length raw - shownRows
             }
+
+    -- Prefer actual changes when long context runs exceed the preview budget.
+    -- Remaining slots show the context closest to those changes, in source
+    -- order, so an approval preview cannot consist entirely of unchanged rows.
+    cappedPatchPreview limit raw
+        | length raw <= limit = raw
+        | null changed = take limit raw
+        | otherwise =
+            markOmissions raw selectedIndices
+      where
+        indexed = zip [0 :: Int ..] raw
+        changed =
+            filter (isChanged . snd) indexed
+        shownChanges = take limit changed
+        changedIndices = map fst shownChanges
+        contextBudget = limit - length shownChanges
+        contextByProximity =
+            sortOn
+                (\(index, _) ->
+                    ( minimum
+                        (map (abs . (index -)) changedIndices)
+                    , index
+                    ))
+                (filter (not . isChanged . snd) indexed)
+        selectedIndices =
+            changedIndices
+                <> map fst (take contextBudget contextByProximity)
+
+    markOmissions raw selectedIndices =
+        go 0
+            [ (index, line)
+            | (index, line) <- zip [0 :: Int ..] raw
+            , index `elem` selectedIndices
+            ]
+      where
+        go offset [] = omission (drop offset raw)
+        go offset ((index, line) : rest) =
+            omission (take (index - offset) (drop offset raw))
+                <> [line]
+                <> go (index + 1) rest
+
+        omission [] = []
+        omission hidden =
+            [ SearchReplaceOmitted
+                (length hidden)
+                (sum (map oldLineSpan hidden))
+                (sum (map newLineSpan hidden))
+            ]
+
+    isChanged = \case
+        SearchReplaceContext _ -> False
+        SearchReplaceRemoved _ -> True
+        SearchReplaceAdded _ -> True
+        SearchReplaceOmitted{} -> False
+
+    isOmission = \case
+        SearchReplaceOmitted{} -> True
+        _ -> False
+
+    oldLineSpan = \case
+        SearchReplaceRemoved _ -> 1
+        SearchReplaceAdded _ -> 0
+        SearchReplaceContext _ -> 1
+        SearchReplaceOmitted _ oldLines _ -> oldLines
+
+    newLineSpan = \case
+        SearchReplaceRemoved _ -> 0
+        SearchReplaceAdded _ -> 1
+        SearchReplaceContext _ -> 1
+        SearchReplaceOmitted _ _ newLines -> newLines
 
     patchBoundary line =
         any (`Text.isPrefixOf` line)
@@ -281,6 +373,7 @@ parseApplyPatchDiffs patch =
     changedLine line = case Text.uncons line of
         Just ('-', text) -> Just (SearchReplaceRemoved text)
         Just ('+', text) -> Just (SearchReplaceAdded text)
+        Just (' ', text) -> Just (SearchReplaceContext text)
         _ -> Nothing
 
     nonEmptyText text =
@@ -346,42 +439,128 @@ formatDiffRelativeAt workspace reportedStart diff =
                     <> workspaceRelativeDisplayPath workspace destination
             Nothing -> ""
         lineStart = reportedStart <|> actionLineStart diffAction
-        shown = maybe (map formatLine diffLines) (`formatNumberedLines` diffLines)
-            lineStart
+        shown = formatDisplayLines lineStart diffLines
+        unmarkedHidden =
+            max 0
+                (diffHiddenLines - sum
+                    [ rows
+                    | SearchReplaceOmitted rows _ _ <- diffLines
+                    ])
         more
-            | diffHiddenLines == 0 = []
+            | unmarkedHidden == 0 = []
             | otherwise =
-                ["  … " <> Text.pack (show diffHiddenLines) <> " more"]
+                ["  … " <> Text.pack (show unmarkedHidden) <> " more"]
     in Text.intercalate "\n" (filter (not . Text.null) (header : shown <> more))
   where
-    formatLine = \case
-        SearchReplaceRemoved line -> "  -" <> line
-        SearchReplaceAdded line -> "  +" <> line
+    formatDisplayLines start lines_ =
+        let numbered = numberLines start start lines_
+            largest =
+                maximum
+                    (1 :
+                        [ number
+                        | (oldLine, newLine, _) <- numbered
+                        , number <- maybeToList oldLine <> maybeToList newLine
+                        ])
+            width = max 3 (length (show largest))
+        in map (formatNumberedLine width) numbered
+
+    numberLines
+        :: Maybe Int
+        -> Maybe Int
+        -> [SearchReplaceLine]
+        -> [(Maybe Int, Maybe Int, SearchReplaceLine)]
+    numberLines _ _ [] = []
+    numberLines oldLine newLine (line : rest) =
+        case line of
+            SearchReplaceRemoved _ ->
+                (oldLine, Nothing, line)
+                    : numberLines (advance oldLine) newLine rest
+            SearchReplaceAdded _ ->
+                (Nothing, newLine, line)
+                    : numberLines oldLine (advance newLine) rest
+            SearchReplaceContext _ ->
+                (oldLine, newLine, line)
+                    : numberLines
+                        (advance oldLine)
+                        (advance newLine)
+                        rest
+            SearchReplaceOmitted _ oldLines newLines ->
+                (Nothing, Nothing, line)
+                    : numberLines
+                        (advanceBy oldLines oldLine)
+                        (advanceBy newLines newLine)
+                        rest
+
+    advance = fmap (+ 1)
+    advanceBy count = fmap (+ count)
+
+    formatNumberedLine
+        :: Int
+        -> (Maybe Int, Maybe Int, SearchReplaceLine)
+        -> Text
+    formatNumberedLine width (oldLine, newLine, line) =
+        case line of
+            SearchReplaceOmitted rows _ _ ->
+                "  … " <> Text.pack (show rows) <> " omitted"
+            SearchReplaceRemoved text -> formatVisibleLine "-" text
+            SearchReplaceAdded text -> formatVisibleLine "+" text
+            SearchReplaceContext text -> formatVisibleLine " " text
+      where
+        formatVisibleLine marker text =
+            "  "
+                <> numberColumn width oldLine
+                <> " "
+                <> numberColumn width newLine
+                <> " │ "
+                <> marker
+                <> text
+
+    numberColumn :: Int -> Maybe Int -> Text
+    numberColumn width =
+        Text.justifyRight width ' ' . maybe "" (Text.pack . show)
 
     actionLineStart = \case
         Just SearchReplaceCreate -> Just 1
         Just SearchReplaceWrite -> Just 1
         _ -> Nothing
 
-formatNumberedLines :: Int -> [SearchReplaceLine] -> [Text]
-formatNumberedLines start lines_ =
-    let numbered = snd (mapAccumL numberLine (start, start) lines_)
-        width = maximum (1 : map (Text.length . Text.pack . show . fst) numbered)
-    in map (formatNumbered width) numbered
+-- | Split a formatted multi-file header into its semantic action and path.
+diffHeaderParts :: Text -> Maybe (Text, Text)
+diffHeaderParts line =
+    firstMatch
+        [ "create"
+        , "delete"
+        , "write"
+        , "update"
+        , "move"
+        ]
   where
-    numberLine (oldLine, newLine) = \case
-        SearchReplaceRemoved line ->
-            ((oldLine + 1, newLine), (oldLine, SearchReplaceRemoved line))
-        SearchReplaceAdded line ->
-            ((oldLine, newLine + 1), (newLine, SearchReplaceAdded line))
+    firstMatch [] = Nothing
+    firstMatch (action : rest) =
+        case Text.stripPrefix ("  " <> action <> " ") line of
+            Just path
+                | not (Text.null (Text.strip path)) ->
+                    Just (action, path)
+            _ -> firstMatch rest
 
-    formatNumbered width (lineNumber, changedLine) =
-        "  "
-            <> Text.justifyRight width ' ' (Text.pack (show lineNumber))
-            <> " "
-            <> case changedLine of
-                SearchReplaceRemoved line -> "-" <> line
-                SearchReplaceAdded line -> "+" <> line
+-- | Decode the stable line-number gutter emitted by 'formatDiffRelative'.
+parseDiffDisplayLine :: Text -> Maybe DiffDisplayLine
+parseDiffDisplayLine line =
+    let (gutter, separatorAndPayload) = Text.breakOn " │ " line
+    in do
+        payload <- Text.stripPrefix " │ " separatorAndPayload
+        (marker, code) <- Text.uncons payload
+        kind <- case marker of
+            '-' -> Just DiffLineRemoved
+            '+' -> Just DiffLineAdded
+            ' ' -> Just DiffLineContext
+            _ -> Nothing
+        pure DiffDisplayLine
+            { diffDisplayGutter = gutter
+            , diffDisplayMarker = Text.singleton marker
+            , diffDisplayCode = code
+            , diffDisplayKind = kind
+            }
 
 searchReplaceLineStart :: Text -> Maybe Int
 searchReplaceLineStart output =

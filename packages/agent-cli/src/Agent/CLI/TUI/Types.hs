@@ -10,7 +10,12 @@ module Agent.CLI.TUI.Types
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
     , ChoiceSelection(..)
+    , CommandPaletteAction(..)
+    , CommandPaletteEntry(..)
     , activeTheme
+    , commandPaletteEntries
+    , commandPaletteRows
+    , commandPaletteActionAt
     , choiceVisibleRows
     , selectedChoice
     , selectedChoiceIndex
@@ -32,7 +37,13 @@ module Agent.CLI.TUI.Types
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry, AgentTarget)
-import Agent.CLI.Command (SkillCommand, SlashCatalog)
+import Agent.CLI.Command
+    ( ReplAction(..)
+    , SkillCommand(..)
+    , SlashCatalog(..)
+    , SlashCommand(..)
+    , parseReplLineWithCatalog
+    )
 import Agent.CLI.Dictation (DictationTarget)
 import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
@@ -161,6 +172,7 @@ data AppEvent
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetModelIds ![Text]
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
+    | AppCommandPaletteSelected !CommandPaletteAction
     | AppSetTheme !ThemeKind
       -- ^ Apply a theme to the retained fullscreen UI.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
@@ -241,6 +253,126 @@ data HistoryCommit
     | HistoryCommitReplace
     | HistoryCommitReset
     deriving (Eq, Show)
+
+-- | What accepting a command-palette row should do. Commands which are
+-- complete without arguments are submitted through the normal REPL input
+-- buffer. Commands needing more input leave their canonical prefix in the
+-- composer. Shortcut rows are discoverability-only.
+data CommandPaletteAction
+    = CommandPaletteSubmit !Text
+    | CommandPaletteInsert !Text
+    | CommandPaletteDismiss
+    deriving (Eq, Show)
+
+data CommandPaletteEntry = CommandPaletteEntry
+    { commandPaletteLabel :: !Text
+    , commandPaletteDetail :: !Text
+    , commandPaletteAction :: !CommandPaletteAction
+    }
+    deriving (Eq, Show)
+
+-- | Build the palette from the live canonical catalog. Keeping this derived
+-- avoids a second, inevitably stale list of slash commands.
+commandPaletteEntries :: SlashCatalog -> [CommandPaletteEntry]
+commandPaletteEntries catalog =
+    map slashEntry catalog.slashCatalogCommands
+        <> map skillEntry catalog.slashCatalogSkills
+        <> shortcutEntries
+  where
+    slashEntry command =
+        let action =
+                commandAction ("/" <> command.slashName)
+        in CommandPaletteEntry
+            { commandPaletteLabel =
+                "Command · " <> command.slashSummary
+            , commandPaletteDetail =
+                Text.intercalate "  ·  " $
+                    [command.slashUsage]
+                        <> aliasPart command.slashAliases
+                        <> keybindingPart command.slashName
+                        <> [actionDetail action]
+            , commandPaletteAction = action
+            }
+
+    skillEntry skill =
+        let action =
+                commandAction ("/" <> skill.skillCommandName)
+        in CommandPaletteEntry
+            { commandPaletteLabel =
+                "Skill · " <> skill.skillCommandSummary
+            , commandPaletteDetail =
+                Text.intercalate "  ·  "
+                    [ "/"
+                        <> skill.skillCommandName
+                        <> maybe
+                            ""
+                            (" " <>)
+                            skill.skillCommandArgumentHint
+                    , actionDetail action
+                    ]
+            , commandPaletteAction = action
+            }
+
+    -- The catalog's @slashTakesArguments@ says whether arguments are accepted,
+    -- not whether they are mandatory. Ask the canonical parser whether the
+    -- bare command is executable instead of guessing from display syntax.
+    commandAction command =
+        case parseReplLineWithCatalog catalog command of
+            ReplCommandError{} -> CommandPaletteInsert (command <> " ")
+            _ -> CommandPaletteSubmit command
+
+    actionDetail = \case
+        CommandPaletteInsert{} -> "Enter inserts command"
+        _ -> "Enter runs command"
+
+    aliasPart [] = []
+    aliasPart aliases =
+        ["aliases " <> Text.intercalate ", " (map ("/" <>) aliases)]
+
+    keybindingPart = \case
+        "quit" -> ["Ctrl-Q; Ctrl-D on empty composer"]
+        _ -> []
+
+    shortcutEntries =
+        [ shortcut "Ctrl-P" "Open commands and keyboard shortcuts"
+        , shortcut "Ctrl-C" "Interrupt; press again to exit"
+        , shortcut "Ctrl-Enter / Ctrl-O" "Send queued prompt now"
+        , shortcut "Shift-Enter" "Insert a newline"
+        , shortcut "Tab" "Focus scrollback"
+        , shortcut "Ctrl-R" "Start dictation"
+        , shortcut "Alt-K" "Toggle Meta Console"
+        , shortcut "Ctrl-V / Cmd-V" "Paste text or an image"
+        ]
+    shortcut keys description =
+        CommandPaletteEntry
+            { commandPaletteLabel = "Shortcut · " <> description
+            , commandPaletteDetail = keys
+            , commandPaletteAction = CommandPaletteDismiss
+            }
+
+commandPaletteRows :: SlashCatalog -> [(Text, Text)]
+commandPaletteRows =
+    map
+        (\entry ->
+            ( entry.commandPaletteLabel
+            , entry.commandPaletteDetail
+            ))
+        . commandPaletteEntries
+
+commandPaletteActionAt
+    :: Int
+    -> SlashCatalog
+    -> Maybe CommandPaletteAction
+commandPaletteActionAt index catalog
+    | index < 0 = Nothing
+    | otherwise =
+        (.commandPaletteAction)
+            <$> listAt index (commandPaletteEntries catalog)
+  where
+    listAt offset values =
+        case drop offset values of
+            value : _ -> Just value
+            [] -> Nothing
 
 data FullscreenRuntime = FullscreenRuntime
     { runtimeEvents :: !(BChan AppEvent)
