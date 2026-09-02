@@ -188,7 +188,7 @@ spec = describe "mail tools" do
                     pure (Right MailDraft
                         { mailDraftId = "draft-1"
                         , mailDraftMessageId = Nothing
-                        , mailDraftThreadId = Nothing
+                        , mailDraftThreadId = Just "provider-thread:raw"
                         , mailDraftWarning = Nothing
                         })
                 , mailToolsUpdateDraft = \request -> do
@@ -225,6 +225,8 @@ spec = describe "mail tools" do
                 }
             }
         created.output `shouldSatisfy` Text.isInfixOf "\"sent\":false"
+        created.output `shouldNotSatisfy`
+            Text.isInfixOf "provider-thread:raw"
         _ <- dispatchToolCall dispatchConfig
             (appToolHandlers tools)
             (functionToolCall "call-update" "email_update_draft"

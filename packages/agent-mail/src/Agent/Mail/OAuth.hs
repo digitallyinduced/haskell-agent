@@ -23,8 +23,8 @@ import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson ((.:), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (parseMaybe)
-import qualified Data.ByteArray as ByteArray
 import qualified Data.ByteString as BS
+import Data.Char (digitToInt)
 import qualified Data.ByteString.Base64.URL as Base64URL
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
@@ -156,12 +156,19 @@ mailOAuthPkceChallenge :: Text -> Text
 mailOAuthPkceChallenge verifier =
     TextEncoding.decodeUtf8
         ( Base64URL.encodeUnpadded
-            ( ByteArray.convert
-                ( hash (TextEncoding.encodeUtf8 verifier)
-                    :: Digest SHA256
-                )
-            )
+            (digestBytes (hash (TextEncoding.encodeUtf8 verifier) :: Digest SHA256))
         )
+  where
+    -- Crypton intentionally keeps the raw Digest byte-array implementation
+    -- private.  Its canonical Show form is lower-case hexadecimal, so decode
+    -- that fixed SHA-256 representation into the exact 32 PKCE digest bytes
+    -- without depending on a competing byte-array package.
+    digestBytes :: Digest SHA256 -> BS.ByteString
+    digestBytes = BS.pack . go . show
+      where
+        go (high : low : rest) =
+            fromIntegral (digitToInt high * 16 + digitToInt low) : go rest
+        go _ = []
 
 mailOAuthScopes :: MailProvider -> Text
 mailOAuthScopes = \case
@@ -179,12 +186,24 @@ exchangeMailOAuthCode
     -> Text
     -> IO (Either Text MailOAuthToken)
 exchangeMailOAuthCode manager client code verifier =
-    exchangeToken manager client $
-        [ ("grant_type", "authorization_code")
-        , ("code", code)
-        , ("code_verifier", verifier)
-        , ("redirect_uri", client.mailOAuthClientRedirectUri)
-        ]
+    fmap (fmap defaultAuthorizationScopes) $
+        exchangeToken manager client
+            [ ("grant_type", "authorization_code")
+            , ("code", code)
+            , ("code_verifier", verifier)
+            , ("redirect_uri", client.mailOAuthClientRedirectUri)
+            ]
+  where
+    -- A successful authorization grant covers the scopes requested by this
+    -- flow when the provider omits its optional scope response field.
+    defaultAuthorizationScopes token
+        | null token.mailOAuthTokenScopes =
+            token
+                { mailOAuthTokenScopes =
+                    Text.words
+                        (mailOAuthScopes client.mailOAuthClientProvider)
+                }
+        | otherwise = token
 
 refreshMailOAuthToken
     :: Manager
@@ -271,12 +290,7 @@ exchangeToken manager client fields
                                     , mailOAuthTokenExpiresIn =
                                         max 1 token.tokenExpiresIn
                                     , mailOAuthTokenScopes =
-                                        case Text.words token.tokenScope of
-                                            [] ->
-                                                Text.words
-                                                    (mailOAuthScopes
-                                                        client.mailOAuthClientProvider)
-                                            scopes -> scopes
+                                        Text.words token.tokenScope
                                     }
 
 tokenFields

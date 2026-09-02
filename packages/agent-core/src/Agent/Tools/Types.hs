@@ -4,6 +4,7 @@ module Agent.Tools.Types
     , BackgroundTaskNotice(..)
     , ToolSchema(..)
     , ApprovalRule(..)
+    , ApprovalRequirement(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
@@ -31,8 +32,10 @@ module Agent.Tools.Types
     , dispatchRegisteredToolCallDetailed
     , jsonToolParameters
     , appToolHandlers
+    , toolApprovalRequirement
     , toolAllowsWithoutPrompt
     , toolRequiresExplicitApproval
+    , toolCallRequiresExplicitApproval
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
@@ -84,7 +87,14 @@ data ToolSchema
     | HostedComputerSchema
     deriving (Eq, Show)
 
--- | Whether a call may run without generic user approval.
+-- | Approval needed for one concrete tool invocation.
+data ApprovalRequirement
+    = ApprovalNotRequired
+    | ApprovalPromptRequired
+    | FreshApprovalRequired
+    deriving (Eq, Show)
+
+-- | How to determine whether a call may run without generic user approval.
 data ApprovalRule
     = AlwaysReadOnly
     -- | Host-authorized effect that is intentionally exempt from the generic
@@ -96,6 +106,10 @@ data ApprovalRule
     -- bypass this rule.
     | AlwaysConfirm
     | ClassifyReadOnly !(ToolCall -> IO Bool)
+    -- | Classify the complete approval requirement for each invocation.
+    -- This is intended for multiplexing tools whose selected operation can
+    -- require a fresh confirmation even when broader approval is enabled.
+    | ClassifyApproval !(ToolCall -> IO ApprovalRequirement)
 
 -- | Whether a tool handler may overlap other handlers emitted in the same
 -- model turn. Approval callbacks are always evaluated serially in call order.
@@ -463,12 +477,22 @@ appToolHandlers :: [AppTool] -> [ToolHandler]
 appToolHandlers = map (.appToolHandler)
 
 toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
-toolAllowsWithoutPrompt tool call = case tool.appToolApproval of
-    AlwaysReadOnly -> pure True
-    AlwaysAllowed -> pure True
-    AlwaysPrompt -> pure False
-    AlwaysConfirm -> pure False
-    ClassifyReadOnly classify -> classify call
+toolAllowsWithoutPrompt tool call =
+    (== ApprovalNotRequired) <$> toolApprovalRequirement tool call
+
+-- | Resolve the approval requirement for one concrete invocation.
+toolApprovalRequirement :: AppTool -> ToolCall -> IO ApprovalRequirement
+toolApprovalRequirement tool call = case tool.appToolApproval of
+    AlwaysReadOnly -> pure ApprovalNotRequired
+    AlwaysAllowed -> pure ApprovalNotRequired
+    AlwaysPrompt -> pure ApprovalPromptRequired
+    AlwaysConfirm -> pure FreshApprovalRequired
+    ClassifyReadOnly classify -> do
+        readOnly <- classify call
+        pure $ if readOnly
+            then ApprovalNotRequired
+            else ApprovalPromptRequired
+    ClassifyApproval classify -> classify call
 
 -- | Whether every invocation must be confirmed by the parent user. This is
 -- deliberately separate from read-only classification so provider-native
@@ -477,3 +501,9 @@ toolRequiresExplicitApproval :: AppTool -> Bool
 toolRequiresExplicitApproval tool = case tool.appToolApproval of
     AlwaysConfirm -> True
     _ -> False
+
+-- | Whether this invocation requires a fresh parent-user confirmation.
+-- Unlike 'toolRequiresExplicitApproval', this evaluates call-sensitive rules.
+toolCallRequiresExplicitApproval :: AppTool -> ToolCall -> IO Bool
+toolCallRequiresExplicitApproval tool call =
+    (== FreshApprovalRequired) <$> toolApprovalRequirement tool call

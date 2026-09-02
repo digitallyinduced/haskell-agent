@@ -20,6 +20,7 @@ module Agent.Mail.Transport
     , parseImapAppendUid
     , parseImapMailboxListLine
     , parseMailReplyRecipient
+    , imapUpdateDraftPostAppendCommands
     , imapUidHasFlag
     , validateMailReplyRecipient
     ) where
@@ -42,7 +43,7 @@ import Agent.Mail.Types
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (SomeException, tryAny)
-import Control.Monad (unless, when)
+import Control.Monad (foldM, unless, when)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson.Types (Parser, parseEither)
@@ -69,6 +70,7 @@ import Network.HTTP.Client
     , checkResponse
     , method
     , parseRequest
+    , redirectCount
     , requestBody
     , requestHeaders
     , responseBody
@@ -261,19 +263,28 @@ dispatchOAuth
     -> (MailImapSettings -> Text -> IO (Either Text value))
     -> IO (Either Text value)
 dispatchOAuth hooks credential gmail microsoft imap =
-    case (credential.mailCredentialAccount.mailAccountProvider,
-          credential.mailCredentialSecret) of
-        (GmailProvider, MailOAuthSecret {}) ->
-            withOAuthAccessToken hooks credential gmail
-        (MicrosoftProvider, MailOAuthSecret {}) ->
-            withOAuthAccessToken hooks credential microsoft
-        (ImapProvider, MailImapSecret { mailImapPassword }) ->
-            case credential.mailCredentialAccount.mailAccountImapSettings of
-                Nothing -> pure (Left "The custom IMAP account is incomplete.")
-                Just settings ->
-                    trackOperationalState hooks credential.mailCredentialAccount
-                        (imap settings mailImapPassword)
-        _ -> pure (Left "The email account credential is invalid.")
+    if not (credentialIdentityMatches credential)
+        then pure (Left "The email account credential is invalid.")
+        else
+            case
+                ( credential.mailCredentialAccount.mailAccountProvider
+                , credential.mailCredentialSecret
+                )
+            of
+                (GmailProvider, MailOAuthSecret {}) ->
+                    withOAuthAccessToken hooks credential gmail
+                (MicrosoftProvider, MailOAuthSecret {}) ->
+                    withOAuthAccessToken hooks credential microsoft
+                (ImapProvider, MailImapSecret { mailImapPassword }) ->
+                    case credential.mailCredentialAccount.mailAccountImapSettings of
+                        Nothing ->
+                            pure (Left "The custom IMAP account is incomplete.")
+                        Just settings ->
+                            trackOperationalState
+                                hooks
+                                credential.mailCredentialAccount
+                                (imap settings mailImapPassword)
+                _ -> pure (Left "The email account credential is invalid.")
 
 trackOperationalState
     :: MailTransportHooks
@@ -321,13 +332,42 @@ withOAuthAccessToken hooks credential action =
     hooks.mailTransportRefreshCredential credential >>= \case
         Left err -> pure (Left err)
         Right refreshed ->
-            case refreshed.mailCredentialSecret of
-                MailOAuthSecret { mailOAuthAccessToken }
-                    | not (Text.null mailOAuthAccessToken) ->
-                        trackOperationalState hooks
-                            refreshed.mailCredentialAccount
-                            (action mailOAuthAccessToken)
-                _ -> pure (Left "The email account must be reconnected.")
+            if not (refreshedIdentityMatches credential refreshed)
+                then pure (Left "The email account credential is invalid.")
+                else
+                    case refreshed.mailCredentialSecret of
+                        MailOAuthSecret { mailOAuthAccessToken }
+                            | mailOAuthAccessToken
+                                == Text.strip mailOAuthAccessToken
+                            , not (Text.null mailOAuthAccessToken) ->
+                                trackOperationalState
+                                    hooks
+                                    refreshed.mailCredentialAccount
+                                    (action mailOAuthAccessToken)
+                        _ ->
+                            pure
+                                (Left
+                                    "The email account must be reconnected.")
+
+credentialIdentityMatches :: MailCredential -> Bool
+credentialIdentityMatches credential =
+    credential.mailCredentialAccount.mailAccountId
+        == secretAccountId credential.mailCredentialSecret
+
+refreshedIdentityMatches :: MailCredential -> MailCredential -> Bool
+refreshedIdentityMatches original refreshed =
+    credentialIdentityMatches refreshed
+        && refreshed.mailCredentialAccount.mailAccountId
+            == original.mailCredentialAccount.mailAccountId
+        && refreshed.mailCredentialAccount.mailAccountProvider
+            == original.mailCredentialAccount.mailAccountProvider
+        && refreshed.mailCredentialAccount.mailAccountEnabled
+        && refreshed.mailCredentialAccount.mailAccountState == MailConnected
+
+secretAccountId :: MailSecret -> Text
+secretAccountId = \case
+    MailOAuthSecret { mailSecretAccountId } -> mailSecretAccountId
+    MailImapSecret { mailSecretAccountId } -> mailSecretAccountId
 
 -- HTTP ----------------------------------------------------------------------
 
@@ -350,6 +390,7 @@ providerGet token rawUrl query extraHeaders maximum = do
                 , requestHeaders =
                     (hAuthorization, "Bearer " <> TextEncoding.encodeUtf8 token)
                         : extraHeaders
+                , redirectCount = 0
                 , responseTimeout = responseTimeoutMicro httpTimeoutMicros
                 , checkResponse = \_ _ -> pure ()
                 }
@@ -398,6 +439,7 @@ providerJsonWrite verb token rawUrl extraHeaders payload maximum = do
                 , requestHeaders =
                     (hAuthorization, "Bearer " <> TextEncoding.encodeUtf8 token)
                         : ("Content-Type", "application/json") : extraHeaders
+                , redirectCount = 0
                 , responseTimeout = responseTimeoutMicro httpTimeoutMicros
                 , checkResponse = \_ _ -> pure ()
                 }
@@ -1013,8 +1055,10 @@ parseGmailSummary = Aeson.withObject "Gmail message" \object -> do
     threadId <- object .:? "threadId"
     snippet <- object .:? "snippet"
     payload <- object .:? "payload"
+    traversal <- maybe (pure emptyGmailPayloadTraversal)
+        gmailPayloadTraversal payload
     let headers = maybe [] gmailHeaders payload
-        attachments = maybe [] gmailAttachments payload
+        attachments = traversal.gmailTraversalAttachments
     pure MailMessageSummary
         { mailMessageSummaryId = messageId
         , mailMessageSummaryThreadId = threadId
@@ -1035,9 +1079,12 @@ parseGmailMessage bodyMaximum value =
         messageId <- object .: "id"
         threadId <- object .:? "threadId"
         payload <- object .:? "payload"
+        traversal <- maybe (pure emptyGmailPayloadTraversal)
+            gmailPayloadTraversal payload
         let headers = maybe [] gmailHeaders payload
-            attachments = maybe [] gmailAttachments payload
-            bodyResult = payload >>= gmailTextBody bodyMaximum
+            attachments = traversal.gmailTraversalAttachments
+            bodyResult = gmailTextBody bodyMaximum
+                traversal.gmailTraversalParts
         pure MailMessage
             { mailMessageId = messageId
             , mailMessageThreadId = threadId
@@ -1080,51 +1127,102 @@ effectiveReplyRecipient headers =
         (headerValue "reply-to" headers)
         (headerValue "from" headers))
 
-gmailAttachments :: Aeson.Value -> [MailAttachment]
-gmailAttachments value =
-    either (const []) id $ parseEither parseParts value
-  where
-    parseParts = Aeson.withObject "Gmail payload" \part -> do
-        filename <- part .:? "filename" Aeson..!= ""
-        contentType <- part .:? "mimeType"
-        body <- part .:? "body"
-        nested <- part .:? "parts" Aeson..!= []
-        direct <- case body of
-            Nothing -> pure []
-            Just bodyValue -> Aeson.withObject "Gmail body" (\bodyObject -> do
-                attachmentId <- bodyObject .:? "attachmentId"
-                size <- bodyObject .:? "size"
-                pure case attachmentId of
-                    Nothing -> []
-                    Just identifier ->
-                        let safeFilename = safeGmailMetadata filename
-                            safeContentType =
-                                contentType >>= safeGmailMetadata
-                        in [MailAttachment
-                            (encodeGmailAttachmentRef
-                                identifier
-                                safeFilename
-                                safeContentType)
-                            safeFilename safeContentType size]) bodyValue
-        children <- concat <$> traverse parseParts nested
-        pure (direct <> children)
+data GmailPayloadTraversal = GmailPayloadTraversal
+    { gmailTraversalParts :: [Aeson.Value]
+    , gmailTraversalAttachments :: [MailAttachment]
+    }
 
-gmailTextBody :: Int -> Aeson.Value -> Maybe (Text, Bool)
-gmailTextBody maximum value =
+emptyGmailPayloadTraversal :: GmailPayloadTraversal
+emptyGmailPayloadTraversal = GmailPayloadTraversal [] []
+
+maximumGmailMimeDepth :: Int
+maximumGmailMimeDepth = 32
+
+maximumGmailMimeParts :: Int
+maximumGmailMimeParts = 512
+
+maximumGmailMimeAttachments :: Int
+maximumGmailMimeAttachments = 200
+
+-- | Parse Gmail's untrusted MIME tree once, with limits that apply to every
+-- consumer.  Do not return a partial prefix: a malformed or oversized tree
+-- makes the whole message unusable.
+gmailPayloadTraversal :: Aeson.Value -> Parser GmailPayloadTraversal
+gmailPayloadTraversal payload = do
+    (parts, attachments, _, _) <- go 0 0 0 payload
+    pure (GmailPayloadTraversal parts attachments)
+  where
+    go
+        :: Int
+        -> Int
+        -> Int
+        -> Aeson.Value
+        -> Parser ([Aeson.Value], [MailAttachment], Int, Int)
+    go depth partCount attachmentCount part = do
+        when (depth > maximumGmailMimeDepth) $
+            fail "Gmail MIME nesting exceeds the supported limit."
+        when (partCount >= maximumGmailMimeParts) $
+            fail "Gmail MIME part count exceeds the supported limit."
+        attachment <- gmailPartAttachment part
+        let nextPartCount = partCount + 1
+            nextAttachmentCount = attachmentCount + length attachment
+        when (nextAttachmentCount > maximumGmailMimeAttachments) $
+            fail "Gmail MIME attachment count exceeds the supported limit."
+        nested <- Aeson.withObject "Gmail payload"
+            (\object -> object .:? "parts" Aeson..!= []) part
+        (childParts, childAttachments, finalPartCount, finalAttachmentCount) <-
+            foldM
+                (\(accumulatedParts, accumulatedAttachments, count, countAttachments)
+                    child -> do
+                    (parts, attachments, nextCount, nextAttachmentCount') <-
+                        go (depth + 1) count countAttachments child
+                    pure
+                        ( accumulatedParts <> parts
+                        , accumulatedAttachments <> attachments
+                        , nextCount
+                        , nextAttachmentCount'
+                        ))
+                ([], [], nextPartCount, nextAttachmentCount)
+                nested
+        pure
+            ( part : childParts
+            , attachment <> childAttachments
+            , finalPartCount
+            , finalAttachmentCount
+            )
+
+gmailPartAttachment :: Aeson.Value -> Parser [MailAttachment]
+gmailPartAttachment = Aeson.withObject "Gmail payload" \part -> do
+    filename <- part .:? "filename" Aeson..!= ""
+    contentType <- part .:? "mimeType"
+    body <- part .:? "body"
+    case body of
+        Nothing -> pure []
+        Just bodyValue -> Aeson.withObject "Gmail body" (\bodyObject -> do
+            attachmentId <- bodyObject .:? "attachmentId"
+            size <- bodyObject .:? "size"
+            pure case attachmentId of
+                Nothing -> []
+                Just identifier ->
+                    let safeFilename = safeGmailMetadata filename
+                        safeContentType =
+                            contentType >>= safeGmailMetadata
+                    in [MailAttachment
+                        (encodeGmailAttachmentRef
+                            identifier
+                            safeFilename
+                            safeContentType)
+                        safeFilename safeContentType size]) bodyValue
+
+gmailTextBody :: Int -> [Aeson.Value] -> Maybe (Text, Bool)
+gmailTextBody maximum parts =
     firstBody "text/plain" id
         <|> firstBody "text/html" stripHtml
   where
     firstBody :: Text -> (Text -> Text) -> Maybe (Text, Bool)
     firstBody contentType transform =
         listToMaybe
-            (mapMaybe (decodePart contentType transform) (flatten value))
-    flatten :: Aeson.Value -> [Aeson.Value]
-    flatten part = part : either (const []) id
-        (parseEither
-            (Aeson.withObject "Gmail payload" \object -> do
-                nested <- object .:? "parts" Aeson..!= []
-                pure (concatMap flatten nested))
-            part)
+            (mapMaybe (decodePart contentType transform) parts)
     decodePart
         :: Text -> (Text -> Text) -> Aeson.Value -> Maybe (Text, Bool)
     decodePart contentType transform =
@@ -1601,39 +1699,27 @@ imapUpdateDraft connector settings password sender request =
                 saved <- imapAppendDraft connection "m413" mailbox
                     (renderMailDraftMime
                         sender request.mailUpdateDraftContent replyHeaders)
-                -- Never issue a bare EXPUNGE/CLOSE: UID EXPUNGE limits removal
-                -- to exactly the replacement target. If the server does not
-                -- support it, retain both drafts rather than deleting data.
                 case saved of
                     Left err -> pure (Left err)
-                    Right draft
-                        | "imap-untracked:" `Text.isPrefixOf`
-                                draft.mailDraftId ->
-                            pure (Right draft
-                                { mailDraftWarning = Just
-                                    "The replacement draft was saved without a stable identifier; the previous draft was retained."
-                                })
+                    -- Updating an IMAP draft is append-only. The runtime has
+                    -- no delete-message capability, so it deliberately keeps
+                    -- the previous draft instead of issuing STORE \Deleted or
+                    -- EXPUNGE behind the model-facing update operation.
                     Right draft -> do
-                        -- The replacement has already been durably appended.
-                        -- Do not turn a later best-effort cleanup failure into
-                        -- a retryable error that could duplicate drafts.
-                        cleanup <- tryAny do
-                            currentFlags <- imapSimpleCommand connection "m414"
-                                ("UID FETCH " <> uid <> " (FLAGS)")
-                            unless (imapUidHasFlag uid "\\Draft" currentFlags) $
-                                failText "The previous IMAP item changed."
-                            _ <- imapSimpleCommand connection "m415"
-                                ("UID STORE " <> uid
-                                    <> " +FLAGS.SILENT (\\Deleted)")
-                            _ <- imapSimpleCommand connection "m417"
-                                ("UID EXPUNGE " <> uid)
-                            pure ()
-                        pure . Right $ case cleanup of
-                            Left (_ :: SomeException) -> draft
-                                { mailDraftWarning = Just
-                                    "The replacement draft was saved, but the previous draft could not be removed automatically."
-                                }
-                            Right () -> draft
+                        mapM_
+                            (\(tag, command) ->
+                                imapSimpleCommand connection tag command)
+                            (imapUpdateDraftPostAppendCommands uid)
+                        pure (Right draft
+                            { mailDraftWarning = Just
+                                "The replacement draft was saved and the previous draft was retained."
+                            })
+
+-- | Commands issued after appending an IMAP draft replacement. This is
+-- intentionally empty: update_draft is append-only and must never smuggle a
+-- message deletion or move into the provider transport.
+imapUpdateDraftPostAppendCommands :: Text -> [(Text, Text)]
+imapUpdateDraftPostAppendCommands _ = []
 
 imapReplyDraft
     :: Maybe MailImapSocketConnector

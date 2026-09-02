@@ -57,7 +57,10 @@ import Agent.CLI.LearnedSkills.Store
 import Agent.CLI.Login ()
 import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
-import Agent.CLI.Mail.Gateway ( gatewayMailTools )
+import Agent.CLI.Mail.Gateway
+    ( GatewayMailRuntime(..)
+    , gatewayMailTools
+    )
 import Agent.CLI.Mail.Tools ( mailToolsForStore )
 import Agent.CLI.Mail.Transport ( productionMailTransport )
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
@@ -76,7 +79,6 @@ import Agent.CLI.ModelConfig
     )
 import Agent.CLI.Models
     ( defaultModelFor,
-      gatewayModelOptions,
       rawModelOption,
       resolveConfiguredModel,
       resolveModelOptionById,
@@ -288,7 +290,7 @@ import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe
-    ( SomeException, finally, onException, throwIO, try )
+    ( SomeException, finally, mask, onException, throwIO, try )
 import Control.Monad ( forM_, join, unless, when )
 import Data.Functor ()
 import Data.IORef
@@ -343,7 +345,8 @@ import qualified Agent.XAI.Request as XAIRequest ()
 import qualified Agent.XAI.Usage as XAIUsage ()
 
 runAgentTools
-    :: (AgentRunMode -> CliOptions -> IO DevResult)
+    :: IORef (IO ())
+    -> (AgentRunMode -> CliOptions -> IO DevResult)
     -> LoadedAuth
     -> Maybe GatewayCredential
     -> Bool
@@ -392,6 +395,7 @@ runAgentTools
     -> Set Provider
     -> IO RunResult
 runAgentTools
+    startupCleanupRef
     runAgentChild
     loaded
     connectedGateway
@@ -440,6 +444,13 @@ runAgentTools
     uiRuntimeRef
     unavailableProviders
     = do
+    let drainRuntimeCleanup =
+            mask
+                (\_ ->
+                    atomicModifyIORef'
+                        startupCleanupRef
+                        (\cleanup -> (pure (), cleanup))
+                        >>= id)
     openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
     when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
@@ -827,12 +838,23 @@ runAgentTools
     promptRequest <- loadPrompt options
     let promptText = fmap (\request -> request.managedTurnText) promptRequest
     persist <-
-        preparePersistence
-            (trustedPool startup.startupDatabaseStore)
-            startup options root
-                inferredTarget { targetDialect = dialectId }
-                gatewayIdentity
-                (isNothing transition) cwd effortText promptText resumed
+        mask \restore -> do
+            initialized <-
+                restore
+                    (preparePersistence
+                        (trustedPool startup.startupDatabaseStore)
+                        startup options root
+                            inferredTarget { targetDialect = dialectId }
+                            gatewayIdentity
+                            (isNothing transition)
+                            cwd
+                            effortText
+                            promptText
+                            resumed)
+            writeIORef
+                startupCleanupRef
+                (cleanupPendingPersistence initialized)
+            pure initialized
     writeIORef persistSlotRef persist
     forM_ fullscreen \runtime ->
         reservedSessionId persist >>= \case
@@ -849,53 +871,103 @@ runAgentTools
                     (emptyFullscreenHistoryPage
                         (HistoryGeneration 0))
     (sessionTmp, ephemeralSessionId) <-
-        persistenceTempDir persist >>= \case
-            Just tempDir -> pure (tempDir, Nothing)
-            Nothing -> do
-                (sessionId, tempDir) <- allocateSessionTemp root
-                pure (tempDir, Just sessionId)
-    setToolSessionTmp baseToolEnv (Just sessionTmp)
-    mailAppTools <- case connectedGateway of
-        Nothing ->
-            mailToolsForStore baseToolEnv productionMailTransport
-        Just gatewayCredential ->
-            gatewayMailTools baseToolEnv gatewayCredential >>= \case
-                Left err -> do
-                    reportStartupWarning startup err
-                    pure []
-                Right tools -> pure tools
-    imageGenerationHistory <- newImageGenerationHistory
-    forM_ resumed \(_, turns) ->
-        recordImageGenerationResponseItems
-            imageGenerationHistory
-            (foldSessionItems turns)
-    home <- getHomeDirectory
-    let cleanupAllocatedScratch = do
+        mask \restore -> do
+            allocated <-
+                restore
+                    (persistenceTempDir persist >>= \case
+                        Just tempDir -> pure (tempDir, Nothing)
+                        Nothing -> do
+                            (sessionId, tempDir) <-
+                                allocateSessionTemp root
+                            pure (tempDir, Just sessionId))
+            let (_, ephemeral) = allocated
+                cleanupSessionTemp = do
+                    cleanupPendingPersistence persist
+                    forM_ ephemeral \sessionId -> do
+                        _ <- removeSessionTemp root sessionId
+                        pure ()
+            writeIORef startupCleanupRef cleanupSessionTemp
+            pure allocated
+    let cleanupSessionTemp = do
             cleanupPendingPersistence persist
             forM_ ephemeralSessionId \sessionId -> do
                 _ <- removeSessionTemp root sessionId
                 pure ()
-    worktreeLease <-
-        acquireWorktreeLease (worktreeRoot home) cwd >>= \case
-            Left err -> do
-                cleanupAllocatedScratch
-                startupDie startup (Text.unpack err)
-            Right lease -> pure lease
-    sessionTempLease <-
-        (acquireSessionTempLease root sessionTmp
-            `onException`
-                (mapM_ releaseWorktreeLease worktreeLease
-                    >> cleanupAllocatedScratch)) >>= \case
-                Left err -> do
+    setToolSessionTmp baseToolEnv (Just sessionTmp)
+    (mailAppTools, imageGenerationHistory, home, rawCleanupScratch) <-
+        mask \restore -> do
+            (registeredMailTools, closeRegisteredMailTools) <-
+                case connectedGateway of
+                    Nothing -> restore do
+                        tools <-
+                            mailToolsForStore
+                                baseToolEnv
+                                productionMailTransport
+                        pure (tools, pure ())
+                    Just gatewayCredential ->
+                        gatewayMailTools
+                            baseToolEnv
+                            gatewayCredential
+                            >>= \case
+                                Left err -> do
+                                    reportStartupWarning startup err
+                                    pure ([], pure ())
+                                Right runtime ->
+                                    do
+                                        writeIORef
+                                            startupCleanupRef
+                                            (runtime.gatewayMailRuntimeClose
+                                                `finally` cleanupSessionTemp)
+                                        pure
+                                            ( runtime.gatewayMailRuntimeTools
+                                            , runtime.gatewayMailRuntimeClose
+                                            )
+            (history, resolvedHome) <-
+                restore
+                    (do
+                        initializedHistory <- newImageGenerationHistory
+                        forM_ resumed \(_, turns) ->
+                            recordImageGenerationResponseItems
+                                initializedHistory
+                                (foldSessionItems turns)
+                        initializedHome <- getHomeDirectory
+                        pure (initializedHistory, initializedHome))
+                    `onException` drainRuntimeCleanup
+            let cleanupAllocatedScratch =
+                    closeRegisteredMailTools
+                        `finally` cleanupSessionTemp
+            writeIORef startupCleanupRef cleanupAllocatedScratch
+            worktreeLease <-
+                restore (acquireWorktreeLease (worktreeRoot resolvedHome) cwd)
+                    `onException` drainRuntimeCleanup
+                    >>= \case
+                        Left err -> do
+                            drainRuntimeCleanup
+                            startupDie startup (Text.unpack err)
+                        Right lease -> pure lease
+            let cleanupWorktreeScratch =
                     mapM_ releaseWorktreeLease worktreeLease
-                    cleanupAllocatedScratch
-                    startupDie startup (Text.unpack err)
-                Right lease -> pure lease
-    let cleanupScratch =
-            mapM_ releaseSessionTempLease sessionTempLease
-                `finally`
-                    (mapM_ releaseWorktreeLease worktreeLease
-                        `finally` cleanupAllocatedScratch)
+                        `finally` cleanupAllocatedScratch
+            writeIORef startupCleanupRef cleanupWorktreeScratch
+            sessionTempLease <-
+                restore (acquireSessionTempLease root sessionTmp)
+                    `onException` drainRuntimeCleanup
+                    >>= \case
+                        Left err -> do
+                            drainRuntimeCleanup
+                            startupDie startup (Text.unpack err)
+                        Right lease -> pure lease
+            let cleanupRegisteredScratch =
+                    mapM_ releaseSessionTempLease sessionTempLease
+                        `finally` cleanupWorktreeScratch
+            writeIORef startupCleanupRef cleanupRegisteredScratch
+            pure
+                ( registeredMailTools
+                , history
+                , resolvedHome
+                , cleanupRegisteredScratch
+                )
+    let cleanupScratch = drainRuntimeCleanup
         toolEnv = baseToolEnv
         mcpServerConfigs =
             [ MCP.McpServerConfig
@@ -1007,31 +1079,41 @@ runAgentTools
                     (Just isConnecting, previous == Just True && not isConnecting)
             when settled (enqueueMcpSnapshot statuses)
     mcpLease <-
-        try @_ @SomeException
-            (if progressiveMcp
-                then
-                    MCP.acquireMcpFleetProgressive
-                        mcpSupervisor
-                        reportProgressiveMcp
-                        mcpServerConfigs
-                else
-                    MCP.acquireMcpFleetWithProgress
-                        mcpSupervisor
-                        (\names ->
-                            setStartupNotice startup.startupFullscreen
-                                (if null names
-                                    then "Loading built-in tools…"
-                                    else
-                                        "Loading tools: "
-                                            <> Text.intercalate ", " names
-                                            <> "…"))
-                        mcpServerConfigs)
-            >>= \case
-            Left exception -> do
-                cleanupScratch
-                startupDie startup
-                    ("Failed to initialize MCP tools: " <> show exception)
-            Right lease -> pure lease
+        mask \restore ->
+            try @_ @SomeException
+                (restore
+                    (if progressiveMcp
+                        then
+                            MCP.acquireMcpFleetProgressive
+                                mcpSupervisor
+                                reportProgressiveMcp
+                                mcpServerConfigs
+                        else
+                            MCP.acquireMcpFleetWithProgress
+                                mcpSupervisor
+                                (\names ->
+                                    setStartupNotice startup.startupFullscreen
+                                        (if null names
+                                            then "Loading built-in tools…"
+                                            else
+                                                "Loading tools: "
+                                                    <> Text.intercalate
+                                                        ", "
+                                                        names
+                                                    <> "…"))
+                                mcpServerConfigs))
+                >>= \case
+                    Left exception -> do
+                        cleanupScratch
+                        startupDie startup
+                            ("Failed to initialize MCP tools: "
+                                <> show exception)
+                    Right lease -> do
+                        writeIORef
+                            startupCleanupRef
+                            (MCP.releaseMcpFleetLease lease
+                                `finally` rawCleanupScratch)
+                        pure lease
     let mcpFleet = mcpLease.mcpLeaseFleet
     writeIORef mcpFleetRef (Just mcpFleet)
     when progressiveMcp $
@@ -1044,21 +1126,26 @@ runAgentTools
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
     coding <-
-        codingToolsForWithTypes
-            dialect
-            toolEnv
-            (Just planHooks)
-            secretHooks
-            imageHooks
-            multiCtx
-            agentTypesRef
-            `onException`
-                (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
-    let closeBeforeSession =
-            coding.codingClose
-                `finally`
-                    (MCP.releaseMcpFleetLease mcpLease
-                        `finally` cleanupScratch)
+        mask \restore -> do
+            registered <-
+                restore
+                    (codingToolsForWithTypes
+                        dialect
+                        toolEnv
+                        (Just planHooks)
+                        secretHooks
+                        imageHooks
+                        multiCtx
+                        agentTypesRef)
+                    `onException` cleanupScratch
+            writeIORef
+                startupCleanupRef
+                (registered.codingClose
+                    `finally`
+                        (MCP.releaseMcpFleetLease mcpLease
+                            `finally` rawCleanupScratch))
+            pure registered
+    let closeBeforeSession = cleanupScratch
         acquireGrokExtras
             | dialectId /= GrokBuildDialect =
                 pure
@@ -1082,7 +1169,26 @@ runAgentTools
                     (newLspRuntime harnessConfig.configLsp toolEnv)
                     (mapM_ closeLspRuntime . (.lspStartupRuntime))
     (webFetchRuntime, lspStartup) <-
-        acquireGrokExtras `onException` closeBeforeSession
+        mask \restore -> do
+            acquired <-
+                restore acquireGrokExtras
+                    `onException` closeBeforeSession
+            let (webRuntime, acquiredLsp) = acquired
+                closeAcquiredExtras =
+                    concurrently_
+                        (mapM_
+                            closeLspRuntime
+                            acquiredLsp.lspStartupRuntime)
+                        (mapM_ closeWebFetchRuntime webRuntime)
+            writeIORef
+                startupCleanupRef
+                (closeAcquiredExtras
+                    `finally`
+                        (coding.codingClose
+                            `finally`
+                                (MCP.releaseMcpFleetLease mcpLease
+                                    `finally` rawCleanupScratch)))
+            pure acquired
     mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
     let lspRuntime = lspStartup.lspStartupRuntime
         extraTools =
@@ -1115,7 +1221,7 @@ runAgentTools
     skillsRef <- newIORef (SkillCatalog [] [])
     skillInvocationsRef <- newIORef []
     codeModeCloseRef <- newIORef (pure ())
-    let claimCurrentSession handle = do
+    let claimCurrentSession handle = mask \_ -> do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
                 Just current
@@ -1261,7 +1367,7 @@ runAgentTools
                         subagentSessions agentTypesRef
                     closeSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
-        closeAll =
+        rawCloseAll =
             closeAgents
                 `finally`
                     ((readIORef activeSessionLock
@@ -1275,7 +1381,9 @@ runAgentTools
                                                 `finally`
                                                     (join (readIORef codeModeCloseRef)
                                                         `finally`
-                                                            cleanupScratch)))))
+                                                            rawCleanupScratch)))))
+        closeAll = cleanupScratch
+    writeIORef startupCleanupRef rawCloseAll
     when resumedPlanPending (activatePlanMode planMode)
     forM_ startup.startupNativeHooks \hooks ->
         when (hooks.nativeInteractionMode == NativePlan) $

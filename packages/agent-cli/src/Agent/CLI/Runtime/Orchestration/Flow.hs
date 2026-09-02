@@ -221,7 +221,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe
-    ( displayException, finally, onException, throwIO, try, tryAny )
+    ( displayException, finally, mask, onException, throwIO, try, tryAny )
 import Control.Monad ( when, forM_, void, unless )
 import Data.Functor ()
 import Data.IORef
@@ -735,7 +735,7 @@ prepareAgentIterationTracked
             gatewayCredentialIdentity <$> connectedGateway
     resumed <- case options.optResume of
         Nothing -> pure Nothing
-        Just sessionId -> do
+        Just sessionId -> mask \restore -> do
             dir <- either
                 (\err -> do
                     signalReady (Left err)
@@ -753,7 +753,7 @@ prepareAgentIterationTracked
                     failPreparation (Text.unpack err)
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
-                    loadSessionMeta sessionPool root sessionId >>= \case
+                    restore $ loadSessionMeta sessionPool root sessionId >>= \case
                         Left err -> do
                             signalReady (Left err)
                             failPreparation (Text.unpack err)

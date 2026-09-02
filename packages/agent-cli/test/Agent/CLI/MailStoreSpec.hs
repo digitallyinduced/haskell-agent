@@ -1,6 +1,7 @@
 module Agent.CLI.MailStoreSpec (spec) where
 
 import Agent.CLI.Mail.Store
+import Agent.Mail.SecretCodec (mailSecretStorageValue)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (bracket)
@@ -80,7 +81,7 @@ spec =
                 LBS.writeFile (unsafePath (mailSecretsPath home)) $
                     Aeson.encode $ Aeson.object
                         [ "version" Aeson..= (1 :: Int)
-                        , "secrets" Aeson..= [secret]
+                        , "secrets" Aeson..= [mailSecretStorageValue secret]
                         ]
                 loadMailCredentialsAt home
                     `shouldReturn` Right [MailCredential account secret]

@@ -130,6 +130,13 @@ data McpToolRegistration = McpToolRegistration
 data McpCatalogEntry = McpCatalogEntry
     { catalogClient :: !McpClient
     , catalogTool :: !McpTool
+    , catalogGeneration :: !Integer
+    }
+
+data McpApprovedCall = McpApprovedCall
+    { approvedCallArguments :: !Text
+    , approvedCatalogName :: !Text
+    , approvedCatalogEntry :: !(Maybe McpCatalogEntry)
     }
 
 -- | Initialization state exposed to status and UI code. Reading this state
@@ -337,6 +344,17 @@ data McpFleet = McpFleet
     , mcpFleetServerOrder :: ![Text]
     , mcpFleetFailures :: !(Map.Map Text Text)
     , mcpFleetCatalog :: !(TVar (Map.Map Text McpCatalogEntry))
+    -- ^ Entries currently advertised for progressive dispatch.
+    , mcpFleetCatalogRevisions :: !(TVar (Map.Map Text Integer))
+    -- ^ Per-server invalidation revisions. A stale refresh may never
+    -- republish entries after a newer list-change notification.
+    , mcpFleetApprovedCalls ::
+        !(TVar (Map.Map (Text, Text) McpApprovedCall))
+    -- ^ Approval-time snapshots keyed by @(call id, meta-tool name)@. The
+    -- progressive handler validates the exact arguments and consumes the
+    -- snapshot once, preventing a catalog update between approval and
+    -- dispatch from silently escalating the selected tool's policy.
+    , mcpFleetNextCatalogGeneration :: !(TVar Integer)
     , mcpFleetReconnects :: !(Map.Map Text (MVar ()))
     , mcpFleetWorkers :: !(MVar [Async ()])
     , mcpFleetClosed :: !(MVar Bool)
@@ -425,6 +443,13 @@ data McpClient = McpClient
     , clientServerInfo :: !(TVar (Maybe McpServerInfo))
     -- ^ Set once the protocol era has been negotiated.
     , clientDiscoveredSkills :: !(TVar [McpSkillEntry])
+    , clientToolsRevision :: !(TVar Integer)
+    -- ^ Incremented synchronously for every tools/list_changed notification.
+    -- Initialization and refresh only publish a catalog discovered at a
+    -- stable revision.
+    , clientReadyToolsRevision :: !(TVar (Maybe Integer))
+    -- ^ Revision represented by 'ClientReady'. 'Nothing' is a buffered
+    -- invalidation which a subsequently attached fleet handler must replay.
     , clientEventHandler :: !(IORef (McpServerEvent -> IO ()))
     , clientEraHint :: !(Maybe McpProtocolEra)
     -- ^ Era observed by a previous connection to the same server. Skips the
@@ -601,16 +626,19 @@ data McpTool = McpTool
     , discoveredInputSchema :: !RawJson
     , discoveredOutputSchema :: !(Maybe RawJson)
     , discoveredReadOnly :: !Bool
+    , discoveredRequiresFreshApproval :: !Bool
     , discoveredDestructive :: !Bool
     , discoveredIdempotent :: !Bool
     , discoveredOpenWorld :: !Bool
     , discoveredHeaderParams :: ![McpHeaderParam]
-    }
+    } deriving (Eq)
 
 -- | Whether a failed call may be retried without risking a duplicated side
 -- effect. Annotations are only hints, so this remains conservative.
 mcpToolRetrySafe :: McpTool -> Bool
-mcpToolRetrySafe tool = tool.discoveredReadOnly || tool.discoveredIdempotent
+mcpToolRetrySafe tool =
+    not tool.discoveredRequiresFreshApproval
+        && (tool.discoveredReadOnly || tool.discoveredIdempotent)
 
 mcpToolDecoder :: Json.Decoder McpTool
 mcpToolDecoder = Json.object do
@@ -624,10 +652,20 @@ mcpToolDecoder = Json.object do
             <$> Json.atKeyOptional "inputSchema" rawJsonDecoder
     discoveredOutputSchema <- Json.optionalKey "outputSchema" rawJsonDecoder
     rawAnnotations <- Json.optionalKey "annotations" rawJsonDecoder
+    -- Use the underlying optional field decoder rather than 'optionalKey':
+    -- explicit null is malformed metadata, not the same as an absent field.
+    rawMeta <- Json.atKeyOptional "_meta" rawJsonDecoder
     let annotations =
             maybe defaultAnnotations (projectRawOr defaultAnnotations annotationsDecoder) rawAnnotations
         (discoveredReadOnly, discoveredDestructive, discoveredIdempotent, discoveredOpenWorld) =
             annotations
+        discoveredRequiresFreshApproval =
+            maybe False
+                -- A malformed proprietary marker must never downgrade a
+                -- sensitive tool to ordinary approval. Treat malformed
+                -- @_meta@ or a non-boolean present marker conservatively.
+                (projectRawOr True freshApprovalDecoder)
+                rawMeta
         discoveredHeaderParams = []
     pure McpTool{..}
   where
@@ -639,6 +677,12 @@ mcpToolDecoder = Json.object do
         idempotent <- Json.defaultKey False "idempotentHint" Json.bool
         openWorld <- Json.defaultKey True "openWorldHint" Json.bool
         pure (readOnly, destructive, idempotent, openWorld)
+    freshApprovalDecoder = Json.object do
+        rawMarker <-
+            Json.atKeyOptional
+                "dev.haskell-agent/fresh-approval"
+                rawJsonDecoder
+        pure $ maybe False (projectRawOr True Json.bool) rawMarker
 
 projectRawOr :: a -> Json.Decoder a -> RawJson -> a
 projectRawOr fallback decoder value =

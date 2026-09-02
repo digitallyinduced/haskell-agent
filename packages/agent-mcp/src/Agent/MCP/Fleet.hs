@@ -13,11 +13,12 @@ import Agent.MCP.Client
 import Agent.MCP.Types
 import Agent.Tools.Types
     ( AppTool(..)
+    , ApprovalRequirement(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
-import Agent.ToolDispatch (ToolCall(..), typedTool)
+import Agent.ToolDispatch (ToolCall(..), typedTool, typedToolWithCall)
 import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
     ( asyncWithUnmask
@@ -250,11 +251,14 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
     skillsVar <- newTVarIO skills
     catalog <- newTVarIO $
         Map.fromList
-            [ (registration.mcpRegistrationTool.appToolName, McpCatalogEntry client tool)
+            [ (registration.mcpRegistrationTool.appToolName, McpCatalogEntry client tool 1)
             | Right (client, tools, _) <- results
             , tool <- tools
             , let registration = registrationFor client tool
             ]
+    catalogRevisions <- newTVarIO Map.empty
+    approvedCalls <- newTVarIO Map.empty
+    catalogGeneration <- newTVarIO 1
     clientsVar <- newTVarIO $
         Map.fromList
             [ (client.clientConfig.mcpServerName, client)
@@ -275,6 +279,9 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
             , mcpFleetServerOrder = map (.mcpServerName) configs
             , mcpFleetFailures = failures
             , mcpFleetCatalog = catalog
+            , mcpFleetCatalogRevisions = catalogRevisions
+            , mcpFleetApprovedCalls = approvedCalls
+            , mcpFleetNextCatalogGeneration = catalogGeneration
             , mcpFleetReconnects = reconnects
             , mcpFleetWorkers = workers
             , mcpFleetClosed = closed
@@ -426,6 +433,9 @@ startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
     closed <- newMVar False
     workers <- newMVar []
     catalog <- newTVarIO Map.empty
+    catalogRevisions <- newTVarIO Map.empty
+    approvedCalls <- newTVarIO Map.empty
+    catalogGeneration <- newTVarIO 0
     ownedClients <- newIORef []
     clientsVar <- newTVarIO Map.empty
     skillsVar <- newTVarIO []
@@ -469,6 +479,9 @@ startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
             , mcpFleetServerOrder = map (.mcpServerName) configs
             , mcpFleetFailures = failures
             , mcpFleetCatalog = catalog
+            , mcpFleetCatalogRevisions = catalogRevisions
+            , mcpFleetApprovedCalls = approvedCalls
+            , mcpFleetNextCatalogGeneration = catalogGeneration
             , mcpFleetReconnects = reconnects
             , mcpFleetWorkers = workers
             , mcpFleetClosed = closed
@@ -477,7 +490,10 @@ startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
         initializeOne client = do
             void (reportFleetStatuses reportStatuses fleet)
             ensureMcpClientReadyWith
-                (publishCatalogEntries catalog client)
+                (publishCatalogEntries
+                    catalog
+                    catalogGeneration
+                    client)
                 client >>= \case
                 Left _ -> pure ()
                 Right _ -> do
@@ -531,10 +547,12 @@ startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
 
 publishCatalogEntries
     :: TVar (Map.Map Text McpCatalogEntry)
+    -> TVar Integer
     -> McpClient
     -> [McpTool]
     -> STM ()
-publishCatalogEntries catalog client tools =
+publishCatalogEntries catalog generationVar client tools = do
+    generation <- nextCatalogGeneration generationVar
     modifyTVar' catalog \current ->
         foldl'
             (\entries tool ->
@@ -542,10 +560,17 @@ publishCatalogEntries catalog client tools =
                     (qualifiedMcpToolName
                         client.clientConfig.mcpServerName
                         tool.discoveredName)
-                    (McpCatalogEntry client tool)
+                    (McpCatalogEntry client tool generation)
                     entries)
             (withoutServer client.clientConfig.mcpServerName current)
             tools
+
+nextCatalogGeneration :: TVar Integer -> STM Integer
+nextCatalogGeneration generationVar = do
+    current <- readTVar generationVar
+    let next = current + 1
+    writeTVar generationVar next
+    pure next
 
 withoutServer :: Text -> Map.Map Text McpCatalogEntry -> Map.Map Text McpCatalogEntry
 withoutServer serverName =
@@ -568,11 +593,70 @@ reportFleetStatuses report fleet = do
 -- | Route a client's server-initiated notifications into fleet maintenance.
 -- Tool list changes refresh the catalog in a tracked worker.
 attachFleetEvents :: McpFleet -> McpClient -> IO ()
-attachFleetEvents fleet client =
-    setMcpClientEventHandler client \case
-        McpToolsListChanged ->
-            spawnFleetWorker fleet (refreshServerTools fleet client)
-        _ -> pure ()
+attachFleetEvents fleet client = do
+    let handleEvent = \case
+            McpToolsListChanged -> do
+                -- Invalidate synchronously on the reader thread so neither
+                -- static registrations nor meta-tools can dispatch a stale
+                -- privilege classification while the replacement catalog is
+                -- fetched.
+                revision <- atomically do
+                    clients <- readTVar fleet.mcpFleetClients
+                    case Map.lookup serverName clients of
+                        Just current
+                            | current.clientNextId == client.clientNextId -> do
+                                revisions <-
+                                    readTVar fleet.mcpFleetCatalogRevisions
+                                let nextRevision =
+                                        Map.findWithDefault
+                                            0
+                                            serverName
+                                            revisions
+                                            + 1
+                                writeTVar
+                                    fleet.mcpFleetCatalogRevisions
+                                    (Map.insert
+                                        serverName
+                                        nextRevision
+                                        revisions)
+                                modifyTVar'
+                                    fleet.mcpFleetCatalog
+                                    (Map.filter
+                                        (\entry ->
+                                            entry.catalogClient.clientConfig.mcpServerName
+                                                /= serverName))
+                                shouldRefresh <-
+                                    readTVar client.clientLifecycle >>= \case
+                                        ClientReady _ warnings -> do
+                                            writeTVar
+                                                client.clientLifecycle
+                                                (ClientReady [] warnings)
+                                            pure True
+                                        -- Initialization observes the
+                                        -- client-local revision and performs
+                                        -- the stable re-list itself.
+                                        _ -> pure False
+                                pure (Just (nextRevision, shouldRefresh))
+                        _ -> pure Nothing
+                forM_ revision \(currentRevision, shouldRefresh) ->
+                    when shouldRefresh $
+                        spawnFleetWorker fleet
+                            (refreshServerTools fleet client currentRevision)
+            _ -> pure ()
+    setMcpClientEventHandler client handleEvent
+    -- A notification can arrive after a blocking initialization publishes
+    -- ClientReady but before the fleet exists. The client buffers that fact
+    -- by clearing clientReadyToolsRevision; replay it after installing the
+    -- real handler so the stale startup result is never left advertised.
+    buffered <- atomically do
+        current <- readTVar client.clientReadyToolsRevision
+        lifecycle <- readTVar client.clientLifecycle
+        pure $ case (current, lifecycle) of
+            (Nothing, ClientReady _ _) -> True
+            _ -> False
+    when buffered (handleEvent McpToolsListChanged)
+  where
+    serverName = client.clientConfig.mcpServerName
 
 -- | Run fleet maintenance in the background. Finished workers are pruned on
 -- the next spawn; the rest are cancelled by 'closeMcpFleet'.
@@ -591,21 +675,40 @@ spawnFleetWorker fleet action =
 -- | Re-list a server's tools after @notifications/tools/list_changed@ and
 -- replace its catalog entries. Statically registered tools keep working for
 -- as long as the server still offers them.
-refreshServerTools :: McpFleet -> McpClient -> IO ()
-refreshServerTools fleet client =
+refreshServerTools :: McpFleet -> McpClient -> Integer -> IO ()
+refreshServerTools fleet client expectedRevision =
     forM_ (Map.lookup serverName fleet.mcpFleetReconnects) \lock ->
         withMVar lock \_ -> do
             current <- Map.lookup serverName <$> readTVarIO fleet.mcpFleetClients
             when (maybe False (sameClient client) current) do
+                expectedClientRevision <-
+                    readTVarIO client.clientToolsRevision
                 tryAny (discoverMcpTools client) >>= \case
                     Left _ -> pure ()
                     Right (tools, warnings) -> atomically do
-                        publishCatalogEntries fleet.mcpFleetCatalog client tools
-                        readTVar client.clientLifecycle >>= \case
-                            ClientReady _ _ ->
-                                writeTVar client.clientLifecycle
-                                    (ClientReady tools warnings)
-                            _ -> pure ()
+                        revisions <-
+                            readTVar fleet.mcpFleetCatalogRevisions
+                        clientRevision <-
+                            readTVar client.clientToolsRevision
+                        when
+                            (Map.lookup serverName revisions
+                                == Just expectedRevision
+                                && clientRevision == expectedClientRevision)
+                            do
+                                publishCatalogEntries
+                                    fleet.mcpFleetCatalog
+                                    fleet.mcpFleetNextCatalogGeneration
+                                    client
+                                    tools
+                                readTVar client.clientLifecycle >>= \case
+                                    ClientReady _ _ ->
+                                        do
+                                            writeTVar
+                                                client.clientReadyToolsRevision
+                                                (Just clientRevision)
+                                            writeTVar client.clientLifecycle
+                                                (ClientReady tools warnings)
+                                    _ -> pure ()
   where
     serverName = client.clientConfig.mcpServerName
     sameClient :: McpClient -> McpClient -> Bool
@@ -824,57 +927,165 @@ callCatalogEntryWithReconnect
     -> RawJson
     -> IO (Either Text Text)
 callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
-    callDiscoveredTool entry.catalogClient entry.catalogTool arguments
-        >>= \case
-            Right result -> pure (Right result)
-            Left originalError
-                | not (mcpToolRetrySafe entry.catalogTool) ->
-                    -- A failed mutation may have reached the server. Retrying
-                    -- it after reconnect could duplicate the side effect.
-                    pure (Left originalError)
-                | otherwise -> do
-                    failed <- readTVarIO entry.catalogClient.clientFailure
-                    case failed of
-                        Nothing -> pure (Left originalError)
-                        Just _ ->
-                            -- Read-only and idempotent calls are safe to retry
-                            -- once after a transport failure. The per-server
-                            -- lock makes this single-flight across concurrent
-                            -- calls.
-                            reconnectCatalogEntry fleet qualifiedName entry
-                                >>= \case
-                                Left reconnectError ->
-                                    pure . Left $
-                                        originalError
-                                            <> "; MCP reconnect failed: "
-                                            <> reconnectError
-                                Right replacement ->
-                                    callDiscoveredTool
-                                        replacement.catalogClient
-                                        replacement.catalogTool
-                                        arguments
+    catalogEntryIsLive entry >>= \case
+        False -> pure (Left changedCatalogEntryMessage)
+        True ->
+            callDiscoveredTool entry.catalogClient entry.catalogTool arguments
+                >>= \case
+                    Right result -> pure (Right result)
+                    Left originalError
+                        | not (mcpToolRetrySafe entry.catalogTool) ->
+                            -- A failed mutation may have reached the server.
+                            -- Retrying it after reconnect could duplicate the
+                            -- side effect.
+                            pure (Left originalError)
+                        | otherwise -> do
+                            failed <-
+                                readTVarIO entry.catalogClient.clientFailure
+                            case failed of
+                                Nothing -> pure (Left originalError)
+                                Just _ ->
+                                    -- Read-only and idempotent calls are safe
+                                    -- to retry once after a transport failure.
+                                    -- The per-server lock makes this
+                                    -- single-flight across concurrent calls.
+                                    reconnectCatalogEntry
+                                        fleet
+                                        qualifiedName
+                                        entry
+                                        >>= \case
+                                            Left reconnectError ->
+                                                pure . Left $
+                                                    originalError
+                                                        <> "; MCP reconnect failed: "
+                                                        <> reconnectError
+                                            Right replacement ->
+                                                if not
+                                                    (sameCatalogTool
+                                                        entry
+                                                        replacement)
+                                                    then
+                                                        pure
+                                                            (Left
+                                                                changedCatalogEntryMessage)
+                                                    else
+                                                        callDiscoveredTool
+                                                            replacement.catalogClient
+                                                            replacement.catalogTool
+                                                            arguments
 
-callCatalogTool
+catalogEntryIsLive :: McpCatalogEntry -> IO Bool
+catalogEntryIsLive entry = do
+    readTVarIO entry.catalogClient.clientLifecycle >>= \case
+        ClientReady tools _ ->
+            pure (any (== entry.catalogTool) tools)
+        _ -> pure False
+
+-- | Dispatch against the catalog snapshot used by the approval classifier.
+-- A generation change is allowed only when every advertised tool property
+-- still matches the snapshot that the parent approved.
+callApprovedCatalogTool
     :: McpFleet
+    -> ToolCall
     -> Text
     -> RawJson
     -> IO (Either Text Text)
-callCatalogTool fleet name toolArguments = do
-    entries <- readTVarIO fleet.mcpFleetCatalog
-    case Map.lookup name entries of
-        Just entry ->
-            callCatalogEntryWithReconnect
-                fleet
-                name
-                entry
-                toolArguments
-        Nothing -> do
-            statuses <- mcpFleetStatuses fleet
-            pure . Left $
-                if any isConnecting statuses
-                    then
-                        "MCP tool is not available yet; one or more servers are still connecting"
-                    else "Unknown MCP tool: " <> name
+callApprovedCatalogTool fleet call name toolArguments = do
+    approved <- atomically do
+        approvals <- readTVar fleet.mcpFleetApprovedCalls
+        writeTVar fleet.mcpFleetApprovedCalls
+            (Map.delete (catalogApprovalKey call) approvals)
+        pure (Map.lookup (catalogApprovalKey call) approvals)
+    case approved of
+        Nothing ->
+            pure (Left "MCP call has no matching approval-time catalog snapshot")
+        Just binding
+            | binding.approvedCallArguments /= call.arguments
+                || binding.approvedCatalogName /= name ->
+                    pure (Left "MCP call changed after approval")
+            | Nothing <- binding.approvedCatalogEntry ->
+                catalogUnavailableError fleet name
+            | Just approvedEntry <- binding.approvedCatalogEntry -> do
+                current <- Map.lookup name <$> readTVarIO fleet.mcpFleetCatalog
+                case current of
+                    Nothing -> pure (Left "MCP tool disappeared after approval")
+                    Just replacement -> do
+                        let selected
+                                | replacement.catalogGeneration
+                                    == approvedEntry.catalogGeneration =
+                                        approvedEntry
+                                | otherwise = replacement
+                        if not (sameCatalogTool approvedEntry replacement)
+                            then pure (Left changedCatalogEntryMessage)
+                            else
+                                callCatalogEntryWithReconnect
+                                    fleet
+                                    name
+                                    selected
+                                    toolArguments
+
+catalogUnavailableError :: McpFleet -> Text -> IO (Either Text a)
+catalogUnavailableError fleet name = do
+    statuses <- mcpFleetStatuses fleet
+    pure . Left $
+        if any isConnecting statuses
+            then
+                "MCP tool is not available yet; one or more servers are still connecting"
+            else "Unknown MCP tool: " <> name
+
+catalogApprovalKey :: ToolCall -> (Text, Text)
+catalogApprovalKey call = (call.callId, call.name)
+
+catalogEntryApproval :: McpCatalogEntry -> ApprovalRequirement
+catalogEntryApproval entry
+    | entry.catalogTool.discoveredRequiresFreshApproval =
+        FreshApprovalRequired
+    | entry.catalogTool.discoveredReadOnly = ApprovalNotRequired
+    | otherwise = ApprovalPromptRequired
+
+sameCatalogTool :: McpCatalogEntry -> McpCatalogEntry -> Bool
+sameCatalogTool approved replacement =
+    catalogToolFingerprint approved == catalogToolFingerprint replacement
+
+-- | Stable, connection-independent identity for the exact catalog entry a
+-- parent approved. Schemas are compared as JSON values rather than source
+-- bytes, so harmless object-key ordering does not invalidate a reconnect.
+data CatalogToolFingerprint = CatalogToolFingerprint
+    !McpServerConfig
+    !Text
+    !(Maybe Text)
+    !Text
+    !Value
+    !(Maybe Value)
+    !Bool
+    !Bool
+    !Bool
+    !Bool
+    !Bool
+    ![McpHeaderParam]
+    deriving (Eq)
+
+catalogToolFingerprint :: McpCatalogEntry -> CatalogToolFingerprint
+catalogToolFingerprint entry =
+    CatalogToolFingerprint
+        entry.catalogClient.clientConfig
+        tool.discoveredName
+        tool.discoveredTitle
+        tool.discoveredDescription
+        (Aeson.toJSON tool.discoveredInputSchema)
+        (Aeson.toJSON <$> tool.discoveredOutputSchema)
+        tool.discoveredReadOnly
+        tool.discoveredRequiresFreshApproval
+        tool.discoveredDestructive
+        tool.discoveredIdempotent
+        tool.discoveredOpenWorld
+        tool.discoveredHeaderParams
+  where
+    tool = entry.catalogTool
+
+changedCatalogEntryMessage :: Text
+changedCatalogEntryMessage =
+    "MCP tool changed after approval; ask the user to approve the call again"
 
 reconnectCatalogEntry
     :: McpFleet
@@ -910,34 +1121,73 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                 pure . Left $
                     redactConfiguredValues config
                         (exceptionSummary exception)
-            Right replacementClient ->
+            Right replacementClient -> do
+                -- Install the event route before initialization. Until the
+                -- replacement becomes the fleet's current client, its
+                -- client-local revision still makes initialization and the
+                -- publication transaction below fail closed.
+                attachFleetEvents fleet replacementClient
                 ensureMcpClientReady replacementClient >>= \case
                     Left err -> do
                         closeMcpClient replacementClient
                         pure (Left err)
                     Right (tools, _) -> do
-                        let replacementEntries =
-                                Map.fromList
-                                    [ ( qualifiedMcpToolName
-                                            serverName tool.discoveredName
-                                      , McpCatalogEntry replacementClient tool
-                                      )
-                                    | tool <- tools
-                                    ]
-                        previousClient <- atomically do
-                            clients <- readTVar fleet.mcpFleetClients
-                            currentCatalog <- readTVar fleet.mcpFleetCatalog
-                            writeTVar fleet.mcpFleetClients
-                                (Map.insert serverName replacementClient clients)
-                            writeTVar fleet.mcpFleetCatalog
-                                (replacementEntries <> withoutServer serverName currentCatalog)
-                            pure (Map.lookup serverName clients)
-                        attachFleetEvents fleet replacementClient
-                        mapM_ closeMcpClient previousClient
-                        case Map.lookup qualifiedName replacementEntries of
-                            Nothing ->
-                                pure (Left "MCP tool disappeared after reconnect")
-                            Just replacement -> pure (Right replacement)
+                        installed <- atomically do
+                            readyRevision <-
+                                readTVar
+                                    replacementClient.clientReadyToolsRevision
+                            readTVar replacementClient.clientLifecycle >>= \case
+                                ClientReady liveTools _
+                                    | liveTools == tools
+                                    , Just _ <- readyRevision -> do
+                                        generation <-
+                                            nextCatalogGeneration
+                                                fleet.mcpFleetNextCatalogGeneration
+                                        let replacementEntries =
+                                                Map.fromList
+                                                    [ ( qualifiedMcpToolName
+                                                            serverName tool.discoveredName
+                                                      , McpCatalogEntry
+                                                            replacementClient
+                                                            tool
+                                                            generation
+                                                      )
+                                                    | tool <- tools
+                                                    ]
+                                        clients <- readTVar fleet.mcpFleetClients
+                                        currentCatalog <-
+                                            readTVar fleet.mcpFleetCatalog
+                                        writeTVar fleet.mcpFleetClients
+                                            (Map.insert
+                                                serverName
+                                                replacementClient
+                                                clients)
+                                        writeTVar fleet.mcpFleetCatalog
+                                            ( replacementEntries
+                                                <> withoutServer
+                                                    serverName
+                                                    currentCatalog
+                                            )
+                                        pure . Just $
+                                            ( Map.lookup serverName clients
+                                            , replacementEntries
+                                            )
+                                _ -> pure Nothing
+                        case installed of
+                            Nothing -> do
+                                closeMcpClient replacementClient
+                                pure
+                                    (Left
+                                        "MCP tools changed while reconnecting; retry the call")
+                            Just (previousClient, replacementEntries) -> do
+                                mapM_ closeMcpClient previousClient
+                                case Map.lookup qualifiedName replacementEntries of
+                                    Nothing ->
+                                        pure
+                                            (Left
+                                                "MCP tool disappeared after reconnect")
+                                    Just replacement ->
+                                        pure (Right replacement)
 
 mcpCallTool :: McpFleet -> AppTool
 mcpCallTool fleet = AppTool
@@ -953,11 +1203,12 @@ mcpCallTool fleet = AppTool
         , "required" .= (["name"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "mcp_call" callArgumentsDecoder
-        \(name, toolArguments) ->
-            callCatalogTool fleet name toolArguments
+    , appToolHandler = typedToolWithCall "mcp_call" callArgumentsDecoder
+        \call (name, toolArguments) ->
+            callApprovedCatalogTool fleet call name toolArguments
     , appToolApproval =
-        ClassifyReadOnly (catalogCallIsReadOnly fleet callArgumentsDecoder)
+        ClassifyApproval
+            (catalogCallApproval fleet callArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     }
@@ -982,11 +1233,12 @@ grokUseTool fleet = AppTool
         , "required" .= (["tool_name", "tool_input"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "use_tool" grokCallArgumentsDecoder
-        \(name, toolArguments) ->
-            callCatalogTool fleet name toolArguments
+    , appToolHandler = typedToolWithCall "use_tool" grokCallArgumentsDecoder
+        \call (name, toolArguments) ->
+            callApprovedCatalogTool fleet call name toolArguments
     , appToolApproval =
-        ClassifyReadOnly (catalogCallIsReadOnly fleet grokCallArgumentsDecoder)
+        ClassifyApproval
+            (catalogCallApproval fleet grokCallArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     }
@@ -1095,19 +1347,53 @@ mcpReadResourceTool fleet = AppTool
                     <> " base64 bytes; binary content is not shown]"
             (Nothing, Nothing) -> "[" <> content.mcpResourceUri <> "]"
 
-catalogCallIsReadOnly
+catalogCallApproval
     :: McpFleet
     -> Json.Decoder (Text, RawJson)
     -> ToolCall
-    -> IO Bool
-catalogCallIsReadOnly fleet decoder call =
+    -> IO ApprovalRequirement
+catalogCallApproval fleet decoder call =
     case Json.decodeEither decoder (TextEncoding.encodeUtf8 call.arguments) of
-        Left _ -> pure False
-        Right (name, _) -> do
-            entries <- readTVarIO fleet.mcpFleetCatalog
-            pure $ maybe False
-                (.catalogTool.discoveredReadOnly)
-                (Map.lookup name entries)
+        Left _ -> do
+            atomically $
+                modifyTVar' fleet.mcpFleetApprovedCalls
+                    (rememberApprovedCall
+                        (catalogApprovalKey call)
+                        McpApprovedCall
+                            { approvedCallArguments = call.arguments
+                            , approvedCatalogName = ""
+                            , approvedCatalogEntry = Nothing
+                            })
+            pure ApprovalPromptRequired
+        Right (name, _) ->
+            atomically do
+                entries <- readTVar fleet.mcpFleetCatalog
+                let selected = Map.lookup name entries
+                modifyTVar' fleet.mcpFleetApprovedCalls $
+                    rememberApprovedCall
+                        (catalogApprovalKey call)
+                        McpApprovedCall
+                            { approvedCallArguments = call.arguments
+                            , approvedCatalogName = name
+                            , approvedCatalogEntry = selected
+                            }
+                pure $ maybe ApprovalPromptRequired catalogEntryApproval selected
+
+rememberApprovedCall
+    :: (Text, Text)
+    -> McpApprovedCall
+    -> Map.Map (Text, Text) McpApprovedCall
+    -> Map.Map (Text, Text) McpApprovedCall
+rememberApprovedCall key binding current =
+    Map.insert key binding bounded
+  where
+    bounded
+        | Map.size current < maxApprovalSnapshots
+            || Map.member key current = current
+        | otherwise = maybe current snd (Map.minViewWithKey current)
+
+maxApprovalSnapshots :: Int
+maxApprovalSnapshots = 1024
 
 searchArgumentsDecoder :: Json.Decoder (Maybe Text, Maybe Text, Int)
 searchArgumentsDecoder = Json.object do

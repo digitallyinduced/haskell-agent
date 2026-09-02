@@ -9,7 +9,8 @@ import Agent.Tools.Types
     , ApprovalRule (..)
     , defaultToolEnv
     )
-import Data.Aeson (Value, object, (.=))
+import Data.Aeson (Value(..), object, (.=))
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 import Test.Hspec
 
@@ -39,6 +40,96 @@ spec = describe "gateway-backed mail tools" do
         expectLeft
             "The organization gateway does not provide a compatible email service."
             tools
+
+    it "rejects duplicate and additional tool definitions" do
+        let duplicate request
+                | request.gatewayMailRequestTool == "$email/tools/list" =
+                    pure $ Right $ object
+                        [ "tools" .=
+                            (mailMcpToolDefinitions
+                                <> take 1 mailMcpToolDefinitions)
+                        ]
+                | otherwise = pure $ Left "unexpected request"
+            additional request
+                | request.gatewayMailRequestTool == "$email/tools/list" =
+                    pure $ Right $ object
+                        [ "tools" .=
+                            (mailMcpToolDefinitions
+                                <> [object
+                                    [ "name" .= ("email_send" :: Text)
+                                    , "description" .= ("Must never exist" :: Text)
+                                    , "inputSchema" .= object []
+                                    ]])
+                        ]
+                | otherwise = pure $ Left "unexpected request"
+        gatewayTools duplicate >>= expectLeft incompatible
+        gatewayTools additional >>= expectLeft incompatible
+
+    it "validates the complete paginated discovery catalog" do
+        let paginated request
+                | request.gatewayMailRequestTool == "$email/tools/list"
+                , cursor request == Nothing =
+                    pure $ Right $ object
+                        [ "tools" .= take 4 mailMcpToolDefinitions
+                        , "nextCursor" .= ("page-2" :: Text)
+                        ]
+                | request.gatewayMailRequestTool == "$email/tools/list"
+                , cursor request == Just "page-2" =
+                    pure $ Right $ object
+                        [ "tools" .= drop 4 mailMcpToolDefinitions ]
+                | otherwise = compatibleGateway request
+        tools <- gatewayTools paginated
+        fmap (fmap (.appToolName)) tools
+            `shouldBe` Right (map (.mailMcpToolName) mailMcpTools)
+
+    it "rejects an additional definition hidden on a later page" do
+        let hiddenAdditional request
+                | request.gatewayMailRequestTool == "$email/tools/list"
+                , cursor request == Nothing =
+                    pure $ Right $ object
+                        [ "tools" .= mailMcpToolDefinitions
+                        , "nextCursor" .= ("hidden" :: Text)
+                        ]
+                | request.gatewayMailRequestTool == "$email/tools/list" =
+                    pure $ Right $ object
+                        [ "tools" .=
+                            [object
+                                [ "name" .= ("email_send" :: Text)
+                                , "description" .= ("Must never exist" :: Text)
+                                , "inputSchema" .= object []
+                                ]]
+                        ]
+                | otherwise = compatibleGateway request
+        gatewayTools hiddenAdditional >>= expectLeft incompatible
+
+    it "rejects a missing output contract" do
+        let withoutOutput = case mailMcpToolDefinitions of
+                Object first : rest ->
+                    Object (KeyMap.delete "outputSchema" first) : rest
+                definitions -> definitions
+            incompatibleGateway request
+                | request.gatewayMailRequestTool == "$email/tools/list" =
+                    pure $ Right $ object ["tools" .= withoutOutput]
+                | otherwise = pure $ Left "unexpected request"
+        gatewayTools incompatibleGateway >>= expectLeft incompatible
+
+    it "rejects non-canonical gateway account references" do
+        let invalidReference request
+                | request.gatewayMailRequestTool == "$email/tools/list" =
+                    compatibleGateway request
+                | request.gatewayMailRequestTool == mailListAccountsToolName =
+                    pure $ Right $ mailMcpSuccess
+                        [ MailAccountSummary
+                            ".."
+                            "gmail"
+                            "person@example.com"
+                            Nothing
+                            True
+                            True
+                        ]
+                | otherwise = pure $ Left "unexpected request"
+        gatewayTools invalidReference >>= expectLeft
+            "The organization gateway returned an invalid email reference."
 
     it "fails closed when gateway discovery or account loading fails" do
         unavailable <- gatewayTools (\_ -> pure (Left "gateway unavailable"))
@@ -97,3 +188,16 @@ isAlwaysConfirm :: ApprovalRule -> Bool
 isAlwaysConfirm = \case
     AlwaysConfirm -> True
     _ -> False
+
+cursor :: GatewayMailRequest -> Maybe Text
+cursor request =
+    case request.gatewayMailRequestArguments of
+        Object arguments ->
+            case KeyMap.lookup "cursor" arguments of
+                Just (String value) -> Just value
+                _ -> Nothing
+        _ -> Nothing
+
+incompatible :: Text
+incompatible =
+    "The organization gateway does not provide a compatible email service."

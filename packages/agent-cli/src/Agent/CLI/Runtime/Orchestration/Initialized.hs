@@ -211,10 +211,11 @@ import Control.Concurrent.MVar
     )
 import Control.Concurrent.STM ()
 import Control.Exception ()
-import Control.Exception.Safe ( onException )
+import Control.Exception.Safe ( finally, mask, onException )
 import Control.Monad ( forM_, void, when )
 import Data.Functor ()
-import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
+import Data.IORef
+    ( IORef, atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
 import Data.Maybe ( isNothing, fromMaybe, isJust )
 import Data.Text ( Text )
@@ -892,7 +893,9 @@ runAgentInitializedWithLock
                                                         }
                                             pure (Right label)
 
+    startupCleanupRef <- newIORef (pure ())
     runAgentTools
+        startupCleanupRef
         runAgentChild
         loaded
         connectedGateway
@@ -940,6 +943,15 @@ runAgentInitializedWithLock
         transitionTarget
         uiRuntimeRef
         unavailableProviders
+        `finally`
+            mask
+                (\_ -> do
+                    cleanup <-
+                        atomicModifyIORef'
+                            startupCleanupRef
+                            (\current -> (pure (), current))
+                    cleanup
+                )
 
 loadPreparedOrStartupAuth
     :: Maybe PreparedStartupAuthWorker

@@ -61,6 +61,10 @@ import Agent.Mail.Types
     , MailSecret(..), MailCredential(..)
     , normalizeMailEmail, validateMailImapSettings, validateMailOAuthClientId
     )
+import Agent.Mail.SecretCodec
+    ( mailSecretStorageValue
+    , parseMailSecretStorageValue
+    )
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
@@ -68,7 +72,7 @@ import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (Exception, tryIO)
 import Control.Monad (unless, when)
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:?), (.=))
+import Data.Aeson (Value, (.:?), (.=))
 import qualified Data.ByteString.Base64.URL as Base64URL
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isControl, isSpace)
@@ -114,7 +118,8 @@ instance Aeson.ToJSON MailStore where
     toJSON store = Aeson.object
         [ "version" .= (1 :: Int)
         , "accounts" .= store.storeMetadata.metadataAccounts
-        , "secrets" .= store.storeSecrets.storedSecrets
+        , "secrets"
+            .= fmap mailSecretStorageValue store.storeSecrets.storedSecrets
         ]
 
 instance Aeson.FromJSON MailStore where
@@ -123,7 +128,8 @@ instance Aeson.FromJSON MailStore where
         when (version /= (1 :: Int)) $
             fail "unsupported mail account store version"
         accounts <- object .:? "accounts" Aeson..!= []
-        secrets <- object .:? "secrets" Aeson..!= []
+        secretValues <- object .:? "secrets" Aeson..!= ([] :: [Value])
+        secrets <- traverse parseMailSecretStorageValue secretValues
         pure MailStore
             { storeMetadata = MetadataFile version accounts
             , storeSecrets = SecretsFile version secrets
@@ -145,7 +151,7 @@ instance Aeson.FromJSON MetadataFile where
 instance Aeson.ToJSON SecretsFile where
     toJSON file = Aeson.object
         [ "version" .= file.secretsVersion
-        , "secrets" .= file.storedSecrets
+        , "secrets" .= fmap mailSecretStorageValue file.storedSecrets
         ]
 
 instance Aeson.FromJSON SecretsFile where
@@ -153,7 +159,8 @@ instance Aeson.FromJSON SecretsFile where
         version <- object .:? "version" Aeson..!= 1
         when (version /= (1 :: Int)) $
             fail "unsupported mail account secrets version"
-        SecretsFile version <$> object .:? "secrets" Aeson..!= []
+        secretValues <- object .:? "secrets" Aeson..!= ([] :: [Value])
+        SecretsFile version <$> traverse parseMailSecretStorageValue secretValues
 
 mailStoreDirectory :: OsPath -> OsPath
 mailStoreDirectory home =

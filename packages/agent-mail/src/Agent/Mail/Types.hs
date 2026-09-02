@@ -1,6 +1,7 @@
 -- | Provider-neutral email values shared by local and gateway backends.
 --
--- Provider credentials deliberately do not appear in this module.  These
+-- 'MailSecret' and 'MailCredential' are secret-bearing transport values and
+-- intentionally have no ambient JSON instances.  The remaining public result
 -- values are safe to encode in the first-party MCP protocol after callers
 -- apply the normal mailbox-content trust warning and output limits.
 module Agent.Mail.Types
@@ -57,6 +58,7 @@ import Data.Aeson
     , (.=)
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import Data.Char
@@ -155,7 +157,10 @@ data MailImapSettings = MailImapSettings
     , mailImapTLSMode :: !MailTLSMode
     , mailImapUsername :: !Text
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailImapSettings where
+    show _ = "MailImapSettings { <redacted> }"
 
 instance ToJSON MailImapSettings where
     toJSON settings = object
@@ -213,7 +218,17 @@ data MailAccount = MailAccount
     , mailAccountLastVerifiedAt :: !(Maybe UTCTime)
     , mailAccountLastErrorCode :: !(Maybe Text)
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailAccount where
+    show account =
+        "MailAccount { mailAccountProvider = "
+            <> show account.mailAccountProvider
+            <> ", mailAccountEnabled = "
+            <> show account.mailAccountEnabled
+            <> ", mailAccountState = "
+            <> show account.mailAccountState
+            <> ", privateFields = <redacted> }"
 
 instance ToJSON MailAccount where
     toJSON account = object
@@ -238,8 +253,8 @@ instance FromJSON MailAccount where
             <*> value .: "provider"
             <*> value .: "email"
             <*> value .:? "label" .!= ""
-            <*> value .:? "enabled" .!= True
-            <*> value .:? "state" .!= MailConnected
+            <*> value .: "enabled"
+            <*> value .: "state"
             <*> value .:? "imap"
             <*> value .:? "oauth_client_id"
             <*> value .: "created_at"
@@ -263,68 +278,8 @@ data MailSecret
 
 instance Show MailSecret where
     show = \case
-        MailOAuthSecret
-            { mailSecretAccountId
-            , mailOAuthExpiresAt
-            , mailOAuthScopes
-            } ->
-                "MailOAuthSecret { mailSecretAccountId = "
-                    <> show mailSecretAccountId
-                    <> ", mailOAuthAccessToken = <redacted>"
-                    <> ", mailOAuthRefreshToken = <redacted>"
-                    <> ", mailOAuthExpiresAt = "
-                    <> show mailOAuthExpiresAt
-                    <> ", mailOAuthScopes = "
-                    <> show mailOAuthScopes
-                    <> " }"
-        MailImapSecret {mailSecretAccountId} ->
-            "MailImapSecret { mailSecretAccountId = "
-                <> show mailSecretAccountId
-                <> ", mailImapPassword = <redacted> }"
-
-instance ToJSON MailSecret where
-    toJSON = \case
-        MailOAuthSecret
-            { mailSecretAccountId
-            , mailOAuthAccessToken
-            , mailOAuthRefreshToken
-            , mailOAuthExpiresAt
-            , mailOAuthScopes
-            } ->
-                object
-                    [ "id" .= mailSecretAccountId
-                    , "kind" .= ("oauth" :: Text)
-                    , "access_token" .= mailOAuthAccessToken
-                    , "refresh_token" .= mailOAuthRefreshToken
-                    , "expires_at" .= mailOAuthExpiresAt
-                    , "scopes" .= mailOAuthScopes
-                    ]
-        MailImapSecret
-            { mailSecretAccountId
-            , mailImapPassword
-            } ->
-                object
-                    [ "id" .= mailSecretAccountId
-                    , "kind" .= ("imap_password" :: Text)
-                    , "password" .= mailImapPassword
-                    ]
-
-instance FromJSON MailSecret where
-    parseJSON = withObject "MailSecret" \value -> do
-        kind <- value .: "kind"
-        case (kind :: Text) of
-            "oauth" ->
-                MailOAuthSecret
-                    <$> value .: "id"
-                    <*> value .: "access_token"
-                    <*> value .:? "refresh_token"
-                    <*> value .:? "expires_at"
-                    <*> value .:? "scopes" .!= []
-            "imap_password" ->
-                MailImapSecret
-                    <$> value .: "id"
-                    <*> value .: "password"
-            _ -> fail "unknown mail secret kind"
+        MailOAuthSecret {} -> "MailOAuthSecret { <redacted> }"
+        MailImapSecret {} -> "MailImapSecret { <redacted> }"
 
 data MailCredential = MailCredential
     { mailCredentialAccount :: !MailAccount
@@ -346,7 +301,16 @@ data MailAccountSummary = MailAccountSummary
     , mailAccountEnabled :: !Bool
     , mailAccountVerified :: !Bool
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailAccountSummary where
+    show account =
+        "MailAccountSummary { privateFields = <redacted>"
+            <> ", mailAccountEnabled = "
+            <> show account.mailAccountEnabled
+            <> ", mailAccountVerified = "
+            <> show account.mailAccountVerified
+            <> " }"
 
 instance ToJSON MailAccountSummary where
     toJSON account = object
@@ -364,9 +328,9 @@ instance FromJSON MailAccountSummary where
             <$> value .: "account_id"
             <*> value .: "provider"
             <*> value .: "email"
-            <*> value .:? "label"
-            <*> value .:? "enabled" .!= True
-            <*> value .:? "verified" .!= True
+            <*> value .: "label"
+            <*> value .: "enabled"
+            <*> value .: "verified"
 
 data MailboxSummary = MailboxSummary
     { mailMailboxId :: !Text
@@ -374,7 +338,10 @@ data MailboxSummary = MailboxSummary
     , mailMailboxRole :: !(Maybe Text)
     , mailMailboxUnreadCount :: !(Maybe Int)
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailboxSummary where
+    show _ = "MailboxSummary { <redacted> }"
 
 instance ToJSON MailboxSummary where
     toJSON mailbox = object
@@ -389,8 +356,8 @@ instance FromJSON MailboxSummary where
         MailboxSummary
             <$> value .: "mailbox_id"
             <*> value .: "name"
-            <*> value .:? "role"
-            <*> value .:? "unread_count"
+            <*> value .: "role"
+            <*> value .: "unread_count"
 
 data MailSearchRequest = MailSearchRequest
     { mailSearchAccountId :: !Text
@@ -404,21 +371,31 @@ data MailSearchRequest = MailSearchRequest
     , mailSearchHasAttachments :: !(Maybe Bool)
     , mailSearchLimit :: !Int
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailSearchRequest where
+    show request =
+        "MailSearchRequest { privateFields = <redacted>"
+            <> ", mailSearchLimit = "
+            <> show request.mailSearchLimit
+            <> " }"
 
 instance ToJSON MailSearchRequest where
-    toJSON request = object
+    toJSON request = object $
         [ "account_id" .= request.mailSearchAccountId
-        , "mailbox_id" .= request.mailSearchMailboxId
-        , "query" .= request.mailSearchQuery
-        , "from" .= request.mailSearchFrom
-        , "to" .= request.mailSearchTo
-        , "subject" .= request.mailSearchSubject
-        , "after" .= request.mailSearchAfter
-        , "before" .= request.mailSearchBefore
-        , "has_attachments" .= request.mailSearchHasAttachments
         , "limit" .= request.mailSearchLimit
         ]
+        <> optional "mailbox_id" request.mailSearchMailboxId
+        <> optional "query" request.mailSearchQuery
+        <> optional "from" request.mailSearchFrom
+        <> optional "to" request.mailSearchTo
+        <> optional "subject" request.mailSearchSubject
+        <> optional "after" request.mailSearchAfter
+        <> optional "before" request.mailSearchBefore
+        <> optional "has_attachments" request.mailSearchHasAttachments
+      where
+        optional _ Nothing = []
+        optional key (Just value) = [Key.fromText key .= value]
 
 instance FromJSON MailSearchRequest where
     parseJSON = withObject "MailSearchRequest" \value ->
@@ -446,7 +423,10 @@ data MailMessageSummary = MailMessageSummary
     , mailMessageSummaryHasAttachments :: !Bool
     , mailMessageSummaryAttachmentCount :: !(Maybe Int)
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailMessageSummary where
+    show _ = "MailMessageSummary { <redacted> }"
 
 instance ToJSON MailMessageSummary where
     toJSON message = object
@@ -466,21 +446,24 @@ instance FromJSON MailMessageSummary where
     parseJSON = withObject "MailMessageSummary" \value ->
         MailMessageSummary
             <$> value .: "message_id"
-            <*> value .:? "thread_id"
-            <*> value .:? "subject"
-            <*> value .:? "from"
-            <*> value .:? "reply_to"
-            <*> value .:? "to"
-            <*> value .:? "received_at"
-            <*> value .:? "snippet"
-            <*> value .:? "has_attachments" .!= False
-            <*> value .:? "attachment_count"
+            <*> value .: "thread_id"
+            <*> value .: "subject"
+            <*> value .: "from"
+            <*> value .: "reply_to"
+            <*> value .: "to"
+            <*> value .: "received_at"
+            <*> value .: "snippet"
+            <*> value .: "has_attachments"
+            <*> value .: "attachment_count"
 
 data MailGetRequest = MailGetRequest
     { mailGetAccountId :: !Text
     , mailGetMessageId :: !Text
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailGetRequest where
+    show _ = "MailGetRequest { <redacted> }"
 
 instance ToJSON MailGetRequest where
     toJSON request = object
@@ -500,7 +483,14 @@ data MailAttachment = MailAttachment
     , mailAttachmentContentType :: !(Maybe Text)
     , mailAttachmentSizeBytes :: !(Maybe Int)
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailAttachment where
+    show attachment =
+        "MailAttachment { privateFields = <redacted>"
+            <> ", mailAttachmentSizeBytes = "
+            <> show attachment.mailAttachmentSizeBytes
+            <> " }"
 
 instance ToJSON MailAttachment where
     toJSON attachment = object
@@ -514,9 +504,9 @@ instance FromJSON MailAttachment where
     parseJSON = withObject "MailAttachment" \value ->
         MailAttachment
             <$> value .: "attachment_id"
-            <*> value .:? "filename"
-            <*> value .:? "content_type"
-            <*> value .:? "size_bytes"
+            <*> value .: "filename"
+            <*> value .: "content_type"
+            <*> value .: "size_bytes"
 
 data MailMessage = MailMessage
     { mailMessageId :: !Text
@@ -532,7 +522,10 @@ data MailMessage = MailMessage
     , mailMessageBodyTruncated :: !Bool
     , mailMessageAttachments :: ![MailAttachment]
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailMessage where
+    show _ = "MailMessage { <redacted> }"
 
 instance ToJSON MailMessage where
     toJSON message = object
@@ -554,24 +547,27 @@ instance FromJSON MailMessage where
     parseJSON = withObject "MailMessage" \value ->
         MailMessage
             <$> value .: "message_id"
-            <*> value .:? "thread_id"
-            <*> value .:? "subject"
-            <*> value .:? "from"
-            <*> value .:? "reply_to"
-            <*> value .:? "to"
-            <*> value .:? "cc"
-            <*> value .:? "received_at"
-            <*> value .:? "sent_at"
-            <*> value .:? "body"
-            <*> value .:? "body_truncated" .!= False
-            <*> value .:? "attachments" .!= []
+            <*> value .: "thread_id"
+            <*> value .: "subject"
+            <*> value .: "from"
+            <*> value .: "reply_to"
+            <*> value .: "to"
+            <*> value .: "cc"
+            <*> value .: "received_at"
+            <*> value .: "sent_at"
+            <*> value .: "body"
+            <*> value .: "body_truncated"
+            <*> value .: "attachments"
 
 data MailAttachmentRequest = MailAttachmentRequest
     { mailAttachmentAccountId :: !Text
     , mailAttachmentMessageId :: !Text
     , mailAttachmentRequestId :: !Text
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailAttachmentRequest where
+    show _ = "MailAttachmentRequest { <redacted> }"
 
 instance ToJSON MailAttachmentRequest where
     toJSON request = object
@@ -592,7 +588,16 @@ data MailAttachmentContent = MailAttachmentContent
     , mailDownloadedAttachmentContentType :: !(Maybe Text)
     , mailDownloadedAttachmentBytes :: !BS.ByteString
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailAttachmentContent where
+    show content =
+        "MailAttachmentContent"
+            <> " { mailDownloadedAttachmentFilename = <redacted>"
+            <> ", mailDownloadedAttachmentContentType = <redacted>"
+            <> ", mailDownloadedAttachmentBytes = <"
+            <> show (BS.length content.mailDownloadedAttachmentBytes)
+            <> " bytes> }"
 
 -- | Result of the MCP control operation.  The bytes are fetched separately
 -- over the authenticated same-origin gateway data plane.
@@ -602,7 +607,17 @@ data MailAttachmentDownload = MailAttachmentDownload
     , mailAttachmentDownloadContentType :: !(Maybe Text)
     , mailAttachmentDownloadSizeBytes :: !Int
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailAttachmentDownload where
+    show download =
+        "MailAttachmentDownload"
+            <> " { mailAttachmentDownloadRef = <redacted>"
+            <> ", mailAttachmentDownloadFilename = <redacted>"
+            <> ", mailAttachmentDownloadContentType = <redacted>"
+            <> ", mailAttachmentDownloadSizeBytes = "
+            <> show download.mailAttachmentDownloadSizeBytes
+            <> " }"
 
 instance ToJSON MailAttachmentDownload where
     toJSON download = object
@@ -616,8 +631,8 @@ instance FromJSON MailAttachmentDownload where
     parseJSON = withObject "MailAttachmentDownload" \value ->
         MailAttachmentDownload
             <$> value .: "download_ref"
-            <*> value .:? "filename"
-            <*> value .:? "content_type"
+            <*> value .: "filename"
+            <*> value .: "content_type"
             <*> value .: "size_bytes"
 
 data MailDraftContent = MailDraftContent
@@ -627,7 +642,10 @@ data MailDraftContent = MailDraftContent
     , mailDraftSubject :: !Text
     , mailDraftBody :: !Text
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailDraftContent where
+    show _ = "MailDraftContent { <redacted> }"
 
 instance ToJSON MailDraftContent where
     toJSON content = object
@@ -651,7 +669,10 @@ data MailCreateDraftRequest = MailCreateDraftRequest
     { mailCreateDraftAccountId :: !Text
     , mailCreateDraftContent :: !MailDraftContent
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailCreateDraftRequest where
+    show _ = "MailCreateDraftRequest { <redacted> }"
 
 instance ToJSON MailCreateDraftRequest where
     toJSON request =
@@ -671,7 +692,10 @@ data MailUpdateDraftRequest = MailUpdateDraftRequest
     , mailUpdateDraftId :: !Text
     , mailUpdateDraftContent :: !MailDraftContent
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailUpdateDraftRequest where
+    show _ = "MailUpdateDraftRequest { <redacted> }"
 
 instance ToJSON MailUpdateDraftRequest where
     toJSON request =
@@ -693,7 +717,10 @@ data MailReplyDraftRequest = MailReplyDraftRequest
     , mailReplyDraftTo :: ![Text]
     , mailReplyDraftBody :: !Text
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailReplyDraftRequest where
+    show _ = "MailReplyDraftRequest { <redacted> }"
 
 instance ToJSON MailReplyDraftRequest where
     toJSON request = object
@@ -717,7 +744,10 @@ data MailDraft = MailDraft
     , mailDraftThreadId :: !(Maybe Text)
     , mailDraftWarning :: !(Maybe Text)
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailDraft where
+    show _ = "MailDraft { <redacted> }"
 
 instance ToJSON MailDraft where
     toJSON draft = object
@@ -730,12 +760,17 @@ instance ToJSON MailDraft where
         ]
 
 instance FromJSON MailDraft where
-    parseJSON = withObject "MailDraft" \value ->
-        MailDraft
+    parseJSON = withObject "MailDraft" \value -> do
+        draft <- MailDraft
             <$> value .: "draft_id"
-            <*> value .:? "message_id"
-            <*> value .:? "thread_id"
-            <*> value .:? "warning"
+            <*> value .: "message_id"
+            <*> value .: "thread_id"
+            <*> value .: "warning"
+        saved <- value .: "saved"
+        sent <- value .: "sent"
+        when (not saved || sent) $
+            fail "email draft result violated the no-send contract"
+        pure draft
 
 -- | Provider transport used by both standalone and gateway credential
 -- stores. The credential is selected and authorized before it reaches this

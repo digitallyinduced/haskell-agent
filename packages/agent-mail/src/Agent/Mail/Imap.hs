@@ -7,6 +7,7 @@
 module Agent.Mail.Imap
     ( MailImapSocketConnector
     , verifyMailImapCredentials
+    , verifyMailImapCredentialsUsing
     , withMailImapConnection
     , withMailImapConnectionUsing
     ) where
@@ -20,6 +21,7 @@ import Control.Exception.Safe
     ( SomeException
     , bracket
     , finally
+    , mask
     , onException
     , tryAny
     )
@@ -54,6 +56,20 @@ verifyMailImapCredentials settings password =
             sendLine connection "a003 LIST \"\" \"INBOX\""
             consumeUntilTagged connection "a003"
 
+-- | Validate credentials through a policy-controlled, already-connected
+-- socket. Hosted callers should use this variant so setup and later mailbox
+-- operations share the same egress restrictions.
+verifyMailImapCredentialsUsing
+    :: MailImapSocketConnector
+    -> MailImapSettings
+    -> Text
+    -> IO (Either Text ())
+verifyMailImapCredentialsUsing connector settings password =
+    fmap (fmap (const ())) $
+        withMailImapConnectionUsing connector settings password \connection -> do
+            sendLine connection "a003 LIST \"\" \"INBOX\""
+            consumeUntilTagged connection "a003"
+
 -- | Open an authenticated, TLS-protected IMAP connection for one bounded
 -- operation.  The caller never receives a plaintext socket and cannot opt out
 -- of certificate validation or the connection timeout.
@@ -65,9 +81,11 @@ withMailImapConnection
 withMailImapConnection =
     withMailImapConnectionInternal Nothing
 
--- | Like 'withMailImapConnection', but use a caller-owned TCP connector.
+-- | Like 'withMailImapConnection', but use a policy-controlled TCP connector.
 -- This is intended for a trusted gateway egress policy, not for callers to
--- disable TLS validation: TLS always retains the configured hostname.
+-- disable TLS validation: TLS always retains the configured hostname. The
+-- connector must return a fresh, connected socket and transfers ownership of
+-- it to this function; it must not retain, close, or reuse that socket.
 withMailImapConnectionUsing
     :: MailImapSocketConnector
     -> MailImapSettings
@@ -112,10 +130,14 @@ withConnection socketConnector settings action =
         context <- Connection.initConnectionContext
         connection <- case socketConnector of
             Nothing -> Connection.connectTo context connectionParams
-            Just connector -> do
-                socket <- connector settings
-                Connection.connectFromSocket context socket connectionParams
-                    `onException` close socket
+            Just connector -> mask \restore -> do
+                socket <- restore (connector settings)
+                restore
+                    (Connection.connectFromSocket
+                        context
+                        socket
+                        connectionParams)
+                    `onException` closeSocketQuietly socket
         pure (context, connection)
 
     connectionParams = Connection.ConnectionParams
@@ -134,6 +156,10 @@ withConnection socketConnector settings action =
         , Connection.settingUseServerName = True
         , Connection.settingClientSupported = defaultSupported
         }
+
+closeSocketQuietly :: Socket -> IO ()
+closeSocketQuietly socket =
+    void (tryAny (close socket) :: IO (Either SomeException ()))
 
 authenticate
     :: Connection.ConnectionContext

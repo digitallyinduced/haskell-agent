@@ -15,7 +15,7 @@ module Agent.CLI.SessionLock
 
 import Agent.CLI.Error (formatException)
 import Agent.OsPath (unsafeToFilePath)
-import Control.Exception.Safe (SomeException, try)
+import Control.Exception.Safe (SomeException, mask_, try)
 import Data.Text (Text)
 import qualified System.FileLock as FileLock
 import qualified System.FilePath as FilePath
@@ -49,7 +49,9 @@ acquireSessionActivityLock sessionDir sessionId =
     acquireLockAt (sessionActivityLockPath sessionDir) sessionId
 
 acquireLockAt :: FilePath -> Text -> IO (Either Text SessionLock)
-acquireLockAt path sessionId = do
+acquireLockAt path sessionId = mask_ do
+    -- Do not expose a successfully acquired lock to async interruption before
+    -- it has been wrapped in the value whose owner will release it.
     try @_ @SomeException
         (FileLock.tryLockFile path FileLock.Exclusive) >>= \case
             Left err -> pure $ Left
@@ -69,7 +71,7 @@ releaseSessionLock lock = do
     pure ()
 
 sessionLockIsActive :: FilePath -> IO Bool
-sessionLockIsActive path =
+sessionLockIsActive path = mask_ $
     try @_ @SomeException
         (FileLock.tryLockFile path FileLock.Exclusive) >>= \case
             Left _ -> pure True

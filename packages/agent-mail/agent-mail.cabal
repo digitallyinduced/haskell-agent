@@ -43,26 +43,26 @@ library
         Agent.Mail.Imap
         Agent.Mail.Mime
         Agent.Mail.OAuth
+        Agent.Mail.SecretCodec
         Agent.Mail.Transport
         Agent.Mail.Types
     build-depends:
         aeson >= 2.0 && < 3
         , base >= 4.17 && < 5
-        , base64-bytestring
+        , base64-bytestring >= 1.2 && < 1.3
         , bytestring >= 0.11 && < 0.13
-        , async
-        , crypton
-        , http-client
-        , http-client-tls
-        , http-types
-        , memory
-        , network
-        , crypton-connection
-        , safe-exceptions
-        , tagsoup
+        , async >= 2.2 && < 2.3
+        , crypton >= 1.0 && < 1.2
+        , http-client >= 0.7 && < 0.8
+        , http-client-tls >= 0.3 && < 0.5
+        , http-types >= 0.12 && < 0.13
+        , network >= 3.2 && < 3.3
+        , crypton-connection >= 0.4.5 && < 0.5
+        , safe-exceptions >= 0.1.7 && < 0.2
+        , tagsoup >= 0.14 && < 0.15
         , text >= 2.0 && < 2.2
-        , time
-        , tls
+        , time >= 1.12 && < 1.15
+        , tls >= 2.1 && < 2.5
 
 test-suite agent-mail-test
     import:          common-options
@@ -75,3 +75,4 @@ test-suite agent-mail-test
         , base
         , hspec >= 2.11 && < 2.12
         , text
+        , time

@@ -16,6 +16,7 @@ module Agent.CLI.Mail.OAuth
     ) where
 
 import Agent.CLI.Mail.Store
+import qualified Agent.Mail.OAuth as SharedOAuth
 import Control.Applicative ((<|>))
 import Control.Concurrent (ThreadId, forkFinally, killThread)
 import Control.Concurrent.MVar
@@ -29,12 +30,14 @@ import Control.Concurrent.MVar
     , tryReadMVar
     , withMVar
     )
-import Control.Exception.Safe (SomeException, finally, onException, tryAny)
+import Control.Exception.Safe
+    ( SomeException
+    , bracket
+    , finally
+    , onException
+    , tryAny
+    )
 import Control.Monad (void)
-import Crypto.Hash (Digest, SHA256, hash)
-import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:), (.:?))
-import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64.URL as Base64URL
 import qualified Data.ByteString.Char8 as BS8
@@ -46,30 +49,8 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.Encoding.Error as TextEncodingError
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
-import Network.HTTP.Client
-    ( BodyReader
-    , RequestBody(RequestBodyBS)
-    , brRead
-    , checkResponse
-    , method
-    , parseRequest
-    , requestBody
-    , requestHeaders
-    , responseBody
-    , responseStatus
-    , responseTimeout
-    , responseTimeoutMicro
-    , withResponse
-    )
+import Network.HTTP.Client (Manager, closeManager)
 import Network.HTTP.Client.TLS (newTlsManager)
-import Network.HTTP.Types
-    ( Status
-    , hAuthorization
-    , hContentType
-    , statusCode
-    , statusIsSuccessful
-    )
-import Network.HTTP.Types.URI (renderSimpleQuery)
 import Network.Socket
     ( AddrInfo(..)
     , SockAddr(SockAddrInet)
@@ -98,14 +79,30 @@ data MailOAuthChallenge = MailOAuthChallenge
     , mailOAuthFlowId :: !Text
     , mailOAuthExpiresInSeconds :: !Int
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailOAuthChallenge where
+    show challenge =
+        "MailOAuthChallenge { mailOAuthProvider = "
+            <> show challenge.mailOAuthProvider
+            <> ", privateFields = <redacted>"
+            <> ", mailOAuthExpiresInSeconds = "
+            <> show challenge.mailOAuthExpiresInSeconds
+            <> " }"
 
 data MailOAuthPoll
     = MailOAuthPending
     | MailOAuthConnected !Text
     | MailOAuthFailed !Text
     | MailOAuthCancelled
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show MailOAuthPoll where
+    show = \case
+        MailOAuthPending -> "MailOAuthPending"
+        MailOAuthConnected _ -> "MailOAuthConnected <redacted>"
+        MailOAuthFailed _ -> "MailOAuthFailed <redacted>"
+        MailOAuthCancelled -> "MailOAuthCancelled"
 
 data OAuthFlow = OAuthFlow
     { flowListener :: !Socket
@@ -156,10 +153,14 @@ startMailOAuth provider rawClientId
             let redirectUri =
                     "http://" <> redirectHost provider <> ":"
                         <> Text.pack (show port) <> "/mail/callback"
-                challenge = MailOAuthChallenge
+            authorizationUrl <- either failText pure $
+                SharedOAuth.mailOAuthAuthorizationUrl
+                    (oauthClient provider clientId redirectUri)
+                    state
+                    verifier
+            let challenge = MailOAuthChallenge
                     { mailOAuthProvider = provider
-                    , mailOAuthAuthorizationUrl =
-                        authorizationUrl provider clientId redirectUri state verifier
+                    , mailOAuthAuthorizationUrl = authorizationUrl
                     , mailOAuthFlowId = flowId
                     , mailOAuthExpiresInSeconds = oauthFlowLifetimeSeconds
                     }
@@ -317,61 +318,103 @@ refreshMailOAuthCredential MailCredential {} =
 exchangeAndPersist
     :: MailProvider -> Text -> Text -> Text -> Text -> IO (Either Text Text)
 exchangeAndPersist provider clientId authorizationCode verifier redirectUri =
-    exchangeToken provider
-        [ ("grant_type", "authorization_code"), ("client_id", clientId)
-        , ("code", authorizationCode), ("code_verifier", verifier)
-        , ("redirect_uri", redirectUri) ] >>= \case
-        Left err -> pure (Left err)
-        Right token -> resolveMailbox provider token.tokenAccessToken >>= \case
-            Left err -> pure (Left err)
-            Right (rawEmail, rawLabel) -> case normalizeMailEmail rawEmail of
-                Left _ -> pure (Left "Mail provider returned an invalid mailbox identity.")
-                Right email -> loadMailCredentials >>= \case
-                    Left err -> pure (Left err)
-                    Right credentials -> do
-                        now <- getCurrentTime
-                        let prior = find (\credential ->
-                                credential.mailCredentialAccount.mailAccountProvider == provider
-                                && normalizedEmail credential.mailCredentialAccount.mailAccountEmail
-                                    == normalizedEmail email) credentials
-                            preserved = prior >>= \credential -> case credential.mailCredentialSecret of
-                                MailOAuthSecret { mailOAuthRefreshToken } -> mailOAuthRefreshToken
+    withOAuthManager \manager ->
+        SharedOAuth.exchangeMailOAuthCode
+            manager
+            (oauthClient provider clientId redirectUri)
+            authorizationCode
+            verifier
+            >>= \case
+                Left err -> pure (Left err)
+                Right token ->
+                    SharedOAuth.resolveMailOAuthMailbox
+                        manager
+                        provider
+                        token.mailOAuthTokenAccessToken
+                        >>= \case
+                            Left err -> pure (Left err)
+                            Right (rawEmail, rawLabel) ->
+                                persist token rawEmail rawLabel
+  where
+    persist token rawEmail rawLabel =
+        case normalizeMailEmail rawEmail of
+            Left _ ->
+                pure
+                    (Left
+                        "Mail provider returned an invalid mailbox identity.")
+            Right email -> loadMailCredentials >>= \case
+                Left err -> pure (Left err)
+                Right credentials -> do
+                    now <- getCurrentTime
+                    let prior = find
+                            ( \credential ->
+                                credential.mailCredentialAccount.mailAccountProvider
+                                    == provider
+                                    && normalizedEmail
+                                        credential.mailCredentialAccount.mailAccountEmail
+                                        == normalizedEmail email
+                            )
+                            credentials
+                        preserved = prior >>= \credential ->
+                            case credential.mailCredentialSecret of
+                                MailOAuthSecret { mailOAuthRefreshToken } ->
+                                    mailOAuthRefreshToken
                                 MailImapSecret {} -> Nothing
-                        case nonEmpty token.tokenRefreshToken <|> preserved of
-                            Nothing -> pure (Left "Mail provider did not return offline refresh access. Authorize again and approve offline access.")
-                            Just refresh -> do
-                                accountId <- maybe (newMailAccountId provider)
-                                    (pure . (.mailCredentialAccount.mailAccountId)) prior
-                                let account = MailAccount
-                                        { mailAccountId = accountId
-                                        , mailAccountProvider = provider
-                                        , mailAccountEmail = email
-                                        , mailAccountLabel = fromMaybe email (nonEmpty rawLabel)
-                                        , mailAccountEnabled = True
-                                        , mailAccountState = MailConnected
-                                        , mailAccountImapSettings = Nothing
-                                        , mailAccountOAuthClientId = Just clientId
-                                        , mailAccountCreatedAt = maybe now
-                                            (.mailCredentialAccount.mailAccountCreatedAt) prior
-                                        , mailAccountUpdatedAt = now
-                                        , mailAccountLastVerifiedAt = Just now
-                                        , mailAccountLastErrorCode = Nothing
-                                        }
-                                    secret = MailOAuthSecret
-                                        { mailSecretAccountId = accountId
-                                        , mailOAuthAccessToken = token.tokenAccessToken
-                                        , mailOAuthRefreshToken = Just refresh
-                                        , mailOAuthExpiresAt = Just (addUTCTime
-                                            (fromIntegral token.tokenExpiresIn) now)
-                                        , mailOAuthScopes =
-                                            case Text.words token.tokenScope of
-                                                [] -> Text.words
-                                                    (oauthScopes provider)
-                                                scopes -> scopes
-                                        }
-                                upsertMailAccount account secret >>= \case
-                                    Left err -> pure (Left err)
-                                    Right () -> pure (Right accountId)
+                    case token.mailOAuthTokenRefreshToken <|> preserved of
+                        Nothing ->
+                            pure
+                                (Left
+                                    "Mail provider did not return offline refresh access. Authorize again and approve offline access.")
+                        Just refresh -> do
+                            accountId <-
+                                maybe
+                                    (newMailAccountId provider)
+                                    (pure
+                                        . (.mailCredentialAccount.mailAccountId))
+                                    prior
+                            let account = MailAccount
+                                    { mailAccountId = accountId
+                                    , mailAccountProvider = provider
+                                    , mailAccountEmail = email
+                                    , mailAccountLabel =
+                                        fromMaybe email (nonEmpty rawLabel)
+                                    , mailAccountEnabled = True
+                                    , mailAccountState = MailConnected
+                                    , mailAccountImapSettings = Nothing
+                                    , mailAccountOAuthClientId = Just clientId
+                                    , mailAccountCreatedAt =
+                                        maybe
+                                            now
+                                            (.mailCredentialAccount.mailAccountCreatedAt)
+                                            prior
+                                    , mailAccountUpdatedAt = now
+                                    , mailAccountLastVerifiedAt = Just now
+                                    , mailAccountLastErrorCode = Nothing
+                                    }
+                                secret = MailOAuthSecret
+                                    { mailSecretAccountId = accountId
+                                    , mailOAuthAccessToken =
+                                        token.mailOAuthTokenAccessToken
+                                    , mailOAuthRefreshToken = Just refresh
+                                    , mailOAuthExpiresAt =
+                                        Just
+                                            ( addUTCTime
+                                                ( fromIntegral
+                                                    token.mailOAuthTokenExpiresIn
+                                                )
+                                                now
+                                            )
+                                    , mailOAuthScopes =
+                                        case token.mailOAuthTokenScopes of
+                                            [] ->
+                                                Text.words
+                                                    (SharedOAuth.mailOAuthScopes
+                                                        provider)
+                                            scopes -> scopes
+                                    }
+                            upsertMailAccount account secret >>= \case
+                                Left err -> pure (Left err)
+                                Right () -> pure (Right accountId)
 
 refreshToken :: MailProvider -> Text -> Text -> Text -> Maybe Text -> [Text]
     -> IO (Either Text MailSecret)
@@ -379,191 +422,61 @@ refreshToken provider clientId accountId oldAccess oldRefresh oldScopes
     | provider == ImapProvider = pure (Left "Custom IMAP accounts do not use OAuth.")
     | otherwise = case oldRefresh >>= nonEmpty of
         Nothing -> pure (Left "Mail account must be reconnected.")
-        Just refresh -> exchangeToken provider
-            [("grant_type", "refresh_token"), ("client_id", clientId),
-             ("refresh_token", refresh)] >>= \case
-                Left err -> pure (Left err)
-                Right token -> do
-                    now <- getCurrentTime
-                    pure (Right MailOAuthSecret
-                        { mailSecretAccountId = accountId
-                        , mailOAuthAccessToken = fromMaybe oldAccess
-                            (nonEmpty token.tokenAccessToken)
-                        , mailOAuthRefreshToken = nonEmpty token.tokenRefreshToken <|> oldRefresh
-                        , mailOAuthExpiresAt = Just (addUTCTime
-                            (fromIntegral token.tokenExpiresIn) now)
-                        , mailOAuthScopes = case Text.words token.tokenScope of
-                            [] -> oldScopes
-                            scopes -> scopes })
-
-data OAuthToken = OAuthToken
-    { tokenAccessToken :: !Text
-    , tokenRefreshToken :: !Text
-    , tokenExpiresIn :: !Int
-    , tokenScope :: !Text
-    }
-
-instance Aeson.FromJSON OAuthToken where
-    parseJSON = Aeson.withObject "Mail OAuth token" \object ->
-        OAuthToken
-            <$> object .: "access_token"
-            <*> object .:? "refresh_token" Aeson..!= ""
-            <*> object .:? "expires_in" Aeson..!= 3600
-            <*> object .:? "scope" Aeson..!= ""
-
-exchangeToken :: MailProvider -> [(Text, Text)] -> IO (Either Text OAuthToken)
-exchangeToken provider fields
-    | provider == ImapProvider =
-        pure (Left "Custom IMAP accounts do not use OAuth.")
-    | otherwise = do
-        manager <- newTlsManager
-        parsed <- tryAny (parseRequest (Text.unpack (tokenEndpoint provider)))
-        case parsed of
-            Left exception -> pure (Left (sanitizeException exception))
-            Right initial -> do
-                response <- tryAny $ withResponse
-                    initial
-                        { method = "POST"
-                        , requestHeaders =
-                            [(hContentType, "application/x-www-form-urlencoded")]
-                        , requestBody = RequestBodyBS
-                            (renderSimpleQuery False
-                                [ (TextEncoding.encodeUtf8 key, TextEncoding.encodeUtf8 value)
-                                | (key, value) <- fields
-                                ])
-                        , responseTimeout =
-                            responseTimeoutMicro oauthHttpTimeoutMicros
-                        , checkResponse = \_ _ -> pure ()
-                        }
+        Just refresh ->
+            withOAuthManager \manager ->
+                SharedOAuth.refreshMailOAuthToken
                     manager
-                    \value -> do
-                        body <- readOAuthBody value.responseBody
-                        pure (value.responseStatus, body)
-                pure case response of
-                    Left exception -> Left (sanitizeException exception)
-                    Right (status, body)
-                        | not (statusIsSuccessful status) ->
-                            Left (oauthTokenStatusError status)
-                        | otherwise -> body >>= \bytes ->
-                            case Aeson.eitherDecodeStrict' bytes of
-                                Left _ ->
-                                    Left "Mail OAuth provider returned an invalid token response."
-                                Right token
-                                    | Text.null (Text.strip token.tokenAccessToken) ->
-                                        Left "Mail OAuth provider returned an empty access token."
-                                    | otherwise -> Right token
+                    (oauthClient
+                        provider
+                        clientId
+                        ("http://" <> redirectHost provider <> "/"))
+                    refresh
+                    >>= \case
+                        Left err -> pure (Left err)
+                        Right token -> do
+                            now <- getCurrentTime
+                            pure
+                                (Right MailOAuthSecret
+                                    { mailSecretAccountId = accountId
+                                    , mailOAuthAccessToken =
+                                        fromMaybe
+                                            oldAccess
+                                            (nonEmpty
+                                                token.mailOAuthTokenAccessToken)
+                                    , mailOAuthRefreshToken =
+                                        token.mailOAuthTokenRefreshToken
+                                            <|> oldRefresh
+                                    , mailOAuthExpiresAt =
+                                        Just
+                                            ( addUTCTime
+                                                ( fromIntegral
+                                                    token.mailOAuthTokenExpiresIn
+                                                )
+                                                now
+                                            )
+                                    , mailOAuthScopes =
+                                        case token.mailOAuthTokenScopes of
+                                            [] -> oldScopes
+                                            scopes -> scopes
+                                    })
 
-resolveMailbox :: MailProvider -> Text -> IO (Either Text (Text, Text))
-resolveMailbox provider accessToken =
-    case provider of
-        GmailProvider ->
-            getJson accessToken
-                "https://gmail.googleapis.com/gmail/v1/users/me/profile"
-                >>= \case
-                    Left err -> pure (Left err)
-                    Right value ->
-                        pure $ maybe
-                            (Left "Gmail did not return a mailbox identity. Reconnect and grant the requested mail permissions.")
-                            Right
-                            (parseMaybe
-                                (Aeson.withObject "Gmail profile" \object ->
-                                    (,) <$> object .: "emailAddress" <*> pure "")
-                                value)
-        MicrosoftProvider -> do
-            identity <- getJson accessToken
-                "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,displayName"
-            mailboxProbe <- getJson accessToken
-                "https://graph.microsoft.com/v1.0/me/messages?$top=1&$select=id"
-            pure do
-                _ <- mailboxProbe
-                value <- identity
-                maybe
-                    (Left "Microsoft did not return a mailbox identity. Reconnect and grant the requested mail permissions.")
-                    Right
-                    (parseMaybe
-                        (Aeson.withObject "Microsoft profile" \object -> do
-                            mail <- object .:? "mail"
-                            principal <- object .:? "userPrincipalName"
-                            displayName <- object .:? "displayName" Aeson..!= ""
-                            address <- maybe
-                                (fail "missing mailbox identity")
-                                pure
-                                ((mail >>= nonEmpty) <|> (principal >>= nonEmpty))
-                            pure (address, displayName))
-                        value)
-        ImapProvider -> pure (Left "Custom IMAP accounts do not use OAuth.")
+oauthClient :: MailProvider -> Text -> Text -> SharedOAuth.MailOAuthClient
+oauthClient provider clientId redirectUri =
+    SharedOAuth.MailOAuthClient
+        { SharedOAuth.mailOAuthClientProvider = provider
+        , SharedOAuth.mailOAuthClientId = clientId
+        , SharedOAuth.mailOAuthClientSecret = Nothing
+        , SharedOAuth.mailOAuthClientRedirectUri = redirectUri
+        }
 
-getJson :: Text -> Text -> IO (Either Text Aeson.Value)
-getJson accessToken rawUrl = do
-    manager <- newTlsManager
-    parsed <- tryAny (parseRequest (Text.unpack rawUrl))
-    case parsed of
-        Left exception -> pure (Left (sanitizeException exception))
-        Right initial -> do
-            response <- tryAny $ withResponse
-                initial
-                    { requestHeaders =
-                        [(hAuthorization, "Bearer " <> TextEncoding.encodeUtf8 accessToken)]
-                    , responseTimeout = responseTimeoutMicro oauthHttpTimeoutMicros
-                    , checkResponse = \_ _ -> pure ()
-                    }
-                manager
-                \value -> do
-                    body <- readOAuthBody value.responseBody
-                    pure (value.responseStatus, body)
-            pure case response of
-                Left exception -> Left (sanitizeException exception)
-                Right (status, body)
-                    | not (statusIsSuccessful status) ->
-                        Left "Mail mailbox access validation failed. Reconnect the account and grant read access."
-                    | otherwise -> body >>= \bytes ->
-                        firstText "Mail provider returned invalid validation JSON."
-                            (Aeson.eitherDecodeStrict' bytes)
-
-authorizationUrl :: MailProvider -> Text -> Text -> Text -> Text -> Text
-authorizationUrl provider clientId redirectUri state verifier =
-    authorizationEndpoint provider <> "?"
-        <> TextEncoding.decodeUtf8
-            (renderSimpleQuery False
-                [ ("response_type", "code")
-                , ("client_id", TextEncoding.encodeUtf8 clientId)
-                , ("redirect_uri", TextEncoding.encodeUtf8 redirectUri)
-                , ("scope", TextEncoding.encodeUtf8 (oauthScopes provider))
-                , ("state", TextEncoding.encodeUtf8 state)
-                , ( "code_challenge"
-                  , Base64URL.encodeUnpadded
-                        (digestBytes
-                            (hash (TextEncoding.encodeUtf8 verifier)
-                                :: Digest SHA256))
-                  )
-                , ("code_challenge_method", "S256")
-                ]
-                <> providerExtras provider)
-
-providerExtras :: MailProvider -> BS.ByteString
-providerExtras GmailProvider = "&access_type=offline&prompt=consent"
-providerExtras MicrosoftProvider = BS.empty
-providerExtras ImapProvider = BS.empty
-
-authorizationEndpoint :: MailProvider -> Text
-authorizationEndpoint = \case
-    GmailProvider -> "https://accounts.google.com/o/oauth2/v2/auth"
-    MicrosoftProvider -> "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-    ImapProvider -> ""
-
-tokenEndpoint :: MailProvider -> Text
-tokenEndpoint = \case
-    GmailProvider -> "https://oauth2.googleapis.com/token"
-    MicrosoftProvider -> "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-    ImapProvider -> ""
-
-oauthScopes :: MailProvider -> Text
-oauthScopes = \case
-    GmailProvider ->
-        "openid email https://www.googleapis.com/auth/gmail.readonly "
-            <> "https://www.googleapis.com/auth/gmail.compose"
-    MicrosoftProvider -> "openid profile offline_access User.Read Mail.ReadWrite"
-    ImapProvider -> ""
+withOAuthManager
+    :: (Manager -> IO (Either Text value))
+    -> IO (Either Text value)
+withOAuthManager action =
+    tryAny (bracket newTlsManager closeManager action) >>= \case
+        Left _ -> pure
+            (Left "Could not complete secure mail authorization. Please try again.")
+        Right result -> pure result
 
 -- Microsoft desktop-app registrations use the special localhost redirect,
 -- whose port is intentionally dynamic. Google installed-app clients support
@@ -737,29 +650,6 @@ randomUrlText :: Int -> IO Text
 randomUrlText bytes =
     TextEncoding.decodeUtf8 . Base64URL.encodeUnpadded <$> getEntropy bytes
 
--- crypton renders a digest as exactly two lowercase hexadecimal characters
--- per byte. Decoding that representation avoids coupling this module to the
--- byte-array implementation package used internally by a particular crypton
--- release.
-digestBytes :: Digest SHA256 -> BS.ByteString
-digestBytes = BS.pack . go . show
-  where
-    go (high : low : rest) =
-        case (hexNibble high, hexNibble low) of
-            (Just highValue, Just lowValue) ->
-                (highValue * 16 + lowValue) : go rest
-            _ -> []
-    go _ = []
-
-    hexNibble character
-        | character >= '0' && character <= '9' =
-            Just (fromIntegral (fromEnum character - fromEnum '0'))
-        | character >= 'a' && character <= 'f' =
-            Just (fromIntegral (fromEnum character - fromEnum 'a' + 10))
-        | character >= 'A' && character <= 'F' =
-            Just (fromIntegral (fromEnum character - fromEnum 'A' + 10))
-        | otherwise = Nothing
-
 pruneExpiredFlows :: IO ()
 pruneExpiredFlows = do
     now <- getCurrentTime
@@ -783,9 +673,6 @@ closeQuietly :: Socket -> IO ()
 closeQuietly socketToClose =
     void (tryAny (close socketToClose) :: IO (Either SomeException ()))
 
-firstText :: Text -> Either a value -> Either Text value
-firstText message = either (const (Left message)) Right
-
 normalizedEmail :: Text -> Text
 normalizedEmail = Text.toCaseFold . Text.strip
 
@@ -801,33 +688,9 @@ sanitizeException :: SomeException -> Text
 sanitizeException _ =
     "Could not complete secure mail authorization. Please try again."
 
-oauthTokenStatusError :: Status -> Text
-oauthTokenStatusError status
-    | statusCode status == 400
-        || statusCode status == 401
-        || statusCode status == 403 =
-            "Mail OAuth credentials were rejected and the account must be reconnected."
-    | statusCode status == 429 || statusCode status >= 500 =
-            "The mail OAuth provider is temporarily unavailable. Please try again."
-    | otherwise =
-            "Mail OAuth authorization failed. Please try again."
-
 oauthRefreshRequiresReconnect :: Text -> Bool
 oauthRefreshRequiresReconnect =
     Text.isInfixOf "must be reconnected" . Text.toCaseFold
-
-readOAuthBody :: BodyReader -> IO (Either Text BS.ByteString)
-readOAuthBody = go [] 0
-  where
-    go chunks size reader = brRead reader >>= \chunk ->
-        if BS.null chunk
-            then pure (Right (BS.concat (reverse chunks)))
-            else
-                let size' = size + BS.length chunk
-                in if size' > oauthMaximumResponseBytes
-                    then pure (Left
-                        "Mail OAuth provider returned an oversized response.")
-                    else go (chunk : chunks) size' reader
 
 safeHead :: [value] -> Maybe value
 safeHead = \case
@@ -837,10 +700,9 @@ safeHead = \case
 failText :: Text -> IO value
 failText = ioError . userError . Text.unpack
 
-oauthFlowLifetimeSeconds, oauthRefreshSkewSeconds, oauthHttpTimeoutMicros :: Int
+oauthFlowLifetimeSeconds, oauthRefreshSkewSeconds :: Int
 oauthFlowLifetimeSeconds = 5 * 60
 oauthRefreshSkewSeconds = 60
-oauthHttpTimeoutMicros = 30 * 1000 * 1000
 
 oauthFlowTimeoutMicros, oauthCallbackClientTimeoutMicros
     , maximumCallbackRequestBytes, maximumCallbackParameters
@@ -853,6 +715,3 @@ maximumCallbackConnections = 32
 callbackReadChunkBytes = 4096
 maximumActiveOAuthFlows :: Int
 maximumActiveOAuthFlows = 8
-
-oauthMaximumResponseBytes :: Int
-oauthMaximumResponseBytes = 1024 * 1024

@@ -289,7 +289,10 @@ sealMessageSummary
 sealMessageSummary key accountId message = do
     reference <- sealMailReference
         key MessageReference accountId [message.mailMessageSummaryId]
-    pure message { mailMessageSummaryId = reference }
+    pure message
+        { mailMessageSummaryId = reference
+        , mailMessageSummaryThreadId = Nothing
+        }
 
 sealMessage
     :: BS.ByteString
@@ -306,6 +309,7 @@ sealMessage key accountId expectedProviderMessageId message = do
     attachments <- traverse sealAttachment message.mailMessageAttachments
     pure message
         { mailMessageId = messageReference
+        , mailMessageThreadId = Nothing
         , mailMessageAttachments = attachments
         }
   where
@@ -326,6 +330,7 @@ sealDraft key accountId draft = do
     pure draft
         { mailDraftId = draftReference
         , mailDraftMessageId = messageReference
+        , mailDraftThreadId = Nothing
         }
 
 openOptionalReference
@@ -854,7 +859,10 @@ createDraftTool env = jsonAppToolWithExecution
                     Right () ->
                         runMailRequest env (env.mailToolsCreateDraft request) >>= \case
                             Left err -> pure (Left err)
-                            Right draft -> renderMailResult env (Aeson.toJSON draft)
+                            Right draft ->
+                                renderMailResult env
+                                    (Aeson.toJSON
+                                        draft { mailDraftThreadId = Nothing })
     )
 
 updateDraftTool :: MailToolsEnv -> AppTool
@@ -881,7 +889,10 @@ updateDraftTool env = jsonAppToolWithExecution
                     Right () ->
                         runMailRequest env (env.mailToolsUpdateDraft request) >>= \case
                             Left err -> pure (Left err)
-                            Right draft -> renderMailResult env (Aeson.toJSON draft)
+                            Right draft ->
+                                renderMailResult env
+                                    (Aeson.toJSON
+                                        draft { mailDraftThreadId = Nothing })
     )
 
 replyDraftTool :: MailToolsEnv -> AppTool
@@ -914,7 +925,10 @@ replyDraftTool env = jsonAppToolWithExecution
                     Right () ->
                         runMailRequest env (env.mailToolsReplyDraft request) >>= \case
                             Left err -> pure (Left err)
-                            Right draft -> renderMailResult env (Aeson.toJSON draft)
+                            Right draft ->
+                                renderMailResult env
+                                    (Aeson.toJSON
+                                        draft { mailDraftThreadId = Nothing })
     )
 
 draftContentProperties :: [PropertySchema]
@@ -1205,7 +1219,7 @@ mailReferenceKeyBytes = 32
 mailReferenceMacBytes = 32
 
 mailReferencePrefix :: Text
-mailReferencePrefix = "mailref:v1:"
+mailReferencePrefix = "mailref_v1_"
 
 maximumAccountResults :: Int
 maximumAccountResults = 100

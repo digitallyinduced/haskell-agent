@@ -399,3 +399,4 @@ approvalLabel = \case
     AlwaysPrompt -> "prompt"
     AlwaysConfirm -> "confirm"
     ClassifyReadOnly _ -> "classified"
+    ClassifyApproval _ -> "classified-approval"

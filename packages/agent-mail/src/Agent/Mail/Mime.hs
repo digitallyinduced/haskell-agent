@@ -23,6 +23,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (chr, isControl, isHexDigit, isSpace, ord, toLower)
 import Data.List (find)
+import qualified Data.List as List
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -52,7 +53,17 @@ data ParsedMailAttachment = ParsedMailAttachment
     , parsedMailAttachmentContentType :: !Text
     , parsedMailAttachmentBytes :: !BS.ByteString
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show ParsedMailAttachment where
+    show attachment =
+        "ParsedMailAttachment"
+            <> " { parsedMailAttachmentId = <redacted>"
+            <> ", parsedMailAttachmentFilename = <redacted>"
+            <> ", parsedMailAttachmentContentType = <redacted>"
+            <> ", parsedMailAttachmentBytes = <"
+            <> show (BS.length attachment.parsedMailAttachmentBytes)
+            <> " bytes> }"
 
 -- | Render a deliberately small, text/plain RFC 5322 message for draft-only
 -- mailbox APIs. Tool-layer validation has already restricted recipients to
@@ -306,7 +317,7 @@ parseEntity depth nextIndex raw
                     Right
                     (lookup "boundary" contentParameters >>= nonEmptyText)
                 children <- splitMultipart boundary body
-                foldl'
+                List.foldl'
                     (\acc child -> do
                         (index, accumulated) <- acc
                         (next, parsed) <- parseEntity (depth + 1) index child
@@ -373,7 +384,7 @@ parseHeaders bytes
 
 unfoldHeaderLines :: [BS.ByteString] -> [BS.ByteString]
 unfoldHeaderLines =
-    reverse . foldl' add []
+    reverse . List.foldl' add []
   where
     add [] line = [line]
     add (current : rest) line
@@ -449,7 +460,7 @@ splitMultipart boundary body
             closing = marker <> "--"
             lines' = splitLinesKeepingContent body
             (_, current, parts, closed) =
-                foldl' (step marker closing) (False, [], [], False) lines'
+                List.foldl' (step marker closing) (False, [], [], False) lines'
             completed =
                 if closed || null current
                     then parts
@@ -598,7 +609,7 @@ nonEmptyText text
 minimumMaybe :: Ord value => [value] -> Maybe value
 minimumMaybe = \case
     [] -> Nothing
-    value : rest -> Just (foldl' min value rest)
+    value : rest -> Just (List.foldl' min value rest)
 
 stripTrailingCR :: BS.ByteString -> BS.ByteString
 stripTrailingCR bytes =
