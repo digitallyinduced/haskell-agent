@@ -1405,6 +1405,7 @@ spec = describe "fullscreen UI reducer" do
                 block.blockState `shouldBe` BlockComplete
                 block.blockTitle `shouldBe` "Read"
                 block.blockDetail `shouldBe` "src/Main.hs"
+                block.blockInspectionGroupable `shouldBe` True
             _ -> expectationFailure "expected one completed inspection block"
 
     it "keeps non-filesystem inspection labels intact" do
@@ -1543,6 +1544,38 @@ spec = describe "fullscreen UI reducer" do
                     ]
         map (.blockKind) (Foldable.toList state.uiBlocks)
             `shouldBe` [BlockInspect, BlockSystem, BlockInspect]
+
+    it "keeps lifecycle-sensitive inspections outside compact bursts" do
+        let taskOutput =
+                functionToolCall
+                    "task-output"
+                    "get_task_output"
+                    "{\"task_id\":\"task-1\"}"
+            session =
+                functionToolCall
+                    "session-read"
+                    "read_agent_session"
+                    "{\"session_id\":\"session-1\"}"
+            finish callId =
+                UiLoop
+                    (ToolFinished
+                        (ToolCallResult
+                            callId
+                            "done"
+                            FunctionCallKind))
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted taskOutput)
+                    , finish "task-output"
+                    , UiLoop (ToolStarted session)
+                    , finish "session-read"
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockKind) blocks
+            `shouldBe` [BlockInspect, BlockInspect]
+        map (.blockInspectionGroupable) blocks
+            `shouldBe` [False, False]
 
     it "shows an apply_patch diff while running and after completion" do
         let call =

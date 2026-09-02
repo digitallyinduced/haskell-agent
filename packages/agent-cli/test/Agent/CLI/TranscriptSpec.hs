@@ -145,6 +145,7 @@ testBlock = UiBlock
     , blockState = BlockComplete
     , blockExpanded = False
     , blockCallId = Nothing
+    , blockInspectionGroupable = False
     }
 
 testTime :: UTCTime

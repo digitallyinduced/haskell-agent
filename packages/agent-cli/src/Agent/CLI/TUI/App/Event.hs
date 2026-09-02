@@ -1083,7 +1083,8 @@ handleCommandPaletteSelection = \case
                 FullscreenInput
                     { fullscreenInputLine = ReplText command
                     , fullscreenInputQueued = queued
-                    , fullscreenInputDisplay = Nothing
+                    , fullscreenInputDisplay =
+                        if queued then Just command else Nothing
                     }
         case result of
             Left message ->

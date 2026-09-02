@@ -52,6 +52,7 @@ coalescibleInspection :: UiBlock -> Bool
 coalescibleInspection block =
     block.blockKind == BlockInspect
         && block.blockState == BlockComplete
+        && block.blockInspectionGroupable
         && inspectionCategory block.blockTitle /= InspectionView
 
 inspectionRunTitle :: [UiBlock] -> Text

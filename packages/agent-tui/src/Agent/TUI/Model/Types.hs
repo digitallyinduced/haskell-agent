@@ -100,6 +100,9 @@ data UiBlock = UiBlock
     , blockState :: !BlockState
     , blockExpanded :: !Bool
     , blockCallId :: !(Maybe Text)
+    -- | Whether restored adjacent blocks may be folded into an inspection
+    -- burst. This preserves the reducer's explicit tool eligibility decision.
+    , blockInspectionGroupable :: !Bool
     }
     deriving (Eq, Show)
 

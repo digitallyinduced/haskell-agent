@@ -115,6 +115,7 @@ import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     )
+import Agent.CLI.TUI.Render.Blocks (cacheableBlock)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , TerminalKind(..)
@@ -212,6 +213,53 @@ spec = do
             toolImageBlockId "code-mode:1:show_image" ui `shouldBe` Nothing
             toolImageBlockId "code-mode:1:show_image" initialUiState
                 `shouldBe` Nothing
+
+    describe "inspection block caching" do
+        it "does not cache a completed group while it can still be extended" do
+            let call =
+                    functionToolCall
+                        "read-1"
+                        "read_file"
+                        "{\"target_file\":\"src/Main.hs\"}"
+                running =
+                    reduceUi
+                        (UiLoop (ToolStarted call))
+                        initialUiState
+                completed =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished
+                                (ToolCallResult
+                                    "read-1"
+                                    "module Main where"
+                                    FunctionCallKind)))
+                        running
+            runtime <- newScriptRuntime completed
+            let appState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            case Seq.lookup 0 completed.uiBlocks of
+                Nothing -> expectationFailure "expected an inspection block"
+                Just inspection ->
+                    cacheableBlock
+                        appState
+                        AgentRoot
+                        completed
+                        inspection
+                        `shouldBe` False
+
+            let closed =
+                    reduceUi
+                        (UiSystemMessage "Continuing")
+                        completed
+            case Seq.lookup 0 closed.uiBlocks of
+                Nothing -> expectationFailure "expected an inspection block"
+                Just inspection ->
+                    cacheableBlock
+                        (appState { appUi = closed })
+                        AgentRoot
+                        closed
+                        inspection
+                        `shouldBe` True
 
     describe "background activity status" do
         it "names a running agent and its current step" do
@@ -752,6 +800,28 @@ spec = do
             (.fullscreenInputLine) <$> toList inputs
                 `shouldBe` [ReplText "/diff"]
             finalState.appUi.uiDraft `shouldBe` draft
+
+        it "shows palette commands queued during a running turn" do
+            let ui =
+                    initialUiState
+                        { uiRunning = True
+                        , uiAwaitingInput = False
+                        }
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            _ <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptApp
+                        (AppCommandPaletteSelected
+                            (CommandPaletteSubmit "/clear"))
+                    , FullscreenScriptHalt
+                    ]
+            inputs <- atomically $
+                Composer.readFullscreenInputs runtime.runtimeInput
+            (.fullscreenInputDisplay) <$> toList inputs
+                `shouldBe` [Just "/clear"]
 
         it "renders and dismisses changelog release notes without choice rows" do
             runtime <- newScriptRuntime initialUiState
@@ -2124,6 +2194,7 @@ replacementAfterHistoryReplacement scenario = do
             , blockState = BlockComplete
             , blockExpanded = False
             , blockCallId = Nothing
+            , blockInspectionGroupable = False
             }
         durableTurn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
@@ -2694,6 +2765,7 @@ markerBlock blockId body = UiBlock
     , blockState = BlockComplete
     , blockExpanded = False
     , blockCallId = Nothing
+    , blockInspectionGroupable = False
     }
 
 renderedAppText :: (Int, Int) -> AppState -> Text

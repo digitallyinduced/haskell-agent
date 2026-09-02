@@ -59,15 +59,13 @@ spec = describe "fullscreen transcript caching" do
 
     it "coalesces adjacent completed inspection blocks under the newest ID" do
         let first =
-                (block 1)
-                    { blockKind = BlockInspect
-                    , blockTitle = "Read src/A.hs"
+                (groupableInspection 1)
+                    { blockTitle = "Read src/A.hs"
                     , blockBody = "module A where"
                     }
             second =
-                (block 2)
-                    { blockKind = BlockInspect
-                    , blockTitle = "Listed src"
+                (groupableInspection 2)
+                    { blockTitle = "Listed src"
                     , blockBody = "A.hs"
                     }
             grouped =
@@ -83,15 +81,13 @@ spec = describe "fullscreen transcript caching" do
 
     it "retains expanded inspection details" do
         let first =
-                (block 1)
-                    { blockKind = BlockInspect
-                    , blockTitle = "Searched needle"
+                (groupableInspection 1)
+                    { blockTitle = "Searched needle"
                     , blockBody = "src/A.hs:1"
                     }
             second =
-                (block 2)
-                    { blockKind = BlockInspect
-                    , blockTitle = "Searched another"
+                (groupableInspection 2)
+                    { blockTitle = "Searched another"
                     , blockBody = "src/B.hs:2"
                     , blockExpanded = True
                     }
@@ -110,9 +106,8 @@ spec = describe "fullscreen transcript caching" do
 
     it "does not merge running, failed, or non-adjacent inspection blocks" do
         let inspect ident state =
-                (block ident)
-                    { blockKind = BlockInspect
-                    , blockTitle = "Read src/A.hs"
+                (groupableInspection ident)
+                    { blockTitle = "Read src/A.hs"
                     , blockState = state
                     }
             input = Seq.fromList
@@ -132,12 +127,28 @@ spec = describe "fullscreen transcript caching" do
                     , blockTitle = "Viewed screenshot.png"
                     }
             readFile =
-                (block 2)
-                    { blockKind = BlockInspect
-                    , blockTitle = "Read src/A.hs"
+                (groupableInspection 2)
+                    { blockTitle = "Read src/A.hs"
                     }
         map (.blockId)
             (toList (coalesceInspectionBlocks (Seq.fromList [viewed, readFile])))
+            `shouldBe` map BlockId [1, 2]
+
+    it "keeps lifecycle-sensitive inspections standalone" do
+        let taskOutput =
+                (block 1)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Read task task-1"
+                    }
+            session =
+                (block 2)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Read agent session session-1"
+                    }
+        map (.blockId)
+            (toList
+                (coalesceInspectionBlocks
+                    (Seq.fromList [taskOutput, session])))
             `shouldBe` map BlockId [1, 2]
   where
     completeChunk =
@@ -154,4 +165,12 @@ block number = UiBlock
     , blockState = BlockComplete
     , blockExpanded = False
     , blockCallId = Nothing
+    , blockInspectionGroupable = False
     }
+
+groupableInspection :: Int -> UiBlock
+groupableInspection number =
+    (block number)
+        { blockKind = BlockInspect
+        , blockInspectionGroupable = True
+        }

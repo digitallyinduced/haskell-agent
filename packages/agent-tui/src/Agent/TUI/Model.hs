@@ -642,7 +642,13 @@ startInspectionCall call state =
                     (Just call.callId)
                     (common prepared)
         in appended
-            { uiInspectionGroups =
+            { uiBlocks =
+                Seq.adjust
+                    (\block ->
+                        block { blockInspectionGroupable = True })
+                    blockIndex
+                    appended.uiBlocks
+            , uiInspectionGroups =
                 Map.insert ident group appended.uiInspectionGroups
             , uiToolCalls =
                 Map.insert
@@ -892,10 +898,7 @@ appendBlock
     -> UiState
     -> UiState
 appendBlock kind title body detail blockState callId state =
-    let prepared =
-            if kind == BlockInspect
-                then state
-                else closeInspectionGroups state
+    let prepared = closeInspectionGroups state
         index = Seq.length prepared.uiBlocks
         ident = BlockId prepared.uiNextBlockId
         block = UiBlock
@@ -911,6 +914,7 @@ appendBlock kind title body detail blockState callId state =
                     || (kind == BlockShell
                         && blockState `elem` [BlockStreaming, BlockRunning])
             , blockCallId = callId
+            , blockInspectionGroupable = False
             }
     in prepared
         { uiBlocks = prepared.uiBlocks Seq.|> block

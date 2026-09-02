@@ -63,7 +63,7 @@ import Agent.TUI.Model
       RetryCountdown(retryCountdownBlockId),
       UiBlock(blockId, blockTimestamp, blockTitle, blockKind, blockState,
               blockDetail, blockExpanded, blockBody),
-      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus) )
+      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus, uiInspectionGroups) )
 import Agent.TUI.Motion
     ( foregroundIndicator,
       nativeProgressAnimationEnabled,
@@ -568,6 +568,12 @@ cacheableBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool
 cacheableBlock state target ui block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+        -- A completed tail inspection can still accept another adjacent call.
+        -- Keep it out of Brick's cache until the reducer closes the group.
+        && not
+            ( block.blockKind == BlockInspect
+                && Map.member block.blockId ui.uiInspectionGroups
+            )
         && maybe
             True
             ((/= block.blockId) . (.retryCountdownBlockId))
