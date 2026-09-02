@@ -9,6 +9,7 @@ module Agent.CLI.Subagents.Runtime.Types
 
 import Agent.CLI.Compaction (OccupancySnapshot)
 import Agent.CLI.Options (ApprovalPolicy, CliOptions)
+import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.CLI.Session (LegacySubagentTarget)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop (BackendSnapshot)
@@ -55,6 +56,7 @@ type SubagentStoreRoot = IORef (Maybe OsPath)
 -- | Provider-neutral dependencies shared by all child-agent backends.
 data SubagentRuntime = SubagentRuntime
     { subagentOptions :: !CliOptions
+    , subagentNetworkRecovery :: !(Maybe NetworkRecovery)
     , subagentGhciEnabled :: !(IORef Bool)
     , subagentBashEnabled :: !(IORef Bool)
     , subagentPolicy :: !(IORef ApprovalPolicy)

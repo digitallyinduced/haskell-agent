@@ -29,6 +29,7 @@ import Agent.CLI.GatewayClient (GatewayModelAccess)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.ModelConfig (ModelCatalog)
+import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.OpenAI.Models.Types (ModelInfo)
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -183,6 +184,7 @@ data SessionRequest = SessionRequest
 
 data StartupRuntime = StartupRuntime
     { startupToolEnv :: !ToolEnv
+    , startupNetworkRecovery :: !(Maybe NetworkRecovery)
     , startupDatabaseStore :: !Store
     , startupInterrupt :: !InterruptState
     , startupEscPaused :: !(IORef Bool)

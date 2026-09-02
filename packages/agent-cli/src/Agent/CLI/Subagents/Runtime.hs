@@ -14,7 +14,7 @@ import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
     ( autoCompactOpenAiBackendWithSender )
-import Agent.CLI.Connectivity (withConnectionRecovery)
+import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
 import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
 import Agent.CLI.Request (requestParams)
@@ -658,13 +658,17 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                         turnState tokenProvider request)
                                 (pure childParams)
                         baseBackend =
-                            if gatewayOnly
-                                then websocketBackend
-                                else
-                                    openAiBackendWithTransportFallback
-                                        httpFallbackActive
-                                        websocketBackend
-                                        httpBackend
+                            -- Keep recovery below automatic compaction so a
+                            -- path change cannot replay a remote checkpoint.
+                            withConnectionRecoveryOn
+                                runtime.subagentNetworkRecovery $
+                                if gatewayOnly
+                                    then websocketBackend
+                                    else
+                                        openAiBackendWithTransportFallback
+                                            httpFallbackActive
+                                            websocketBackend
+                                            httpBackend
                         compactSender request =
                             if gatewayOnly
                                 then
@@ -693,7 +697,7 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                 baseBackend
                         backend =
                             withCodexTurnStateScope (pure turnState) $
-                                withConnectionRecovery compactingBackend
+                                compactingBackend
                     runPreparedChild
                         runtime env prepared.preparedSession
                         prepared.preparedToolEnv toolRegistry
@@ -859,7 +863,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
                     let backend =
-                            withConnectionRecovery $
+                            withConnectionRecoveryOn
+                                runtime.subagentNetworkRecovery $
                                 mkBackend childParams
                     runPreparedChild
                         runtime env prepared.preparedSession

@@ -24,7 +24,7 @@ import Agent.CLI.Command
       SlashCatalog(slashCatalogToolNames) )
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
-import Agent.CLI.Connectivity ()
+import Agent.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()

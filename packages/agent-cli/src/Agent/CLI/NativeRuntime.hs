@@ -20,6 +20,12 @@ import Agent.CLI.Options
     , CliOptions(..)
     , parseArgs
     )
+import Agent.Connectivity.NetworkPath
+    ( NetworkRecoveryMonitor
+    , closeNetworkRecoveryMonitor
+    , networkRecovery
+    , newNetworkRecoveryMonitor
+    )
 import Agent.CLI.Runtime.Orchestration (runAgentWithRuntime)
 import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..)
@@ -57,6 +63,7 @@ import System.OsPath (OsPath)
 data NativeProcessRuntime = NativeProcessRuntime
     { nativeMcpSupervisor :: !MCP.McpSupervisor
     , nativeSessionThreads :: !SessionThreadManager
+    , nativeNetworkRecovery :: !NetworkRecoveryMonitor
     , nativeStartCleanup :: !(IO () -> IO ())
     , nativeMcpElicitation
         :: !(IORef (Maybe
@@ -80,19 +87,27 @@ newNativeProcessRuntime root = do
             if shouldStart
                 then putMVar cleanupRequest action
                 else pure ()
+    networkMonitor <-
+        newNetworkRecoveryMonitor
+            `onException` closeCleanupWorker
     mcpSupervisor <-
         MCP.newMcpSupervisorWith
             MCP.defaultMcpHostHooks
                 { MCP.mcpHostElicit = readIORef elicitationRef }
-            `onException` closeCleanupWorker
+            `onException`
+                (closeNetworkRecoveryMonitor networkMonitor
+                    `finally` closeCleanupWorker)
     sessionThreads <-
         newSessionThreadManager root
             `onException`
                 (MCP.closeMcpSupervisor mcpSupervisor
-                    `finally` closeCleanupWorker)
+                    `finally`
+                        (closeNetworkRecoveryMonitor networkMonitor
+                            `finally` closeCleanupWorker))
     pure NativeProcessRuntime
         { nativeMcpSupervisor = mcpSupervisor
         , nativeSessionThreads = sessionThreads
+        , nativeNetworkRecovery = networkMonitor
         , nativeStartCleanup = startCleanup
         , nativeMcpElicitation = elicitationRef
         , nativeCleanupWorker = cleanupWorker
@@ -103,9 +118,12 @@ closeNativeProcessRuntime runtime =
     closeSessionThreadManager runtime.nativeSessionThreads
         `finally`
             (MCP.closeMcpSupervisor runtime.nativeMcpSupervisor
-                `finally` do
-                    cancel runtime.nativeCleanupWorker
-                    void (waitCatch runtime.nativeCleanupWorker))
+                `finally`
+                    (closeNetworkRecoveryMonitor
+                        runtime.nativeNetworkRecovery
+                        `finally` do
+                            cancel runtime.nativeCleanupWorker
+                            void (waitCatch runtime.nativeCleanupWorker)))
 
 restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
 restartNativeMcpRuntime runtime =
@@ -128,6 +146,8 @@ runNativeAgent runtime output cwd hooks args =
                     , processSessionThreads = runtime.nativeSessionThreads
                     , processStartCleanup = runtime.nativeStartCleanup
                     , processMcpElicitation = runtime.nativeMcpElicitation
+                    , processNetworkRecovery =
+                        networkRecovery runtime.nativeNetworkRecovery
                     }
                 (nativeRunMode output cwd hooks)
                 options

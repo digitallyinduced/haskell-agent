@@ -31,7 +31,7 @@ import Agent.CLI.Config
       McpServerConfig(..),
       loadHarnessConfig,
       useProgressiveMcp )
-import Agent.CLI.Connectivity ()
+import Agent.Connectivity ()
 import Agent.CLI.Database ( databaseTools )
 import Agent.CLI.Database.Store
     (DatabaseScopes, databaseToolsEnvForStore)

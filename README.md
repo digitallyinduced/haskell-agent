@@ -386,6 +386,11 @@ and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
 
+`agent-connectivity` wraps individual provider submissions with replay-safe
+retry policy. On macOS it also uses `NWPathMonitor` to wake an interrupted
+submission as soon as the network path recovers; other platforms retain the
+portable polling fallback.
+
 `agent-cli-runtime` is the headless frontend library shared by the terminal
 CLI and gateways. Interactive parsing, rendering, and TTY state remain in
 `agent-cli`, so Cabal builds of gateway libraries do not depend on or rebuild
