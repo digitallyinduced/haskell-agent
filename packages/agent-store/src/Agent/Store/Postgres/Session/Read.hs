@@ -16,6 +16,7 @@ module Agent.Store.Postgres.Session.Read
     , loadSessions
     , loadSessionMetadataMany
     , loadSessionMetadata
+    , loadSessionMetadataForBoundary
     , loadLatestSessionPromptEpoch
     , loadActiveSession
     , loadActiveSessionWithImplementation
@@ -165,6 +166,23 @@ loadSessionMetadata pool sessionKey =
     withSession pool $
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement sessionKey loadMetadataStatement
+
+-- | Load metadata only when the row belongs to the caller's exact routing
+-- boundary. The authorization predicate is part of the SQL statement, so an
+-- unauthorized row is never returned to the application for post-filtering.
+loadSessionMetadataForBoundary
+    :: StorePool
+    -> Text
+    -> Maybe Text
+    -> Text
+    -> IO (Either StoreError (Maybe SessionListEntry))
+loadSessionMetadataForBoundary
+        pool gatewayConnection gatewayIdentity sessionKey =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement
+                (sessionKey, gatewayConnection, gatewayIdentity)
+                loadMetadataForBoundaryStatement
 
 loadSessionMetadataMany
     :: StorePool
@@ -472,7 +490,7 @@ archiveFilterParameter = \case
     SessionArchived -> "archived"
     SessionAll -> "all"
 
-toSessionListPage :: Int -> [SessionMetadata] -> SessionListPage
+toSessionListPage :: Int -> [SessionListEntry] -> SessionListPage
 toSessionListPage limit rows =
     let
         sessions = take limit rows
@@ -480,8 +498,9 @@ toSessionListPage limit rows =
             | length rows <= limit = Nothing
             | otherwise = case reverse sessions of
                 [] -> Nothing
-                metadata : _ ->
-                    Just SessionListCursor
+                entry : _ ->
+                    let metadata = entry.sessionListEntryMetadata
+                    in Just SessionListCursor
                         { sessionListCursorUpdatedAt =
                             metadata.sessionMetadataUpdatedAt
                         , sessionListCursorKey =
@@ -812,6 +831,29 @@ loadMetadataStatement = mkStatement
     (Decoders.rowMaybe metadataRow)
     True
 
+loadMetadataForBoundaryStatement
+    :: Statement (Text, Text, Maybe Text) (Maybe SessionListEntry)
+loadMetadataForBoundaryStatement = mkStatement
+    (metadataWithArchiveSelectSql
+        <> " WHERE session_key = $1 AND deleted_at IS NULL\
+           \ AND (\
+           \   ($3 IS NULL\
+           \     AND connection_id <> $2\
+           \     AND gateway_identity IS NULL)\
+           \   OR ($3 IS NOT NULL\
+           \     AND connection_id = $2\
+           \     AND gateway_identity = $3)\
+           \ )")
+    ( ((\(sessionKey, _, _) -> sessionKey)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, gatewayConnection, _) -> gatewayConnection)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, _, gatewayIdentity) -> gatewayIdentity)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+    )
+    (Decoders.rowMaybe sessionListEntryRow)
+    True
+
 listMetadataStatement :: Statement () [SessionMetadata]
 listMetadataStatement = mkStatement
     (metadataSelectSql
@@ -824,9 +866,9 @@ listMetadataStatement = mkStatement
 listMetadataForBoundaryStatement
     :: Statement
         (Text, Maybe Text, Text, Maybe UTCTime, Maybe Text, Int64)
-        [SessionMetadata]
+        [SessionListEntry]
 listMetadataForBoundaryStatement = mkStatement
-    (metadataSelectSql
+    (metadataWithArchiveSelectSql
         <> " WHERE deleted_at IS NULL\
            \ AND (\
            \   ($2 IS NULL\
@@ -861,7 +903,7 @@ listMetadataForBoundaryStatement = mkStatement
         <> ((\(_, _, _, _, _, value) -> value)
             >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
-    (Decoders.rowList metadataRow)
+    (Decoders.rowList sessionListEntryRow)
     True
 
 listArchiveKeysStatement :: Statement () [Text]
@@ -876,15 +918,30 @@ listArchiveKeysStatement = mkStatement
 
 metadataSelectSql :: Text
 metadataSelectSql =
-    "SELECT session_key, session_schema_version, created_at, updated_at,\
+    "SELECT " <> metadataSelectColumnsSql <> " FROM harness.sessions"
+
+metadataWithArchiveSelectSql :: Text
+metadataWithArchiveSelectSql =
+    "SELECT "
+        <> metadataSelectColumnsSql
+        <> ", archived_at IS NOT NULL FROM harness.sessions"
+
+metadataSelectColumnsSql :: Text
+metadataSelectColumnsSql =
+    "session_key, session_schema_version, created_at, updated_at,\
     \ provider, connection_id, gateway_identity, model_id,\
     \ transport_model_id, dialect,\
     \ legacy_target_provider, legacy_target_connection,\
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
     \ title_user_turns, last_response_id, input_tokens, output_tokens,\
-    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns\
-    \ FROM harness.sessions"
+    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns"
+
+sessionListEntryRow :: Decoders.Row SessionListEntry
+sessionListEntryRow =
+    SessionListEntry
+        <$> metadataRow
+        <*> Decoders.column (Decoders.nonNullable Decoders.bool)
 
 loadTurnsManyStatement
     :: Statement [Text] (Vector.Vector (Text, TurnRow))

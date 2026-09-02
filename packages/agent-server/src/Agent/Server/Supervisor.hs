@@ -6,15 +6,21 @@ module Agent.Server.Supervisor
     ( Supervisor
     , SupervisorConfig(..)
     , SubmitError(..)
+    , CheckedSubmitError(..)
+    , SessionMutationError(..)
     , TurnControl(..)
     , TurnRunner
+    , TurnBoundaryGuard
     , newSupervisor
+    , newSupervisorWithBoundaryGuard
     , closeSupervisor
     , submitTurn
+    , submitTurnChecked
     , cancelTurn
     , lookupTurn
     , listTurns
     , sessionHasActiveTurn
+    , withSessionMutation
     , listHumanRequests
     , resolveHumanRequest
     , lookupTurnAgents
@@ -37,21 +43,22 @@ import Control.Concurrent.MVar
     )
 import Control.Concurrent.STM
     ( STM
-    , TChan
+    , TBQueue
     , TMVar
     , TVar
     , atomically
-    , dupTChan
+    , isFullTBQueue
     , modifyTVar'
-    , newBroadcastTChanIO
     , newEmptyTMVar
+    , newTBQueue
     , newTVarIO
     , putTMVar
+    , readTBQueue
     , readTVar
     , retry
     , takeTMVar
     , tryPutTMVar
-    , writeTChan
+    , writeTBQueue
     , writeTVar
     )
 import Control.Exception.Safe
@@ -60,7 +67,7 @@ import Control.Exception.Safe
     , mask
     , tryAny
     )
-import Control.Monad (forM_, void)
+import Control.Monad (forM_, void, when)
 import Data.Aeson (Value, object, toJSON, (.=))
 import Data.Foldable (toList)
 import Data.List (sortOn)
@@ -75,12 +82,23 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Time.Clock (UTCTime, getCurrentTime)
+import System.Timeout (timeout)
 
 data SupervisorConfig = SupervisorConfig
     { supervisorMaxConcurrentTurns :: !Int
     , supervisorMaxQueuedTurns :: !Int
     , supervisorEventReplayLimit :: !Int
     }
+    deriving (Eq, Show)
+
+data CheckedSubmitError validationError
+    = SubmitValidationFailed !validationError
+    | SubmitValidationRejected !SubmitError
+    deriving (Eq, Show)
+
+data SessionMutationError
+    = SessionMutationBusy
+    | SessionMutationSupervisorClosed
     deriving (Eq, Show)
 
 data SubmitError
@@ -92,52 +110,78 @@ data SubmitError
 data TurnControl = TurnControl
     { turnControlEmit :: !(Text -> Value -> IO ())
     , turnControlRequestInput
-        :: !(HumanRequestSpec -> IO (Either Text Text))
+        :: !(HumanRequestSpec -> IO (Either Text HumanResponse))
     , turnControlRegisterCancel :: !(IO () -> IO ())
-    , turnControlSetAgents :: !(Value -> IO ())
+    , turnControlSetAgents :: !(IO Value -> IO ())
     }
 
 type TurnRunner = TurnControl -> TurnSpec -> IO (Either Text ())
+
+-- | Run an action only while the exact admitted gateway boundary is leased.
+--
+-- Production uses the credential turn lease here so the runtime invocation
+-- and its terminal state/event commit share one uninterrupted boundary.
+type TurnBoundaryGuard =
+    forall value.
+    GatewayBoundary ->
+    IO value ->
+    IO (Either Text value)
 
 data TurnSlot = TurnSlot
     { turnSlotSpec :: !TurnSpec
     , turnSlotRecord :: !TurnRecord
     , turnSlotCancel :: !(Maybe (IO ()))
-    , turnSlotAgents :: !Value
+    , turnSlotAgents :: !(IO Value)
     }
 
 data PendingInput = PendingInput
     { pendingInputView :: !HumanRequest
-    , pendingInputReply :: !(TMVar (Either Text Text))
+    , pendingInputReply :: !(TMVar (Either Text HumanResponse))
     }
 
 data EventBuffer = EventBuffer
     { eventBufferReplay :: !(Seq ServerEvent)
+    , eventBufferNextId :: !Integer
+    }
+
+data EventSubscriber = EventSubscriber
+    { eventSubscriberBoundary :: !GatewayBoundary
+    , eventSubscriberQueue :: !(TBQueue ServerEvent)
     }
 
 data SupervisorState = SupervisorState
     { stateNextTurnId :: !Integer
     , stateNextRequestId :: !Integer
-    , stateNextEventId :: !Integer
     , stateQueue :: !(Seq TurnId)
     , stateTurns :: !(Map TurnId TurnSlot)
-    , stateActiveSessions :: !(Set Text)
+    , stateActiveSessions :: !(Set (GatewayBoundary, Text))
     , stateWorkers :: !(Map TurnId (Async ()))
     , statePendingInputs :: !(Map RequestId PendingInput)
     , stateEvents :: !(Map GatewayBoundary EventBuffer)
+    , stateNextSubscriberId :: !Integer
+    , stateSubscribers :: !(Map Integer EventSubscriber)
     , stateClosed :: !Bool
     }
 
 data Supervisor = Supervisor
     { supervisorConfig :: !SupervisorConfig
     , supervisorRunner :: !TurnRunner
+    , supervisorBoundaryGuard :: !TurnBoundaryGuard
     , supervisorState :: !(TVar SupervisorState)
-    , supervisorBroadcast :: !(TChan ServerEvent)
     , supervisorDispatcher :: !(MVar (Async ()))
     }
 
 newSupervisor :: SupervisorConfig -> TurnRunner -> IO Supervisor
-newSupervisor config runner
+newSupervisor config =
+    newSupervisorWithBoundaryGuard config
+        (\_ action -> Right <$> action)
+
+newSupervisorWithBoundaryGuard
+    :: SupervisorConfig
+    -> TurnBoundaryGuard
+    -> TurnRunner
+    -> IO Supervisor
+newSupervisorWithBoundaryGuard config boundaryGuard runner
     | config.supervisorMaxConcurrentTurns < 1 =
         fail "supervisorMaxConcurrentTurns must be positive"
     | config.supervisorMaxQueuedTurns < 1 =
@@ -148,22 +192,22 @@ newSupervisor config runner
         state <- newTVarIO SupervisorState
             { stateNextTurnId = 1
             , stateNextRequestId = 1
-            , stateNextEventId = 1
             , stateQueue = Seq.empty
             , stateTurns = Map.empty
             , stateActiveSessions = Set.empty
             , stateWorkers = Map.empty
             , statePendingInputs = Map.empty
             , stateEvents = Map.empty
+            , stateNextSubscriberId = 1
+            , stateSubscribers = Map.empty
             , stateClosed = False
             }
-        broadcast <- newBroadcastTChanIO
         dispatcherVar <- newEmptyMVar
         let supervisor = Supervisor
                 { supervisorConfig = config
                 , supervisorRunner = runner
+                , supervisorBoundaryGuard = boundaryGuard
                 , supervisorState = state
-                , supervisorBroadcast = broadcast
                 , supervisorDispatcher = dispatcherVar
                 }
         dispatcher <- async (restore (dispatcherLoop supervisor))
@@ -216,7 +260,9 @@ closeSupervisor supervisor = mask \restore -> do
                             })
                         activeSlots
                 writeTVar supervisor.supervisorState state'
-                forM_ events (writeTChan supervisor.supervisorBroadcast)
+                forM_
+                    (sortOn (.serverEventId) events)
+                    (publishToSubscribers state')
                 pure
                     ( Map.elems state.stateWorkers
                     , cancellationActions
@@ -224,25 +270,79 @@ closeSupervisor supervisor = mask \restore -> do
                     )
     forM_ replies \reply ->
         atomically (void (tryPutTMVar reply (Left "server is shutting down")))
-    -- Ask the runtime to interrupt in-band before the structured cancellation.
-    forM_ cancellations \action -> void (tryAny action)
-    forM_ workers cancel
-    forM_ workers (void . waitCatch)
-    dispatcher <- readMVar supervisor.supervisorDispatcher
-    cancel dispatcher
-    void (restore (waitCatch dispatcher))
+    let interruptInBand =
+            forM_ cancellations \action ->
+                void $
+                    timeout cancelHookTimeoutMicros
+                        (void (tryAny (restore action)))
+        stopWorkers = do
+            forM_ workers cancel
+            forM_ workers (void . waitCatch)
+        stopDispatcher = do
+            dispatcher <- readMVar supervisor.supervisorDispatcher
+            cancel dispatcher
+            void (waitCatch dispatcher)
+    -- A stuck provider interrupt must not skip structured worker teardown.
+    (interruptInBand `finally` stopWorkers)
+        `finally` stopDispatcher
 
 submitTurn
     :: Supervisor
     -> TurnSpec
     -> IO (Either SubmitError TurnRecord)
-submitTurn supervisor spec = do
+submitTurn supervisor = enqueueTurn supervisor False
+
+-- | Validate a session while holding the same per-boundary reservation that
+-- is atomically converted into a queued turn. This prevents delete/patch/fork
+-- from interleaving between durable validation and turn admission.
+submitTurnChecked
+    :: Supervisor
+    -> TurnSpec
+    -> IO (Either validationError ())
+    -> IO (Either (CheckedSubmitError validationError) TurnRecord)
+submitTurnChecked supervisor spec validate = do
+    reserved <-
+        withSessionMutation
+            supervisor
+            spec.turnSpecBoundary
+            spec.turnSpecSessionId
+            (validate >>= \case
+                Left err ->
+                    pure (Left (SubmitValidationFailed err))
+                Right () ->
+                    fmap
+                        (either
+                            (Left . SubmitValidationRejected)
+                            Right)
+                        (enqueueTurn supervisor True spec))
+    pure case reserved of
+        Left SessionMutationBusy ->
+            Left (SubmitValidationRejected SubmitSessionBusy)
+        Left SessionMutationSupervisorClosed ->
+            Left (SubmitValidationRejected SubmitSupervisorClosed)
+        Right result -> result
+
+enqueueTurn
+    :: Supervisor
+    -> Bool
+    -> TurnSpec
+    -> IO (Either SubmitError TurnRecord)
+enqueueTurn supervisor reservationHeld spec = do
     now <- getCurrentTime
     atomically do
         state <- readTVar supervisor.supervisorState
+        let key = (spec.turnSpecBoundary, spec.turnSpecSessionId)
+            reserved = Set.member key state.stateActiveSessions
         if state.stateClosed
             then pure (Left SubmitSupervisorClosed)
-            else if sessionBusy spec.turnSpecSessionId state.stateTurns
+            else if reservationHeld && not reserved
+                then pure (Left SubmitSessionBusy)
+            else if
+                (not reservationHeld && reserved)
+                    || sessionBusy
+                        spec.turnSpecBoundary
+                        spec.turnSpecSessionId
+                        state.stateTurns
                 then pure (Left SubmitSessionBusy)
                 else if Seq.length state.stateQueue
                     >= supervisor.supervisorConfig.supervisorMaxQueuedTurns
@@ -269,14 +369,17 @@ submitTurn supervisor spec = do
                                 { turnSlotSpec = spec
                                 , turnSlotRecord = record
                                 , turnSlotCancel = Nothing
-                                , turnSlotAgents = toJSONEmptyArray
+                                , turnSlotAgents = pure toJSONEmptyArray
                                 }
                             withTurn = state
                                 { stateNextTurnId =
                                     state.stateNextTurnId + 1
                                 , stateQueue = state.stateQueue |> turnId
                                 , stateTurns =
-                                    Map.insert turnId slot state.stateTurns
+                                    Map.insert
+                                        turnId
+                                        slot
+                                        (pruneTerminalTurns state.stateTurns)
                                 }
                             (event, state') = appendEventToState
                                 supervisor.supervisorConfig
@@ -288,7 +391,7 @@ submitTurn supervisor spec = do
                                 (object [])
                                 withTurn
                         writeTVar supervisor.supervisorState state'
-                        writeTChan supervisor.supervisorBroadcast event
+                        publishToSubscribers state' event
                         pure (Right record)
 
 cancelTurn
@@ -312,6 +415,8 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
                 | otherwise -> do
                     let record = cancelledRecord now slot.turnSlotRecord
                         slot' = slot { turnSlotRecord = record }
+                        worker =
+                            Map.lookup turnId state.stateWorkers
                         (inputs, retainedInputs) =
                             Map.partition
                                 ((== turnId)
@@ -331,6 +436,16 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
                                 , stateTurns =
                                     Map.insert turnId slot' state.stateTurns
                                 , statePendingInputs = retainedInputs
+                                , stateActiveSessions =
+                                    case worker of
+                                        Nothing ->
+                                            Set.delete
+                                                ( boundary
+                                                , record.turnRecordSessionId
+                                                )
+                                                state.stateActiveSessions
+                                        Just _ ->
+                                            state.stateActiveSessions
                                 }
                     forM_ (Map.elems inputs) \input ->
                         void
@@ -338,18 +453,28 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
                                 input.pendingInputReply
                                 (Left "turn cancelled"))
                     writeTVar supervisor.supervisorState state'
-                    writeTChan supervisor.supervisorBroadcast event
+                    publishToSubscribers state' event
                     pure
                         (Right
                             ( record
                             , slot.turnSlotCancel
-                            , Map.lookup turnId state.stateWorkers
+                            , worker
                             ))
     case outcome of
         Left err -> pure (Left err)
         Right (record, cancellation, worker) -> do
-            forM_ cancellation \action -> void (tryAny (restore action))
-            forM_ worker cancel
+            let stopWorker =
+                    forM_ worker \running -> do
+                        cancel running
+                        void (waitCatch running)
+                interruptInBand =
+                    forM_ cancellation \action ->
+                        void $
+                            timeout cancelHookTimeoutMicros
+                                (void (tryAny (restore action)))
+            -- Preserve in-band cancellation when it is responsive, but always
+            -- deliver and join the structured cancellation.
+            interruptInBand `finally` stopWorker
             pure (Right record)
 
 lookupTurn
@@ -392,13 +517,60 @@ sessionHasActiveTurn supervisor boundary sessionId =
     atomically do
         state <- readTVar supervisor.supervisorState
         pure $
-            any
+            Set.member
+                (boundary, sessionId)
+                state.stateActiveSessions
+                || any
                 (\slot ->
                     slot.turnSlotRecord.turnRecordBoundary == boundary
                         && slot.turnSlotRecord.turnRecordSessionId == sessionId
                         && isActiveStatus
                             slot.turnSlotRecord.turnRecordStatus)
                 (Map.elems state.stateTurns)
+
+-- | Reserve a session for a mutation, atomically excluding turn admission.
+--
+-- The key includes the exact gateway boundary so equal session identifiers in
+-- two credential identities do not interfere with one another.
+withSessionMutation
+    :: Supervisor
+    -> GatewayBoundary
+    -> Text
+    -> IO value
+    -> IO (Either SessionMutationError value)
+withSessionMutation supervisor boundary sessionId action =
+    mask \restore -> do
+        acquired <- atomically do
+            state <- readTVar supervisor.supervisorState
+            let key = (boundary, sessionId)
+            if state.stateClosed
+                then pure (Left SessionMutationSupervisorClosed)
+                else if
+                    Set.member key state.stateActiveSessions
+                        || sessionBusy boundary sessionId state.stateTurns
+                    then pure (Left SessionMutationBusy)
+                    else do
+                        writeTVar supervisor.supervisorState
+                            state
+                                { stateActiveSessions =
+                                    Set.insert key state.stateActiveSessions
+                                }
+                        pure (Right ())
+        case acquired of
+            Left err -> pure (Left err)
+            Right () ->
+                (Right <$> restore action)
+                    `finally`
+                        atomically
+                            (modifyTVar'
+                                supervisor.supervisorState
+                                (\state ->
+                                    state
+                                        { stateActiveSessions =
+                                            Set.delete
+                                                (boundary, sessionId)
+                                                state.stateActiveSessions
+                                        }))
 
 listHumanRequests
     :: Supervisor
@@ -419,9 +591,9 @@ resolveHumanRequest
     :: Supervisor
     -> GatewayBoundary
     -> RequestId
-    -> Text
+    -> HumanResponse
     -> IO (Either Text HumanRequest)
-resolveHumanRequest supervisor boundary requestId answer = do
+resolveHumanRequest supervisor boundary requestId response = do
     now <- getCurrentTime
     atomically do
         state <- readTVar supervisor.supervisorState
@@ -433,11 +605,11 @@ resolveHumanRequest supervisor boundary requestId answer = do
                 | not
                     (validHumanAnswer
                         pending.pendingInputView.humanRequestOptions
-                        answer) ->
+                        response.humanResponseDecision) ->
                     pure (Left "decision is not one of the allowed options")
                 | otherwise -> do
                     accepted <-
-                        tryPutTMVar pending.pendingInputReply (Right answer)
+                        tryPutTMVar pending.pendingInputReply (Right response)
                     if not accepted
                         then pure (Left "request has already been resolved")
                         else do
@@ -465,7 +637,7 @@ resolveHumanRequest supervisor boundary requestId answer = do
                                         , stateTurns = turns'
                                         }
                             writeTVar supervisor.supervisorState state'
-                            writeTChan supervisor.supervisorBroadcast event
+                            publishToSubscribers state' event
                             pure (Right request)
 
 lookupTurnAgents
@@ -474,13 +646,14 @@ lookupTurnAgents
     -> TurnId
     -> IO (Maybe Value)
 lookupTurnAgents supervisor boundary turnId =
-    atomically do
+    atomically (do
         state <- readTVar supervisor.supervisorState
         pure do
             slot <- Map.lookup turnId state.stateTurns
             if slot.turnSlotRecord.turnRecordBoundary == boundary
                 then Just slot.turnSlotAgents
-                else Nothing
+                else Nothing)
+        >>= sequence
 
 publishEvent
     :: Supervisor
@@ -494,48 +667,81 @@ publishEvent supervisor boundary eventType turnId sessionId value = do
     now <- getCurrentTime
     atomically do
         state <- readTVar supervisor.supervisorState
-        let (event, state') = appendEventToState
-                supervisor.supervisorConfig
-                now
-                boundary
-                eventType
-                turnId
-                sessionId
-                value
-                state
-        writeTVar supervisor.supervisorState state'
-        writeTChan supervisor.supervisorBroadcast event
+        when (not state.stateClosed) do
+            let (event, state') = appendEventToState
+                    supervisor.supervisorConfig
+                    now
+                    boundary
+                    eventType
+                    turnId
+                    sessionId
+                    value
+                    state
+            writeTVar supervisor.supervisorState state'
+            publishToSubscribers state' event
 
 subscribeEvents
     :: Supervisor
     -> GatewayBoundary
     -> Maybe Integer
-    -> IO (EventSubscription (TChan ServerEvent))
+    -> IO (EventSubscription (TBQueue ServerEvent))
 subscribeEvents supervisor boundary lastEventId =
     atomically do
         state <- readTVar supervisor.supervisorState
         let buffer =
                 Map.findWithDefault
-                    (EventBuffer Seq.empty)
+                    (EventBuffer Seq.empty 1)
                     boundary
                     state.stateEvents
             replay = buffer.eventBufferReplay
             oldest = (.serverEventId) <$> Seq.lookup 0 replay
+            latest = (.serverEventId) <$> Seq.lookup
+                (Seq.length replay - 1)
+                replay
             resetRequired = case (lastEventId, oldest) of
                 (Nothing, _) -> False
                 (Just requested, Nothing) -> requested > 0
-                (Just requested, Just firstId) -> requested < firstId - 1
+                (Just requested, Just firstId) ->
+                    requested < firstId - 1
+                        || maybe False (requested >) latest
             replayEvents = case lastEventId of
                 Nothing -> []
                 Just requested ->
                     filter
                         ((> requested) . (.serverEventId))
                         (toList replay)
-        channel <- dupTChan supervisor.supervisorBroadcast
+            subscriberId = state.stateNextSubscriberId
+        channel <-
+            newTBQueue
+                (fromIntegral
+                    supervisor.supervisorConfig.supervisorEventReplayLimit)
+        writeTVar supervisor.supervisorState state
+            { stateNextSubscriberId = subscriberId + 1
+            , stateSubscribers =
+                Map.insert
+                    subscriberId
+                    EventSubscriber
+                        { eventSubscriberBoundary = boundary
+                        , eventSubscriberQueue = channel
+                        }
+                    state.stateSubscribers
+            }
         pure EventSubscription
             { subscriptionReplay = replayEvents
             , subscriptionResetRequired = resetRequired
+            , subscriptionLatestEventId = latest
             , subscriptionChannel = channel
+            , subscriptionClose =
+                atomically $
+                    modifyTVar'
+                        supervisor.supervisorState
+                        (\current ->
+                            current
+                                { stateSubscribers =
+                                    Map.delete
+                                        subscriberId
+                                        current.stateSubscribers
+                                })
             }
 
 dispatcherLoop :: Supervisor -> IO ()
@@ -544,9 +750,6 @@ dispatcherLoop supervisor = do
     case next of
         Nothing -> pure ()
         Just (turnId, spec) -> do
-            startedAt <- getCurrentTime
-            atomically $
-                markTurnStarted supervisor startedAt turnId spec
             spawnTrackedWorker supervisor turnId spec
             dispatcherLoop supervisor
 
@@ -581,11 +784,20 @@ reserveRunnable supervisor = do
                                         , stateTurns =
                                             Map.insert
                                                 turnId
-                                                slot { turnSlotRecord = record }
+                                                slot
+                                                    { turnSlotRecord = record
+                                                    , turnSlotSpec =
+                                                        slot.turnSlotSpec
+                                                            { turnSpecPrompt =
+                                                                ""
+                                                            }
+                                                    }
                                                 state.stateTurns
                                         , stateActiveSessions =
                                             Set.insert
-                                                sessionId
+                                                ( slot.turnSlotRecord.turnRecordBoundary
+                                                , sessionId
+                                                )
                                                 state.stateActiveSessions
                                         }
                                 writeTVar supervisor.supervisorState state'
@@ -621,7 +833,7 @@ markTurnStarted supervisor now turnId spec =
                 (object [])
                 withStarted
         writeTVar supervisor.supervisorState state'
-        writeTChan supervisor.supervisorBroadcast event
+        publishToSubscribers state' event
 
 spawnTrackedWorker :: Supervisor -> TurnId -> TurnSpec -> IO ()
 spawnTrackedWorker supervisor turnId spec = mask \restore -> do
@@ -629,26 +841,46 @@ spawnTrackedWorker supervisor turnId spec = mask \restore -> do
     worker <- async do
         atomically (takeTMVar gate)
         restore (executeTurn supervisor turnId spec)
-    atomically do
-        modifyTVar' supervisor.supervisorState \state ->
-            state
-                { stateWorkers =
-                    Map.insert turnId worker state.stateWorkers
-                }
-        putTMVar gate ()
+    accepted <- atomically do
+        state <- readTVar supervisor.supervisorState
+        case Map.lookup turnId state.stateTurns of
+            Just slot
+                | not state.stateClosed
+                , slot.turnSlotRecord.turnRecordStatus == TurnRunning
+                , slot.turnSlotRecord.turnRecordBoundary
+                    == spec.turnSpecBoundary
+                , slot.turnSlotRecord.turnRecordSessionId
+                    == spec.turnSpecSessionId
+                , Set.member
+                    (spec.turnSpecBoundary, spec.turnSpecSessionId)
+                    state.stateActiveSessions -> do
+                        writeTVar supervisor.supervisorState
+                            state
+                                { stateWorkers =
+                                    Map.insert
+                                        turnId worker state.stateWorkers
+                                }
+                        putTMVar gate ()
+                        pure True
+            _ -> pure False
+    if accepted
+        then pure ()
+        else do
+            cancel worker
+            void (waitCatch worker)
 
 executeTurn :: Supervisor -> TurnId -> TurnSpec -> IO ()
 executeTurn supervisor turnId spec =
-    finally run finish
+    finally guardedRun finish
   where
     control = TurnControl
         { turnControlEmit = \eventType value ->
-            publishEvent
+            publishTurnEvent
                 supervisor
                 spec.turnSpecBoundary
+                turnId
+                spec.turnSpecSessionId
                 eventType
-                (Just turnId)
-                (Just spec.turnSpecSessionId)
                 value
         , turnControlRequestInput =
             requestTurnInput supervisor turnId spec
@@ -664,15 +896,36 @@ executeTurn supervisor turnId spec =
                     (setTurnAgents turnId agents)
         }
 
-    run = do
+    guardedRun = do
+        let Supervisor { supervisorBoundaryGuard = boundaryGuard } =
+                supervisor
+        guarded <-
+            tryAny $
+                boundaryGuard
+                    spec.turnSpecBoundary
+                    runAndFinalize
+                :: IO (Either SomeException (Either Text ()))
+        case guarded of
+            Left _ ->
+                finalizeTurnStateOnly
+                    supervisor
+                    turnId
+                    "gateway boundary validation failed"
+            Right (Left err) ->
+                finalizeTurnStateOnly supervisor turnId err
+            Right (Right ()) -> pure ()
+
+    runAndFinalize = do
+        startedAt <- getCurrentTime
+        atomically $
+            markTurnStarted supervisor startedAt turnId spec
         outcome <-
             tryAny (supervisor.supervisorRunner control spec)
                 :: IO (Either SomeException (Either Text ()))
-        case outcome of
-            Left _ -> finalizeTurn
-                supervisor turnId spec
-                (Left "agent turn terminated unexpectedly")
-            Right result -> finalizeTurn supervisor turnId spec result
+        let result = case outcome of
+                Left _ -> Left "agent turn terminated unexpectedly"
+                Right value -> value
+        finalizeTurn supervisor turnId spec result
 
     finish =
         atomically $
@@ -682,7 +935,9 @@ executeTurn supervisor turnId spec =
                         Map.delete turnId state.stateWorkers
                     , stateActiveSessions =
                         Set.delete
-                            spec.turnSpecSessionId
+                            ( spec.turnSpecBoundary
+                            , spec.turnSpecSessionId
+                            )
                             state.stateActiveSessions
                     }
 
@@ -704,7 +959,11 @@ finalizeTurn supervisor turnId spec result = do
                     pure ()
                 | otherwise -> do
                     let (status, eventType, turnError) = case result of
-                            Left err -> (TurnFailed, "turn.failed", Just err)
+                            Left err ->
+                                ( TurnFailed
+                                , "turn.failed"
+                                , Just (boundedSupervisorText err)
+                                )
                             Right () ->
                                 (TurnCompleted, "turn.completed", Nothing)
                         record =
@@ -732,17 +991,61 @@ finalizeTurn supervisor turnId spec result = do
                                         state.stateTurns
                                 }
                     writeTVar supervisor.supervisorState state'
-                    writeTChan supervisor.supervisorBroadcast event
+                    publishToSubscribers state' event
+
+-- A failed boundary guard must not invoke an event callback for the stale
+-- credential. Retain only a terminal in-memory state, still scoped to the
+-- originally admitted boundary.
+finalizeTurnStateOnly
+    :: Supervisor
+    -> TurnId
+    -> Text
+    -> IO ()
+finalizeTurnStateOnly supervisor turnId err = do
+    now <- getCurrentTime
+    atomically $
+        modifyTVar' supervisor.supervisorState \state ->
+            state
+                { stateTurns =
+                    Map.adjust
+                        (\slot ->
+                            if isTerminalStatus
+                                slot.turnSlotRecord.turnRecordStatus
+                                then slot
+                                else slot
+                                    { turnSlotRecord =
+                                        slot.turnSlotRecord
+                                            { turnRecordStatus = TurnFailed
+                                            , turnRecordFinishedAt = Just now
+                                            , turnRecordError =
+                                                Just
+                                                    (boundedSupervisorText err)
+                                            }
+                                    , turnSlotCancel = Nothing
+                                    })
+                        turnId
+                        state.stateTurns
+                }
 
 requestTurnInput
     :: Supervisor
     -> TurnId
     -> TurnSpec
     -> HumanRequestSpec
-    -> IO (Either Text Text)
+    -> IO (Either Text HumanResponse)
 requestTurnInput supervisor turnId spec requestSpec = do
     now <- getCurrentTime
     reply <- atomically newEmptyTMVar
+    let boundedRequestSpec = HumanRequestSpec
+            { humanRequestSpecKind =
+                requestSpec.humanRequestSpecKind
+            , humanRequestSpecPrompt =
+                boundedSupervisorText
+                    requestSpec.humanRequestSpecPrompt
+            , humanRequestSpecOptions =
+                map boundedSupervisorText
+                    (take 100 requestSpec.humanRequestSpecOptions)
+            }
     requestResult <- atomically do
         state <- readTVar supervisor.supervisorState
         case Map.lookup turnId state.stateTurns of
@@ -765,11 +1068,11 @@ requestTurnInput supervisor turnId spec requestSpec = do
                             , humanRequestBoundary =
                                 spec.turnSpecBoundary
                             , humanRequestKind =
-                                requestSpec.humanRequestSpecKind
+                                boundedRequestSpec.humanRequestSpecKind
                             , humanRequestPrompt =
-                                requestSpec.humanRequestSpecPrompt
+                                boundedRequestSpec.humanRequestSpecPrompt
                             , humanRequestOptions =
-                                requestSpec.humanRequestSpecOptions
+                                boundedRequestSpec.humanRequestSpecOptions
                             , humanRequestCreatedAt = now
                             }
                         pending = PendingInput
@@ -802,7 +1105,7 @@ requestTurnInput supervisor turnId spec requestSpec = do
                                         state.stateTurns
                                 }
                     writeTVar supervisor.supervisorState state'
-                    writeTChan supervisor.supervisorBroadcast event
+                    publishToSubscribers state' event
                     pure (Right ())
     case requestResult of
         Left err -> pure (Left err)
@@ -821,7 +1124,7 @@ setTurnCancellation turnId action state =
                 state.stateTurns
         }
 
-setTurnAgents :: TurnId -> Value -> SupervisorState -> SupervisorState
+setTurnAgents :: TurnId -> IO Value -> SupervisorState -> SupervisorState
 setTurnAgents turnId agents state =
     state
         { stateTurns =
@@ -833,7 +1136,7 @@ setTurnAgents turnId agents state =
 
 pickRunnable
     :: Map TurnId TurnSlot
-    -> Set Text
+    -> Set (GatewayBoundary, Text)
     -> Seq TurnId
     -> Maybe (TurnId, Seq TurnId)
 pickRunnable turns activeSessions = go Seq.empty
@@ -847,10 +1150,44 @@ pickRunnable turns activeSessions = go Seq.empty
                     | slot.turnSlotRecord.turnRecordStatus /= TurnQueued ->
                         go prefix rest
                     | Set.notMember
-                        slot.turnSlotRecord.turnRecordSessionId
+                        ( slot.turnSlotRecord.turnRecordBoundary
+                        , slot.turnSlotRecord.turnRecordSessionId
+                        )
                         activeSessions ->
                         Just (turnId, prefix <> rest)
                     | otherwise -> go (prefix |> turnId) rest
+
+publishTurnEvent
+    :: Supervisor
+    -> GatewayBoundary
+    -> TurnId
+    -> Text
+    -> Text
+    -> Value
+    -> IO ()
+publishTurnEvent
+        supervisor boundary turnId sessionId eventType value = do
+    now <- getCurrentTime
+    atomically do
+        state <- readTVar supervisor.supervisorState
+        case Map.lookup turnId state.stateTurns of
+            Just slot
+                | not state.stateClosed
+                , slot.turnSlotRecord.turnRecordBoundary == boundary
+                , slot.turnSlotRecord.turnRecordSessionId == sessionId
+                , isActiveStatus slot.turnSlotRecord.turnRecordStatus -> do
+                    let (event, state') = appendEventToState
+                            supervisor.supervisorConfig
+                            now
+                            boundary
+                            eventType
+                            (Just turnId)
+                            (Just sessionId)
+                            value
+                            state
+                    writeTVar supervisor.supervisorState state'
+                    publishToSubscribers state' event
+            _ -> pure ()
 
 appendEventToState
     :: SupervisorConfig
@@ -867,11 +1204,11 @@ appendEventToState config now boundary eventType turnId sessionId value state =
   where
     buffer =
         Map.findWithDefault
-            (EventBuffer Seq.empty)
+            (EventBuffer Seq.empty 1)
             boundary
             state.stateEvents
     event = ServerEvent
-        { serverEventId = state.stateNextEventId
+        { serverEventId = buffer.eventBufferNextId
         , serverEventBoundary = boundary
         , serverEventType = eventType
         , serverEventTurnId = turnId
@@ -883,11 +1220,13 @@ appendEventToState config now boundary eventType turnId sessionId value state =
         trimReplay
             config.supervisorEventReplayLimit
             (buffer.eventBufferReplay |> event)
-    buffer' = EventBuffer { eventBufferReplay = replay }
+    buffer' = EventBuffer
+        { eventBufferReplay = replay
+        , eventBufferNextId = buffer.eventBufferNextId + 1
+        }
     state' =
         state
-            { stateNextEventId = state.stateNextEventId + 1
-            , stateEvents =
+            { stateEvents =
                 Map.insert boundary buffer' state.stateEvents
             }
 
@@ -895,13 +1234,51 @@ trimReplay :: Int -> Seq a -> Seq a
 trimReplay limit values =
     Seq.drop (max 0 (Seq.length values - limit)) values
 
-sessionBusy :: Text -> Map TurnId TurnSlot -> Bool
-sessionBusy sessionId =
+publishToSubscribers :: SupervisorState -> ServerEvent -> STM ()
+publishToSubscribers state event =
+    forM_ (Map.elems state.stateSubscribers) \subscriber ->
+        when
+            (subscriber.eventSubscriberBoundary
+                == event.serverEventBoundary) do
+                full <- isFullTBQueue subscriber.eventSubscriberQueue
+                when full (void (readTBQueue subscriber.eventSubscriberQueue))
+                writeTBQueue subscriber.eventSubscriberQueue event
+
+sessionBusy
+    :: GatewayBoundary
+    -> Text
+    -> Map TurnId TurnSlot
+    -> Bool
+sessionBusy boundary sessionId =
     any
         (\slot ->
-            slot.turnSlotRecord.turnRecordSessionId == sessionId
+            slot.turnSlotRecord.turnRecordBoundary == boundary
+                && slot.turnSlotRecord.turnRecordSessionId == sessionId
                 && isActiveStatus slot.turnSlotRecord.turnRecordStatus)
         . Map.elems
+
+pruneTerminalTurns :: Map TurnId TurnSlot -> Map TurnId TurnSlot
+pruneTerminalTurns turns =
+    Map.fromList
+        [ (slot.turnSlotRecord.turnRecordId, slot)
+        | slot <- active <> retainedTerminal
+        ]
+  where
+    slots = Map.elems turns
+    active =
+        filter
+            (isActiveStatus . (.turnSlotRecord.turnRecordStatus))
+            slots
+    retainedTerminal =
+        take maximumRetainedTerminalTurns $
+            sortOn
+                (Down . (.turnSlotRecord.turnRecordCreatedAt))
+                (filter
+                    (isTerminalStatus . (.turnSlotRecord.turnRecordStatus))
+                    slots)
+
+maximumRetainedTerminalTurns :: Int
+maximumRetainedTerminalTurns = 1000
 
 isActiveStatus :: TurnStatus -> Bool
 isActiveStatus = \case
@@ -956,6 +1333,14 @@ resumeWaitingTurn _now slot
 validHumanAnswer :: [Text] -> Text -> Bool
 validHumanAnswer options answer =
     null options || answer `elem` options
+
+boundedSupervisorText :: Text -> Text
+boundedSupervisorText value
+    | Text.length value <= 16384 = value
+    | otherwise = Text.take 16383 value <> "…"
+
+cancelHookTimeoutMicros :: Int
+cancelHookTimeoutMicros = 1000 * 1000
 
 toJSONRequest :: HumanRequest -> Value
 toJSONRequest request = object

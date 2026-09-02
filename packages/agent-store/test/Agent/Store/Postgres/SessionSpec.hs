@@ -535,6 +535,39 @@ spec = describe "PostgreSQL session schema" do
                                     createSession pool pageFixture
                                         `shouldReturn` Right True)
                                 pageFixtures
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                "page-authorized-a" >>= \case
+                                    Right (Just loaded) ->
+                                        do
+                                            loaded.sessionListEntryMetadata.sessionMetadataKey
+                                                `shouldBe` "page-authorized-a"
+                                            loaded.sessionListEntryArchived
+                                                `shouldBe` False
+                                    other ->
+                                        expectationFailure
+                                            ("expected authorized metadata: "
+                                                <> show other)
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                otherPageIdentity
+                                "page-authorized-a"
+                                `shouldReturn` Right Nothing
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                Nothing
+                                "page-authorized-a"
+                                `shouldReturn` Right Nothing
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                "page-direct-newer"
+                                `shouldReturn` Right Nothing
                             listSessionMetadataForBoundary
                                 pool
                                 pageGateway
@@ -548,7 +581,8 @@ spec = describe "PostgreSQL session schema" do
                                                 <> show err)
                                     Right firstPage -> do
                                         map
-                                            (.sessionMetadataKey)
+                                            (\entry ->
+                                                entry.sessionListEntryMetadata.sessionMetadataKey)
                                             firstPage.sessionListPageSessions
                                             `shouldBe`
                                                 [ "page-authorized-a"
@@ -577,7 +611,8 @@ spec = describe "PostgreSQL session schema" do
                                                         )
                                                 Right secondPage -> do
                                                     map
-                                                        (.sessionMetadataKey)
+                                                        (\entry ->
+                                                            entry.sessionListEntryMetadata.sessionMetadataKey)
                                                         secondPage.sessionListPageSessions
                                                         `shouldBe`
                                                             [ "page-authorized-c"
@@ -597,7 +632,8 @@ spec = describe "PostgreSQL session schema" do
                                                 <> show err)
                                     Right otherPage ->
                                         map
-                                            (.sessionMetadataKey)
+                                            (\entry ->
+                                                entry.sessionListEntryMetadata.sessionMetadataKey)
                                             otherPage.sessionListPageSessions
                                             `shouldBe`
                                                 [ "page-other-newer"
@@ -648,7 +684,8 @@ spec = describe "PostgreSQL session schema" do
                                                 <> show err)
                                     Right directPage ->
                                         map
-                                            (.sessionMetadataKey)
+                                            (\entry ->
+                                                entry.sessionListEntryMetadata.sessionMetadataKey)
                                             directPage.sessionListPageSessions
                                             `shouldBe`
                                                 [ "page-direct-a"
@@ -660,6 +697,18 @@ spec = describe "PostgreSQL session schema" do
                                 True
                                 now
                                 `shouldReturn` Right True
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                "page-authorized-a" >>= \case
+                                    Right (Just loaded) ->
+                                        loaded.sessionListEntryArchived
+                                            `shouldBe` True
+                                    other ->
+                                        expectationFailure
+                                            ("expected archived metadata: "
+                                                <> show other)
                             let
                                 expectFilteredPage archiveFilter expected =
                                     listSessionMetadataForBoundary
@@ -675,7 +724,8 @@ spec = describe "PostgreSQL session schema" do
                                                         <> show err)
                                             Right page ->
                                                 map
-                                                    (.sessionMetadataKey)
+                                                    (\entry ->
+                                                        entry.sessionListEntryMetadata.sessionMetadataKey)
                                                     page.sessionListPageSessions
                                                     `shouldBe` expected
                             expectFilteredPage

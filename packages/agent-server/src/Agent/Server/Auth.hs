@@ -4,6 +4,7 @@ module Agent.Server.Auth
     , AuthConfig(..)
     , AuthFailure(..)
     , authorizeRequest
+    , authorizePreflight
     , corsResponseHeaders
     , isCorsPreflight
     ) where
@@ -47,6 +48,35 @@ authorizeRequest :: AuthConfig -> Request -> Either AuthFailure [Header]
 authorizeRequest config request = do
     authorizeOrigin config request
     authorizeMode config.authMode request
+    pure (corsResponseHeaders config request)
+
+-- | CORS preflights do not carry bearer credentials. They may reveal no
+-- application data, but still require an explicitly allowed Origin and, in
+-- loopback mode, a valid Host header.
+authorizePreflight
+    :: AuthConfig
+    -> Request
+    -> Either AuthFailure [Header]
+authorizePreflight config request = do
+    authorizeOrigin config request
+    case lookup "Origin" request.requestHeaders of
+        Nothing -> Left AuthFailure
+            { authFailureStatus = 403
+            , authFailureCode = "origin_not_allowed"
+            , authFailureMessage = "a CORS preflight requires an Origin"
+            }
+        Just origin
+            | origin `Set.member` config.authCorsOrigins -> Right ()
+            | otherwise -> Left AuthFailure
+                { authFailureStatus = 403
+                , authFailureCode = "origin_not_allowed"
+                , authFailureMessage =
+                    "the request Origin is not allowed"
+                }
+    case config.authMode of
+        LoopbackHostAuth allowedHosts ->
+            authorizeMode (LoopbackHostAuth allowedHosts) request
+        BearerTokenAuth _ -> Right ()
     pure (corsResponseHeaders config request)
 
 authorizeMode :: AuthMode -> Request -> Either AuthFailure ()

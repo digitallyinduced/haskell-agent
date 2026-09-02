@@ -10,6 +10,7 @@ module Agent.Server.Types
     , HumanRequestKind(..)
     , humanRequestKindText
     , HumanRequestSpec(..)
+    , HumanResponse(..)
     , HumanRequest(..)
     , ServerEvent(..)
     , EventSubscription(..)
@@ -23,8 +24,10 @@ module Agent.Server.Types
     , archiveFilterText
     ) where
 
+import Agent.CLI.GatewayBoundary (GatewayBoundary(..))
 import Data.Aeson
     ( FromJSON(..)
+    , Object
     , ToJSON(..)
     , Value
     , object
@@ -33,18 +36,12 @@ import Data.Aeson
     , (.:?)
     , (.=)
     )
+import Data.Aeson.Key (Key)
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
-
--- | The exact organization-routing context captured at request admission.
---
--- 'NoGatewayBoundary' intentionally covers only sessions with no gateway
--- identity. 'OrganizationGatewayBoundary' is keyed by the credential identity,
--- not merely by the shared gateway connection id.
-data GatewayBoundary
-    = NoGatewayBoundary
-    | OrganizationGatewayBoundary !Text
-    deriving (Eq, Ord, Show)
 
 newtype TurnId = TurnId { unTurnId :: Text }
     deriving (Eq, Ord, Show)
@@ -123,6 +120,12 @@ data HumanRequestSpec = HumanRequestSpec
     }
     deriving (Eq, Show)
 
+data HumanResponse = HumanResponse
+    { humanResponseDecision :: !Text
+    , humanResponseValue :: !(Maybe Text)
+    }
+    deriving (Eq, Show)
+
 data HumanRequest = HumanRequest
     { humanRequestId :: !RequestId
     , humanRequestTurnId :: !TurnId
@@ -170,7 +173,9 @@ instance ToJSON ServerEvent where
 data EventSubscription channel = EventSubscription
     { subscriptionReplay :: ![ServerEvent]
     , subscriptionResetRequired :: !Bool
+    , subscriptionLatestEventId :: !(Maybe Integer)
     , subscriptionChannel :: !channel
+    , subscriptionClose :: !(IO ())
     }
 
 data ApiError = ApiError
@@ -190,7 +195,11 @@ data CreateSessionRequest = CreateSessionRequest
     deriving (Eq, Show)
 
 instance FromJSON CreateSessionRequest where
-    parseJSON = withObject "CreateSessionRequest" \value ->
+    parseJSON = withObject "CreateSessionRequest" \value -> do
+        rejectUnknownFields
+            "CreateSessionRequest"
+            ["model", "cwd", "effort", "title"]
+            value
         CreateSessionRequest
             <$> value .:? "model"
             <*> value .:? "cwd"
@@ -204,7 +213,11 @@ data PatchSessionRequest = PatchSessionRequest
     deriving (Eq, Show)
 
 instance FromJSON PatchSessionRequest where
-    parseJSON = withObject "PatchSessionRequest" \value ->
+    parseJSON = withObject "PatchSessionRequest" \value -> do
+        rejectUnknownFields
+            "PatchSessionRequest"
+            ["title", "archived"]
+            value
         PatchSessionRequest
             <$> value .:? "title"
             <*> value .:? "archived"
@@ -217,7 +230,11 @@ data ForkSessionRequest = ForkSessionRequest
     deriving (Eq, Show)
 
 instance FromJSON ForkSessionRequest where
-    parseJSON = withObject "ForkSessionRequest" \value ->
+    parseJSON = withObject "ForkSessionRequest" \value -> do
+        rejectUnknownFields
+            "ForkSessionRequest"
+            ["throughTurn", "title", "cwd"]
+            value
         ForkSessionRequest
             <$> value .:? "throughTurn"
             <*> value .:? "title"
@@ -229,7 +246,8 @@ newtype CreateTurnRequest = CreateTurnRequest
     deriving (Eq, Show)
 
 instance FromJSON CreateTurnRequest where
-    parseJSON = withObject "CreateTurnRequest" \value ->
+    parseJSON = withObject "CreateTurnRequest" \value -> do
+        rejectUnknownFields "CreateTurnRequest" ["input"] value
         CreateTurnRequest <$> value .: "input"
 
 data ResolveRequest = ResolveRequest
@@ -239,7 +257,11 @@ data ResolveRequest = ResolveRequest
     deriving (Eq, Show)
 
 instance FromJSON ResolveRequest where
-    parseJSON = withObject "ResolveRequest" \value ->
+    parseJSON = withObject "ResolveRequest" \value -> do
+        rejectUnknownFields
+            "ResolveRequest"
+            ["decision", "value"]
+            value
         ResolveRequest
             <$> value .: "decision"
             <*> value .:? "value"
@@ -255,3 +277,14 @@ archiveFilterText = \case
     ActiveSessions -> "active"
     ArchivedSessions -> "archived"
     AllSessions -> "all"
+
+rejectUnknownFields :: String -> [Key] -> Object -> Parser ()
+rejectUnknownFields typeName allowed value =
+    case filter (`notElem` allowed) (KeyMap.keys value) of
+        [] -> pure ()
+        unknown ->
+            fail
+                ("unknown field(s) in "
+                    <> typeName
+                    <> ": "
+                    <> unwords (map Key.toString unknown))

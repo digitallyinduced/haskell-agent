@@ -23,6 +23,7 @@ common common-options
                       , OverloadedRecordDot
                       , OverloadedStrings
                       , RecordWildCards
+                      , RankNTypes
                       , ScopedTypeVariables
     ghc-options:      -Wall
                       -Wcompat
@@ -38,6 +39,7 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_server
+    other-modules:    Paths_agent_server
     exposed-modules:  Agent.Server
                     , Agent.Server.Application
                     , Agent.Server.Auth
@@ -59,7 +61,6 @@ library
                     , crypton
                     , directory
                     , filepath
-                    , hasql-pool >= 1.3 && < 2
                     , http-types
                     , memory
                     , optparse-applicative >= 0.18 && < 0.19
@@ -86,15 +87,18 @@ test-suite agent-server-test
     main-is:          Spec.hs
     other-modules:    Agent.Server.ApplicationSpec
                     , Agent.Server.AuthSpec
+                    , Agent.Server.ConfigSpec
                     , Agent.Server.EventSpec
                     , Agent.Server.SupervisorSpec
     ghc-options:      -threaded
     build-depends:    agent-server
+                    , agent-core
                     , aeson
                     , async
                     , base >= 4.17 && < 5
                     , bytestring
                     , containers
+                    , directory
                     , hspec >= 2.11 && < 2.12
                     , http-types
                     , safe-exceptions
@@ -103,4 +107,3 @@ test-suite agent-server-test
                     , time
                     , wai
                     , wai-extra
-

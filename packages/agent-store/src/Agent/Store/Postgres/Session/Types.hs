@@ -16,6 +16,7 @@ module Agent.Store.Postgres.Session.Types
     , NativeConversationSearchResult(..)
     , SessionTurnPage(..)
     , SessionListCursor(..)
+    , SessionListEntry(..)
     , SessionListPage(..)
     , SessionArchiveFilter(..)
     , SessionHistorySnapshot(..)
@@ -116,10 +117,16 @@ data SessionListCursor = SessionListCursor
     }
     deriving (Eq, Show)
 
+data SessionListEntry = SessionListEntry
+    { sessionListEntryMetadata :: !SessionMetadata
+    , sessionListEntryArchived :: !Bool
+    }
+    deriving (Eq, Show)
+
 -- | One page of session metadata. A next cursor is present only when another
 -- row existed inside the same gateway boundary at query time.
 data SessionListPage = SessionListPage
-    { sessionListPageSessions :: ![SessionMetadata]
+    { sessionListPageSessions :: ![SessionListEntry]
     , sessionListPageNextCursor :: !(Maybe SessionListCursor)
     }
     deriving (Eq, Show)
