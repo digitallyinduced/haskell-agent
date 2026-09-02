@@ -831,7 +831,7 @@ class SessionReaderTest(unittest.TestCase):
         transcript = (
             home
             / "projects"
-            / "project"
+            / reader.cursor_project_slug(str(self.cwd))
             / "agent-transcripts"
             / "cursor-session"
             / "cursor-session.jsonl"
@@ -874,13 +874,12 @@ class SessionReaderTest(unittest.TestCase):
         self.assertEqual(item["title"], "Resume Cursor work")
         self.assertEqual(stream.records_read, 2)
 
-    def test_cursor_metadata_traversal_is_iterative(self):
+    def test_cursor_metadata_helpers_are_iterative(self):
         nested_cwd = {"workspacePath": str(self.cwd)}
         nested_title = {"role": "user", "text": "Deep Cursor work"}
         for _ in range(1_200):
             nested_cwd = {"nested": nested_cwd}
             nested_title = {"messages": [nested_title]}
-        self.assertTrue(reader.cursor_record_matches_cwd(nested_cwd, str(self.cwd)))
         self.assertEqual(
             reader.nested_strings(nested_cwd, reader.CURSOR_CWD_KEYS),
             [str(self.cwd)],
@@ -898,7 +897,7 @@ class SessionReaderTest(unittest.TestCase):
         transcript = (
             home
             / "projects"
-            / "project"
+            / reader.cursor_project_slug(str(self.cwd))
             / "agent-transcripts"
             / "cursor-session"
             / "cursor-session.jsonl"
@@ -920,6 +919,101 @@ class SessionReaderTest(unittest.TestCase):
             item = reader.cursor_transcript_candidate(transcript, str(self.cwd))
         self.assertIsNotNone(item)
         self.assertEqual(item["title"], "Recovered Cursor work")
+
+    def test_cursor_transcript_ignores_cwd_values_in_message_payloads(self):
+        home = self.root / "cursor-foreign"
+        project = home / "projects" / "foreign-project"
+        transcript = (
+            project
+            / "agent-transcripts"
+            / "foreign-session"
+            / "foreign-session.jsonl"
+        )
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "role": "assistant",
+                    "message": {
+                        "tool": {
+                            "arguments": {"cwd": str(self.cwd)},
+                        }
+                    },
+                },
+                {"role": "user", "text": "Foreign Cursor work"},
+            ],
+        )
+        (project / ".workspace-trusted").write_text(
+            json.dumps({"workspacePath": str(self.root / "other-repo")}),
+            encoding="utf-8",
+        )
+        with (
+            patch.dict(os.environ, {"CURSOR_HOME": str(home)}),
+            patch.object(reader, "cursor_desktop_databases", return_value=[]),
+        ):
+            items = reader.discover("cursor", str(self.cwd), 0)
+        self.assertEqual(items, [])
+
+    def test_cursor_discovery_deduplicates_storage_sources_by_session_id(self):
+        home = self.root / "cursor-duplicates"
+        project = home / "projects" / "project"
+        session_id = "duplicate-session"
+        transcript = (
+            project
+            / "agent-transcripts"
+            / session_id
+            / f"{session_id}.jsonl"
+        )
+        write_jsonl(
+            transcript,
+            [{"role": "user", "text": "Duplicate Cursor task"}],
+        )
+        (project / ".workspace-trusted").write_text(
+            json.dumps({"workspacePath": str(self.cwd)}),
+            encoding="utf-8",
+        )
+        database = self.root / "duplicate-state.vscdb"
+        db = sqlite3.connect(database)
+        db.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        db.execute(
+            "INSERT INTO ItemTable VALUES (?, ?)",
+            (
+                "composer.composerHeaders",
+                json.dumps(
+                    {
+                        "allComposers": [
+                            {
+                                "composerId": session_id,
+                                "name": "Duplicate Cursor task",
+                                "workspacePath": str(self.cwd),
+                                "lastUpdatedAt": 1,
+                            }
+                        ]
+                    }
+                ),
+            ),
+        )
+        db.commit()
+        db.close()
+        with (
+            patch.dict(os.environ, {"CURSOR_HOME": str(home)}),
+            patch.object(
+                reader,
+                "cursor_desktop_databases",
+                return_value=[database],
+            ),
+        ):
+            items = reader.discover("cursor", str(self.cwd), 0)
+            selected = reader.resolve(
+                "cursor",
+                str(self.cwd),
+                "Duplicate Cursor task",
+                0,
+            )
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["session_id"], session_id)
+        self.assertEqual(items[0]["source"], "cursor-transcript")
+        self.assertEqual(selected["session_id"], session_id)
 
     def test_cursor_selected_transcript_streams_and_bounds_turns(self):
         transcript = self.root / "cursor-session.jsonl"

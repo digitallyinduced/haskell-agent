@@ -55,6 +55,11 @@ CURSOR_CWD_KEYS = {
     "sourcereporootpath",
     "workspacepath",
 }
+CURSOR_SOURCE_PRIORITY = {
+    "cursor-desktop": 3,
+    "cursor-cli": 2,
+    "cursor-transcript": 1,
+}
 CLAUDE_CHAIN_TYPES = {"user", "assistant", "system", "attachment"}
 
 
@@ -1481,25 +1486,36 @@ def cursor_first_user_title(value: Any) -> str | None:
     return None
 
 
-def cursor_record_matches_cwd(value: Any, cwd: str) -> bool:
-    pending = [value]
-    while pending:
-        current = pending.pop()
-        if isinstance(current, dict):
-            children: list[Any] = []
-            for key, child in current.items():
-                if (
-                    key.lower() in CURSOR_CWD_KEYS
-                    and isinstance(child, str)
-                    and same_cwd(child, cwd)
-                ):
-                    return True
-                if isinstance(child, (dict, list)):
-                    children.append(child)
-            pending.extend(reversed(children))
-        elif isinstance(current, list):
-            pending.extend(reversed(current))
-    return False
+def cursor_project_slug(cwd: str) -> str:
+    absolute = os.path.abspath(os.path.expanduser(cwd))
+    return re.sub(r"[^A-Za-z0-9]+", "-", absolute).strip("-")
+
+
+def cursor_project_matches_cwd(project_dir: Path, cwd: str) -> bool:
+    projects = cursor_root() / "projects"
+    if (
+        not project_dir.is_dir()
+        or project_dir.is_symlink()
+        or not path_is_within(project_dir, projects)
+    ):
+        return False
+    metadata_path = project_dir / ".workspace-trusted"
+    if (
+        metadata_path.is_file()
+        and not metadata_path.is_symlink()
+        and path_is_within(metadata_path, project_dir)
+    ):
+        try:
+            metadata = read_json(metadata_path)
+        except (OSError, ValueError, json.JSONDecodeError, RecursionError):
+            metadata = None
+        if isinstance(metadata, dict):
+            workspace = metadata.get("workspacePath")
+            if isinstance(workspace, str) and workspace.strip():
+                workspace = os.path.expanduser(workspace.strip())
+                if os.path.isabs(workspace):
+                    return same_cwd(workspace, cwd)
+    return project_dir.name.casefold() == cursor_project_slug(cwd).casefold()
 
 
 def cursor_transcript_candidate(path: Path, cwd: str) -> dict[str, Any] | None:
@@ -1510,7 +1526,17 @@ def cursor_transcript_candidate(path: Path, cwd: str) -> dict[str, Any] | None:
         or not path_is_within(path, transcript_root)
     ):
         return None
-    matched_cwd = False
+    try:
+        relative = Path(canonical(path)).relative_to(
+            Path(canonical(transcript_root))
+        )
+    except ValueError:
+        return None
+    if len(relative.parts) < 3 or relative.parts[1] != "agent-transcripts":
+        return None
+    project_dir = transcript_root / relative.parts[0]
+    if not cursor_project_matches_cwd(project_dir, cwd):
+        return None
     title = None
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
@@ -1523,15 +1549,11 @@ def cursor_transcript_candidate(path: Path, cwd: str) -> dict[str, Any] | None:
                     continue
                 if not isinstance(record, dict):
                     continue
-                if not matched_cwd:
-                    matched_cwd = cursor_record_matches_cwd(record, cwd)
                 if title is None:
                     title = cursor_first_user_title(record)
-                if matched_cwd and title:
+                if title:
                     break
     except OSError:
-        return None
-    if not matched_cwd:
         return None
     return candidate(
         "cursor",
@@ -1594,9 +1616,7 @@ def discover_cursor(cwd: str) -> list[dict[str, Any]]:
         for header in values:
             if not isinstance(header, dict) or header.get("isDraft"):
                 continue
-            paths = nested_strings(
-                header, {"path", "cwd", "rootpath", "folderpath", "fsPath".lower()}
-            )
+            paths = nested_strings(header, CURSOR_CWD_KEYS)
             if paths and not any(same_cwd(path, cwd) for path in paths):
                 continue
             # A header without a filesystem path cannot safely be assigned to
@@ -1871,14 +1891,39 @@ READERS = {
 }
 
 
+def cursor_candidate_rank(
+    item: dict[str, Any],
+) -> tuple[float, bool, int]:
+    return (
+        item.get("_sort_time", 0),
+        item.get("title") != "(untitled)",
+        CURSOR_SOURCE_PRIORITY.get(safe_string(item.get("source")), 0),
+    )
+
+
 def sort_and_dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: dict[tuple[str, str], dict[str, Any]] = {}
     for item in items:
-        key = (safe_string(item.get("source")), safe_string(item.get("session_id")))
+        session_id = safe_string(item.get("session_id"))
+        key = (
+            ("cursor", session_id.casefold())
+            if item.get("tool") == "cursor" and session_id
+            else (safe_string(item.get("source")), session_id)
+        )
         old = unique.get(key)
-        if old is None or item.get("_sort_time", 0) > old.get("_sort_time", 0):
+        if old is None:
             unique[key] = item
-    return sorted(unique.values(), key=lambda item: item.get("_sort_time", 0), reverse=True)
+            continue
+        if item.get("tool") == "cursor":
+            if cursor_candidate_rank(item) > cursor_candidate_rank(old):
+                unique[key] = item
+        elif item.get("_sort_time", 0) > old.get("_sort_time", 0):
+            unique[key] = item
+    return sorted(
+        unique.values(),
+        key=lambda item: item.get("_sort_time", 0),
+        reverse=True,
+    )
 
 
 def discover(tool: str, cwd: str, within_min: int) -> list[dict[str, Any]]:
