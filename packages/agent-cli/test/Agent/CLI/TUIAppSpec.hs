@@ -302,6 +302,17 @@ spec = do
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.fromList ["haskell", "python"]
 
+        it "requests source grammars from Markdown diff fences" do
+            let conversation =
+                    reduceUi
+                        (UiAssistantHistory
+                            "```diff\n--- a/src/Agent/Syntax.hs\n\
+                            \+++ b/src/Agent/Syntax.hs\n\
+                            \@@ -1 +1 @@\n-old\n+new\n```")
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.singleton "haskell"
+
         it "requests the JavaScript grammar for exec source" do
             let conversation =
                     reduceUi

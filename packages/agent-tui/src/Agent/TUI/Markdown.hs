@@ -8,6 +8,9 @@ module Agent.TUI.Markdown
     , diffWidgetWithSyntaxHighlighting
     , highlightDiffCodeRows
     , inlinePlainText
+    , isDiffFenceInfo
+    , looksLikeUnifiedDiff
+    , markdownFenceSyntaxLanguages
     , markdownWidget
     , markdownWidgetWithLinks
     , markdownWidgetWithCodeControls
@@ -32,6 +35,7 @@ import Agent.Syntax
     , SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
+    , resolveFenceLanguage
     , resolvePathLanguage
     )
 import Agent.TUI.Presentation
@@ -49,6 +53,7 @@ import Agent.TUI.TextWidth
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
+import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
 import Data.Char (isDigit, isSpace)
 import qualified Data.List as List
@@ -192,6 +197,32 @@ diffSyntaxLanguages initialPath body =
         , Just language <- [resolvePathLanguage path]
         ]
 
+-- | Fence info that should be painted as a unified/edit diff rather than
+-- tokenized with Skylighting's @diff@ grammar. That grammar maps removed
+-- lines to strings (green) and added lines to variables (cyan).
+isDiffFenceInfo :: Text -> Bool
+isDiffFenceInfo info =
+    resolveFenceLanguage info == Just "diff"
+
+-- | Conservative detection for unlabeled unified diffs. A hunk header at the
+-- start of a line is distinctive enough that ordinary source is unlikely to
+-- match.
+looksLikeUnifiedDiff :: Text -> Bool
+looksLikeUnifiedDiff =
+    any ("@@" `Text.isPrefixOf`) . Text.lines
+
+-- | Grammars to load for one Markdown fence. Diff fences contribute the
+-- languages of the files they name rather than the @diff@ grammar itself.
+markdownFenceSyntaxLanguages :: Text -> Text -> [Text]
+markdownFenceSyntaxLanguages info body =
+    case resolveFenceLanguage info of
+        Just "diff" -> diffSyntaxLanguages "" body
+        Just language -> [language]
+        Nothing
+            | looksLikeUnifiedDiff body ->
+                diffSyntaxLanguages "" body
+            | otherwise -> []
+
 -- | Render a compact edit preview with token-level syntax foregrounds over
 -- full-width added/removed backgrounds.
 diffWidgetWithSyntaxHighlighting
@@ -272,6 +303,9 @@ parseDiffLines initialPath =
         | Just nextPaths <- diffHeaderPaths line =
             ParsedDiffLine DiffLineHeader nextPaths "" line
                 : go nextPaths rest
+        | Just nextPaths <- unifiedDiffHeaderPaths currentPaths line =
+            ParsedDiffLine DiffLineMeta nextPaths "" line
+                : go nextPaths rest
         | Just displayLine <- parseDiffDisplayLine line =
             ParsedDiffLine
                 (displayLineKind displayLine.diffDisplayKind)
@@ -285,9 +319,11 @@ parseDiffLines initialPath =
         | Just (kind, prefix, source) <- changedDiffLine line =
             ParsedDiffLine kind currentPaths prefix source
                 : go currentPaths rest
-        | "  …" `Text.isPrefixOf` line
-            || "… +" `Text.isPrefixOf` line =
+        | isDiffMetaLine line =
             ParsedDiffLine DiffLineMeta currentPaths "" line
+                : go currentPaths rest
+        | Just (kind, prefix, source) <- unifiedDiffLine line =
+            ParsedDiffLine kind currentPaths prefix source
                 : go currentPaths rest
         | otherwise =
             ParsedDiffLine DiffLinePlain currentPaths "" line
@@ -356,6 +392,87 @@ diffHeaderPaths line =
                         , diffAddedPath = Just destinationPath
                         })
             Nothing -> pure (sameDiffPaths sourcePath)
+
+-- | Git/unified headers update the current file paths so later +/- rows can
+-- pick a source grammar. They stay muted rather than using the compact
+-- create/update chrome.
+unifiedDiffHeaderPaths :: DiffPaths -> Text -> Maybe DiffPaths
+unifiedDiffHeaderPaths current line
+    | Just rest <- Text.stripPrefix "diff --git " line =
+        case Text.words rest of
+            [source, destination] ->
+                Just
+                    DiffPaths
+                        { diffRemovedPath = gitDiffPath source
+                        , diffAddedPath = gitDiffPath destination
+                        }
+            _ -> Nothing
+    | Just rest <- Text.stripPrefix "--- " line =
+        let removed = gitDiffPath rest
+        in Just
+            current
+                { diffRemovedPath = removed
+                , diffAddedPath = current.diffAddedPath <|> removed
+                }
+    | Just rest <- Text.stripPrefix "+++ " line =
+        let added = gitDiffPath rest
+        in Just
+            current
+                { diffAddedPath = added
+                , diffRemovedPath = current.diffRemovedPath <|> added
+                }
+    | otherwise = Nothing
+
+gitDiffPath :: Text -> Maybe Text
+gitDiffPath raw =
+    let trimmed = Text.strip (Text.takeWhile (/= '\t') raw)
+        unquoted = stripDiffQuotes trimmed
+        withoutPrefix
+            | "a/" `Text.isPrefixOf` unquoted
+                || "b/" `Text.isPrefixOf` unquoted =
+                Text.drop 2 unquoted
+            | otherwise = unquoted
+    in if Text.null withoutPrefix || withoutPrefix == "/dev/null"
+        then Nothing
+        else Just withoutPrefix
+
+stripDiffQuotes :: Text -> Text
+stripDiffQuotes text =
+    case Text.uncons text of
+        Just ('"', rest)
+            | Text.isSuffixOf "\"" rest && not (Text.null rest) ->
+                Text.dropEnd 1 rest
+        _ -> text
+
+unifiedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
+unifiedDiffLine line
+    | "+" `Text.isPrefixOf` line
+    , not ("+++" `Text.isPrefixOf` line) =
+        Just (DiffLineAdded, "+", Text.drop 1 line)
+    | "-" `Text.isPrefixOf` line
+    , not ("---" `Text.isPrefixOf` line) =
+        Just (DiffLineRemoved, "-", Text.drop 1 line)
+    | " " `Text.isPrefixOf` line =
+        Just (DiffLineContext, " ", Text.drop 1 line)
+    | otherwise = Nothing
+
+isDiffMetaLine :: Text -> Bool
+isDiffMetaLine line =
+    "  …" `Text.isPrefixOf` line
+        || "… +" `Text.isPrefixOf` line
+        || "@@" `Text.isPrefixOf` Text.stripStart line
+        || "\\ " `Text.isPrefixOf` line
+        || "index " `Text.isPrefixOf` line
+        || "new file mode " `Text.isPrefixOf` line
+        || "deleted file mode " `Text.isPrefixOf` line
+        || "old mode " `Text.isPrefixOf` line
+        || "new mode " `Text.isPrefixOf` line
+        || "similarity index " `Text.isPrefixOf` line
+        || "rename from " `Text.isPrefixOf` line
+        || "rename to " `Text.isPrefixOf` line
+        || "copy from " `Text.isPrefixOf` line
+        || "copy to " `Text.isPrefixOf` line
+        || "Binary files " `Text.isPrefixOf` line
 
 emptyDiffPaths :: DiffPaths
 emptyDiffPaths =
@@ -705,11 +822,26 @@ renderChunk syntaxHighlighter _ cacheCode codeHeader (FenceBlock block) =
         else bodyWidget
     ]
   where
-    bodyWidget =
-        renderCodeBody
-            (if block.fencedClosed then syntaxHighlighter else Nothing)
-            block.fencedInfo
-            (codeBodyLines block.fencedBody)
+    highlighter =
+        if block.fencedClosed then syntaxHighlighter else Nothing
+    bodyWidget
+        | shouldRenderFenceAsDiff block =
+            diffWidgetWithSyntaxHighlighting
+                highlighter
+                ""
+                block.fencedBody
+        | otherwise =
+            renderCodeBody
+                highlighter
+                block.fencedInfo
+                (codeBodyLines block.fencedBody)
+
+shouldRenderFenceAsDiff :: FencedBlock -> Bool
+shouldRenderFenceAsDiff block =
+    isDiffFenceInfo block.fencedInfo
+        || ( Text.null (Text.strip block.fencedInfo)
+            && looksLikeUnifiedDiff block.fencedBody
+           )
 
 renderLines
     :: Ord n

@@ -338,6 +338,37 @@ spec = describe "fullscreen Markdown rendering" do
                 ])
             `shouldBe` ["haskell", "typescript", "python", "rust"]
 
+    it "discovers languages from unified diff headers" do
+        diffSyntaxLanguages
+            ""
+            (Text.unlines
+                [ "diff --git a/src/Main.hs b/src/Main.hs"
+                , "--- a/src/Main.hs"
+                , "+++ b/src/Main.hs"
+                , "@@ -1,2 +1,2 @@"
+                , " context"
+                , "-old"
+                , "+new"
+                ])
+            `shouldBe` ["haskell"]
+
+    it "loads source grammars for Markdown diff fences" do
+        markdownFenceSyntaxLanguages
+            "diff"
+            "--- a/src/Main.hs\n+++ b/src/Main.hs\n@@ -1 +1 @@\n-old\n+new\n"
+            `shouldBe` ["haskell"]
+        markdownFenceSyntaxLanguages "PATCH" "-old\n+new\n"
+            `shouldBe` []
+        markdownFenceSyntaxLanguages
+            ""
+            "@@ -1 +1 @@\n-old\n+new\n"
+            `shouldBe` []
+        markdownFenceSyntaxLanguages "haskell" "main = pure ()"
+            `shouldBe` ["haskell"]
+        isDiffFenceInfo "udiff" `shouldBe` True
+        looksLikeUnifiedDiff "@@ -1 +1 @@\n-old\n+new\n" `shouldBe` True
+        looksLikeUnifiedDiff "main = pure ()" `shouldBe` False
+
     it "syntax-highlights edit lines over full-width diff backgrounds" do
         syntaxDirectory <- sourceSyntaxDirectory
         loadSyntaxHighlighterFrom syntaxDirectory >>= \case
@@ -424,6 +455,73 @@ spec = describe "fullscreen Markdown rendering" do
                 fmap (V.attrForeColor . spanAttr)
                     (find (containsText "destination comment") rows)
                     `shouldBe` Just commentForeground
+
+    it "paints Markdown diff fences with add/remove backgrounds" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let width = 40
+                    widget :: Widget ()
+                    widget =
+                        markdownWidgetWithSyntaxHighlighting
+                            (Just highlighter)
+                            (\_ body -> body)
+                            (\_ _ -> txt "")
+                            (Text.unlines
+                                [ "```diff"
+                                , "--- a/Main.hs"
+                                , "+++ b/Main.hs"
+                                , "@@ -1 +1 @@"
+                                , "-message = \"before\""
+                                , "+message = \"after\""
+                                , "```"
+                                ])
+                    picture =
+                        renderWidget
+                            (Just Theme.terminalDefault)
+                            [widget]
+                            (width, 8)
+                    rows =
+                        map toList $
+                            toList $
+                                displayOpsForPic picture (width, 8)
+                    findText expected =
+                        find (containsText expected) (concat rows)
+                    stringForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxStringAttr
+                                Theme.terminalDefault
+                    removedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffRemovedAttr
+                                Theme.terminalDefault
+                    addedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffAddedAttr
+                                Theme.terminalDefault
+                    variableForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxVariableAttr
+                                Theme.terminalDefault
+                V.imageWidth (V.picImage picture) `shouldBe` width
+                fmap (V.attrForeColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just removedBackground
+                fmap (V.attrForeColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just addedBackground
+                -- Skylighting's diff grammar would paint the whole added
+                -- line as a variable (cyan). Semantic rows keep string
+                -- tokens green on the added wash instead.
+                fmap (V.attrForeColor . spanAttr) (findText "\"after\"")
+                    `shouldNotBe` Just variableForeground
 
     it "renders terminal controls as inert visible glyphs" do
         let unsafe = "\ESC]0;owned\BEL\t\r"
