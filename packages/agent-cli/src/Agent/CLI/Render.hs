@@ -1001,6 +1001,8 @@ paintDiffRelative color workspace diff =
             style color [terminalRed] ("  -" <> line)
         SearchReplaceAdded line ->
             style color [terminalGreen] ("  +" <> line)
+        SearchReplaceContext line ->
+            roleMuted color ("   " <> line)
 
 renderToolPath :: Bool -> Text -> Text -> Text
 renderToolPath color =

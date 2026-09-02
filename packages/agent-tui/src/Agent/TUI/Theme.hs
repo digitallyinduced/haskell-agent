@@ -11,9 +11,13 @@ module Agent.TUI.Theme
     , controlLinkActiveAttr
     , controlLinkAttr
     , controlLinkHoverAttr
-    , diffAddedAttr
-    , diffRemovedAttr
     , dimAttr
+    , diffAddedAttr
+    , diffAddedGutterAttr
+    , diffContextGutterAttr
+    , diffPathAttr
+    , diffRemovedAttr
+    , diffRemovedGutterAttr
     , emphasisAttr
     , headingAttr
     , inspectAttr
@@ -111,10 +115,20 @@ data ThemeKind
 
 data ThemePalette = ThemePalette
     { themePaletteBackground :: !V.Color
+    , themePaletteRaised :: !V.Color
+    , themePaletteFocused :: !V.Color
     , themePaletteForeground :: !V.Color
+    , themePaletteStrong :: !V.Color
+    , themePaletteSecondary :: !V.Color
     , themePaletteMuted :: !V.Color
+    , themePaletteBorder :: !V.Color
+    , themePaletteBorderActive :: !V.Color
     , themePaletteAccent :: !V.Color
     , themePaletteLink :: !V.Color
+    , themePaletteSuccess :: !V.Color
+    , themePaletteError :: !V.Color
+    , themePaletteWarning :: !V.Color
+    , themePaletteCyan :: !V.Color
     }
 
 themeKindText :: ThemeKind -> Text
@@ -168,21 +182,91 @@ themeKindAt index =
 fixedThemePalette :: ThemeKind -> Maybe ThemePalette
 fixedThemePalette = \case
     Auto -> Nothing
-    Midnight -> Just (ThemePalette
-        (RGBColor 26 27 38) (RGBColor 220 220 230) (RGBColor 120 125 145)
-        (RGBColor 187 154 247) (RGBColor 122 162 247))
-    Daylight -> Just (ThemePalette
-        (RGBColor 250 247 242) (RGBColor 45 42 46) (RGBColor 110 105 100)
-        (RGBColor 144 80 150) (RGBColor 45 100 170))
-    TokyoNight -> Just (ThemePalette
-        (RGBColor 26 27 38) (RGBColor 192 202 245) (RGBColor 86 95 137)
-        (RGBColor 187 154 247) (RGBColor 122 162 247))
-    RosePineMoon -> Just (ThemePalette
-        (RGBColor 25 23 36) (RGBColor 224 222 244) (RGBColor 144 140 170)
-        (RGBColor 235 188 186) (RGBColor 196 167 231))
-    OscuraMidnight -> Just (ThemePalette
-        (RGBColor 8 12 18) (RGBColor 220 235 245) (RGBColor 105 130 145)
-        (RGBColor 65 210 190) (RGBColor 80 170 255))
+    Midnight -> Just ThemePalette
+        { themePaletteBackground = RGBColor 20 20 20
+        , themePaletteRaised = RGBColor 36 36 36
+        , themePaletteFocused = RGBColor 44 44 44
+        , themePaletteForeground = RGBColor 200 200 200
+        , themePaletteStrong = RGBColor 225 225 225
+        , themePaletteSecondary = RGBColor 120 120 120
+        , themePaletteMuted = RGBColor 108 108 108
+        , themePaletteBorder = RGBColor 50 50 55
+        , themePaletteBorderActive = RGBColor 60 60 65
+        , themePaletteAccent = RGBColor 187 154 247
+        , themePaletteLink = RGBColor 122 162 247
+        , themePaletteSuccess = RGBColor 158 206 106
+        , themePaletteError = RGBColor 247 118 142
+        , themePaletteWarning = RGBColor 224 175 104
+        , themePaletteCyan = RGBColor 137 221 255
+        }
+    Daylight -> Just ThemePalette
+        { themePaletteBackground = RGBColor 250 247 242
+        , themePaletteRaised = RGBColor 255 255 255
+        , themePaletteFocused = RGBColor 242 237 230
+        , themePaletteForeground = RGBColor 45 42 46
+        , themePaletteStrong = RGBColor 30 28 31
+        , themePaletteSecondary = RGBColor 82 78 76
+        , themePaletteMuted = RGBColor 110 105 100
+        , themePaletteBorder = RGBColor 198 191 183
+        , themePaletteBorderActive = RGBColor 117 111 105
+        , themePaletteAccent = RGBColor 144 80 150
+        , themePaletteLink = RGBColor 45 100 170
+        , themePaletteSuccess = RGBColor 52 132 79
+        , themePaletteError = RGBColor 184 54 72
+        , themePaletteWarning = RGBColor 161 108 24
+        , themePaletteCyan = RGBColor 30 120 145
+        }
+    TokyoNight -> Just ThemePalette
+        { themePaletteBackground = RGBColor 26 27 38
+        , themePaletteRaised = RGBColor 36 40 59
+        , themePaletteFocused = RGBColor 47 53 73
+        , themePaletteForeground = RGBColor 192 202 245
+        , themePaletteStrong = RGBColor 218 224 255
+        , themePaletteSecondary = RGBColor 120 128 170
+        , themePaletteMuted = RGBColor 86 95 137
+        , themePaletteBorder = RGBColor 59 66 97
+        , themePaletteBorderActive = RGBColor 86 95 137
+        , themePaletteAccent = RGBColor 187 154 247
+        , themePaletteLink = RGBColor 122 162 247
+        , themePaletteSuccess = RGBColor 158 206 106
+        , themePaletteError = RGBColor 247 118 142
+        , themePaletteWarning = RGBColor 224 175 104
+        , themePaletteCyan = RGBColor 137 221 255
+        }
+    RosePineMoon -> Just ThemePalette
+        { themePaletteBackground = RGBColor 25 23 36
+        , themePaletteRaised = RGBColor 38 35 58
+        , themePaletteFocused = RGBColor 49 46 69
+        , themePaletteForeground = RGBColor 224 222 244
+        , themePaletteStrong = RGBColor 240 238 255
+        , themePaletteSecondary = RGBColor 174 169 202
+        , themePaletteMuted = RGBColor 144 140 170
+        , themePaletteBorder = RGBColor 68 64 89
+        , themePaletteBorderActive = RGBColor 110 106 134
+        , themePaletteAccent = RGBColor 235 188 186
+        , themePaletteLink = RGBColor 196 167 231
+        , themePaletteSuccess = RGBColor 156 207 154
+        , themePaletteError = RGBColor 235 111 146
+        , themePaletteWarning = RGBColor 246 193 119
+        , themePaletteCyan = RGBColor 156 207 216
+        }
+    OscuraMidnight -> Just ThemePalette
+        { themePaletteBackground = RGBColor 8 12 18
+        , themePaletteRaised = RGBColor 20 27 35
+        , themePaletteFocused = RGBColor 28 37 46
+        , themePaletteForeground = RGBColor 220 235 245
+        , themePaletteStrong = RGBColor 238 247 252
+        , themePaletteSecondary = RGBColor 139 162 176
+        , themePaletteMuted = RGBColor 105 130 145
+        , themePaletteBorder = RGBColor 39 54 66
+        , themePaletteBorderActive = RGBColor 70 92 106
+        , themePaletteAccent = RGBColor 65 210 190
+        , themePaletteLink = RGBColor 80 170 255
+        , themePaletteSuccess = RGBColor 101 210 154
+        , themePaletteError = RGBColor 242 112 135
+        , themePaletteWarning = RGBColor 224 175 104
+        , themePaletteCyan = RGBColor 105 205 225
+        }
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, userMutedAttr, assistantAttr, slashCommandAttr :: AttrName
@@ -195,12 +279,13 @@ transcriptHoverMutedAttr, transcriptHoverMutedItalicAttr :: AttrName
 transcriptHoverMutedCancelledAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
-diffAddedAttr, diffRemovedAttr :: AttrName
 lambdaDimAttr, lambdaTrailAttr, lambdaGlowAttr, lambdaSparkAttr :: AttrName
 syntaxNormalAttr, syntaxKeywordAttr, syntaxTypeAttr, syntaxFunctionAttr :: AttrName
 syntaxVariableAttr, syntaxStringAttr, syntaxNumberAttr, syntaxCommentAttr :: AttrName
 syntaxOperatorAttr, syntaxAnnotationAttr, syntaxPreprocessorAttr :: AttrName
 syntaxWarningAttr, syntaxErrorAttr :: AttrName
+diffAddedAttr, diffRemovedAttr, diffAddedGutterAttr, diffRemovedGutterAttr :: AttrName
+diffContextGutterAttr, diffPathAttr :: AttrName
 waitingDimAttr, waitingMidAttr, completionFlashAttr :: AttrName
 baseAttr = attrName "base"
 headerAttr = attrName "header"
@@ -244,8 +329,6 @@ strongAttr = attrName "markdown-strong"
 controlLinkAttr = attrName "control-link"
 controlLinkHoverAttr = attrName "control-link-hover"
 controlLinkActiveAttr = attrName "control-link-active"
-diffAddedAttr = attrName "diff-added"
-diffRemovedAttr = attrName "diff-removed"
 syntaxNormalAttr = attrName "syntax-normal"
 syntaxKeywordAttr = attrName "syntax-keyword"
 syntaxTypeAttr = attrName "syntax-type"
@@ -259,6 +342,12 @@ syntaxAnnotationAttr = attrName "syntax-annotation"
 syntaxPreprocessorAttr = attrName "syntax-preprocessor"
 syntaxWarningAttr = attrName "syntax-warning"
 syntaxErrorAttr = attrName "syntax-error"
+diffAddedAttr = attrName "diff-added"
+diffRemovedAttr = attrName "diff-removed"
+diffAddedGutterAttr = attrName "diff-added-gutter"
+diffRemovedGutterAttr = attrName "diff-removed-gutter"
+diffContextGutterAttr = attrName "diff-context-gutter"
+diffPathAttr = attrName "diff-path"
 
 syntaxClassAttr :: SyntaxClass -> AttrName
 syntaxClassAttr = \case
@@ -306,6 +395,10 @@ terminalDefault =
         , (todoCancelledAttr, palette V.brightBlack `V.withStyle` V.strikethrough)
         , (errorAttr, palette V.red `V.withStyle` V.bold)
         , (successAttr, palette V.green)
+        , (diffAddedGutterAttr, palette V.green `V.withStyle` V.bold)
+        , (diffRemovedGutterAttr, palette V.red `V.withStyle` V.bold)
+        , (diffContextGutterAttr, palette V.brightBlack)
+        , (diffPathAttr, palette V.yellow)
         , (completionFlashAttr,
             palette V.brightGreen `V.withStyle` V.bold)
         , (selectedAttr, raisedPanelAttr `V.withStyle` V.bold)
@@ -384,6 +477,12 @@ monochrome =
         , (todoCancelledAttr, V.defAttr `V.withStyle` V.strikethrough)
         , (errorAttr, V.defAttr `V.withStyle` V.bold)
         , (successAttr, V.defAttr)
+        , (diffAddedAttr, V.defAttr)
+        , (diffRemovedAttr, V.defAttr)
+        , (diffAddedGutterAttr, V.defAttr `V.withStyle` V.bold)
+        , (diffRemovedGutterAttr, V.defAttr `V.withStyle` V.bold)
+        , (diffContextGutterAttr, V.defAttr `V.withStyle` V.dim)
+        , (diffPathAttr, V.defAttr `V.withStyle` V.underline)
         , (completionFlashAttr, V.defAttr `V.withStyle` V.bold)
         , (selectedAttr, V.defAttr
             `V.withStyle` (V.bold .|. V.reverseVideo))
@@ -415,8 +514,6 @@ monochrome =
         , (controlLinkHoverAttr, V.defAttr
             `V.withStyle` (V.underline .|. V.bold))
         , (controlLinkActiveAttr, V.defAttr `V.withStyle` V.reverseVideo)
-        , (diffAddedAttr, V.defAttr)
-        , (diffRemovedAttr, V.defAttr)
         , (syntaxNormalAttr, V.defAttr)
         , (syntaxKeywordAttr, V.defAttr `V.withStyle` V.bold)
         , (syntaxTypeAttr, V.defAttr `V.withStyle` V.bold)
@@ -441,26 +538,20 @@ themeAttrMap theme =
     maybe terminalDefault themePaletteAttrMap (fixedThemePalette theme)
 
 themePaletteAttrMap :: ThemePalette -> AttrMap
-themePaletteAttrMap palette =
-    mkTheme
-        palette.themePaletteBackground
-        palette.themePaletteForeground
-        palette.themePaletteMuted
-        palette.themePaletteAccent
-        palette.themePaletteLink
+themePaletteAttrMap = mkTheme
 
-mkTheme :: V.Color -> V.Color -> V.Color -> V.Color -> V.Color -> AttrMap
-mkTheme background foreground muted accent link =
+mkTheme :: ThemePalette -> AttrMap
+mkTheme palette =
     attrMap (V.defAttr `V.withBackColor` background)
         [ (baseAttr, base)
-        , (headerAttr, base `V.withStyle` V.bold)
+        , (headerAttr, strongA `V.withStyle` V.bold)
         , (footerAttr, mutedA)
         , (mutedAttr, mutedA)
-        , (userAttr, panel `V.withStyle` V.bold)
-        , (userMutedAttr, panelMuted)
+        , (userAttr, raisedStrong `V.withStyle` V.bold)
+        , (userMutedAttr, raisedMuted)
         , (assistantAttr, base)
         , (slashCommandAttr, linkA)
-        , (thinkingAttr, accentA)
+        , (thinkingAttr, secondaryA)
         , (thinkingBodyAttr, mutedA `V.withStyle` (V.dim .|. V.italic))
         , (waitingDimAttr, mutedA)
         , (waitingMidAttr, accentA)
@@ -473,32 +564,43 @@ mkTheme background foreground muted accent link =
         , (todoCancelledAttr, mutedA `V.withStyle` V.strikethrough)
         , (errorAttr, redA `V.withStyle` V.bold)
         , (successAttr, greenA)
+        , (diffAddedAttr, diffAddedA)
+        , (diffRemovedAttr, diffRemovedA)
+        , (diffAddedGutterAttr,
+            diffAddedGutterA `V.withStyle` V.bold)
+        , (diffRemovedGutterAttr,
+            diffRemovedGutterA `V.withStyle` V.bold)
+        , (diffContextGutterAttr, mutedA)
+        , (diffPathAttr, yellowA)
         , (completionFlashAttr, greenA `V.withStyle` V.bold)
-        , (selectedAttr, panel `V.withStyle` V.bold)
-        , (selectedMutedAttr, panelMuted)
-        , (borderAttr, mutedA `V.withStyle` V.dim)
-        , (borderActiveAttr, mutedA)
+        , (selectedAttr, focusedStrong `V.withStyle` V.bold)
+        , (selectedMutedAttr, focusedMuted)
+        , (transcriptHoverAttr, focused)
+        , (transcriptHoverMutedAttr,
+            focusedMuted `V.withStyle` V.dim)
+        , (transcriptHoverMutedItalicAttr,
+            focusedMuted `V.withStyle` (V.dim .|. V.italic))
+        , (transcriptHoverMutedCancelledAttr,
+            focusedMuted `V.withStyle` (V.dim .|. V.strikethrough))
+        , (borderAttr, borderA `V.withStyle` V.dim)
+        , (borderActiveAttr, borderActiveA)
         , (headingAttr, accentA `V.withStyle` V.bold)
         , (codeAttr, linkA)
         -- Overlay dimming uses 'forceAttr', so it must preserve the page
         -- background instead of falling back to the terminal's colors.
         , (dimAttr, mutedA `V.withBackColor` background)
         , (emphasisAttr, base `V.withStyle` V.italic)
-        , (inlineCodeAttr, linkA `V.withStyle` V.reverseVideo)
+        , (inlineCodeAttr, raisedCyan)
         , (lambdaDimAttr, mutedA)
         , (lambdaTrailAttr, mutedA)
-        , (lambdaGlowAttr, base `V.withStyle` V.bold)
-        , (lambdaSparkAttr, base `V.withStyle` V.bold)
+        , (lambdaGlowAttr, strongA `V.withStyle` V.bold)
+        , (lambdaSparkAttr, strongA `V.withStyle` V.bold)
         , (linkAttr, linkA `V.withStyle` V.underline)
-        , (strongAttr, base `V.withStyle` V.bold)
+        , (strongAttr, strongA `V.withStyle` V.bold)
         , (controlLinkAttr, mutedA `V.withBackColor` background)
         , (controlLinkHoverAttr,
-            panel `V.withStyle` V.underline)
-        , (controlLinkActiveAttr, panel `V.withStyle` V.bold)
-        , (diffAddedAttr,
-            greenA `V.withBackColor` diffAddedBackground)
-        , (diffRemovedAttr,
-            redA `V.withBackColor` diffRemovedBackground)
+            raisedStrong `V.withStyle` V.underline)
+        , (controlLinkActiveAttr, focusedStrong `V.withStyle` V.bold)
         , (syntaxNormalAttr, base)
         , (syntaxKeywordAttr, accentA)
         , (syntaxTypeAttr, yellowA)
@@ -514,21 +616,64 @@ mkTheme background foreground muted accent link =
         , (syntaxErrorAttr, redA `V.withStyle` V.bold)
         ]
   where
+    background = palette.themePaletteBackground
+    raised = palette.themePaletteRaised
+    focusedBackground = palette.themePaletteFocused
+    foreground = palette.themePaletteForeground
+    strong = palette.themePaletteStrong
+    secondary = palette.themePaletteSecondary
+    muted = palette.themePaletteMuted
+    border = palette.themePaletteBorder
+    borderActive = palette.themePaletteBorderActive
+    accent = palette.themePaletteAccent
+    link = palette.themePaletteLink
+    success = palette.themePaletteSuccess
+    failure = palette.themePaletteError
+    warning = palette.themePaletteWarning
+    cyan = palette.themePaletteCyan
     base =
         V.defAttr
             `V.withForeColor` foreground
             `V.withBackColor` background
-    panel =
+    strongA =
         V.defAttr
-            `V.withForeColor` foreground
-            `V.withBackColor` lighten background
-    panelMuted =
+            `V.withForeColor` strong
+            `V.withBackColor` background
+    secondaryA =
         V.defAttr
-            `V.withForeColor` muted
-            `V.withBackColor` lighten background
+            `V.withForeColor` secondary
+            `V.withBackColor` background
     mutedA =
         V.defAttr
             `V.withForeColor` muted
+            `V.withBackColor` background
+    raisedStrong =
+        V.defAttr
+            `V.withForeColor` strong
+            `V.withBackColor` raised
+    raisedMuted =
+        V.defAttr
+            `V.withForeColor` secondary
+            `V.withBackColor` raised
+    focused =
+        V.defAttr
+            `V.withForeColor` foreground
+            `V.withBackColor` focusedBackground
+    focusedStrong =
+        V.defAttr
+            `V.withForeColor` strong
+            `V.withBackColor` focusedBackground
+    focusedMuted =
+        V.defAttr
+            `V.withForeColor` secondary
+            `V.withBackColor` focusedBackground
+    borderA =
+        V.defAttr
+            `V.withForeColor` border
+            `V.withBackColor` background
+    borderActiveA =
+        V.defAttr
+            `V.withForeColor` borderActive
             `V.withBackColor` background
     accentA =
         V.defAttr
@@ -540,38 +685,44 @@ mkTheme background foreground muted accent link =
             `V.withBackColor` background
     redA =
         V.defAttr
-            `V.withForeColor` (RGBColor 220 100 120)
+            `V.withForeColor` failure
             `V.withBackColor` background
     greenA =
         V.defAttr
-            `V.withForeColor` (RGBColor 100 210 150)
+            `V.withForeColor` success
             `V.withBackColor` background
     yellowA =
         V.defAttr
-            `V.withForeColor` (RGBColor 230 190 100)
+            `V.withForeColor` warning
             `V.withBackColor` background
     cyanA =
         V.defAttr
-            `V.withForeColor` (RGBColor 90 200 220)
+            `V.withForeColor` cyan
             `V.withBackColor` background
+    raisedCyan =
+        V.defAttr
+            `V.withForeColor` cyan
+            `V.withBackColor` raised
+    diffAddedA =
+        V.defAttr
+            `V.withForeColor` foreground
+            `V.withBackColor` diffAddedBackground
+    diffRemovedA =
+        V.defAttr
+            `V.withForeColor` foreground
+            `V.withBackColor` diffRemovedBackground
+    diffAddedGutterA =
+        V.defAttr
+            `V.withForeColor` success
+            `V.withBackColor` diffAddedBackground
+    diffRemovedGutterA =
+        V.defAttr
+            `V.withForeColor` failure
+            `V.withBackColor` diffRemovedBackground
     diffAddedBackground =
-        fromMaybe background $
-            blendRgb background (RGBColor 45 150 85) 0.22
+        fromMaybe raised (blendRgb background success 0.16)
     diffRemovedBackground =
-        fromMaybe background $
-            blendRgb background (RGBColor 180 55 75) 0.22
-
-    lighten (RGBColor r g b) =
-        RGBColor
-            (lightenChannel r)
-            (lightenChannel g)
-            (lightenChannel b)
-    lighten color = color
-
-    lightenChannel :: Word8 -> Word8
-    lightenChannel channel =
-        fromIntegral
-            (min (255 :: Int) (fromIntegral channel + 14))
+        fromMaybe raised (blendRgb background failure 0.16)
 
 palette :: V.Color -> V.Attr
 palette = V.withForeColor V.defAttr

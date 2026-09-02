@@ -772,14 +772,22 @@ conversationBlocks target state =
     case target of
         AgentRoot ->
             concatMap
-                (toList . (.historyTurnBlocks))
+                ( toList
+                    . Transcript.coalesceInspectionBlocks
+                    . (.historyTurnBlocks)
+                )
                 (toList state.appHistoryWindow.historyWindowTurns)
-                <> toList state.appUi.uiBlocks
+                <> toList
+                    (Transcript.coalesceInspectionBlocks state.appUi.uiBlocks)
         AgentChild _ ->
-            maybe [] (toList . (.uiBlocks))
+            maybe
+                []
+                (toList . Transcript.coalesceInspectionBlocks . (.uiBlocks))
                 (conversationUiForTarget target state)
         AgentNative _ ->
-            maybe [] (toList . (.uiBlocks))
+            maybe
+                []
+                (toList . Transcript.coalesceInspectionBlocks . (.uiBlocks))
                 (conversationUiForTarget target state)
 
 historyBlock :: HistoryWindow -> BlockId -> Maybe UiBlock
@@ -808,14 +816,7 @@ selectedConversationBlock
     -> Maybe UiBlock
 selectedConversationBlock target state =
     selectedConversationBlockId target state >>= \ident ->
-        case target of
-            AgentRoot ->
-                historyBlock state.appHistoryWindow ident
-                    <|> lookupBlock ident state.appUi
-            AgentChild _ ->
-                conversationUiForTarget target state >>= lookupBlock ident
-            AgentNative _ ->
-                conversationUiForTarget target state >>= lookupBlock ident
+        find ((== ident) . (.blockId)) (conversationBlocks target state)
 
 selectConversationBlock
     :: AgentTarget

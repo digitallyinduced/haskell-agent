@@ -1,7 +1,8 @@
 module Agent.CLI.TUITranscriptSpec (spec) where
 
 import Agent.CLI.TUI.Transcript
-    ( transcriptChunkCacheKey
+    ( coalesceInspectionBlocks
+    , transcriptChunkCacheKey
     , transcriptChunkSize
     , transcriptChunks
     )
@@ -11,7 +12,9 @@ import Agent.TUI.Model
     , BlockState(..)
     , UiBlock(..)
     )
+import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -53,6 +56,89 @@ spec = describe "fullscreen transcript caching" do
             `shouldBe` Nothing
         transcriptChunkCacheKey (const True) [BlockId 99] completeChunk
             `shouldBe` Just (BlockId 1, BlockId transcriptChunkSize)
+
+    it "coalesces adjacent completed inspection blocks under the newest ID" do
+        let first =
+                (block 1)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Read src/A.hs"
+                    , blockBody = "module A where"
+                    }
+            second =
+                (block 2)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Listed src"
+                    , blockBody = "A.hs"
+                    }
+            grouped =
+                toList
+                    (coalesceInspectionBlocks (Seq.fromList [first, second]))
+        case grouped of
+            [summary] -> do
+                summary.blockId `shouldBe` BlockId 2
+                summary.blockTitle `shouldBe` "Read 1 file, Listed 1 dir"
+                summary.blockBody
+                    `shouldBe` "  ◇ Read src/A.hs\n  ◇ Listed src"
+            _ -> expectationFailure "expected one inspection summary"
+
+    it "retains expanded inspection details" do
+        let first =
+                (block 1)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Searched needle"
+                    , blockBody = "src/A.hs:1"
+                    }
+            second =
+                (block 2)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Searched another"
+                    , blockBody = "src/B.hs:2"
+                    , blockExpanded = True
+                    }
+            grouped =
+                toList
+                    (coalesceInspectionBlocks (Seq.fromList [first, second]))
+        case grouped of
+            [summary] -> do
+                summary.blockTitle `shouldBe` "Searched 2 queries"
+                summary.blockState `shouldBe` BlockComplete
+                summary.blockBody `shouldSatisfy`
+                    Text.isInfixOf "    src/A.hs:1"
+                summary.blockBody `shouldSatisfy`
+                    Text.isInfixOf "    src/B.hs:2"
+            _ -> expectationFailure "expected one inspection summary"
+
+    it "does not merge running, failed, or non-adjacent inspection blocks" do
+        let inspect ident state =
+                (block ident)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Read src/A.hs"
+                    , blockState = state
+                    }
+            input = Seq.fromList
+                [ inspect 1 BlockComplete
+                , inspect 2 BlockRunning
+                , block 3
+                , inspect 4 BlockComplete
+                , inspect 5 BlockFailed
+                ]
+        map (.blockId) (toList (coalesceInspectionBlocks input))
+            `shouldBe` map BlockId [1, 2, 3, 4, 5]
+
+    it "keeps image inspections standalone" do
+        let viewed =
+                (block 1)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Viewed screenshot.png"
+                    }
+            readFile =
+                (block 2)
+                    { blockKind = BlockInspect
+                    , blockTitle = "Read src/A.hs"
+                    }
+        map (.blockId)
+            (toList (coalesceInspectionBlocks (Seq.fromList [viewed, readFile])))
+            `shouldBe` map BlockId [1, 2]
   where
     completeChunk =
         Seq.fromList (map block [1 .. transcriptChunkSize])

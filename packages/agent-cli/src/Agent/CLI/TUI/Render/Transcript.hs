@@ -146,7 +146,10 @@ import qualified Agent.TUI.Theme as Theme
       strongAttr,
       userAttr )
 import qualified Agent.CLI.TUI.Transcript as Transcript
-    ( transcriptChunks, transcriptChunkCacheKey )
+    ( coalesceInspectionBlocks
+    , transcriptChunks
+    , transcriptChunkCacheKey
+    )
 import qualified Graphics.Vty.CrossPlatform as Vty ()
 
 
@@ -170,7 +173,10 @@ drawTranscript state =
   where
     historicalBlocks =
         concatMap
-            (toList . (.historyTurnBlocks))
+            ( toList
+                . Transcript.coalesceInspectionBlocks
+                . (.historyTurnBlocks)
+            )
             (toList state.appHistoryWindow.historyWindowTurns)
     olderGap =
         historyGapWidget
@@ -238,7 +244,9 @@ drawConversationBlocks state target ui =
     vBox $
         map
             (drawTranscriptChunk state target ui)
-            (Transcript.transcriptChunks ui.uiBlocks)
+            ( Transcript.transcriptChunks
+                (Transcript.coalesceInspectionBlocks ui.uiBlocks)
+            )
 
 historyRangeWidgets :: AppState -> [Widget Name]
 historyRangeWidgets state =

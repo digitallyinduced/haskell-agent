@@ -556,7 +556,22 @@ renderCodeBodyWith
     -> Text
     -> [Text]
     -> Widget n
-renderCodeBodyWith wrapLine syntaxHighlighter language bodyLines =
+renderCodeBodyWith wrapLine =
+    renderCodeBodyWithBackground wrapLine Nothing
+
+renderCodeBodyWithBackground
+    :: (Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]])
+    -> Maybe AttrName
+    -> Maybe SyntaxHighlighter
+    -> Text
+    -> [Text]
+    -> Widget n
+renderCodeBodyWithBackground
+    wrapLine
+    backgroundName
+    syntaxHighlighter
+    language
+    bodyLines =
     -- Keep tokenization inside the render action. Brick's 'cached' inspects a
     -- widget's size policy before consulting its cache; returning a concrete
     -- vBox here would therefore force tokenization on every streamed redraw.
@@ -567,6 +582,7 @@ renderCodeBodyWith wrapLine syntaxHighlighter language bodyLines =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
         codeAttr <- B.lookupAttrName Theme.codeAttr
+        backgroundAttr <- traverse B.lookupAttrName backgroundName
         styledLines <-
             case syntaxHighlighter >>= highlighted of
                 Just highlightedLines
@@ -577,19 +593,29 @@ renderCodeBodyWith wrapLine syntaxHighlighter language bodyLines =
                         [ [(codeAttr, displayTerminalText line)]
                         | line <- bodyLines
                         ]
+        let applyBackground =
+                maybe id inheritBackground backgroundAttr
+            backgroundCodeAttr = applyBackground codeAttr
+            backgroundLines =
+                map
+                    (map (\(attr, text) -> (applyBackground attr, text)))
+                    styledLines
         let availableWidth = max 1 context.availWidth
             horizontalPadding =
                 if availableWidth >= 3 then 1 else 0
             contentWidth =
                 max 1 (availableWidth - 2 * horizontalPadding)
             rows =
-                concatMap (wrapLine contentWidth) styledLines
+                concatMap (wrapLine contentWidth) backgroundLines
             image =
                 V.vertCat
-                    [ renderCodeRow
-                        codeAttr
-                        horizontalPadding
-                        row
+                    [ fillBackgroundRow
+                        availableWidth
+                        backgroundCodeAttr $
+                        renderCodeRow
+                            backgroundCodeAttr
+                            horizontalPadding
+                            row
                     | row <- rows
                     ]
             boundedImage
@@ -607,6 +633,27 @@ renderCodeBodyWith wrapLine syntaxHighlighter language bodyLines =
     resolveSyntaxSpan span_ = do
         attr <- B.lookupAttrName (Theme.syntaxClassAttr span_.syntaxClass)
         pure (attr, displayTerminalText span_.syntaxText)
+
+    inheritBackground background attr =
+        case V.attrBackColor background of
+            V.SetTo color -> attr `V.withBackColor` color
+            _ -> attr
+
+    fillBackgroundRow availableWidth backgroundCodeAttr row =
+        case backgroundName of
+            Just _
+                | remaining > 0 ->
+                    V.horizCat
+                        [ row
+                        , V.charFill
+                            backgroundCodeAttr
+                            ' '
+                            remaining
+                            1
+                        ]
+            _ -> row
+      where
+        remaining = availableWidth - V.imageWidth row
 
 renderCodeRow
     :: V.Attr

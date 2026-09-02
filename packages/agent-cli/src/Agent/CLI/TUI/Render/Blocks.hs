@@ -45,7 +45,7 @@ import Agent.CLI.TUI.Types
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
 import Agent.Loop ()
-import Agent.Syntax ( SyntaxHighlighter )
+import Agent.Syntax ( SyntaxHighlighter, resolveFenceLanguage )
 import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting,
       diffWidgetWithSyntaxHighlighting,
@@ -70,7 +70,11 @@ import Agent.TUI.Motion
       waitingIndicator,
       MotionMode(MotionOff) )
 import Agent.TUI.Presentation
-    ( TodoDisplayLine(todoLineText, todoLineStatus),
+    ( DiffDisplayLine(..),
+      DiffLineKind(..),
+      TodoDisplayLine(todoLineText, todoLineStatus),
+      diffHeaderParts,
+      parseDiffDisplayLine,
       parseTodoList,
       todoStatusGlyph,
       toolOutputCodeLanguage,
@@ -163,9 +167,16 @@ import qualified Agent.TUI.Theme as Theme
       completionFlashAttr,
       controlLinkAttr,
       dimAttr,
+      diffAddedAttr,
+      diffAddedGutterAttr,
+      diffContextGutterAttr,
+      diffPathAttr,
+      diffRemovedAttr,
+      diffRemovedGutterAttr,
       errorAttr,
       inspectAttr,
       mutedAttr,
+      strongAttr,
       successAttr,
       syntaxCommentAttr,
       thinkingAttr,

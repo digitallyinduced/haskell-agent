@@ -259,6 +259,23 @@ spec = describe "fullscreen Markdown rendering" do
         Text.filter (/= ' ') (Text.concat rows)
             `shouldBe` Text.filter (/= ' ') code
 
+    it "fills a semantic code background across the available row" do
+        let width = 18
+            widget :: Widget ()
+            widget =
+                codeWidgetWithSyntaxHighlightingOn
+                    Nothing
+                    "haskell"
+                    Theme.diffAddedAttr
+                    "value = 1"
+            image =
+                V.picImage $
+                    renderWidget
+                        (Just (Theme.themeAttrMap Theme.Midnight))
+                        [widget]
+                        (width, 2)
+        V.imageWidth image `shouldBe` width
+
     it "preserves spaces inside wrapped code and string literals" do
         let code = "putStrLn \"alpha beta gamma delta epsilon\""
             widget :: Widget ()

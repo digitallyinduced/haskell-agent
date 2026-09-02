@@ -823,6 +823,23 @@ uiStateLogicalBytes ui =
                         (toolCallLogicalBytes call))
             0
             ui.uiToolCalls
+        , Map.foldl'
+            (\size group ->
+                saturatingAdd size $
+                    foldl'
+                        (\groupSize item ->
+                            saturatingAdd groupSize $
+                                saturatingAdd 192 $
+                                    logicalTextsBytes
+                                        [ item.inspectionCallId
+                                        , item.inspectionToolName
+                                        , item.inspectionTitle
+                                        , item.inspectionBody
+                                        ])
+                        128
+                        group.inspectionGroupItems)
+            0
+            ui.uiInspectionGroups
         , foldl'
             (\size todo ->
                 saturatingAdd size

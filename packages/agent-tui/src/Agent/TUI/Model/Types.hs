@@ -9,6 +9,8 @@ module Agent.TUI.Model.Types
     , PermissionOverlay(..)
     , PromptLimitStatus(..)
     , PromptState(..)
+    , InspectionGroup(..)
+    , InspectionItem(..)
     , UiBlock(..)
     , UiEvent(..)
     , UiNotice(..)
@@ -70,6 +72,22 @@ data BlockState
     | BlockFailed
     | BlockCancelled
     | BlockDenied
+    deriving (Eq, Show)
+
+data InspectionItem = InspectionItem
+    { inspectionCallId :: !Text
+    , inspectionToolName :: !Text
+    , inspectionTitle :: !Text
+    , inspectionDetail :: !Text
+    , inspectionBody :: !Text
+    , inspectionState :: !BlockState
+    }
+    deriving (Eq, Show)
+
+data InspectionGroup = InspectionGroup
+    { inspectionGroupOpen :: !Bool
+    , inspectionGroupItems :: ![InspectionItem]
+    }
     deriving (Eq, Show)
 
 data UiBlock = UiBlock
@@ -145,6 +163,8 @@ data UiState = UiState
     , uiTurnStartBlock :: !Int
     , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
+    -- | Live metadata for compact read/list/search bursts.
+    , uiInspectionGroups :: !(Map.Map BlockId InspectionGroup)
     -- | Background shell session IDs mapped to the block that owns their
     -- lifecycle. Empty write_stdin calls update that block instead of adding
     -- one retained block per poll.

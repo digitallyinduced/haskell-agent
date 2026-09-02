@@ -122,7 +122,10 @@ import Agent.TUI.Motion ( MotionDemand(..)
     , quietIndicator
     , waitingIndicator
     )
-import Agent.TUI.Presentation ( permissionToolCallPromptRelative )
+import Agent.TUI.Presentation
+    ( diffHeaderParts
+    , permissionToolCallPromptRelative
+    )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick

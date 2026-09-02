@@ -45,6 +45,39 @@ spec = do
                     ]
 
     describe "syntax theme attributes" do
+        it "uses quiet semantic depth in the default Midnight theme" do
+            let theme = Theme.themeAttrMap Theme.Midnight
+                base = attrMapLookup Theme.baseAttr theme
+                user = attrMapLookup Theme.userAttr theme
+                selected = attrMapLookup Theme.selectedAttr theme
+                assistant = attrMapLookup Theme.assistantAttr theme
+                header = attrMapLookup Theme.headerAttr theme
+                muted = attrMapLookup Theme.mutedAttr theme
+                border = attrMapLookup Theme.borderAttr theme
+                activeBorder = attrMapLookup Theme.borderActiveAttr theme
+            V.attrBackColor base `shouldBe` V.SetTo (RGBColor 20 20 20)
+            V.attrBackColor user `shouldBe` V.SetTo (RGBColor 36 36 36)
+            V.attrBackColor selected `shouldBe` V.SetTo (RGBColor 44 44 44)
+            V.attrForeColor assistant
+                `shouldBe` V.SetTo (RGBColor 200 200 200)
+            V.attrForeColor header
+                `shouldBe` V.SetTo (RGBColor 225 225 225)
+            V.attrForeColor muted
+                `shouldBe` V.SetTo (RGBColor 108 108 108)
+            V.attrForeColor border
+                `shouldBe` V.SetTo (RGBColor 50 50 55)
+            V.attrForeColor activeBorder
+                `shouldBe` V.SetTo (RGBColor 60 60 65)
+
+        it "gives fixed-theme hover attributes explicit surfaces" do
+            let theme = Theme.themeAttrMap Theme.Midnight
+                hover = attrMapLookup Theme.transcriptHoverAttr theme
+                hoverMuted =
+                    attrMapLookup Theme.transcriptHoverMutedAttr theme
+            V.attrBackColor hover `shouldBe` V.SetTo (RGBColor 44 44 44)
+            V.attrBackColor hoverMuted
+                `shouldBe` V.SetTo (RGBColor 44 44 44)
+
         it "keeps the daylight page background while dimming overlays" do
             V.attrBackColor
                 (attrMapLookup Theme.dimAttr (Theme.themeAttrMap Theme.Daylight))
@@ -84,6 +117,34 @@ spec = do
             V.attrBackColor midnight
                 `shouldBe` V.SetTo (RGBColor 26 27 38)
             V.attrStyle noColor `shouldBe` V.SetTo V.bold
+
+        it "sets backgrounds on force-painted attributes in every fixed theme" do
+            mapM_
+                ( \kind ->
+                    map
+                        ( \name ->
+                            V.attrBackColor
+                                (attrMapLookup
+                                    name
+                                    (Theme.themeAttrMap kind))
+                        )
+                        forcePaintedAttributes
+                        `shouldSatisfy` all (/= V.Default)
+                )
+                [ Theme.Midnight
+                , Theme.Daylight
+                , Theme.TokyoNight
+                , Theme.RosePineMoon
+                , Theme.OscuraMidnight
+                ]
+
+        it "uses distinct semantic surfaces for fixed-theme diff rows" do
+            let theme = Theme.themeAttrMap Theme.Daylight
+                added = attrMapLookup Theme.diffAddedAttr theme
+                removed = attrMapLookup Theme.diffRemovedAttr theme
+            V.attrBackColor added `shouldNotBe` V.Default
+            V.attrBackColor removed `shouldNotBe` V.Default
+            V.attrBackColor added `shouldNotBe` V.attrBackColor removed
 
         it "sets a daylight background on semantic text attributes" do
             map
@@ -353,3 +414,17 @@ isRgbForeground = \case
 
 allSyntaxClasses :: [SyntaxClass]
 allSyntaxClasses = [minBound .. maxBound]
+
+forcePaintedAttributes :: [AttrName]
+forcePaintedAttributes =
+    [ Theme.dimAttr
+    , Theme.mutedAttr
+    , Theme.selectedAttr
+    , Theme.transcriptHoverAttr
+    , Theme.transcriptHoverMutedAttr
+    , Theme.transcriptHoverMutedItalicAttr
+    , Theme.transcriptHoverMutedCancelledAttr
+    , Theme.controlLinkAttr
+    , Theme.controlLinkHoverAttr
+    , Theme.controlLinkActiveAttr
+    ]
