@@ -251,6 +251,17 @@
                     ];
                 };
 
+                agentMailSource = nix-filter.lib {
+                    root = ./packages/agent-mail;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-mail.cabal"
+                        "package.nix"
+                        "LICENSE"
+                    ];
+                };
+
                 agentResponsesSource = nix-filter.lib {
                     root = ./packages/agent-responses;
                     include = [
@@ -487,6 +498,11 @@
                             {
                                 src = agentMcpSource;
                             });
+                        agent-mail = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-mail/package.nix { })
+                            {
+                                src = agentMailSource;
+                            });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
@@ -638,6 +654,7 @@
                         null;
                 agentCorePackage = productionHaskellPackages.agent-core;
                 agentMcpPackage = productionHaskellPackages.agent-mcp;
+                agentMailPackage = productionHaskellPackages.agent-mail;
                 agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentRuntimeDaemonPackage =
@@ -938,6 +955,7 @@
                 packages.agent-cli-runtime = agentCliRuntimePackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
+                packages.agent-mail = agentMailPackage;
                 packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-runtime-daemon = agentRuntimeDaemonExecutable;
@@ -981,6 +999,7 @@
                         packages.agent-telegram
                         packages.agent-core
                         packages.agent-mcp
+                        packages.agent-mail
                         packages.agent-json
                         packages.agent-process
                         packages.agent-runtime-daemon
@@ -1038,6 +1057,7 @@
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;
                     agent-mcp = haskellPackages.agent-mcp;
+                    agent-mail = haskellPackages.agent-mail;
                     agent-json = haskellPackages.agent-json;
                     agent-process = haskellPackages.agent-process;
                     agent-runtime-daemon =

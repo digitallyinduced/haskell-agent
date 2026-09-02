@@ -14,6 +14,16 @@ module Agent.CLI.Prompt
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
+import Agent.Mail.Contract
+    ( mailCreateDraftToolName
+    , mailDownloadAttachmentToolName
+    , mailGetToolName
+    , mailListAccountsToolName
+    , mailListMailboxesToolName
+    , mailReplyDraftToolName
+    , mailSearchToolName
+    , mailUpdateDraftToolName
+    )
 import Agent.Codex.Dialect.Prompt
     ( codexSystemPrompt
     , codexSystemPromptForTools
@@ -313,14 +323,14 @@ mailGuidance available
             ]
   where
     mailToolNames =
-        [ "email_list_accounts"
-        , "email_list_mailboxes"
-        , "email_search"
-        , "email_get"
-        , "email_download_attachment"
-        , "email_create_draft"
-        , "email_update_draft"
-        , "email_reply_draft"
+        [ mailListAccountsToolName
+        , mailListMailboxesToolName
+        , mailSearchToolName
+        , mailGetToolName
+        , mailDownloadAttachmentToolName
+        , mailCreateDraftToolName
+        , mailUpdateDraftToolName
+        , mailReplyDraftToolName
         ]
 
 -- | Prefer GHCI as the general-purpose scripting environment.

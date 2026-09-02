@@ -22,20 +22,29 @@ delete, move, or label messages.
 - Custom IMAP permits implicit TLS or STARTTLS only. Certificate validation
   and SNI are enabled, authentication occurs only after TLS is established,
   and credentials are persisted only after an authenticated `LIST` probe.
-- The authoritative, versioned account snapshot is
+- In standalone mode, the authoritative, versioned account snapshot is
   `~/.haskell-agent/mail/store.json`; it is owner-only and atomically replaced
   under private cross-process locks so credentials cannot be paired with stale
   connection metadata after a crash. A separate `accounts.json` mirror contains
-  metadata only. Secrets never appear in account-list results, tool arguments,
-  errors, or `Show` output.
+  metadata only. In organization mode the gateway owns and encrypts the
+  credentials instead. Secrets never appear in account-list results, tool
+  arguments, errors, or `Show` output.
 
 ## Agent tools
 
-These capabilities are registered as first-party tools, rather than through a
-user-configured MCP subprocess. This keeps OAuth tokens and IMAP passwords out
-of MCP configuration, environment variables, and protocol payloads while still
-giving every agent backend the same provider-neutral function surface. The
-normal MCP collision check reserves these names.
+These capabilities are always registered as the same first-party tools. In
+standalone mode they execute against the local account store. When an
+organization gateway is connected, the runtime verifies and invokes the
+gateway's versioned, first-party MCP contract internally. The raw gateway MCP
+server is not added to the user-configured MCP fleet: the agent therefore sees
+the same canonical names and approval policy in both modes, and cannot bypass
+draft approval with a generic `mcp_call`.
+
+The selected backend is fail-closed. A connected gateway is authoritative; if
+its email contract is unavailable or incompatible, email tools stay disabled
+instead of silently falling back to locally stored credentials. OAuth tokens
+and IMAP passwords remain in the selected backend and never cross the MCP
+payload.
 
 The provider-neutral tool contract is:
 
@@ -48,18 +57,24 @@ The provider-neutral tool contract is:
 - `email_update_draft`
 - `email_reply_draft`
 
-The runtime integration registers tools only when an enabled, verified
-account exists. IDs are opaque and must come from a preceding email tool
-result. Provider-local mailbox, message, attachment, and draft references are
-authenticated with a per-runtime key and bound to both the originating
-account and capability kind. A reference cannot therefore be moved to another
-account, substituted for a different kind of item, or reused after restart.
+The runtime integration registers tools only when an enabled, verified account
+exists. IDs are opaque and must come from a preceding email tool result. In
+standalone mode, provider-local mailbox, message, attachment, and draft
+references are authenticated with a per-runtime key and bound to both the
+originating account and capability kind. A reference cannot therefore be moved
+to another account, substituted for a different kind of item, or reused after
+restart. In gateway mode, the gateway owns equivalent opaque references and
+binds them to the authenticated gateway client and account; the local runtime
+treats them as opaque values and does not persist them.
 Search accepts structured mailbox, sender, recipient, subject, date,
 attachment, and limit fields. Search and get results expose `reply_to` as the
 effective bare reply address when provider metadata is safe and unambiguous.
 Results, message bodies, attachments, provider requests, and wall clock
 duration are bounded. Downloads go to the current session's private temporary
-directory rather than being returned to the model.
+directory rather than being returned to the model. In gateway mode, the MCP
+operation returns only a short-lived opaque descriptor; the runtime then
+fetches bytes from a bounded, authenticated same-origin gateway endpoint with
+redirects disabled.
 
 Gmail and Microsoft support all eight tools. Compatible custom IMAP servers
 also support drafts when they advertise a Drafts mailbox and the UIDPLUS
@@ -97,8 +112,11 @@ not sufficient.
 
 ## Native account management
 
-The native application starts a browser authorization, opens the returned
-URL, and polls with the opaque flow ID. It may cancel the flow at any time.
+In standalone mode, the native application starts a browser authorization,
+opens the returned URL, and polls with the opaque flow ID. It may cancel the
+flow at any time. In gateway mode, account connection and management belong to
+the gateway control plane, so the native UI shows gateway-managed accounts and
+does not invoke local OAuth or IMAP setup.
 Google must be configured with an installed-app OAuth client ID; Microsoft
 must use a public desktop/native application registration. Their public client
 IDs are injected into the release `Info.plist`; neither provider uses a client
@@ -111,6 +129,7 @@ ID.
 
 Changes to connected accounts affect the next newly-created agent runtime.
 The native application creates that tool set for each new run; an already
-running turn keeps the snapshot with which it started. Every tool invocation
-also rechecks account enabled/state metadata, so disabling or deleting an
-account revokes access even for an existing snapshot.
+running turn keeps the snapshot with which it started. Every standalone tool
+invocation also rechecks account enabled/state metadata, so disabling or
+deleting an account revokes access even for an existing snapshot. Gateway
+mode authorizes the authenticated gateway identity on every request.

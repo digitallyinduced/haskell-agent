@@ -57,6 +57,7 @@ import Agent.CLI.LearnedSkills.Store
 import Agent.CLI.Login ()
 import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
+import Agent.CLI.Mail.Gateway ( gatewayMailTools )
 import Agent.CLI.Mail.Tools ( mailToolsForStore )
 import Agent.CLI.Mail.Transport ( productionMailTransport )
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
@@ -854,7 +855,15 @@ runAgentTools
                 (sessionId, tempDir) <- allocateSessionTemp root
                 pure (tempDir, Just sessionId)
     setToolSessionTmp baseToolEnv (Just sessionTmp)
-    mailAppTools <- mailToolsForStore baseToolEnv productionMailTransport
+    mailAppTools <- case connectedGateway of
+        Nothing ->
+            mailToolsForStore baseToolEnv productionMailTransport
+        Just gatewayCredential ->
+            gatewayMailTools baseToolEnv gatewayCredential >>= \case
+                Left err -> do
+                    reportStartupWarning startup err
+                    pure []
+                Right tools -> pure tools
     imageGenerationHistory <- newImageGenerationHistory
     forM_ resumed \(_, turns) ->
         recordImageGenerationResponseItems

@@ -54,6 +54,13 @@ module Agent.CLI.Mail.Store
     ) where
 
 import Agent.CLI.Error (formatException)
+import Agent.Mail.Types
+    ( MailProvider(..), mailProviderSlug, parseMailProvider
+    , MailTLSMode(..), mailTLSModeSlug, MailImapSettings(..)
+    , MailAccountState(..), mailAccountStateSlug, MailAccount(..)
+    , MailSecret(..), MailCredential(..)
+    , normalizeMailEmail, validateMailImapSettings, validateMailOAuthClientId
+    )
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
@@ -61,10 +68,10 @@ import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (Exception, tryIO)
 import Control.Monad (unless, when)
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:), (.:?), (.=))
+import Data.Aeson ((.:?), (.=))
 import qualified Data.ByteString.Base64.URL as Base64URL
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isAlphaNum, isAscii, isControl, isHexDigit, isSpace)
+import Data.Char (isControl, isSpace)
 import Data.Foldable (traverse_)
 import Data.List (find, nub, sortOn)
 import Data.Maybe (fromMaybe)
@@ -82,242 +89,6 @@ import System.Directory.OsPath
 import System.IO.Unsafe (unsafePerformIO)
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
-
-data MailProvider
-    = GmailProvider
-    | MicrosoftProvider
-    | ImapProvider
-    deriving (Eq, Ord, Show)
-
-mailProviderSlug :: MailProvider -> Text
-mailProviderSlug = \case
-    GmailProvider -> "gmail"
-    MicrosoftProvider -> "microsoft"
-    ImapProvider -> "imap"
-
-parseMailProvider :: Text -> Maybe MailProvider
-parseMailProvider value =
-    case Text.toCaseFold (Text.strip value) of
-        "gmail" -> Just GmailProvider
-        "google" -> Just GmailProvider
-        "microsoft" -> Just MicrosoftProvider
-        "outlook" -> Just MicrosoftProvider
-        "imap" -> Just ImapProvider
-        _ -> Nothing
-
-instance Aeson.ToJSON MailProvider where
-    toJSON = Aeson.String . mailProviderSlug
-
-instance Aeson.FromJSON MailProvider where
-    parseJSON = Aeson.withText "MailProvider" \value ->
-        maybe (fail "unknown mail provider") pure (parseMailProvider value)
-
--- | There is intentionally no plaintext mode.
-data MailTLSMode
-    = MailImplicitTLS
-    | MailStartTLS
-    deriving (Eq, Ord, Show)
-
-mailTLSModeSlug :: MailTLSMode -> Text
-mailTLSModeSlug = \case
-    MailImplicitTLS -> "tls"
-    MailStartTLS -> "starttls"
-
-instance Aeson.ToJSON MailTLSMode where
-    toJSON = Aeson.String . mailTLSModeSlug
-
-instance Aeson.FromJSON MailTLSMode where
-    parseJSON = Aeson.withText "MailTLSMode" \value ->
-        case Text.toCaseFold value of
-            "tls" -> pure MailImplicitTLS
-            "ssl" -> pure MailImplicitTLS
-            "implicit_tls" -> pure MailImplicitTLS
-            "starttls" -> pure MailStartTLS
-            _ -> fail "mail TLS mode must be tls or starttls"
-
-data MailImapSettings = MailImapSettings
-    { mailImapHost :: !Text
-    , mailImapPort :: !Int
-    , mailImapTLSMode :: !MailTLSMode
-    , mailImapUsername :: !Text
-    }
-    deriving (Eq, Show)
-
-instance Aeson.ToJSON MailImapSettings where
-    toJSON settings = Aeson.object
-        [ "host" .= settings.mailImapHost
-        , "port" .= settings.mailImapPort
-        , "tls_mode" .= settings.mailImapTLSMode
-        , "username" .= settings.mailImapUsername
-        ]
-
-instance Aeson.FromJSON MailImapSettings where
-    parseJSON = Aeson.withObject "MailImapSettings" \object ->
-        MailImapSettings
-            <$> object .: "host"
-            <*> object .: "port"
-            <*> object .: "tls_mode"
-            <*> object .: "username"
-
--- | State is public but contains no arbitrary server response. A disabled
--- account remains in its previous health state and is simply not registered.
-data MailAccountState
-    = MailConnected
-    | MailNeedsReauthorization
-    | MailConnectionError
-    deriving (Eq, Ord, Show)
-
-mailAccountStateSlug :: MailAccountState -> Text
-mailAccountStateSlug = \case
-    MailConnected -> "connected"
-    MailNeedsReauthorization -> "needs_reauth"
-    MailConnectionError -> "connection_error"
-
-instance Aeson.ToJSON MailAccountState where
-    toJSON = Aeson.String . mailAccountStateSlug
-
-instance Aeson.FromJSON MailAccountState where
-    parseJSON = Aeson.withText "MailAccountState" \value ->
-        case Text.toCaseFold value of
-            "connected" -> pure MailConnected
-            "needs_reauth" -> pure MailNeedsReauthorization
-            "needs_reauthorization" -> pure MailNeedsReauthorization
-            "connection_error" -> pure MailConnectionError
-            -- Accept the pre-release spelling when reading an existing draft
-            -- store, but always write the stable ABI vocabulary above.
-            "validation_failed" -> pure MailConnectionError
-            _ -> fail "unknown mail account state"
-
--- | Metadata contains no password, access token, refresh token, or arbitrary
--- error string. OAuth client IDs are public identifiers needed after restart.
-data MailAccount = MailAccount
-    { mailAccountId :: !Text
-    , mailAccountProvider :: !MailProvider
-    , mailAccountEmail :: !Text
-    , mailAccountLabel :: !Text
-    , mailAccountEnabled :: !Bool
-    , mailAccountState :: !MailAccountState
-    , mailAccountImapSettings :: !(Maybe MailImapSettings)
-    , mailAccountOAuthClientId :: !(Maybe Text)
-    , mailAccountCreatedAt :: !UTCTime
-    , mailAccountUpdatedAt :: !UTCTime
-    , mailAccountLastVerifiedAt :: !(Maybe UTCTime)
-    , mailAccountLastErrorCode :: !(Maybe Text)
-    }
-    deriving (Eq, Show)
-
-instance Aeson.ToJSON MailAccount where
-    toJSON account = Aeson.object
-        [ "id" .= account.mailAccountId
-        , "provider" .= account.mailAccountProvider
-        , "email" .= account.mailAccountEmail
-        , "label" .= account.mailAccountLabel
-        , "enabled" .= account.mailAccountEnabled
-        , "state" .= account.mailAccountState
-        , "imap" .= account.mailAccountImapSettings
-        , "oauth_client_id" .= account.mailAccountOAuthClientId
-        , "created_at" .= account.mailAccountCreatedAt
-        , "updated_at" .= account.mailAccountUpdatedAt
-        , "last_verified_at" .= account.mailAccountLastVerifiedAt
-        , "last_error_code" .= account.mailAccountLastErrorCode
-        ]
-
-instance Aeson.FromJSON MailAccount where
-    parseJSON = Aeson.withObject "MailAccount" \object ->
-        MailAccount
-            <$> object .: "id"
-            <*> object .: "provider"
-            <*> object .: "email"
-            <*> object .:? "label" Aeson..!= ""
-            <*> object .:? "enabled" Aeson..!= True
-            <*> object .:? "state" Aeson..!= MailConnected
-            <*> object .:? "imap"
-            <*> object .:? "oauth_client_id"
-            <*> object .: "created_at"
-            <*> object .: "updated_at"
-            <*> object .:? "last_verified_at"
-            <*> object .:? "last_error_code"
-
-data MailSecret
-    = MailOAuthSecret
-        { mailSecretAccountId :: !Text
-        , mailOAuthAccessToken :: !Text
-        , mailOAuthRefreshToken :: !(Maybe Text)
-        , mailOAuthExpiresAt :: !(Maybe UTCTime)
-        , mailOAuthScopes :: ![Text]
-        }
-    | MailImapSecret
-        { mailSecretAccountId :: !Text
-        , mailImapPassword :: !Text
-        }
-    deriving (Eq)
-
-instance Show MailSecret where
-    show = \case
-        MailOAuthSecret { mailSecretAccountId, mailOAuthExpiresAt, mailOAuthScopes } ->
-            "MailOAuthSecret { mailSecretAccountId = "
-                <> show mailSecretAccountId
-                <> ", mailOAuthAccessToken = <redacted>"
-                <> ", mailOAuthRefreshToken = <redacted>"
-                <> ", mailOAuthExpiresAt = " <> show mailOAuthExpiresAt
-                <> ", mailOAuthScopes = " <> show mailOAuthScopes <> " }"
-        MailImapSecret { mailSecretAccountId } ->
-            "MailImapSecret { mailSecretAccountId = "
-                <> show mailSecretAccountId
-                <> ", mailImapPassword = <redacted> }"
-
-instance Aeson.ToJSON MailSecret where
-    toJSON = \case
-        MailOAuthSecret
-            { mailSecretAccountId
-            , mailOAuthAccessToken
-            , mailOAuthRefreshToken
-            , mailOAuthExpiresAt
-            , mailOAuthScopes
-            } ->
-                Aeson.object
-                    [ "id" .= mailSecretAccountId
-                    , "kind" .= ("oauth" :: Text)
-                    , "access_token" .= mailOAuthAccessToken
-                    , "refresh_token" .= mailOAuthRefreshToken
-                    , "expires_at" .= mailOAuthExpiresAt
-                    , "scopes" .= mailOAuthScopes
-                    ]
-        MailImapSecret { mailSecretAccountId, mailImapPassword } ->
-            Aeson.object
-                [ "id" .= mailSecretAccountId
-                , "kind" .= ("imap_password" :: Text)
-                , "password" .= mailImapPassword
-                ]
-
-instance Aeson.FromJSON MailSecret where
-    parseJSON = Aeson.withObject "MailSecret" \object -> do
-        kind <- object .: "kind"
-        case (kind :: Text) of
-            "oauth" ->
-                MailOAuthSecret
-                    <$> object .: "id"
-                    <*> object .: "access_token"
-                    <*> object .:? "refresh_token"
-                    <*> object .:? "expires_at"
-                    <*> object .:? "scopes" Aeson..!= []
-            "imap_password" ->
-                MailImapSecret
-                    <$> object .: "id"
-                    <*> object .: "password"
-            _ -> fail "unknown mail secret kind"
-
-data MailCredential = MailCredential
-    { mailCredentialAccount :: !MailAccount
-    , mailCredentialSecret :: !MailSecret
-    }
-    deriving (Eq)
-
-instance Show MailCredential where
-    show credential =
-        "MailCredential { mailCredentialAccount = "
-            <> show credential.mailCredentialAccount
-            <> ", mailCredentialSecret = <redacted> }"
 
 data MailAccountDiscovery
     = MailOAuthDiscovery !MailProvider
@@ -764,15 +535,6 @@ discoverMailSettings rawEmail = do
         , ("web.de", "imap.web.de")
         ]
 
-normalizeMailEmail :: Text -> Either Text Text
-normalizeMailEmail raw =
-    case Text.splitOn "@" (Text.toCaseFold (Text.strip raw)) of
-        [local, domain]
-            | validLocal local
-            , validDomain domain ->
-                Right (local <> "@" <> domain)
-        _ -> Left "enter a valid email address"
-
 validateMailAccount :: MailAccount -> Either Text ()
 validateMailAccount account = do
     validateId "mail account id" account.mailAccountId
@@ -791,25 +553,6 @@ validateMailAccount account = do
                         Left "custom IMAP account must not have an OAuth client id"
         GmailProvider -> validateOAuthMetadata account
         MicrosoftProvider -> validateOAuthMetadata account
-
-validateMailImapSettings :: MailImapSettings -> Either Text ()
-validateMailImapSettings settings = do
-    let rawHost = settings.mailImapHost
-        rawUsername = settings.mailImapUsername
-        host = Text.strip rawHost
-        username = Text.strip rawUsername
-    when (rawHost /= host || Text.null host || Text.length host > 253
-        || Text.any (\character -> isControl character || isSpace character) rawHost
-        || not (validHost host)) $
-        Left "IMAP host is invalid"
-    when (settings.mailImapPort < 1 || settings.mailImapPort > 65535) $
-        Left "IMAP port must be between 1 and 65535"
-    when (rawUsername /= username || Text.null username
-        || Text.length username > 320
-        || Text.any
-            (\character -> isControl character || isSpace character)
-            rawUsername) $
-        Left "IMAP username is invalid"
 
 validateMailSecret :: MailSecret -> Either Text ()
 validateMailSecret = \case
@@ -860,36 +603,6 @@ validateOAuthMetadata account = do
             | otherwise -> Left "OAuth account is missing its OAuth client id"
         Just clientId ->
             validateMailOAuthClientId account.mailAccountProvider clientId
-
-validateMailOAuthClientId :: MailProvider -> Text -> Either Text ()
-validateMailOAuthClientId provider rawClientId
-    | rawClientId /= clientId
-        || Text.null clientId
-        || Text.length clientId > 1024
-        || Text.any isControl clientId =
-            Left "OAuth client id is invalid"
-    | provider == GmailProvider
-        , Just prefix <- Text.stripSuffix googleClientIdSuffix clientId
-        , not (Text.null prefix)
-        , Text.all validGoogleCharacter prefix =
-            Right ()
-    | provider == MicrosoftProvider
-        , map Text.length groups == [8, 4, 4, 4, 12]
-        , all (Text.all isHexDigit) groups =
-            Right ()
-    | provider == GmailProvider =
-        Left "Gmail OAuth client id must be an installed-app client id."
-    | provider == MicrosoftProvider =
-        Left "Microsoft OAuth client id must be a UUID."
-    | otherwise =
-        Left "Custom IMAP accounts do not use OAuth client ids."
-  where
-    clientId = Text.strip rawClientId
-    groups = Text.splitOn "-" clientId
-    googleClientIdSuffix = ".apps.googleusercontent.com"
-    validGoogleCharacter character =
-        isAscii character
-            && (isAlphaNum character || character == '_' || character == '-')
 
 loadStoreUnlocked :: OsPath -> IO (Either Text MailStore)
 loadStoreUnlocked home = do
@@ -1114,52 +827,6 @@ safeErrorCodes =
     , "timeout"
     , "validation_failed"
     ]
-
-validLocal :: Text -> Bool
-validLocal local =
-    not (Text.null local)
-        && Text.length local <= 64
-        && Text.all
-            (\character ->
-                isAscii character
-                    && (isAlphaNum character
-                        || character `elem`
-                            (".!#$%&'*+/=?^_`{|}~-" :: String)))
-            local
-
-validDomain :: Text -> Bool
-validDomain domain =
-    Text.length domain <= 253
-        && length labels >= 2
-        && all validLabel labels
-  where
-    labels = Text.splitOn "." domain
-    validLabel label =
-        not (Text.null label)
-            && Text.length label <= 63
-            && Text.head label /= '-'
-            && Text.last label /= '-'
-            && Text.all
-                (\character ->
-                    isAscii character
-                        && (isAlphaNum character || character == '-'))
-                label
-
-validHost :: Text -> Bool
-validHost host
-    | Text.length host >= 3
-        && Text.head host == '['
-        && Text.last host == ']' =
-            let address = Text.init (Text.tail host)
-            in not (Text.null address)
-                && Text.all
-                    (\character ->
-                        isAscii character
-                            && (isAlphaNum character
-                                || character == ':'
-                                || character == '.'))
-                    address
-    | otherwise = validDomain host
 
 boundedException :: Exception exception => exception -> Text
 boundedException =

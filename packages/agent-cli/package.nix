@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, agent-claude, agent-cli-runtime
+{ mkDerivation, aeson, agent-claude, agent-cli-runtime, agent-mail
 , agent-codex-dialect, agent-core, agent-gemini
 , agent-grok-build-dialect, agent-json, agent-mcp, agent-openai
 , agent-openrouter, agent-process, agent-responses
@@ -23,7 +23,7 @@ mkDerivation {
   # Keep agent-runtime-daemon here for the Darwin bridge component.
   libraryHaskellDepends = [
     aeson agent-claude agent-cli-runtime agent-codex-dialect agent-core
-    agent-gemini agent-grok-build-dialect agent-json agent-mcp
+    agent-gemini agent-grok-build-dialect agent-json agent-mail agent-mcp
     agent-openai agent-openrouter agent-process agent-responses
     agent-runtime-daemon
     agent-responses-types agent-store agent-syntax agent-tui agent-xai
@@ -41,7 +41,7 @@ mkDerivation {
   ];
   testHaskellDepends = [
     aeson agent-claude agent-cli-runtime agent-codex-dialect agent-core
-    agent-gemini agent-grok-build-dialect agent-json agent-mcp
+    agent-gemini agent-grok-build-dialect agent-json agent-mail agent-mcp
     agent-openai agent-openrouter agent-responses agent-responses-types
     agent-runtime-daemon agent-store agent-tui agent-xai ansi-terminal
     async base brick bytestring colour containers directory filepath

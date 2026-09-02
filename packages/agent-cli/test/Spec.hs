@@ -26,6 +26,7 @@ import qualified Agent.CLI.ConversationStoreSpec as ConversationStoreSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.MailStoreSpec as MailStoreSpec
 import qualified Agent.CLI.MailMimeSpec as MailMimeSpec
+import qualified Agent.CLI.MailGatewaySpec as MailGatewaySpec
 import qualified Agent.CLI.MailOAuthSpec as MailOAuthSpec
 import qualified Agent.CLI.MailToolsSpec as MailToolsSpec
 import qualified Agent.CLI.MailTransportSpec as MailTransportSpec
@@ -134,6 +135,7 @@ main = hspec do
     ConnectivitySpec.spec
     MailStoreSpec.spec
     MailMimeSpec.spec
+    MailGatewaySpec.spec
     MailOAuthSpec.spec
     MailToolsSpec.spec
     MailTransportSpec.spec

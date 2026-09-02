@@ -181,6 +181,7 @@ library
                     , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
                     , Agent.CLI.Mail.Imap
+                    , Agent.CLI.Mail.Gateway
                     , Agent.CLI.Mail.Mime
                     , Agent.CLI.Mail.OAuth
                     , Agent.CLI.Mail.Store
@@ -265,6 +266,7 @@ library
                     , agent-cli-runtime:Agent.CLI.Session.StoreCodec as Agent.CLI.Session.StoreCodec
                     , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
     build-depends:    agent-cli-runtime >= 0.1 && < 0.2
+                    , agent-mail >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
@@ -487,6 +489,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.MailMimeSpec
+                    , Agent.CLI.MailGatewaySpec
                     , Agent.CLI.MailOAuthSpec
                     , Agent.CLI.MailStoreSpec
                     , Agent.CLI.MailToolsSpec
@@ -558,6 +561,7 @@ test-suite agent-cli-test
     build-depends:    agent-cli
                     , agent-cli-runtime
                     , agent-runtime-daemon
+                    , agent-mail
                     , agent-core
                     , agent-mcp
                     , agent-json

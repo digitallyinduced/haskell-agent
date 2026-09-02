@@ -1,5 +1,6 @@
 packages:
     packages/agent-process
+    packages/agent-mail
     packages/agent-cli-runtime
     packages/agent-cli
     packages/agent-telegram

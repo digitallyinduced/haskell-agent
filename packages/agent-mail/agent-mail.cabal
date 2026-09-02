@@ -1,0 +1,77 @@
+cabal-version:      3.0
+name:               agent-mail
+version:            0.1.0.0
+synopsis:           Provider-neutral email contract for Haskell Agent
+description:
+    Shared email domain types, Model Context Protocol schemas, and bounded
+    provider transports used by standalone agents and organization gateways.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Network
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions:
+        BlockArguments
+        DuplicateRecordFields
+        LambdaCase
+        NamedFieldPuns
+        NoFieldSelectors
+        NumericUnderscores
+        OverloadedRecordDot
+        OverloadedStrings
+        RecordWildCards
+        ScopedTypeVariables
+    ghc-options:
+        -Wall
+        -Wcompat
+        -Widentities
+        -Wincomplete-record-updates
+        -Wincomplete-uni-patterns
+        -Wpartial-fields
+        -Werror=incomplete-patterns
+
+library
+    import:          common-options
+    hs-source-dirs:  src
+    exposed-modules:
+        Agent.Mail.Contract
+        Agent.Mail.Imap
+        Agent.Mail.Mime
+        Agent.Mail.OAuth
+        Agent.Mail.Transport
+        Agent.Mail.Types
+    build-depends:
+        aeson >= 2.0 && < 3
+        , base >= 4.17 && < 5
+        , base64-bytestring
+        , bytestring >= 0.11 && < 0.13
+        , async
+        , crypton
+        , http-client
+        , http-client-tls
+        , http-types
+        , memory
+        , network
+        , crypton-connection
+        , safe-exceptions
+        , tagsoup
+        , text >= 2.0 && < 2.2
+        , time
+        , tls
+
+test-suite agent-mail-test
+    import:          common-options
+    type:            exitcode-stdio-1.0
+    hs-source-dirs:  test
+    main-is:         Spec.hs
+    build-depends:
+        agent-mail
+        , aeson
+        , base
+        , hspec >= 2.11 && < 2.12
+        , text
