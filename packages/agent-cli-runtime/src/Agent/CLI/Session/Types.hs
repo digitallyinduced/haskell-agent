@@ -21,6 +21,7 @@ module Agent.CLI.Session.Types
     , transcriptEffectText
     , parseTranscriptEffect
     , inferTranscriptEffect
+    , restoreLegacyLocalCompactionMarker
     ) where
 
 import Agent.CLI.Models (ModelTarget)
@@ -49,11 +50,13 @@ import Agent.OpenAI.Compaction
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Agent.Responses.Types
-    ( MessageContent(..)
+    ( InternalChatMetadata(..)
+    , MessageContent(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , localCompactionSummaryContentItemKind
     )
 import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder)
@@ -397,7 +400,8 @@ sessionTurnDecoder = Hermes.object do
             , turnError = turnErrorValue
             , turnResponseId = responseId
             , turnEffect = effect
-            , turnItems = items
+            , turnItems =
+                restoreLegacyLocalCompactionMarker effect items
             , turnDisplayItems = displayItems
             , turnUsage = usage
             , turnProviderTelemetry = providerTelemetry
@@ -427,6 +431,50 @@ inferTranscriptEffect userText items
         || hasLegacyTextCompactionCheckpoint items =
         TranscriptReplace
     | otherwise = TranscriptAppend
+
+-- | Upgrade pre-marker local summaries using their persisted replacement
+-- effect. This keeps old sessions compatible without letting live provider
+-- policy infer checkpoints from arbitrary assistant text.
+restoreLegacyLocalCompactionMarker
+    :: TranscriptEffect
+    -> [ResponseItem]
+    -> [ResponseItem]
+restoreLegacyLocalCompactionMarker effect items
+    | effect /= TranscriptReplace = items
+    | hasCompactionCheckpoint items = items
+    | otherwise = map markLegacySummary items
+  where
+    markLegacySummary = \case
+        MessageItem message
+            | message.role == RoleAssistant
+            , maybe False
+                (Text.isPrefixOf summaryPrefix . Text.stripStart)
+                (legacyMessageText message) ->
+                MessageItem message
+                    { passthrough =
+                        Just (markMetadata message.passthrough)
+                    }
+        item -> item
+
+    markMetadata existing =
+        let metadata = fromMaybe emptyMetadata existing
+            existingKinds = fromMaybe [] metadata.contentItemKinds
+        in metadata
+            { contentItemKinds =
+                Just
+                    ( localCompactionSummaryContentItemKind
+                    : filter
+                        (/= localCompactionSummaryContentItemKind)
+                        existingKinds
+                    )
+            }
+
+    emptyMetadata = InternalChatMetadata
+        { turnId = Nothing
+        , createTime = Nothing
+        , contentItemKinds = Nothing
+        , executedToolCalls = Nothing
+        }
 
 -- Older persisted turns have no explicit effect or internal summary marker.
 -- Keep the visible-prefix fallback confined to their decoder migration path;

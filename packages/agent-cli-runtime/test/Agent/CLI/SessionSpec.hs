@@ -13,6 +13,7 @@ import Agent.CLI.Session.StoreCodec
     ( fromStoredResponseItem
     , toStoredResponseItem
     )
+import Agent.CLI.Session.Types (restoreLegacyLocalCompactionMarker)
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect (DialectId(..))
@@ -1873,12 +1874,10 @@ spec = describe "Agent.CLI.Session" do
                     , "items" Aeson..= (items :: [ResponseItem])
                     , "usage" Aeson..= (Nothing :: Maybe TokenUsage)
                     ]
-                effect userText items =
-                    fmap
-                        (.turnEffect)
-                        (Hermes.decodeEither sessionTurnDecoder
-                            (LBS.toStrict
-                                (Aeson.encode (legacy userText items))))
+                decoded userText items =
+                    Hermes.decodeEither sessionTurnDecoder
+                        (LBS.toStrict
+                            (Aeson.encode (legacy userText items)))
                 oldLocalSummary = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
@@ -1892,11 +1891,28 @@ spec = describe "Agent.CLI.Session" do
                     , phase = Nothing
                     , passthrough = Nothing
                     }
-            effect "/compact focus" []
+                hasLocalMarker = any \case
+                    MessageItem message ->
+                        responseMessageHasContentItemKind
+                            localCompactionSummaryContentItemKind
+                            message
+                    _ -> False
+            fmap (.turnEffect) (decoded "/compact focus" [])
                 `shouldBe` Right TranscriptReplace
-            effect "/rewind" [] `shouldBe` Right TranscriptReset
-            effect "continue" [oldLocalSummary]
-                `shouldBe` Right TranscriptReplace
+            fmap (.turnEffect) (decoded "/rewind" [])
+                `shouldBe` Right TranscriptReset
+            fmap
+                (\turn ->
+                    ( turn.turnEffect
+                    , hasLocalMarker turn.turnItems
+                    ))
+                (decoded "continue" [oldLocalSummary])
+                `shouldBe` Right (TranscriptReplace, True)
+            hasLocalMarker
+                (restoreLegacyLocalCompactionMarker
+                    TranscriptAppend
+                    [oldLocalSummary])
+                `shouldBe` False
 
 testCreate :: StorePool -> OsPath -> SessionCreate
 testCreate pool root = SessionCreate
