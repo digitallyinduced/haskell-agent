@@ -496,6 +496,7 @@ test-suite agent-cli-test
                     , Agent.CLI.MetaConsoleRuntimeSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.NativeAgentsSpec
+                    , Agent.CLI.NativeRuntimeSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
