@@ -1212,29 +1212,58 @@ spec = do
 
     describe "shell block rendering" do
         it "renders a completed command as one line until it is reopened" do
-            let call =
+            let completeCall resultCallId resultCallKind call output =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished ToolCallResult
+                                { callId = resultCallId
+                                , output
+                                , callKind = resultCallKind
+                                }))
+                        (foldl
+                            (flip reduceUi)
+                            initialUiState
+                            [ UiLoop TurnStarted
+                            , UiLoop (ToolStarted call)
+                            ])
+                call =
                     functionToolCall
                         "shell-render"
                         "shell_command"
                         "{\"command\":\"printf shell-command\"}"
-                running =
-                    foldl
-                        (flip reduceUi)
-                        initialUiState
-                        [ UiLoop TurnStarted
-                        , UiLoop (ToolStarted call)
-                        ]
-                completed =
-                    reduceUi
-                        (UiLoop
-                            (ToolFinished ToolCallResult
-                                { callId = "shell-render"
-                                , output =
-                                    "exit: 0\nshell-output-marker\nsecond-line"
-                                , callKind = FunctionCallKind
-                                }))
-                        running
+                completed = completeCall
+                    "shell-render"
+                    FunctionCallKind
+                    call
+                    "exit: 0\nshell-output-marker\nsecond-line"
                 reopened = reduceUi UiToggleSelected completed
+                ghciCompleted =
+                    completeCall
+                        "ghci-render"
+                        FunctionCallKind
+                        (functionToolCall
+                            "ghci-render"
+                            "run_ghci"
+                            "{\"expression\":\"putStrLn \\\"invocation-marker\\\"\"}")
+                        "exit: 0\nghci-output-marker"
+                execCompleted =
+                    completeCall
+                        "exec-render"
+                        CustomCallKind
+                        (customToolCall
+                            "exec-render"
+                            "exec"
+                            "text(\"exec-invocation-marker\");")
+                        "Script completed\nexec-output-marker"
+                failed =
+                    completeCall
+                        "failed-render"
+                        FunctionCallKind
+                        (functionToolCall
+                            "failed-render"
+                            "shell_command"
+                            "{\"command\":\"false\"}")
+                        "exit: 7\nfailed-output-marker"
             runtime <- newScriptRuntime completed
             let size = (80, 20)
                 renderShell ui =
@@ -1261,12 +1290,27 @@ spec = do
                     RowEnd width -> Text.replicate width " "
                 collapsedText = renderShell completed
                 reopenedText = renderShell reopened
+                ghciText = renderShell ghciCompleted
+                execText = renderShell execCompleted
+                failedText = renderShell failed
             collapsedText `shouldSatisfy`
                 Text.isInfixOf "$ printf shell-command"
             collapsedText `shouldNotSatisfy`
                 Text.isInfixOf "shell-output-marker"
             reopenedText `shouldSatisfy`
                 Text.isInfixOf "shell-output-marker"
+            ghciText `shouldSatisfy`
+                Text.isInfixOf "$ ghci · putStrLn \"invocation-marker\""
+            ghciText `shouldNotSatisfy`
+                Text.isInfixOf "ghci-output-marker"
+            execText `shouldSatisfy`
+                Text.isInfixOf "$ exec · text(\"exec-invocation-marker\");"
+            execText `shouldNotSatisfy`
+                Text.isInfixOf "exec-output-marker"
+            failedText `shouldSatisfy`
+                Text.isInfixOf "› ✗ $ false"
+            failedText `shouldNotSatisfy`
+                Text.isInfixOf "failed-output-marker"
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do
