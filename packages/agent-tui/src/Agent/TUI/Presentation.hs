@@ -29,6 +29,7 @@ module Agent.TUI.Presentation
     , todoListHasOpenWork
     , todoStatusGlyph
     , toolCallInput
+    , toolCallHeaderRelative
     , toolCallTitle
     , toolCallTitleRelative
     , toolCallDiff
@@ -123,6 +124,18 @@ toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
     | canonicalToolName call.name == "exec" = "$ exec"
     | otherwise = summarizeToolCallRelative workspace call
+
+-- | Separate a filesystem action from its path so renderers can style the
+-- path without guessing from the human-readable title. Non-filesystem calls
+-- retain their complete title and have no separate header detail.
+toolCallHeaderRelative :: Text -> ToolCall -> (Text, Maybe Text)
+toolCallHeaderRelative workspace call =
+    case toolPathArgument call of
+        Just path ->
+            ( toolVerb call.name
+            , Just (workspaceRelativeDisplayPath workspace path)
+            )
+        Nothing -> (toolCallTitleRelative workspace call, Nothing)
 
 -- | Full invocation text that benefits from dedicated code rendering.
 toolCallInput :: ToolCall -> Text

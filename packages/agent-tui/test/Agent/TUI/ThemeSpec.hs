@@ -62,6 +62,13 @@ spec = do
                     (Theme.themeAttrMap Theme.Daylight))
                 `shouldBe` V.SetTo (RGBColor 255 255 255)
 
+        it "uses the readable daylight accent for tool paths" do
+            V.attrForeColor
+                (attrMapLookup
+                    Theme.toolPathAttr
+                    (Theme.themeAttrMap Theme.Daylight))
+                `shouldBe` V.SetTo (RGBColor 144 80 150)
+
         it "sets a daylight background on semantic text attributes" do
             map
                 ( V.attrBackColor

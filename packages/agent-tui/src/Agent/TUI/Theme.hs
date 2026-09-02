@@ -445,7 +445,7 @@ mkTheme background foreground muted accent link =
         , (waitingMidAttr, accentA)
         , (toolAttr, linkA)
         , (inspectAttr, mutedA `V.withStyle` V.bold)
-        , (toolPathAttr, yellowA)
+        , (toolPathAttr, accentA)
         , (todoPendingAttr, base)
         , (todoInProgressAttr, accentA `V.withStyle` V.bold)
         , (todoCompletedAttr, mutedA)

@@ -145,15 +145,13 @@ import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( breakOn,
-      dropWhile,
+    ( dropWhile,
       isPrefixOf,
       length,
       lines,
       null,
       strip,
       take,
-      stripStart,
       uncons,
       unlines,
       unwords,
@@ -280,6 +278,7 @@ drawBlock state target ui block =
                     (inspectionStatusAttr block)
                     (blockStateGlyph state target block)
                     block.blockTitle
+                    block.blockDetail
                     (toolBodySections
                         state.appSyntaxHighlighter
                         block.blockBody
@@ -321,6 +320,7 @@ drawBlock state target ui block =
                     (statusAttr state target block)
                     (blockStateGlyph state target block)
                     block.blockTitle
+                    block.blockDetail
                     (editBodyWidgets (visibleBody block))
             BlockSystem ->
                 withAttr Theme.mutedAttr
@@ -774,13 +774,12 @@ accentFileBlockWithSections
     -> AttrName
     -> Text
     -> Text
+    -> Text
     -> [Widget Name]
     -> Widget Name
 accentFileBlockWithSections
-    state target ui block waveElapsed accent glyph heading sections =
-    let (verb, suffix) = Text.breakOn " " heading
-        path = Text.stripStart suffix
-    in accentBlockWithHeader
+    state target ui block waveElapsed accent glyph verb path sections =
+    accentBlockWithHeader
         state
         target
         ui

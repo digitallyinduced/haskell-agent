@@ -1368,9 +1368,11 @@ spec = describe "fullscreen UI reducer" do
                                 }))
                     started
         case Foldable.toList started.uiBlocks of
-            [block] ->
+            [block] -> do
                 block.blockTitle
-                    `shouldBe` "Edited nix/modules/telegram.nix"
+                    `shouldBe` "Edited"
+                block.blockDetail
+                    `shouldBe` "nix/modules/telegram.nix"
             _ -> expectationFailure "expected one running edit block"
         case Foldable.toList finished.uiBlocks of
             [block] -> do
@@ -1401,7 +1403,28 @@ spec = describe "fullscreen UI reducer" do
             [block] -> do
                 block.blockKind `shouldBe` BlockInspect
                 block.blockState `shouldBe` BlockComplete
+                block.blockTitle `shouldBe` "Read"
+                block.blockDetail `shouldBe` "src/Main.hs"
             _ -> expectationFailure "expected one completed inspection block"
+
+    it "keeps non-filesystem inspection labels intact" do
+        let call =
+                functionToolCall
+                    "session-1"
+                    "read_agent_session"
+                    "{\"session_id\":\"session-1\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockInspect
+                block.blockTitle
+                    `shouldBe` "Read agent session session-1"
+                block.blockDetail `shouldBe` ""
+            _ -> expectationFailure "expected one inspection block"
 
     it "shows an apply_patch diff while running and after completion" do
         let call =
