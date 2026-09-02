@@ -1186,6 +1186,10 @@ spec = do
                 `shouldBe` True
             hasCompactionCheckpoint [assistant "ordinary response"]
                 `shouldBe` False
+            hasCompactionCheckpoint
+                [assistant
+                    "Compacted conversation summary:\nordinary response"]
+                `shouldBe` False
 
     describe "isCompactSessionTurn" do
         it "recognizes compact markers" do

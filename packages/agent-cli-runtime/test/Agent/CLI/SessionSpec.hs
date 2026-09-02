@@ -613,6 +613,25 @@ spec = describe "Agent.CLI.Session" do
             traverse fromStoredResponseItem (map toStoredResponseItem items)
                 `shouldBe` Right items
 
+        it "persists the local compaction checkpoint marker" do
+            let item = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [OutputTextPart "summary" Nothing Nothing]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Just InternalChatMetadata
+                        { turnId = Nothing
+                        , createTime = Nothing
+                        , contentItemKinds =
+                            Just [localCompactionSummaryContentItemKind]
+                        , executedToolCalls = Nothing
+                        }
+                    }
+            fromStoredResponseItem (toStoredResponseItem item)
+                `shouldBe` Right item
+
         it "stores inline image and file payloads as binary data" do
             let imageUrl = "data:image/png;base64,cG5nLWJ5dGVz"
                 fileData = "data:text/plain;base64,ZmlsZS1ieXRlcw=="
@@ -1845,23 +1864,39 @@ spec = describe "Agent.CLI.Session" do
                 `shouldBe` Right (meta { metaGatewayIdentity = Nothing })
 
         it "infers transcript effects when importing legacy JSON turns" do
-            let legacy userText = Aeson.object
+            let legacy userText items = Aeson.object
                     [ "at" Aeson..= fixedTime
                     , "userText" Aeson..= (userText :: Text.Text)
                     , "assistantText" Aeson..= (Nothing :: Maybe Text.Text)
                     , "error" Aeson..= (Nothing :: Maybe Text.Text)
                     , "responseId" Aeson..= (Nothing :: Maybe Text.Text)
-                    , "items" Aeson..= ([] :: [ResponseItem])
+                    , "items" Aeson..= (items :: [ResponseItem])
                     , "usage" Aeson..= (Nothing :: Maybe TokenUsage)
                     ]
-                effect userText =
+                effect userText items =
                     fmap
                         (.turnEffect)
                         (Hermes.decodeEither sessionTurnDecoder
-                            (LBS.toStrict (Aeson.encode (legacy userText))))
-            effect "/compact focus"
+                            (LBS.toStrict
+                                (Aeson.encode (legacy userText items))))
+                oldLocalSummary = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "Compacted conversation summary:\nlegacy state"
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+            effect "/compact focus" []
                 `shouldBe` Right TranscriptReplace
-            effect "/rewind" `shouldBe` Right TranscriptReset
+            effect "/rewind" [] `shouldBe` Right TranscriptReset
+            effect "continue" [oldLocalSummary]
+                `shouldBe` Right TranscriptReplace
 
 testCreate :: StorePool -> OsPath -> SessionCreate
 testCreate pool root = SessionCreate

@@ -9,6 +9,7 @@ import Agent.Responses.Request
     ( forceStatelessStreaming
     , mapResponseTools
     , selectConfiguredModel
+    , stripLocalCompactionMarker
     )
 import Agent.ReasoningEffort
     ( ReasoningEffort(..)
@@ -42,27 +43,28 @@ mapModel options model =
 -- never stored server-side.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
-    withHostedXSearch $
-        mapResponseTools xaiTool $
-            forceStatelessStreaming defaultResponseCreateParams
-            { model = Just $
-                selectConfiguredModel
-                    options.modelOverrides
-                    (Text.isPrefixOf "grok")
-                    options.defaultModel
-                    request.model
-            , input = Just (ResponseInputItems (systemItems <> requestInputItems request))
-            , tools = request.tools
-            , reasoning = Just ReasoningConfig
-                { context = Nothing
-                , effort = Just (xaiReasoningEffort (request.reasoning >>= (.effort)))
-                , generateSummary = Nothing
-                , reasoningMode = Nothing
-                , summary = Just "concise"
+    stripLocalCompactionMarker $
+        withHostedXSearch $
+            mapResponseTools xaiTool $
+                forceStatelessStreaming defaultResponseCreateParams
+                { model = Just $
+                    selectConfiguredModel
+                        options.modelOverrides
+                        (Text.isPrefixOf "grok")
+                        options.defaultModel
+                        request.model
+                , input = Just (ResponseInputItems (systemItems <> requestInputItems request))
+                , tools = request.tools
+                , reasoning = Just ReasoningConfig
+                    { context = Nothing
+                    , effort = Just (xaiReasoningEffort (request.reasoning >>= (.effort)))
+                    , generateSummary = Nothing
+                    , reasoningMode = Nothing
+                    , summary = Just "concise"
+                    }
+                , include = request.include
+                , promptCacheKey = request.promptCacheKey
                 }
-            , include = request.include
-            , promptCacheKey = request.promptCacheKey
-            }
   where
     systemItems = case request.instructions of
         Just instructions

@@ -4,6 +4,7 @@ module Agent.Responses.Request
     , mapResponseTools
     , selectConfiguredModel
     , setResponseModel
+    , stripLocalCompactionMarker
     , stripReplayedItemStatus
     , stripReplayedInputStatus
     ) where
@@ -61,6 +62,61 @@ selectConfiguredModel overrides isNative defaultModel = \case
         Nothing
             | isNative model -> model
             | otherwise -> defaultModel
+
+-- | Remove the host-only marker that identifies a locally generated
+-- compaction summary. The marker remains in persisted state so compaction
+-- policy can recognize the checkpoint, but Responses-compatible providers
+-- must never receive it.
+stripLocalCompactionMarker
+    :: ResponseCreateParams
+    -> ResponseCreateParams
+stripLocalCompactionMarker ResponseCreateParams { input, .. } =
+    ResponseCreateParams
+        { input = stripInput <$> input
+        , ..
+        }
+  where
+    stripInput = \case
+        ResponseInputItems items ->
+            ResponseInputItems (map stripItem items)
+        other -> other
+
+    stripItem = \case
+        MessageItem ResponseMessage { passthrough, .. } ->
+            MessageItem ResponseMessage
+                { passthrough = stripMetadata passthrough
+                , ..
+                }
+        AgentMessageItem ResponseAgentMessage { passthrough, .. } ->
+            AgentMessageItem ResponseAgentMessage
+                { passthrough = stripMetadata passthrough
+                , ..
+                }
+        other -> other
+
+    stripMetadata = \case
+        Nothing -> Nothing
+        Just metadata ->
+            let remainingKinds = case metadata.contentItemKinds of
+                    Nothing -> Nothing
+                    Just kinds -> case
+                        filter
+                            (/= localCompactionSummaryContentItemKind)
+                            kinds
+                        of
+                            [] -> Nothing
+                            values -> Just values
+                cleaned = metadata { contentItemKinds = remainingKinds }
+            in if cleaned == emptyMetadata
+                then Nothing
+                else Just cleaned
+
+    emptyMetadata = InternalChatMetadata
+        { turnId = Nothing
+        , createTime = Nothing
+        , contentItemKinds = Nothing
+        , executedToolCalls = Nothing
+        }
 
 -- | Drop the provider lifecycle @status@ from transcript items that are
 -- replayed as request input.

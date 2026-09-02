@@ -8,6 +8,8 @@ module Agent.Responses.Types.Items
     , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
+    , localCompactionSummaryContentItemKind
+    , responseMessageHasContentItemKind
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , CustomToolCall(..)
@@ -61,6 +63,19 @@ data ResponseMessage = ResponseMessage
     , passthrough :: !(Maybe InternalChatMetadata)
 
     } deriving stock (Eq, Show)
+
+-- | Internal marker attached to locally generated compaction summaries.
+-- Provider request adapters may remove it at the wire boundary after using it
+-- to distinguish checkpoints from ordinary assistant text.
+localCompactionSummaryContentItemKind :: Text
+localCompactionSummaryContentItemKind =
+    "haskell-agent.local-compaction-summary"
+
+responseMessageHasContentItemKind :: Text -> ResponseMessage -> Bool
+responseMessageHasContentItemKind kind message =
+    maybe False
+        (maybe False (kind `elem`) . (.contentItemKinds))
+        message.passthrough
 
 instance ToJSON ResponseMessage where
     toJSON ResponseMessage

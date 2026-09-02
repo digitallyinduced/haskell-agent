@@ -35,7 +35,6 @@ import Control.Retry
     , retrying
     )
 import qualified Data.ByteString.Char8 as BS8
-import qualified Data.Text as TextValue
 import qualified Data.Text.Encoding as Text
 import Network.HTTP.Simple hiding (Response)
 
@@ -201,31 +200,10 @@ isCompactionCheckpoint = \case
     KnownResponseItem ItemContextCompaction _ -> True
     MessageItem message
         | message.role == RoleAssistant ->
-            maybe False
-                (TextValue.isPrefixOf localSummaryPrefix . TextValue.stripStart)
-                (responseMessageText message)
+            responseMessageHasContentItemKind
+                localCompactionSummaryContentItemKind
+                message
     _ -> False
-
-responseMessageText :: ResponseMessage -> Maybe TextValue.Text
-responseMessageText message = case message.content of
-    MessageContentText value -> Just value
-    MessageContentParts parts ->
-        case
-            [ value
-            | part <- parts
-            , value <- case part of
-                InputTextPart { text = value } -> [value]
-                OutputTextPart { text = value } -> [value]
-                _ -> []
-            ]
-        of
-            [] -> Nothing
-            values -> Just (TextValue.intercalate "\n" values)
-
--- Kept in sync with the portable checkpoint emitted by
--- Agent.OpenAI.Compaction.assistantSummaryItem.
-localSummaryPrefix :: TextValue.Text
-localSummaryPrefix = "Compacted conversation summary:"
 
 -- | Retry capacity / overload pressure and short-lived 5xx failures. Generic
 -- connection drops and quota errors are left to the caller. Production uses a

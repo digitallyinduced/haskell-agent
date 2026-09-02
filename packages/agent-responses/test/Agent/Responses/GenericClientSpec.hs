@@ -53,6 +53,15 @@ spec = do
                 projected = buildRequest options request
             projected.tools `shouldBe` Just [tool]
 
+        it "strips local compaction metadata from serialized input" do
+            let projected = buildRequest options markedSummaryRequest
+                encoded = LBS.toStrict (Aeson.encode projected)
+            BS.isInfixOf
+                "haskell-agent.local-compaction-summary"
+                encoded
+                `shouldBe` False
+            BS.isInfixOf "preserved.kind" encoded `shouldBe` True
+
         it "preserves custom grammar and namespace tool fields" do
             let grammar = rawJsonFromEncoding $ Aeson.pairs $
                     "type" Aeson..= ("grammar" :: Text)
@@ -138,14 +147,20 @@ spec = do
             attempts <- newIORef (0 :: Int)
             recordedModels <- newIORef []
             recordedHeaders <- newIORef []
+            recordedMarkers <- newIORef []
             Warp.testWithApplication
-                (pure (providerHookApp attempts recordedModels recordedHeaders))
+                (pure
+                    (providerHookApp
+                        attempts
+                        recordedModels
+                        recordedHeaders
+                        recordedMarkers))
                 \port -> do
                     let config = providerHookConfig port
                     result <- createResponseWithProviderPolicy
                         (constantDelay 0 <> limitRetries 2)
                         config
-                        defaultResponseCreateParams
+                        markedSummaryRequest
                         Nothing
                     response <- expectRight result
                     response.responseId `shouldBe` "resp-provider-hook"
@@ -153,6 +168,7 @@ spec = do
             readIORef recordedModels
                 `shouldReturn` [Just "provider-model", Just "provider-model"]
             readIORef recordedHeaders `shouldReturn` [True, True]
+            readIORef recordedMarkers `shouldReturn` [False, False]
 
         it "classifies a valid oversized error before adding truncation context" do
             requireLoopbackListener
@@ -201,15 +217,26 @@ providerHookConfig port = ProviderClientConfig
         _ -> False
     }
 
-providerHookApp attempts recordedModels recordedHeaders request respond = do
+providerHookApp
+    attempts
+    recordedModels
+    recordedHeaders
+    recordedMarkers
+    request
+    respond = do
     body <- Wai.strictRequestBody request
     let decoded = Codec.decodeResponseCreateParams (LBS.toStrict body)
         requestModel = either (const Nothing) (.model) decoded
         hasProviderHeader =
             lookup "X-Provider-Hook" (Wai.requestHeaders request)
                 == Just "enabled"
+        hasLocalMarker =
+            BS.isInfixOf
+                "haskell-agent.local-compaction-summary"
+                (LBS.toStrict body)
     modifyIORef' recordedModels (<> [requestModel])
     modifyIORef' recordedHeaders (<> [hasProviderHeader])
+    modifyIORef' recordedMarkers (<> [hasLocalMarker])
     attempt <- atomicModifyIORef' attempts \current ->
         let next = current + 1
         in (next, next)
@@ -251,6 +278,29 @@ expectRight = \case
         expectationFailure ("expected Right, got Left " <> show err)
             >> fail "unreachable"
     Right value -> pure value
+
+markedSummaryRequest :: ResponseCreateParams
+markedSummaryRequest = defaultResponseCreateParams
+    { input = Just (ResponseInputItems
+        [ MessageItem ResponseMessage
+            { messageId = Nothing
+            , content = MessageContentParts
+                [OutputTextPart "summary" Nothing Nothing]
+            , role = RoleAssistant
+            , status = Nothing
+            , phase = Nothing
+            , passthrough = Just InternalChatMetadata
+                { turnId = Just "turn-1"
+                , createTime = Nothing
+                , contentItemKinds = Just
+                    [ localCompactionSummaryContentItemKind
+                    , "preserved.kind"
+                    ]
+                , executedToolCalls = Nothing
+                }
+            }
+        ])
+    }
 
 withTools :: [ResponseTool] -> ResponseCreateParams -> ResponseCreateParams
 withTools value request = request { tools = Just value }

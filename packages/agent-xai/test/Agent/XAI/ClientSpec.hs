@@ -14,6 +14,7 @@ import Control.Exception.Safe (finally)
 import Control.Monad (void, when)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
@@ -120,7 +121,13 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
-                    , passthrough = Nothing
+                    , passthrough = Just InternalChatMetadata
+                        { turnId = Nothing
+                        , createTime = Nothing
+                        , contentItemKinds =
+                            Just [localCompactionSummaryContentItemKind]
+                        , executedToolCalls = Nothing
+                        }
                     }
                 request = (helloRequest "continue")
                     { model = Just "grok-4.6"
@@ -135,6 +142,44 @@ spec = do
 
             [sent] <- readIORef recorded
             lookup "x-compaction-at" sent.headers `shouldBe` Nothing
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+            BS.isInfixOf
+                (Text.encodeUtf8 localCompactionSummaryContentItemKind)
+                (LBS.toStrict sent.body)
+                `shouldBe` False
+
+        it "keeps x-compaction-at for ordinary assistant text with the summary heading" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-ordinary-summary-heading" []
+                    ]
+                ordinaryReply = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "Compacted conversation summary:\nuser-visible reply"
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just (ResponseInputItems [ordinaryReply])
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "400000"
             lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
 
         it "does not invent server compaction metadata for unknown Grok models" do

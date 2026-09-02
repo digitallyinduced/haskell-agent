@@ -1026,7 +1026,13 @@ assistantSummaryItem summary =
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
-        , passthrough = Nothing
+        , passthrough = Just InternalChatMetadata
+            { turnId = Nothing
+            , createTime = Nothing
+            , contentItemKinds =
+                Just [localCompactionSummaryContentItemKind]
+            , executedToolCalls = Nothing
+            }
         }
 
 -- | Grok-style local rebuild: recent user texts + assistant summary.
@@ -1101,7 +1107,7 @@ hasCompactionCheckpoint = any \case
     KnownResponseItem ItemContextCompaction _ -> True
     MessageItem message
         | message.role == RoleAssistant ->
-            maybe False
-                (Text.isPrefixOf summaryPrefix . Text.stripStart)
-                (messageText message)
+            responseMessageHasContentItemKind
+                localCompactionSummaryContentItemKind
+                message
     _ -> False

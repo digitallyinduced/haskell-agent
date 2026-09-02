@@ -10,6 +10,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
@@ -99,6 +100,15 @@ spec = do
             KeyMap.lookup "reasoning" object `shouldBe` Just (Aeson.object
                 [ "effort" .= ("high" :: Text)
                 ])
+
+        it "strips local compaction metadata from serialized input" do
+            let encoded = LBS.toStrict . Aeson.encode $
+                    buildRequest defaultClientOptions markedSummaryRequest
+            BS.isInfixOf
+                "haskell-agent.local-compaction-summary"
+                encoded
+                `shouldBe` False
+            BS.isInfixOf "preserved.kind" encoded `shouldBe` True
 
     describe "SSE assembly" do
         it "decodes typed event constructors and builds the merged final response" do
@@ -192,6 +202,29 @@ sampleRequest = defaultResponseCreateParams
         }
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     , promptCacheKey = Just "cache-1"
+    }
+
+markedSummaryRequest :: ResponseCreateParams
+markedSummaryRequest = sampleRequest
+    { input = Just (ResponseInputItems
+        [ MessageItem ResponseMessage
+            { messageId = Nothing
+            , content = MessageContentParts
+                [OutputTextPart "summary" Nothing Nothing]
+            , role = RoleAssistant
+            , status = Nothing
+            , phase = Nothing
+            , passthrough = Just InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Just
+                    [ localCompactionSummaryContentItemKind
+                    , "preserved.kind"
+                    ]
+                , executedToolCalls = Nothing
+                }
+            }
+        ])
     }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams

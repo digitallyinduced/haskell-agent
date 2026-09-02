@@ -23,6 +23,8 @@ module Agent.Responses.Types
     , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
+    , localCompactionSummaryContentItemKind
+    , responseMessageHasContentItemKind
     , ResponseAgentMessage(..)
     , InternalChatMetadata(..)
     , AdditionalToolsItem(..)

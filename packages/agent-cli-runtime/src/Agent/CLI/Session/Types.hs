@@ -44,10 +44,17 @@ import Agent.OpenAI.Compaction
     , isCompactSessionTurn
     , isNewSessionTurn
     , isRewindSessionTurn
+    , summaryPrefix
     )
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
-import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.Types
+    ( MessageContent(..)
+    , ResponseContentPart(..)
+    , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
+    )
 import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder)
 import Agent.Store.Postgres.Connection (StorePool)
@@ -415,9 +422,39 @@ inferTranscriptEffect userText items
         || isNewSessionTurn userText
         || isRewindSessionTurn userText =
         TranscriptReset
-    | isCompactSessionTurn userText || hasCompactionCheckpoint items =
+    | isCompactSessionTurn userText
+        || hasCompactionCheckpoint items
+        || hasLegacyTextCompactionCheckpoint items =
         TranscriptReplace
     | otherwise = TranscriptAppend
+
+-- Older persisted turns have no explicit effect or internal summary marker.
+-- Keep the visible-prefix fallback confined to their decoder migration path;
+-- live request policy must never infer a checkpoint from assistant text.
+hasLegacyTextCompactionCheckpoint :: [ResponseItem] -> Bool
+hasLegacyTextCompactionCheckpoint = any \case
+    MessageItem message
+        | message.role == RoleAssistant ->
+            maybe False
+                (Text.isPrefixOf summaryPrefix . Text.stripStart)
+                (legacyMessageText message)
+    _ -> False
+
+legacyMessageText :: ResponseMessage -> Maybe Text
+legacyMessageText message = case message.content of
+    MessageContentText text -> Just text
+    MessageContentParts parts ->
+        case
+            [ text
+            | part <- parts
+            , text <- case part of
+                InputTextPart { text } -> [text]
+                OutputTextPart { text } -> [text]
+                _ -> []
+            ]
+        of
+            [] -> Nothing
+            values -> Just (Text.intercalate "\n" values)
 
 -- | Ephemeral progress for a running persisted session. This lives in the
 -- session temp directory rather than the transcript so polling clients can

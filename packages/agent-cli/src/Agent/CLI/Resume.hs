@@ -53,11 +53,7 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
-import Agent.OpenAI.Compaction
-    ( hasCompactionCheckpoint
-    , hasReloadedGeneratedContextItems
-    , isTranscriptResetTurn
-    )
+import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)
 import Agent.CLI.TextLayout
     ( SplitPaneFrame(..)
     , clampSelectionIndex
@@ -147,8 +143,7 @@ resumeNeedsGeneratedContext turns =
                         newerTurns)
   where
     isContextBoundary turn =
-        isTranscriptResetTurn turn.turnUserText
-            || hasCompactionCheckpoint turn.turnItems
+        turn.turnEffect /= TranscriptAppend
 
 -- | Build picker entries from already loaded sessions.
 resumeEntriesFrom :: [(SessionMeta, [SessionTurn])] -> [ResumeEntry]
