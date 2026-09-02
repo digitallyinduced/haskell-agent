@@ -46,13 +46,29 @@ spec = do
                            ]
             trimDanglingToolSuffix items `shouldBe` prefix
 
-        it "does not truncate an old unmatched call before a later message" do
+        it "removes an old unmatched call before a later message" do
             let items =
                     [ userItem "before"
                     , functionCallItem "old-call"
                     , userItem "continued later"
                     ]
-            trimDanglingToolSuffix items `shouldBe` items
+            trimDanglingToolSuffix items
+                `shouldBe` [userItem "before", userItem "continued later"]
+
+        it "removes an orphan output without a preceding call" do
+            let items =
+                    [ functionOutputItem "orphan"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
+
+        it "does not pair an output that precedes its call" do
+            let items =
+                    [ functionOutputItem "torn"
+                    , functionCallItem "torn"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
 
     describe "runBtwWithCancel" do
         it "uses private state and preserves parent params including tools" do

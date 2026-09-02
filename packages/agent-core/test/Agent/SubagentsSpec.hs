@@ -231,13 +231,13 @@ spec = describe "Agent.Subagents" do
             `shouldReturn` Right replacement
         closeSubagentRegistry registry
 
-    it "allows 32 concurrent agents by default" do
+    it "allows eight concurrent agents by default" do
         defaultSubagentConfig.maxConcurrent `shouldBe` defaultMaxConcurrent
-        defaultMaxConcurrent `shouldBe` 32
+        defaultMaxConcurrent `shouldBe` 8
 
-    it "allows four nested levels by default and rejects depth five" do
+    it "allows one delegated level by default and rejects nested delegation" do
         defaultSubagentConfig.maxDepth `shouldBe` Just defaultMaxDepth
-        defaultMaxDepth `shouldBe` 4
+        defaultMaxDepth `shouldBe` 1
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Right LoopResult
                 { finalResponseId = "x"
@@ -248,16 +248,31 @@ spec = describe "Agent.Subagents" do
             (\_ _ -> pure ())
         Right level1 <- spawnSubagent registry Nothing 0 "one" Nothing
         _ <- waitSubagents registry [level1] 15000
-        Right level2 <- spawnSubagent registry (Just level1) 1 "two" Nothing
-        _ <- waitSubagents registry [level2] 15000
-        Right level3 <- spawnSubagent registry (Just level2) 2 "three" Nothing
-        _ <- waitSubagents registry [level3] 15000
-        Right level4 <- spawnSubagent registry (Just level3) 3 "four" Nothing
-        _ <- waitSubagents registry [level4] 15000
-        result <- spawnSubagent registry (Just level4) 4 "five" Nothing
+        result <- spawnSubagent registry (Just level1) 1 "two" Nothing
         result `shouldBe`
             Left
-                "Agent depth limit reached (maximum depth 4). Solve the task yourself."
+                "Agent depth limit reached (maximum depth 1). Solve the task yourself."
+
+    it "caps cumulative new agents per root turn after agents finish" do
+        let config = defaultSubagentConfig
+                { maxSpawnedPerTurn = Just 2
+                }
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (completedResult "done"))
+            (\_ _ -> pure ())
+        rootTurnId <- beginRootTurn registry
+        let spawnForTurn name =
+                spawnSubagentWithCwdForTurn registry (Just rootTurnId)
+                    (fromFilePath "/tmp") Nothing 0 name Nothing
+        Right first <- spawnForTurn "first"
+        _ <- waitSubagents registry [first] 15000
+        Right second <- spawnForTurn "second"
+        _ <- waitSubagents registry [second] 15000
+        third <- spawnForTurn "third"
+        third `shouldBe`
+            Left
+                "Subagent budget reached for this turn (maximum 2). Solve the remaining task yourself."
+        closeSubagentRegistry registry
 
     it "releases maxConcurrent capacity when agents finish" do
         gate <- newTVarIO False
@@ -303,7 +318,9 @@ spec = describe "Agent.Subagents" do
         closeSubagentRegistry registry
 
     it "supports nested spawn when depth is unlimited" do
-        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxDepth = Nothing })
+            (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         setSubagentRunner registry \env _previous prompt _ ->
@@ -542,7 +559,9 @@ spec = describe "Agent.Subagents" do
         noticeSeen <- newEmptyTMVarIO
         rootNotices <- newIORef ([] :: [SubagentId])
         settled <- newIORef ([] :: [(SubagentId, SubagentStatus)])
-        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxDepth = Just 2 })
+            (fromFilePath "/tmp")
             (\_ _ _ _ -> pure (Left LoopNoResponseId))
             (\_ _ -> pure ())
         setSubagentOnComplete registry \agentId _ ->
