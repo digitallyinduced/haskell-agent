@@ -27,6 +27,7 @@ spec = do
                 , Theme.selectedAttr
                 , Theme.selectedMutedAttr
                 , Theme.todoPendingAttr
+                , Theme.toolPathAttr
                 ]
                 `shouldBe`
                     [ V.SetTo V.brightBlack
@@ -40,6 +41,7 @@ spec = do
                     , V.SetTo V.brightWhite
                     , V.SetTo V.white
                     , V.Default
+                    , V.SetTo V.brightYellow
                     ]
 
     describe "syntax theme attributes" do
@@ -76,6 +78,7 @@ spec = do
                 , Theme.thinkingAttr
                 , Theme.toolAttr
                 , Theme.inspectAttr
+                , Theme.toolPathAttr
                 , Theme.errorAttr
                 , Theme.successAttr
                 , Theme.codeAttr
