@@ -447,6 +447,7 @@ noteTerminalFocusLost = do
             , appSyntaxHighlighter = Nothing
             , appSyntaxRequested = Set.empty
             , appHoveredControl = Nothing
+            , appHoveredLine = Nothing
             , appPressedControl = Nothing
             , appAgentHover = Nothing
             }

@@ -455,6 +455,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appAgentHover = Nothing
         , appMarkdownLinkHovered = False
         , appHoveredControl = Nothing
+        , appHoveredLine = Nothing
         , appPressedControl = Nothing
         , appWorkerStopped = False
         , appConversationAnchor = Nothing
