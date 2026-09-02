@@ -523,6 +523,90 @@ spec = describe "fullscreen Markdown rendering" do
                 fmap (V.attrForeColor . spanAttr) (findText "\"after\"")
                     `shouldNotBe` Just variableForeground
 
+    it "treats triple-prefix hunk lines as added and removed changes" do
+        let width = 40
+            widget :: Widget ()
+            widget =
+                diffWidgetWithSyntaxHighlighting
+                    Nothing
+                    "Main.hs"
+                    (Text.unlines
+                        [ "@@ -1,2 +1,2 @@"
+                        , "--- comment"
+                        , "+++counter;"
+                        ])
+            picture =
+                renderWidget
+                    (Just Theme.terminalDefault)
+                    [widget]
+                    (width, 4)
+            rows =
+                concat $
+                    map toList $
+                        toList $
+                            displayOpsForPic picture (width, 4)
+            findText expected = find (containsText expected) rows
+            removedBackground =
+                V.attrBackColor $
+                    attrMapLookup Theme.diffRemovedAttr Theme.terminalDefault
+            addedBackground =
+                V.attrBackColor $
+                    attrMapLookup Theme.diffAddedAttr Theme.terminalDefault
+        fmap (V.attrBackColor . spanAttr) (findText "-- comment")
+            `shouldBe` Just removedBackground
+        fmap (V.attrBackColor . spanAttr) (findText "++counter;")
+            `shouldBe` Just addedBackground
+
+    it "keeps unified YAML context from matching compact-edit removals" do
+        let width = 40
+            widget :: Widget ()
+            widget =
+                diffWidgetWithSyntaxHighlighting
+                    Nothing
+                    "items.yaml"
+                    (Text.unlines
+                        [ "@@ -1 +1 @@"
+                        , "  - item"
+                        ])
+            picture =
+                renderWidget
+                    (Just Theme.terminalDefault)
+                    [widget]
+                    (width, 3)
+            rows =
+                concat $
+                    map toList $
+                        toList $
+                            displayOpsForPic picture (width, 3)
+            removedBackground =
+                V.attrBackColor $
+                    attrMapLookup Theme.diffRemovedAttr Theme.terminalDefault
+            addedBackground =
+                V.attrBackColor $
+                    attrMapLookup Theme.diffAddedAttr Theme.terminalDefault
+        find (containsText "- item") rows `shouldSatisfy` isJust
+        fmap (V.attrBackColor . spanAttr) (find (containsText "- item") rows)
+            `shouldNotBe` Just removedBackground
+        fmap (V.attrBackColor . spanAttr) (find (containsText "- item") rows)
+            `shouldNotBe` Just addedBackground
+
+    it "keeps a following file header after a unified hunk is complete" do
+        diffSyntaxLanguages
+            ""
+            (Text.unlines
+                [ "--- a/src/Main.hs"
+                , "+++ b/src/Main.hs"
+                , "@@ -1 +1 @@"
+                , "-old"
+                , "+new"
+                , "--- a/web/app.ts"
+                , "+++ b/web/app.ts"
+                , "@@ -1 +1 @@"
+                , "-const oldValue = 1"
+                , "+const newValue = 2"
+                ])
+            `shouldBe` ["haskell", "typescript"]
+
     it "renders terminal controls as inert visible glyphs" do
         let unsafe = "\ESC]0;owned\BEL\t\r"
             prose = Text.concat (renderRows 40 unsafe)

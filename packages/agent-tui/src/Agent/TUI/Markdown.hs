@@ -60,6 +60,7 @@ import qualified Data.List as List
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Text.Read (readMaybe)
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Builder as Builder
 import qualified Graphics.Vty as V
@@ -292,42 +293,89 @@ data StyledDiffRow = StyledDiffRow
     , styledDiffFragments :: ![(V.Attr, Text)]
     }
 
+data DiffParseState = DiffParseState
+    { parsePaths :: !DiffPaths
+    , parseHunk :: !(Maybe HunkRemaining)
+    }
+
+data HunkRemaining = HunkRemaining
+    { hunkOldLeft :: !Int
+    , hunkNewLeft :: !Int
+    }
+
 parseDiffLines :: Text -> Text -> [ParsedDiffLine]
 parseDiffLines initialPath =
-    go
-        (maybe emptyDiffPaths sameDiffPaths (nonEmptyText initialPath))
-        . Text.lines
+    go initialState . Text.lines
   where
+    initialState =
+        DiffParseState
+            { parsePaths =
+                maybe emptyDiffPaths sameDiffPaths (nonEmptyText initialPath)
+            , parseHunk = Nothing
+            }
+
     go _ [] = []
-    go currentPaths (line : rest)
+    go state (line : rest)
         | Just nextPaths <- diffHeaderPaths line =
             ParsedDiffLine DiffLineHeader nextPaths "" line
-                : go nextPaths rest
-        | Just nextPaths <- unifiedDiffHeaderPaths currentPaths line =
+                : go
+                    state { parsePaths = nextPaths, parseHunk = Nothing }
+                    rest
+        | Just hunk <- state.parseHunk =
+            parseInsideHunk state hunk line rest
+        | otherwise =
+            parseOutsideHunk state line rest
+
+    parseInsideHunk state hunk line rest
+        | Just nextPaths <- gitDiffFileStart line =
             ParsedDiffLine DiffLineMeta nextPaths "" line
-                : go nextPaths rest
+                : go
+                    state { parsePaths = nextPaths, parseHunk = Nothing }
+                    rest
+        | Just nextHunk <- parseHunkCounts line =
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state { parseHunk = Just nextHunk } rest
+        | isNoNewlineMarker line =
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state rest
+        | Just (kind, prefix, source) <- unifiedHunkLine line =
+            ParsedDiffLine kind state.parsePaths prefix source
+                : go
+                    state { parseHunk = advanceHunk hunk kind }
+                    rest
+        | otherwise =
+            ParsedDiffLine DiffLinePlain state.parsePaths "" line
+                : go state rest
+
+    parseOutsideHunk state line rest
+        | Just nextPaths <- unifiedDiffHeaderPaths state.parsePaths line =
+            ParsedDiffLine DiffLineMeta nextPaths "" line
+                : go state { parsePaths = nextPaths } rest
+        | Just hunk <- parseHunkCounts line =
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state { parseHunk = Just hunk } rest
         | Just displayLine <- parseDiffDisplayLine line =
             ParsedDiffLine
                 (displayLineKind displayLine.diffDisplayKind)
-                currentPaths
+                state.parsePaths
                 ( displayLine.diffDisplayGutter
                     <> " │ "
                     <> displayLine.diffDisplayMarker
                 )
                 displayLine.diffDisplayCode
-                : go currentPaths rest
+                : go state rest
         | Just (kind, prefix, source) <- changedDiffLine line =
-            ParsedDiffLine kind currentPaths prefix source
-                : go currentPaths rest
+            ParsedDiffLine kind state.parsePaths prefix source
+                : go state rest
         | isDiffMetaLine line =
-            ParsedDiffLine DiffLineMeta currentPaths "" line
-                : go currentPaths rest
-        | Just (kind, prefix, source) <- unifiedDiffLine line =
-            ParsedDiffLine kind currentPaths prefix source
-                : go currentPaths rest
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state rest
+        | Just (kind, prefix, source) <- unifiedHunkLine line =
+            ParsedDiffLine kind state.parsePaths prefix source
+                : go state rest
         | otherwise =
-            ParsedDiffLine DiffLinePlain currentPaths "" line
-                : go currentPaths rest
+            ParsedDiffLine DiffLinePlain state.parsePaths "" line
+                : go state rest
 
 displayLineKind :: Presentation.DiffLineKind -> DiffLineKind
 displayLineKind = \case
@@ -395,26 +443,22 @@ diffHeaderPaths line =
 
 -- | Git/unified headers update the current file paths so later +/- rows can
 -- pick a source grammar. They stay muted rather than using the compact
--- create/update chrome.
+-- create/update chrome. @---@/@+++@ are headers only when the payload looks
+-- like a git path; inside a hunk the first character is always the marker.
 unifiedDiffHeaderPaths :: DiffPaths -> Text -> Maybe DiffPaths
 unifiedDiffHeaderPaths current line
-    | Just rest <- Text.stripPrefix "diff --git " line =
-        case Text.words rest of
-            [source, destination] ->
-                Just
-                    DiffPaths
-                        { diffRemovedPath = gitDiffPath source
-                        , diffAddedPath = gitDiffPath destination
-                        }
-            _ -> Nothing
-    | Just rest <- Text.stripPrefix "--- " line =
+    | Just nextPaths <- gitDiffFileStart line =
+        Just nextPaths
+    | Just rest <- Text.stripPrefix "--- " line
+    , looksLikeGitHeaderPath rest =
         let removed = gitDiffPath rest
         in Just
             current
                 { diffRemovedPath = removed
                 , diffAddedPath = current.diffAddedPath <|> removed
                 }
-    | Just rest <- Text.stripPrefix "+++ " line =
+    | Just rest <- Text.stripPrefix "+++ " line
+    , looksLikeGitHeaderPath rest =
         let added = gitDiffPath rest
         in Just
             current
@@ -422,6 +466,27 @@ unifiedDiffHeaderPaths current line
                 , diffRemovedPath = current.diffRemovedPath <|> added
                 }
     | otherwise = Nothing
+
+gitDiffFileStart :: Text -> Maybe DiffPaths
+gitDiffFileStart line = do
+    rest <- Text.stripPrefix "diff --git " line
+    case Text.words rest of
+        [source, destination] ->
+            Just
+                DiffPaths
+                    { diffRemovedPath = gitDiffPath source
+                    , diffAddedPath = gitDiffPath destination
+                    }
+        _ -> Nothing
+
+looksLikeGitHeaderPath :: Text -> Bool
+looksLikeGitHeaderPath raw =
+    let trimmed = Text.strip (Text.takeWhile (/= '\t') raw)
+        unquoted = stripDiffQuotes trimmed
+    in unquoted == "/dev/null"
+        || "a/" `Text.isPrefixOf` unquoted
+        || "b/" `Text.isPrefixOf` unquoted
+        || Text.any (`elem` ['/', '\\']) unquoted
 
 gitDiffPath :: Text -> Maybe Text
 gitDiffPath raw =
@@ -444,24 +509,75 @@ stripDiffQuotes text =
                 Text.dropEnd 1 rest
         _ -> text
 
-unifiedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
-unifiedDiffLine line
-    | "+" `Text.isPrefixOf` line
-    , not ("+++" `Text.isPrefixOf` line) =
-        Just (DiffLineAdded, "+", Text.drop 1 line)
-    | "-" `Text.isPrefixOf` line
-    , not ("---" `Text.isPrefixOf` line) =
-        Just (DiffLineRemoved, "-", Text.drop 1 line)
-    | " " `Text.isPrefixOf` line =
-        Just (DiffLineContext, " ", Text.drop 1 line)
-    | otherwise = Nothing
+-- | Inside a hunk only the first character is the marker, so added
+-- @++counter;@ (@+++counter;@) and removed @-- comment@ (@--- comment@) stay
+-- change rows instead of being mistaken for file headers.
+unifiedHunkLine :: Text -> Maybe (DiffLineKind, Text, Text)
+unifiedHunkLine line =
+    case Text.uncons line of
+        Just ('+', rest) -> Just (DiffLineAdded, "+", rest)
+        Just ('-', rest) -> Just (DiffLineRemoved, "-", rest)
+        Just (' ', rest) -> Just (DiffLineContext, " ", rest)
+        _ -> Nothing
+
+parseHunkCounts :: Text -> Maybe HunkRemaining
+parseHunkCounts line = do
+    afterOpen <- Text.stripPrefix "@@" (Text.stripStart line)
+    afterMinus <- Text.stripPrefix "-" (Text.strip afterOpen)
+    (oldCount, afterOld) <- hunkCount afterMinus
+    afterPlus <- Text.stripPrefix "+" (Text.strip afterOld)
+    (newCount, _) <- hunkCount afterPlus
+    pure
+        HunkRemaining
+            { hunkOldLeft = oldCount
+            , hunkNewLeft = newCount
+            }
+
+hunkCount :: Text -> Maybe (Int, Text)
+hunkCount text = do
+    let (startDigits, afterStart) = Text.span isDigit text
+    _start <- readNonEmptyDigits startDigits
+    case Text.uncons afterStart of
+        Just (',', rest) -> do
+            let (countDigits, afterCount) = Text.span isDigit rest
+            count <- readNonEmptyDigits countDigits
+            pure (count, afterCount)
+        _ ->
+            Just (1, afterStart)
+
+readNonEmptyDigits :: Text -> Maybe Int
+readNonEmptyDigits digits
+    | Text.null digits = Nothing
+    | otherwise = readMaybe (Text.unpack digits)
+
+advanceHunk :: HunkRemaining -> DiffLineKind -> Maybe HunkRemaining
+advanceHunk hunk kind =
+    let next = case kind of
+            DiffLineRemoved ->
+                hunk { hunkOldLeft = max 0 (hunk.hunkOldLeft - 1) }
+            DiffLineAdded ->
+                hunk { hunkNewLeft = max 0 (hunk.hunkNewLeft - 1) }
+            DiffLineContext ->
+                hunk
+                    { hunkOldLeft = max 0 (hunk.hunkOldLeft - 1)
+                    , hunkNewLeft = max 0 (hunk.hunkNewLeft - 1)
+                    }
+            _ -> hunk
+    in if next.hunkOldLeft == 0 && next.hunkNewLeft == 0
+        then Nothing
+        else Just next
+
+isNoNewlineMarker :: Text -> Bool
+isNoNewlineMarker line =
+    "\\ " `Text.isPrefixOf` line
+        || "\\ No newline" `Text.isPrefixOf` line
 
 isDiffMetaLine :: Text -> Bool
 isDiffMetaLine line =
     "  …" `Text.isPrefixOf` line
         || "… +" `Text.isPrefixOf` line
         || "@@" `Text.isPrefixOf` Text.stripStart line
-        || "\\ " `Text.isPrefixOf` line
+        || isNoNewlineMarker line
         || "index " `Text.isPrefixOf` line
         || "new file mode " `Text.isPrefixOf` line
         || "deleted file mode " `Text.isPrefixOf` line
