@@ -2,8 +2,11 @@
 module Agent.TUI.Markdown
     ( Inline(..)
     , codeWidgetWithSyntaxHighlighting
+    , codeWidgetWithSyntaxHighlightingOn
+    , diffCodeWidgetWithSyntaxHighlighting
     , diffSyntaxLanguages
     , diffWidgetWithSyntaxHighlighting
+    , highlightDiffCodeRows
     , inlinePlainText
     , markdownWidget
     , markdownWidgetWithLinks
@@ -25,11 +28,18 @@ import Agent.TUI.Markdown.Inline
     )
 import qualified Agent.TUI.Markdown.Block as Block
 import Agent.Syntax
-    ( SyntaxHighlighter
+    ( HighlightedLine
+    , SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
     , resolvePathLanguage
     )
+import Agent.TUI.Presentation
+    ( DiffDisplayLine(..)
+    , diffHeaderParts
+    , parseDiffDisplayLine
+    )
+import qualified Agent.TUI.Presentation as Presentation
 import Agent.TUI.TextWidth
     ( displayTerminalText
     , graphemeCellWidth
@@ -152,6 +162,22 @@ codeWidgetWithSyntaxHighlighting syntaxHighlighter language =
     renderCodeBodyWith wrapStyledCode syntaxHighlighter language
         . codeBodyLines
 
+-- | Render code while applying one semantic background to every highlighted
+-- token.
+codeWidgetWithSyntaxHighlightingOn
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> AttrName
+    -> Text
+    -> Widget n
+codeWidgetWithSyntaxHighlightingOn syntaxHighlighter language background =
+    renderCodeBodyWithBackground
+        wrapStyledCode
+        (Just background)
+        syntaxHighlighter
+        language
+        . codeBodyLines
+
 -- | Languages needed to render a compact edit preview. The first file path is
 -- supplied separately, while later files are introduced by body headers.
 diffSyntaxLanguages :: Text -> Text -> [Text]
@@ -204,6 +230,7 @@ diffWidgetWithSyntaxHighlighting syntaxHighlighter initialPath body =
 data DiffLineKind
     = DiffLineAdded
     | DiffLineRemoved
+    | DiffLineContext
     | DiffLineHeader
     | DiffLineMeta
     | DiffLinePlain
@@ -223,7 +250,7 @@ data ParsedDiffLine = ParsedDiffLine
     }
 
 data DiffRun
-    = DiffChangedRun !DiffLineKind !DiffPaths ![(Text, Text)]
+    = DiffChangedRun !DiffPaths ![ParsedDiffLine]
     | DiffPlainRun !ParsedDiffLine
 
 data StyledDiffRow = StyledDiffRow
@@ -242,6 +269,16 @@ parseDiffLines initialPath =
         | Just nextPaths <- diffHeaderPaths line =
             ParsedDiffLine DiffLineHeader nextPaths "" line
                 : go nextPaths rest
+        | Just displayLine <- parseDiffDisplayLine line =
+            ParsedDiffLine
+                (displayLineKind displayLine.diffDisplayKind)
+                currentPaths
+                ( displayLine.diffDisplayGutter
+                    <> " │ "
+                    <> displayLine.diffDisplayMarker
+                )
+                displayLine.diffDisplayCode
+                : go currentPaths rest
         | Just (kind, prefix, source) <- changedDiffLine line =
             ParsedDiffLine kind currentPaths prefix source
                 : go currentPaths rest
@@ -252,6 +289,12 @@ parseDiffLines initialPath =
         | otherwise =
             ParsedDiffLine DiffLinePlain currentPaths "" line
                 : go currentPaths rest
+
+displayLineKind :: Presentation.DiffLineKind -> DiffLineKind
+displayLineKind = \case
+    Presentation.DiffLineAdded -> DiffLineAdded
+    Presentation.DiffLineRemoved -> DiffLineRemoved
+    Presentation.DiffLineContext -> DiffLineContext
 
 changedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
 changedDiffLine line =
@@ -329,13 +372,6 @@ diffPathHints :: DiffPaths -> [Text]
 diffPathHints paths =
     List.nub (catMaybes [paths.diffRemovedPath, paths.diffAddedPath])
 
-diffPathForKind :: DiffLineKind -> DiffPaths -> Maybe Text
-diffPathForKind kind paths =
-    case kind of
-        DiffLineRemoved -> paths.diffRemovedPath
-        DiffLineAdded -> paths.diffAddedPath
-        _ -> Nothing
-
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value =
     let stripped = Text.strip value
@@ -344,26 +380,22 @@ nonEmptyText value =
 diffRuns :: [ParsedDiffLine] -> [DiffRun]
 diffRuns [] = []
 diffRuns (line : rest)
-    | changedKind line.diffLineKind =
+    | codeLineKind line.diffLineKind =
         let (matching, remaining) =
                 span
                     (\next ->
-                        next.diffLineKind == line.diffLineKind
+                        codeLineKind next.diffLineKind
                             && next.diffPaths == line.diffPaths)
                     rest
-        in DiffChangedRun
-                line.diffLineKind
-                line.diffPaths
-                (map
-                    (\changed ->
-                        (changed.diffLinePrefix, changed.diffLineText))
-                    (line : matching))
+        in DiffChangedRun line.diffPaths (line : matching)
                 : diffRuns remaining
     | otherwise =
         DiffPlainRun line : diffRuns rest
   where
-    changedKind kind =
-        kind == DiffLineAdded || kind == DiffLineRemoved
+    codeLineKind kind =
+        kind == DiffLineAdded
+            || kind == DiffLineRemoved
+            || kind == DiffLineContext
 
 resolveDiffRun
     :: Maybe SyntaxHighlighter
@@ -381,63 +413,112 @@ resolveDiffRun
     mutedAttr
     addedAttr
     removedAttr = \case
-        DiffPlainRun line ->
-            pure
-                [ StyledDiffRow
-                    Nothing
-                    [ ( if line.diffLineKind == DiffLineMeta
-                            then mutedAttr
-                            else baseAttr
-                      , displayTerminalText line.diffLineText
-                      )
+        DiffPlainRun line
+            | line.diffLineKind == DiffLineHeader
+            , Just (action, path) <- diffHeaderParts line.diffLineText -> do
+                strongAttr <- B.lookupAttrName Theme.strongAttr
+                pathAttr <- B.lookupAttrName Theme.diffPathAttr
+                pure
+                    [ StyledDiffRow
+                        Nothing
+                        [ ( strongAttr
+                          , displayTerminalText
+                                ("  " <> Text.toTitle action <> " ")
+                          )
+                        , (pathAttr, displayTerminalText path)
+                        ]
                     ]
-                ]
-        DiffChangedRun kind paths changedLines -> do
-            let background =
-                    if kind == DiffLineAdded then addedAttr else removedAttr
-                sourceLines = map snd changedLines
+            | otherwise ->
+                pure
+                    [ StyledDiffRow
+                        Nothing
+                        [ ( if line.diffLineKind == DiffLineMeta
+                                then mutedAttr
+                                else baseAttr
+                          , displayTerminalText line.diffLineText
+                          )
+                        ]
+                    ]
+        DiffChangedRun paths changedLines -> do
+            let displayLines = map parsedDisplayLine changedLines
                 highlightedLines = do
                     highlighter <- syntaxHighlighter
-                    sourcePath <- diffPathForKind kind paths
-                    language <- resolvePathLanguage sourcePath
                     either (const Nothing) Just $
-                        highlightCode
+                        highlightDiffCodeRowsWithLanguages
                             highlighter
-                            language
-                            (Text.intercalate "\n" sourceLines)
+                            (paths.diffRemovedPath >>= resolvePathLanguage)
+                            (paths.diffAddedPath >>= resolvePathLanguage)
+                            displayLines
             contentRows <-
                 case highlightedLines of
-                    Just rows
-                        | length rows == length sourceLines ->
-                            traverse
-                                (traverse
-                                    (\span_ -> do
-                                        attr <-
-                                            B.lookupAttrName
-                                                (Theme.syntaxClassAttr
-                                                    span_.syntaxClass)
-                                        pure
-                                            ( withDiffBackground
-                                                background
-                                                attr
-                                            , displayTerminalText
-                                                span_.syntaxText
-                                            )))
-                                rows
+                    Just rows ->
+                        traverse
+                            (\(line, spans) ->
+                                traverse
+                                    (resolveSpan (lineBackground line))
+                                    spans)
+                            (zip changedLines rows)
                     _ ->
                         pure
-                            [ [ ( withDiffBackground background codeAttr
-                                , displayTerminalText source
+                            [ [ ( maybe
+                                    codeAttr
+                                    (`withDiffBackground` codeAttr)
+                                    (lineBackground line)
+                                , displayTerminalText line.diffLineText
                                 )
                               ]
-                            | source <- sourceLines
+                            | line <- changedLines
                             ]
-            pure
-                [ StyledDiffRow
-                    (Just background)
-                    ((background, prefix) : content)
-                | ((prefix, _), content) <- zip changedLines contentRows
-                ]
+            traverse makeStyledRow (zip changedLines contentRows)
+          where
+            lineBackground line =
+                case line.diffLineKind of
+                    DiffLineAdded -> Just addedAttr
+                    DiffLineRemoved -> Just removedAttr
+                    _ -> Nothing
+
+            resolveSpan background span_ = do
+                attr <-
+                    B.lookupAttrName
+                        (Theme.syntaxClassAttr span_.syntaxClass)
+                pure
+                    ( maybe attr (`withDiffBackground` attr) background
+                    , displayTerminalText span_.syntaxText
+                    )
+
+            makeStyledRow (line, content) = do
+                gutterAttr <-
+                    B.lookupAttrName $
+                        case line.diffLineKind of
+                            DiffLineAdded -> Theme.diffAddedGutterAttr
+                            DiffLineRemoved -> Theme.diffRemovedGutterAttr
+                            _ -> Theme.diffContextGutterAttr
+                pure
+                    StyledDiffRow
+                        { styledDiffBackground = lineBackground line
+                        , styledDiffFragments =
+                            ( gutterAttr
+                            , displayTerminalText line.diffLinePrefix
+                            )
+                                : content
+                        }
+
+parsedDisplayLine :: ParsedDiffLine -> DiffDisplayLine
+parsedDisplayLine line =
+    DiffDisplayLine
+        { diffDisplayGutter = ""
+        , diffDisplayMarker =
+            case line.diffLineKind of
+                DiffLineAdded -> "+"
+                DiffLineRemoved -> "-"
+                _ -> " "
+        , diffDisplayCode = line.diffLineText
+        , diffDisplayKind =
+            case line.diffLineKind of
+                DiffLineAdded -> Presentation.DiffLineAdded
+                DiffLineRemoved -> Presentation.DiffLineRemoved
+                _ -> Presentation.DiffLineContext
+        }
 
 withDiffBackground :: V.Attr -> V.Attr -> V.Attr
 withDiffBackground background attr =
@@ -463,6 +544,146 @@ renderStyledDiffRow availableWidth row =
                         then V.emptyImage
                         else V.charFill background ' ' padding 1
                     ]
+
+-- | Render one contiguous diff region while preserving lexical state in the
+-- old and new source streams independently.
+diffCodeWidgetWithSyntaxHighlighting
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> [DiffDisplayLine]
+    -> Widget n
+diffCodeWidgetWithSyntaxHighlighting syntaxHighlighter language displayLines =
+    B.Widget B.Greedy B.Fixed do
+        codeAttr <- B.lookupAttrName Theme.codeAttr
+        addedBackground <- B.lookupAttrName Theme.diffAddedAttr
+        removedBackground <- B.lookupAttrName Theme.diffRemovedAttr
+        styledLines <-
+            case syntaxHighlighter >>= highlighted of
+                Just highlightedLines ->
+                    traverse (traverse resolveSyntaxSpan) highlightedLines
+                Nothing ->
+                    pure
+                        [ [(codeAttr, displayTerminalText line.diffDisplayCode)]
+                        | line <- displayLines
+                        ]
+        B.render $
+            vBox
+                (zipWith
+                    (diffLineWidget
+                        codeAttr
+                        addedBackground
+                        removedBackground)
+                    displayLines
+                    styledLines)
+  where
+    highlighted highlighter =
+        either (const Nothing) Just $
+            highlightDiffCodeRows highlighter language displayLines
+
+    resolveSyntaxSpan span_ = do
+        attr <- B.lookupAttrName (Theme.syntaxClassAttr span_.syntaxClass)
+        pure (attr, displayTerminalText span_.syntaxText)
+
+    diffLineWidget
+        codeAttr
+        addedBackground
+        removedBackground
+        displayLine
+        fragments =
+        hBox
+            [ withAttr gutterAttr
+                (txt (displayTerminalText gutter))
+            , resolvedCodeLineWidget codeAttr bodyBackground fragments
+            ]
+      where
+        (gutterAttr, bodyBackground) =
+            case displayLine.diffDisplayKind of
+                Presentation.DiffLineAdded ->
+                    (Theme.diffAddedGutterAttr, Just addedBackground)
+                Presentation.DiffLineRemoved ->
+                    (Theme.diffRemovedGutterAttr, Just removedBackground)
+                Presentation.DiffLineContext ->
+                    (Theme.diffContextGutterAttr, Nothing)
+        gutter =
+            displayLine.diffDisplayGutter
+                <> " │ "
+                <> displayLine.diffDisplayMarker
+
+-- | Highlight displayed diff rows by tokenizing the old and new source
+-- streams separately. Context rows use the new stream's styling.
+highlightDiffCodeRows
+    :: SyntaxHighlighter
+    -> Text
+    -> [DiffDisplayLine]
+    -> Either Text [HighlightedLine]
+highlightDiffCodeRows highlighter language =
+    highlightDiffCodeRowsWithLanguages
+        highlighter
+        (Just language)
+        (Just language)
+
+highlightDiffCodeRowsWithLanguages
+    :: SyntaxHighlighter
+    -> Maybe Text
+    -> Maybe Text
+    -> [DiffDisplayLine]
+    -> Either Text [HighlightedLine]
+highlightDiffCodeRowsWithLanguages
+    highlighter
+    oldLanguage
+    newLanguage
+    displayLines = do
+    oldHighlighted <- highlightStream oldLanguage oldLines
+    newHighlighted <- highlightStream newLanguage newLines
+    maybe
+        (Left "Syntax highlighter returned misaligned diff rows")
+        Right
+        (selectRows displayLines oldHighlighted newHighlighted)
+  where
+    oldLines =
+        [ line.diffDisplayCode
+        | line <- displayLines
+        , line.diffDisplayKind /= Presentation.DiffLineAdded
+        ]
+    newLines =
+        [ line.diffDisplayCode
+        | line <- displayLines
+        , line.diffDisplayKind /= Presentation.DiffLineRemoved
+        ]
+
+    highlightStream _ [] = Right []
+    highlightStream Nothing _ =
+        Left "No syntax language is available for a diff stream"
+    highlightStream (Just language) lines_ = do
+        highlighted <-
+            highlightCode
+                highlighter
+                language
+                (Text.intercalate "\n" lines_)
+        if length highlighted == length lines_
+            then Right highlighted
+            else Left "Syntax highlighter changed the diff line count"
+
+    selectRows [] [] [] = Just []
+    selectRows [] _ _ = Nothing
+    selectRows (line : rest) oldRows newRows =
+        case line.diffDisplayKind of
+            Presentation.DiffLineRemoved ->
+                case oldRows of
+                    oldRow : remainingOld ->
+                        (oldRow :) <$> selectRows rest remainingOld newRows
+                    [] -> Nothing
+            Presentation.DiffLineAdded ->
+                case newRows of
+                    newRow : remainingNew ->
+                        (newRow :) <$> selectRows rest oldRows remainingNew
+                    [] -> Nothing
+            Presentation.DiffLineContext ->
+                case (oldRows, newRows) of
+                    (_ : remainingOld, newRow : remainingNew) ->
+                        (newRow :)
+                            <$> selectRows rest remainingOld remainingNew
+                    _ -> Nothing
 
 renderChunk
     :: Ord n
@@ -593,36 +814,15 @@ renderCodeBodyWithBackground
                         [ [(codeAttr, displayTerminalText line)]
                         | line <- bodyLines
                         ]
-        let applyBackground =
-                maybe id inheritBackground backgroundAttr
-            backgroundCodeAttr = applyBackground codeAttr
-            backgroundLines =
-                map
-                    (map (\(attr, text) -> (applyBackground attr, text)))
-                    styledLines
         let availableWidth = max 1 context.availWidth
-            horizontalPadding =
-                if availableWidth >= 3 then 1 else 0
-            contentWidth =
-                max 1 (availableWidth - 2 * horizontalPadding)
-            rows =
-                concatMap (wrapLine contentWidth) backgroundLines
             image =
-                V.vertCat
-                    [ fillBackgroundRow
-                        availableWidth
-                        backgroundCodeAttr $
-                        renderCodeRow
-                            backgroundCodeAttr
-                            horizontalPadding
-                            row
-                    | row <- rows
-                    ]
-            boundedImage
-                | V.imageWidth image > availableWidth =
-                    V.cropRight availableWidth image
-                | otherwise = image
-        pure B.emptyResult { B.image = boundedImage }
+                renderResolvedCodeImage
+                    wrapLine
+                    backgroundAttr
+                    codeAttr
+                    availableWidth
+                    styledLines
+        pure B.emptyResult { B.image = image }
   where
     highlighted highlighter =
         either (const Nothing) Just $
@@ -634,13 +834,69 @@ renderCodeBodyWithBackground
         attr <- B.lookupAttrName (Theme.syntaxClassAttr span_.syntaxClass)
         pure (attr, displayTerminalText span_.syntaxText)
 
+resolvedCodeLineWidget
+    :: V.Attr
+    -> Maybe V.Attr
+    -> [(V.Attr, Text)]
+    -> Widget n
+resolvedCodeLineWidget codeAttr backgroundAttr fragments =
+    B.Widget B.Greedy B.Fixed do
+        context <- B.getContext
+        let availableWidth = max 1 context.availWidth
+            image =
+                renderResolvedCodeImage
+                    wrapStyledCode
+                    backgroundAttr
+                    codeAttr
+                    availableWidth
+                    [fragments]
+        pure B.emptyResult { B.image = image }
+
+renderResolvedCodeImage
+    :: (Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]])
+    -> Maybe V.Attr
+    -> V.Attr
+    -> Int
+    -> [[(V.Attr, Text)]]
+    -> V.Image
+renderResolvedCodeImage
+    wrapLine
+    backgroundAttr
+    codeAttr
+    availableWidth
+    styledLines =
+    boundedImage
+  where
+    applyBackground =
+        maybe id inheritBackground backgroundAttr
+    backgroundCodeAttr = applyBackground codeAttr
+    backgroundLines =
+        map
+            (map (\(attr, text) -> (applyBackground attr, text)))
+            styledLines
+    horizontalPadding =
+        if availableWidth >= 3 then 1 else 0
+    contentWidth =
+        max 1 (availableWidth - 2 * horizontalPadding)
+    rows =
+        concatMap (wrapLine contentWidth) backgroundLines
+    image =
+        V.vertCat
+            [ fillBackgroundRow row
+            | row <- rows
+            ]
+    boundedImage
+        | V.imageWidth image > availableWidth =
+            V.cropRight availableWidth image
+        | otherwise = image
+
     inheritBackground background attr =
         case V.attrBackColor background of
             V.SetTo color -> attr `V.withBackColor` color
             _ -> attr
 
-    fillBackgroundRow availableWidth backgroundCodeAttr row =
-        case backgroundName of
+    fillBackgroundRow fragments =
+        case backgroundAttr of
             Just _
                 | remaining > 0 ->
                     V.horizCat
@@ -653,6 +909,11 @@ renderCodeBodyWithBackground
                         ]
             _ -> row
       where
+        row =
+            renderCodeRow
+                backgroundCodeAttr
+                horizontalPadding
+                fragments
         remaining = availableWidth - V.imageWidth row
 
 renderCodeRow

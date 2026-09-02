@@ -71,9 +71,7 @@ import Agent.TUI.Motion
       waitingIndicator,
       MotionMode(MotionOff) )
 import Agent.TUI.Presentation
-    ( DiffDisplayLine(..),
-      DiffLineKind(..),
-      TodoDisplayLine(todoLineText, todoLineStatus),
+    ( TodoDisplayLine(todoLineText, todoLineStatus),
       diffHeaderParts,
       parseDiffDisplayLine,
       parseTodoList,
@@ -170,12 +168,7 @@ import qualified Agent.TUI.Theme as Theme
       completionFlashAttr,
       controlLinkAttr,
       dimAttr,
-      diffAddedAttr,
-      diffAddedGutterAttr,
-      diffContextGutterAttr,
       diffPathAttr,
-      diffRemovedAttr,
-      diffRemovedGutterAttr,
       errorAttr,
       inspectAttr,
       mutedAttr,

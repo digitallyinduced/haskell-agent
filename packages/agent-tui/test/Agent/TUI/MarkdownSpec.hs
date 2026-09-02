@@ -1,7 +1,15 @@
 module Agent.TUI.MarkdownSpec (spec) where
 
 import Agent.TUI.Markdown
-import Agent.Syntax (loadSyntaxHighlighterFrom)
+import Agent.Syntax
+    ( SyntaxClass(SyntaxComment)
+    , SyntaxSpan(syntaxClass)
+    , loadSyntaxHighlighterFrom
+    )
+import Agent.TUI.Presentation
+    ( DiffDisplayLine(..)
+    , DiffLineKind(..)
+    )
 import Agent.TUI.TextWidth
     ( displayTerminalText
     , graphemeCellWidth
@@ -275,6 +283,41 @@ spec = describe "fullscreen Markdown rendering" do
                         [widget]
                         (width, 2)
         V.imageWidth image `shouldBe` width
+
+    it "preserves lexical state across old and new diff streams" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let line kind marker code =
+                        DiffDisplayLine
+                            { diffDisplayGutter = ""
+                            , diffDisplayMarker = marker
+                            , diffDisplayCode = code
+                            , diffDisplayKind = kind
+                            }
+                    diffLines =
+                        [ line DiffLineContext " " "{-"
+                        , line DiffLineRemoved "-" "-}"
+                        , line DiffLineAdded "+" "new inside comment"
+                        , line DiffLineContext " " "new context remains comment"
+                        , line DiffLineContext " " "-}"
+                        ]
+                case highlightDiffCodeRows highlighter "haskell" diffLines of
+                    Left message -> expectationFailure (Text.unpack message)
+                    Right [_, removedLine, addedLine, contextLine, _] -> do
+                        removedLine `shouldSatisfy` (not . null)
+                        addedLine `shouldSatisfy` (not . null)
+                        contextLine `shouldSatisfy` (not . null)
+                        map (.syntaxClass) removedLine
+                            `shouldSatisfy` all (== SyntaxComment)
+                        map (.syntaxClass) addedLine
+                            `shouldSatisfy` all (== SyntaxComment)
+                        map (.syntaxClass) contextLine
+                            `shouldSatisfy` all (== SyntaxComment)
+                    Right _ ->
+                        expectationFailure
+                            "expected one highlighted row per diff row"
 
     it "preserves spaces inside wrapped code and string literals" do
         let code = "putStrLn \"alpha beta gamma delta epsilon\""
