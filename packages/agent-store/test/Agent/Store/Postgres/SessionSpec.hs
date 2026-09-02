@@ -471,6 +471,185 @@ spec = describe "PostgreSQL session schema" do
                                         expectationFailure
                                             ("unexpected native direct search: "
                                                 <> show other)
+                            let
+                                pageGateway = "pagination-gateway"
+                                pageIdentity =
+                                    Just "gateway-sha256:page-tenant"
+                                otherPageIdentity =
+                                    Just "gateway-sha256:other-page-tenant"
+                                pageMetadata
+                                    sessionKey
+                                    updatedAt
+                                    connection
+                                    identity =
+                                        metadata
+                                            { sessionMetadataKey = sessionKey
+                                            , sessionMetadataCreatedAt =
+                                                updatedAt
+                                            , sessionMetadataUpdatedAt =
+                                                updatedAt
+                                            , sessionMetadataConnection =
+                                                connection
+                                            , sessionMetadataGatewayIdentity =
+                                                identity
+                                            }
+                                pageTieTime = addUTCTime 100 now
+                                pageFixtures =
+                                    [ pageMetadata
+                                        "page-authorized-a"
+                                        pageTieTime
+                                        pageGateway
+                                        pageIdentity
+                                    , pageMetadata
+                                        "page-authorized-b"
+                                        pageTieTime
+                                        pageGateway
+                                        pageIdentity
+                                    , pageMetadata
+                                        "page-authorized-c"
+                                        (addUTCTime 90 now)
+                                        pageGateway
+                                        pageIdentity
+                                    -- These rows sort before or between the
+                                    -- authorized rows and would consume page
+                                    -- capacity if filtering happened after
+                                    -- ORDER BY/LIMIT.
+                                    , pageMetadata
+                                        "page-other-newer"
+                                        (addUTCTime 300 now)
+                                        pageGateway
+                                        otherPageIdentity
+                                    , pageMetadata
+                                        "page-other-between"
+                                        (addUTCTime 95 now)
+                                        pageGateway
+                                        otherPageIdentity
+                                    , pageMetadata
+                                        "page-direct-newer"
+                                        (addUTCTime 200 now)
+                                        "openai"
+                                        Nothing
+                                    ]
+                            mapM_
+                                (\pageFixture ->
+                                    createSession pool pageFixture
+                                        `shouldReturn` Right True)
+                                pageFixtures
+                            listSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                Nothing
+                                2 >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not list first boundary page: "
+                                                <> show err)
+                                    Right firstPage -> do
+                                        map
+                                            (.sessionMetadataKey)
+                                            firstPage.sessionListPageSessions
+                                            `shouldBe`
+                                                [ "page-authorized-a"
+                                                , "page-authorized-b"
+                                                ]
+                                        firstPage.sessionListPageNextCursor
+                                            `shouldBe`
+                                                Just SessionListCursor
+                                                    { sessionListCursorUpdatedAt =
+                                                        pageTieTime
+                                                    , sessionListCursorKey =
+                                                        "page-authorized-b"
+                                                    }
+                                        listSessionMetadataForBoundary
+                                            pool
+                                            pageGateway
+                                            pageIdentity
+                                            firstPage.sessionListPageNextCursor
+                                            2 >>= \case
+                                                Left err ->
+                                                    expectationFailure
+                                                        ( "could not list second "
+                                                            <> "boundary page: "
+                                                            <> show err
+                                                        )
+                                                Right secondPage -> do
+                                                    map
+                                                        (.sessionMetadataKey)
+                                                        secondPage.sessionListPageSessions
+                                                        `shouldBe`
+                                                            [ "page-authorized-c"
+                                                            ]
+                                                    secondPage.sessionListPageNextCursor
+                                                        `shouldBe` Nothing
+                            listSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                otherPageIdentity
+                                Nothing
+                                100 >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not list other boundary: "
+                                                <> show err)
+                                    Right otherPage ->
+                                        map
+                                            (.sessionMetadataKey)
+                                            otherPage.sessionListPageSessions
+                                            `shouldBe`
+                                                [ "page-other-newer"
+                                                , "page-other-between"
+                                                ]
+                            let
+                                directTieTime = addUTCTime 500 now
+                                directFixtures =
+                                    [ pageMetadata
+                                        "page-direct-a"
+                                        directTieTime
+                                        "openai"
+                                        Nothing
+                                    , pageMetadata
+                                        "page-direct-b"
+                                        directTieTime
+                                        "anthropic"
+                                        Nothing
+                                    -- Identity-bearing direct-connection rows
+                                    -- and identity-less gateway rows are both
+                                    -- outside the direct boundary.
+                                    , pageMetadata
+                                        "page-direct-with-identity"
+                                        (addUTCTime 700 now)
+                                        "openai"
+                                        pageIdentity
+                                    , pageMetadata
+                                        "page-gateway-without-identity"
+                                        (addUTCTime 800 now)
+                                        pageGateway
+                                        Nothing
+                                    ]
+                            mapM_
+                                (\pageFixture ->
+                                    createSession pool pageFixture
+                                        `shouldReturn` Right True)
+                                directFixtures
+                            listSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                Nothing
+                                Nothing
+                                2 >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not list direct boundary: "
+                                                <> show err)
+                                    Right directPage ->
+                                        map
+                                            (.sessionMetadataKey)
+                                            directPage.sessionListPageSessions
+                                            `shouldBe`
+                                                [ "page-direct-a"
+                                                , "page-direct-b"
+                                                ]
                             setSessionArchived pool "session-2" True now
                                 `shouldReturn` Right True
                             searchNativeConversations pool "second" 10 >>= \case

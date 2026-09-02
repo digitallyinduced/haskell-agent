@@ -30,6 +30,7 @@ module Agent.Store.Postgres.Session.Read
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , listSessionMetadataForBoundary
     , listSessionArchiveKeys
     , searchConversationTurns
     , searchConversationTurnsForBoundary
@@ -426,6 +427,62 @@ listSessionMetadata pool =
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement () listMetadataStatement
 
+-- | List sessions inside the caller's exact organization-gateway boundary.
+--
+-- Gateway mode admits only rows for the reserved gateway connection whose
+-- stored credential identity exactly matches the supplied identity. Direct
+-- mode admits only identity-less rows outside the reserved gateway
+-- connection. Both the boundary and cursor predicates are applied before
+-- ordering and LIMIT so unauthorized rows cannot displace authorized results.
+listSessionMetadataForBoundary
+    :: StorePool
+    -> Text
+    -- ^ Reserved organization-gateway connection identifier.
+    -> Maybe Text
+    -- ^ Current gateway credential identity, or 'Nothing' for direct mode.
+    -> Maybe SessionListCursor
+    -> Int
+    -> IO (Either StoreError SessionListPage)
+listSessionMetadataForBoundary
+        pool gatewayConnection gatewayIdentity cursor requestedLimit = do
+    let
+        limit = max 1 (min 100 requestedLimit)
+        cursorUpdatedAt = (.sessionListCursorUpdatedAt) <$> cursor
+        cursorKey = (.sessionListCursorKey) <$> cursor
+    fmap (fmap (toSessionListPage limit)) $
+        withSession pool $
+            Transactions.transaction
+                Transactions.RepeatableRead
+                Transactions.Read $
+                    Transaction.statement
+                        ( gatewayConnection
+                        , gatewayIdentity
+                        , cursorUpdatedAt
+                        , cursorKey
+                        , fromIntegral (limit + 1)
+                        )
+                        listMetadataForBoundaryStatement
+
+toSessionListPage :: Int -> [SessionMetadata] -> SessionListPage
+toSessionListPage limit rows =
+    let
+        sessions = take limit rows
+        nextCursor
+            | length rows <= limit = Nothing
+            | otherwise = case reverse sessions of
+                [] -> Nothing
+                metadata : _ ->
+                    Just SessionListCursor
+                        { sessionListCursorUpdatedAt =
+                            metadata.sessionMetadataUpdatedAt
+                        , sessionListCursorKey =
+                            metadata.sessionMetadataKey
+                        }
+    in SessionListPage
+        { sessionListPageSessions = sessions
+        , sessionListPageNextCursor = nextCursor
+        }
+
 listSessionArchiveKeys
     :: StorePool
     -> IO (Either StoreError [Text])
@@ -752,6 +809,42 @@ listMetadataStatement = mkStatement
         <> " WHERE deleted_at IS NULL\
            \ ORDER BY updated_at DESC, session_key ASC")
     Encoders.noParams
+    (Decoders.rowList metadataRow)
+    True
+
+listMetadataForBoundaryStatement
+    :: Statement
+        (Text, Maybe Text, Maybe UTCTime, Maybe Text, Int64)
+        [SessionMetadata]
+listMetadataForBoundaryStatement = mkStatement
+    (metadataSelectSql
+        <> " WHERE deleted_at IS NULL\
+           \ AND (\
+           \   ($2 IS NULL\
+           \     AND connection_id <> $1\
+           \     AND gateway_identity IS NULL)\
+           \   OR ($2 IS NOT NULL\
+           \     AND connection_id = $1\
+           \     AND gateway_identity = $2)\
+           \ )\
+           \ AND (\
+           \   $3 IS NULL\
+           \   OR updated_at < $3\
+           \   OR (updated_at = $3 AND session_key > $4)\
+           \ )\
+           \ ORDER BY updated_at DESC, session_key ASC\
+           \ LIMIT $5")
+    ( ((\(value, _, _, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _, _, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, value, _, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.timestamptz))
+        <> ((\(_, _, _, value, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, _, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
     (Decoders.rowList metadataRow)
     True
 
