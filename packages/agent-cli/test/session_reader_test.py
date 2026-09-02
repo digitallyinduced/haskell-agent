@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -581,6 +582,63 @@ class SessionReaderTest(unittest.TestCase):
         self.assertEqual(items[0]["session_id"], "claude-session")
         self.assertEqual(items[0]["title"], "Recovered Claude work")
 
+    def test_claude_selected_transcript_streams_and_bounds_active_chain(self):
+        transcript = self.root / "claude-session.jsonl"
+        records = [
+            {
+                "type": "user",
+                "uuid": "root",
+                "parentUuid": None,
+                "timestamp": 0,
+                "message": {
+                    "role": "user",
+                    "content": "Original Claude request",
+                },
+            }
+        ]
+        parent = "root"
+        for index in range(reader.MAX_TURNS + 50):
+            uuid = f"assistant-{index}"
+            records.append(
+                {
+                    "type": "assistant",
+                    "uuid": uuid,
+                    "parentUuid": parent,
+                    "timestamp": index + 1,
+                    "message": {
+                        "role": "assistant",
+                        "content": f"Claude answer {index}",
+                    },
+                }
+            )
+            parent = uuid
+        write_jsonl(transcript, records)
+        item = reader.candidate(
+            "claude",
+            "claude-code",
+            "claude-session",
+            transcript,
+            "Original Claude request",
+            str(self.cwd),
+        )
+        with patch.object(
+            reader,
+            "read_jsonl",
+            side_effect=AssertionError("selected Claude transcript was buffered"),
+        ):
+            result = reader.read_claude(item, 100)
+        self.assertEqual(len(result["turns"]), reader.MAX_TURNS)
+        self.assertEqual(result["turns"][0]["text"], "Claude answer 50")
+        self.assertEqual(result["last_user_request"], "Original Claude request")
+        self.assertEqual(
+            result["last_assistant_action"],
+            f"Claude answer {reader.MAX_TURNS + 49}",
+        )
+        self.assertIn(
+            "turns_truncated",
+            {entry["code"] for entry in result["warnings"]},
+        )
+
     def test_harness_wrapper_uses_prior_request_when_current_request_is_empty(self):
         wrapped = (
             "Instructions supplied by the outer agent harness:\n"
@@ -700,6 +758,42 @@ class SessionReaderTest(unittest.TestCase):
         call = result["turns"][-1]["tool_calls"][0]
         self.assertEqual(call["name"], "shell")
         self.assertLessEqual(len(call["arguments"]), 40)
+
+    def test_grok_selected_transcript_streams_and_bounds_turns(self):
+        session = self.root / "grok-session"
+        session.mkdir()
+        write_jsonl(
+            session / "chat_history.jsonl",
+            [{"type": "user", "content": "Original Grok request"}]
+            + [
+                {"type": "assistant", "content": f"Grok answer {index}"}
+                for index in range(reader.MAX_TURNS + 50)
+            ],
+        )
+        item = reader.candidate(
+            "grok",
+            "grok-build",
+            "grok-session",
+            session,
+            "Original Grok request",
+            str(self.cwd),
+        )
+        with patch.object(
+            reader,
+            "read_jsonl",
+            side_effect=AssertionError("selected Grok transcript was buffered"),
+        ):
+            result = reader.read_grok(item, 100)
+        self.assertEqual(len(result["turns"]), reader.MAX_TURNS)
+        self.assertEqual(result["last_user_request"], "Original Grok request")
+        self.assertEqual(
+            result["last_assistant_action"],
+            f"Grok answer {reader.MAX_TURNS + 49}",
+        )
+        self.assertIn(
+            "turns_truncated",
+            {entry["code"] for entry in result["warnings"]},
+        )
 
     def test_cursor_does_not_assign_pathless_desktop_sessions_to_current_repo(self):
         database = self.root / "state.vscdb"
@@ -875,6 +969,17 @@ class SessionReaderTest(unittest.TestCase):
         self.assertEqual(result["last_user_request"], "Original goal")
         self.assertEqual(len(result["turns"]), reader.MAX_TURNS)
         self.assertIn("turns_truncated", {item["code"] for item in result["warnings"]})
+
+    def test_emit_json_escapes_lone_surrogates(self):
+        raw = io.BytesIO()
+        stdout = io.TextIOWrapper(raw, encoding="utf-8", errors="strict")
+        with patch.object(reader.sys, "stdout", stdout):
+            reader.emit({"title": "invalid \ud800 title"}, True)
+            stdout.flush()
+        rendered = raw.getvalue().decode("utf-8")
+        stdout.detach()
+        self.assertIn("\\ud800", rendered)
+        self.assertEqual(json.loads(rendered)["title"], "invalid \ud800 title")
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is not installed")
     def test_codex_reads_compressed_rollout(self):

@@ -110,6 +110,8 @@ def one_line(value: Any, limit: int = 100) -> str:
 def json_preview(value: Any, limit: int) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except RecursionError:
+        text = "[nested value omitted]"
     except (TypeError, ValueError):
         text = safe_string(value)
     return one_line(text, limit)
@@ -355,11 +357,16 @@ def decode_jsonish(raw: Any) -> Any:
     ):
         try:
             return json.loads(bytes.fromhex(text).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        except (
+            ValueError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+        ):
             pass
     try:
         return json.loads(text)
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError, RecursionError):
         return None
 
 
@@ -939,39 +946,112 @@ def claude_parent(record: dict[str, Any]) -> str:
     return safe_string(record.get("parentUuid") or record.get("logicalParentUuid"))
 
 
-def read_claude_records(path: Path) -> tuple[list[dict[str, Any]], int]:
-    records, malformed = read_jsonl(path)
-    messages = {
-        safe_string(record.get("uuid")): record
-        for record in records
-        if record.get("type") in CLAUDE_CHAIN_TYPES
-        and record.get("uuid")
-        and not record.get("isSidechain")
-    }
-    if not messages:
-        return [], malformed
-    parents = {
-        claude_parent(record)
-        for record in messages.values()
-        if claude_parent(record)
-    }
-    leaves = [record for key, record in messages.items() if key not in parents]
-    leaf = max(
-        leaves or list(messages.values()),
-        key=lambda record: timestamp_value(record.get("timestamp"), path),
-    )
-    chain: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    current: dict[str, Any] | None = leaf
-    while current:
-        uid = safe_string(current.get("uuid"))
-        if not uid or uid in seen:
-            break
-        seen.add(uid)
-        chain.append(current)
-        current = messages.get(claude_parent(current))
-    chain.reverse()
-    return chain, malformed
+class ClaudeChainIndex:
+    def __init__(self, database: sqlite3.Connection, path: Path):
+        self.database = database
+        self.path = path
+        self.sequence = 0
+        self.unindexable = 0
+        self.database.execute("PRAGMA journal_mode = OFF")
+        self.database.execute("PRAGMA synchronous = OFF")
+        self.database.execute(
+            "CREATE TABLE claude_messages ("
+            "uuid BLOB PRIMARY KEY, "
+            "sequence INTEGER NOT NULL, "
+            "parent_uuid BLOB NOT NULL, "
+            "sort_time REAL NOT NULL, "
+            "payload TEXT NOT NULL)"
+        )
+        self.database.execute(
+            "CREATE INDEX claude_messages_parent "
+            "ON claude_messages (parent_uuid)"
+        )
+        self.database.execute(
+            "CREATE TABLE claude_visited (uuid BLOB PRIMARY KEY)"
+        )
+
+    @staticmethod
+    def key(value: Any) -> bytes:
+        return safe_string(value).encode(
+            "utf-8",
+            errors="surrogatepass",
+        )
+
+    def consume(self, record: dict[str, Any]) -> None:
+        raw_uuid = record.get("uuid")
+        if (
+            record.get("type") not in CLAUDE_CHAIN_TYPES
+            or not raw_uuid
+            or record.get("isSidechain")
+        ):
+            return
+        try:
+            payload = json.dumps(
+                record,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        except (RecursionError, TypeError, ValueError):
+            self.unindexable += 1
+            return
+        self.sequence += 1
+        parent = claude_parent(record)
+        self.database.execute(
+            "INSERT INTO claude_messages "
+            "(uuid, sequence, parent_uuid, sort_time, payload) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(uuid) DO UPDATE SET "
+            "parent_uuid = excluded.parent_uuid, "
+            "sort_time = excluded.sort_time, "
+            "payload = excluded.payload",
+            (
+                self.key(raw_uuid),
+                self.sequence,
+                self.key(parent) if parent else b"",
+                timestamp_value(record.get("timestamp"), self.path),
+                payload,
+            ),
+        )
+
+    def active_chain_from_leaf(self) -> Iterable[dict[str, Any]]:
+        leaf = self.database.execute(
+            "SELECT messages.uuid "
+            "FROM claude_messages AS messages "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM claude_messages AS children "
+            "WHERE children.parent_uuid = messages.uuid"
+            ") "
+            "ORDER BY messages.sort_time DESC, messages.sequence ASC "
+            "LIMIT 1"
+        ).fetchone()
+        if leaf is None:
+            leaf = self.database.execute(
+                "SELECT uuid FROM claude_messages "
+                "ORDER BY sort_time DESC, sequence ASC LIMIT 1"
+            ).fetchone()
+        if leaf is None:
+            return
+        uuid = leaf[0]
+        while uuid:
+            inserted = self.database.execute(
+                "INSERT OR IGNORE INTO claude_visited (uuid) VALUES (?)",
+                (uuid,),
+            )
+            if inserted.rowcount != 1:
+                break
+            row = self.database.execute(
+                "SELECT parent_uuid, payload FROM claude_messages WHERE uuid = ?",
+                (uuid,),
+            ).fetchone()
+            if row is None:
+                break
+            try:
+                record = json.loads(row[1])
+            except (json.JSONDecodeError, RecursionError, ValueError):
+                record = None
+            if isinstance(record, dict):
+                yield record
+            uuid = row[0]
 
 
 def claude_metadata(path: Path) -> dict[str, Any] | None:
@@ -982,10 +1062,10 @@ def claude_metadata(path: Path) -> dict[str, Any] | None:
     cwd = None
     session_id = path.stem
     first_user = ""
-    titles: dict[str, list[str]] = {
-        "custom-title": [],
-        "ai-title": [],
-        "summary": [],
+    titles = {
+        "custom-title": "",
+        "ai-title": "",
+        "summary": "",
     }
     title_fields = {
         "custom-title": "customTitle",
@@ -1012,7 +1092,7 @@ def claude_metadata(path: Path) -> dict[str, Any] | None:
             record_type = safe_string(record.get("type"))
             title_field = title_fields.get(record_type)
             if title_field and isinstance(record.get(title_field), str):
-                titles[record_type].append(record[title_field])
+                titles[record_type] = record[title_field]
             if (
                 record_type == "user"
                 and not record.get("isMeta")
@@ -1024,9 +1104,9 @@ def claude_metadata(path: Path) -> dict[str, Any] | None:
                     first_user = user_text(content_text(message.get("content")))
     title = next(
         (
-            values[-1]
+            titles[record_type]
             for record_type in ("custom-title", "ai-title", "summary")
-            if (values := titles[record_type])
+            if titles[record_type]
         ),
         first_user,
     )
@@ -1053,60 +1133,93 @@ def discover_claude(cwd: str) -> list[dict[str, Any]]:
     return [item for item in found if same_cwd(item.get("cwd"), cwd)]
 
 
-def read_claude(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
-    records, malformed = read_claude_records(Path(item["path"]))
-    turns: list[dict[str, Any]] = []
+def claude_turn(
+    record: dict[str, Any], max_tool_chars: int
+) -> tuple[dict[str, Any] | None, int]:
+    if record.get("isMeta") or record.get("isCompactSummary"):
+        return None, 1
+    role = safe_string(record.get("type"))
+    if role not in {"user", "assistant"}:
+        return None, 1
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return None, 1
+    content = message.get("content")
+    calls: list[dict[str, str]] = []
+    results: list[dict[str, str]] = []
     skipped = 0
-    for record in records:
-        if record.get("isMeta") or record.get("isCompactSummary"):
-            skipped += 1
-            continue
-        role = safe_string(record.get("type"))
-        if role not in {"user", "assistant"}:
-            skipped += 1
-            continue
-        message = record.get("message")
-        if not isinstance(message, dict):
-            skipped += 1
-            continue
-        content = message.get("content")
-        calls: list[dict[str, str]] = []
-        results: list[dict[str, str]] = []
-        if isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                kind = safe_string(block.get("type"))
-                if kind == "tool_use":
-                    calls.append(
-                        {
-                            "name": safe_string(block.get("name")),
-                            "arguments": json_preview(block.get("input"), max_tool_chars),
-                        }
-                    )
-                elif kind == "tool_result":
-                    results.append(
-                        {
-                            "call_id": safe_string(block.get("tool_use_id")),
-                            "output": one_line(
-                                content_text(block.get("content")), max_tool_chars
-                            ),
-                            "stale": "true",
-                        }
-                    )
-                elif kind in {"thinking", "redacted_thinking"}:
-                    skipped += 1
-        turn = inert_turn(role, content_text(content), calls, results)
-        if turn:
-            turns.append(turn)
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = safe_string(block.get("type"))
+            if kind == "tool_use":
+                calls.append(
+                    {
+                        "name": safe_string(block.get("name")),
+                        "arguments": json_preview(
+                            block.get("input"), max_tool_chars
+                        ),
+                    }
+                )
+            elif kind == "tool_result":
+                results.append(
+                    {
+                        "call_id": safe_string(block.get("tool_use_id")),
+                        "output": one_line(
+                            content_text(block.get("content")), max_tool_chars
+                        ),
+                        "stale": "true",
+                    }
+                )
+            elif kind in {"thinking", "redacted_thinking"}:
+                skipped += 1
+    return inert_turn(role, content_text(content), calls, results), skipped
+
+
+def read_claude(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+    path = Path(item["path"])
+    turns_from_leaf: list[dict[str, Any]] = []
+    last_text: dict[str, str] = {}
+    skipped = 0
+    with tempfile.TemporaryDirectory(prefix="resume-claude-chain-") as temporary:
+        try:
+            with closing(
+                sqlite3.connect(str(Path(temporary) / "chain.sqlite"))
+            ) as database:
+                index = ClaudeChainIndex(database, path)
+                malformed = consume_jsonl(path, index.consume)
+                skipped += index.unindexable
+                for record in index.active_chain_from_leaf():
+                    turn, record_skipped = claude_turn(record, max_tool_chars)
+                    skipped += record_skipped
+                    if not turn:
+                        continue
+                    role = safe_string(turn.get("role"))
+                    text = safe_string(turn.get("text"))
+                    if role in {"user", "assistant"} and text:
+                        last_text.setdefault(role, text)
+                    if len(turns_from_leaf) < MAX_TURNS + 1:
+                        turns_from_leaf.append(turn)
+        except sqlite3.Error as exc:
+            raise ReaderError(
+                f"temporary Claude chain index failed: {exc}"
+            ) from exc
+    turns = list(reversed(turns_from_leaf))
     warnings: list[dict[str, str]] = []
     if malformed:
         warnings.append(warning("malformed_records", f"Skipped {malformed} malformed record(s)."))
     if skipped:
         warnings.append(
-            warning("unsafe_records_skipped", f"Skipped {skipped} hidden or unsupported record(s).")
+            warning(
+                "unsafe_records_skipped",
+                f"Skipped {skipped} hidden or unsupported record(s).",
+            )
         )
-    return finalise({**public_candidate(item), "turns": turns}, warnings)
+    result = finalise({**public_candidate(item), "turns": turns}, warnings)
+    result["last_user_request"] = last_text.get("user")
+    result["last_assistant_action"] = last_text.get("assistant")
+    return result
 
 
 def grok_home() -> Path:
@@ -1116,7 +1229,7 @@ def grok_home() -> Path:
 def grok_metadata(summary_path: Path) -> dict[str, Any] | None:
     try:
         summary = read_json(summary_path)
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError, RecursionError):
         return None
     if not isinstance(summary, dict):
         return None
@@ -1146,6 +1259,62 @@ def discover_grok(cwd: str) -> list[dict[str, Any]]:
     return [item for item in found if same_cwd(item.get("cwd"), cwd)]
 
 
+def grok_turn(
+    record: dict[str, Any], max_tool_chars: int
+) -> tuple[dict[str, Any] | None, int]:
+    kind = safe_string(record.get("type")).lower()
+    if record.get("synthetic_reason"):
+        return None, 1
+    if kind in {"user", "assistant"}:
+        calls: list[dict[str, str]] = []
+        skipped = 0
+        if kind == "assistant" and isinstance(record.get("tool_calls"), list):
+            for raw_call in record["tool_calls"]:
+                if not isinstance(raw_call, dict):
+                    skipped += 1
+                    continue
+                calls.append(
+                    {
+                        "call_id": safe_string(
+                            raw_call.get("id") or raw_call.get("call_id")
+                        ),
+                        "name": safe_string(raw_call.get("name") or "tool"),
+                        "arguments": json_preview(
+                            raw_call.get("arguments", raw_call.get("input")),
+                            max_tool_chars,
+                        ),
+                    }
+                )
+        return (
+            inert_turn(
+                kind, content_text(record.get("content")), tool_calls=calls
+            ),
+            skipped,
+        )
+    if kind in {"tool_call", "backend_tool_call"}:
+        call = {
+            "name": safe_string(
+                record.get("name") or record.get("tool_name") or kind
+            ),
+            "arguments": json_preview(
+                record.get("arguments", record.get("input")), max_tool_chars
+            ),
+        }
+        return inert_turn("assistant", tool_calls=[call]), 0
+    if kind == "tool_result":
+        result = {
+            "call_id": safe_string(
+                record.get("call_id") or record.get("tool_call_id")
+            ),
+            "output": one_line(
+                record.get("output", record.get("content")), max_tool_chars
+            ),
+            "stale": "true",
+        }
+        return inert_turn("assistant", tool_results=[result]), 0
+    return None, 1
+
+
 def read_grok(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     session_dir = Path(item["path"])
     transcript = session_dir / "chat_history.jsonl"
@@ -1154,66 +1323,18 @@ def read_grok(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
         and not transcript.is_symlink()
         and path_is_within(transcript, session_dir)
     )
-    if transcript_safe:
-        records, malformed = read_jsonl(transcript)
-    else:
-        records, malformed = [], 0
-    turns: list[dict[str, Any]] = []
+    bounded = BoundedTurns()
     skipped = 0
-    for record in records:
-        kind = safe_string(record.get("type")).lower()
-        if record.get("synthetic_reason"):
-            skipped += 1
-            continue
-        if kind in {"user", "assistant"}:
-            calls: list[dict[str, str]] = []
-            if kind == "assistant" and isinstance(record.get("tool_calls"), list):
-                for raw_call in record["tool_calls"]:
-                    if not isinstance(raw_call, dict):
-                        skipped += 1
-                        continue
-                    calls.append(
-                        {
-                            "call_id": safe_string(
-                                raw_call.get("id") or raw_call.get("call_id")
-                            ),
-                            "name": safe_string(raw_call.get("name") or "tool"),
-                            "arguments": json_preview(
-                                raw_call.get("arguments", raw_call.get("input")),
-                                max_tool_chars,
-                            ),
-                        }
-                    )
-            turn = inert_turn(
-                kind, content_text(record.get("content")), tool_calls=calls
-            )
-            if turn:
-                turns.append(turn)
-        elif kind in {"tool_call", "backend_tool_call"}:
-            call = {
-                "name": safe_string(record.get("name") or record.get("tool_name") or kind),
-                "arguments": json_preview(
-                    record.get("arguments", record.get("input")), max_tool_chars
-                ),
-            }
-            turn = inert_turn("assistant", tool_calls=[call])
-            if turn:
-                turns.append(turn)
-        elif kind == "tool_result":
-            result = {
-                "call_id": safe_string(record.get("call_id") or record.get("tool_call_id")),
-                "output": one_line(
-                    record.get("output", record.get("content")), max_tool_chars
-                ),
-                "stale": "true",
-            }
-            turn = inert_turn("assistant", tool_results=[result])
-            if turn:
-                turns.append(turn)
-        elif kind in {"system", "reasoning"}:
-            skipped += 1
-        else:
-            skipped += 1
+
+    def consume_record(record: dict[str, Any]) -> None:
+        nonlocal skipped
+        turn, record_skipped = grok_turn(record, max_tool_chars)
+        skipped += record_skipped
+        if turn:
+            bounded.append(turn)
+
+    malformed = consume_jsonl(transcript, consume_record) if transcript_safe else 0
+    turns = bounded.recent()
     warnings: list[dict[str, str]] = []
     if not transcript_safe:
         warnings.append(
@@ -1227,9 +1348,15 @@ def read_grok(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
         warnings.append(warning("malformed_records", f"Skipped {malformed} malformed record(s)."))
     if skipped:
         warnings.append(
-            warning("unsafe_records_skipped", f"Skipped {skipped} hidden or unsupported record(s).")
+            warning(
+                "unsafe_records_skipped",
+                f"Skipped {skipped} hidden or unsupported record(s).",
+            )
         )
-    return finalise({**public_candidate(item), "turns": turns}, warnings)
+    result = finalise({**public_candidate(item), "turns": turns}, warnings)
+    result["last_user_request"] = bounded.last_text("user")
+    result["last_assistant_action"] = bounded.last_text("assistant")
+    return result
 
 
 def cursor_root() -> Path:
@@ -1434,7 +1561,7 @@ def cursor_cli_candidate(
             if meta_path.is_file() and not meta_path.is_symlink()
             else {}
         )
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError, RecursionError):
         meta = {}
     if not isinstance(meta, dict):
         meta = {}
@@ -1941,19 +2068,28 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def stdout_safe_text(value: Any) -> str:
+    return safe_string(value).encode(
+        "utf-8", errors="backslashreplace"
+    ).decode("utf-8")
+
+
 def emit(value: Any, as_json: bool) -> None:
     if as_json:
-        json.dump(value, sys.stdout, ensure_ascii=False, indent=2)
+        json.dump(value, sys.stdout, ensure_ascii=True, indent=2)
         sys.stdout.write("\n")
     else:
         if isinstance(value, list):
             for item in value:
-                print(
-                    f"{item.get('updated_at') or '-'}  {item.get('session_id')}  "
-                    f"{item.get('title')}"
+                sys.stdout.write(
+                    stdout_safe_text(
+                        f"{item.get('updated_at') or '-'}  "
+                        f"{item.get('session_id')}  {item.get('title')}"
+                    )
+                    + "\n"
                 )
         else:
-            print(json.dumps(value, ensure_ascii=False, indent=2))
+            print(json.dumps(value, ensure_ascii=True, indent=2))
 
 
 def main() -> int:
