@@ -261,6 +261,39 @@ spec = do
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.singleton "javascript"
 
+        it "requests grammars for every file in an edit preview" do
+            let patch =
+                    Text.unlines
+                        [ "*** Begin Patch"
+                        , "*** Update File: Main module.hs"
+                        , "@@"
+                        , "-main = old"
+                        , "+main = new"
+                        , "*** Update File: web/my app.ts"
+                        , "@@"
+                        , "-const oldValue = 1"
+                        , "+const newValue = 2"
+                        , "*** Update File: scripts/old module.py"
+                        , "*** Move to: crates/new module.rs"
+                        , "@@"
+                        , "-# source comment"
+                        , "+// destination comment"
+                        , "*** End Patch"
+                        ]
+                conversation =
+                    reduceUi
+                        (UiLoop
+                            (ToolStarted
+                                (customToolCall
+                                    "edit-1"
+                                    "apply_patch"
+                                    patch)))
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe`
+                    Set.fromList
+                        ["haskell", "python", "rust", "typescript"]
+
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
             let url = "https://github.com/digitallyinduced/haskell-agent"

@@ -11,6 +11,8 @@ module Agent.TUI.Theme
     , controlLinkActiveAttr
     , controlLinkAttr
     , controlLinkHoverAttr
+    , diffAddedAttr
+    , diffRemovedAttr
     , dimAttr
     , emphasisAttr
     , headingAttr
@@ -191,6 +193,7 @@ transcriptHoverMutedAttr, transcriptHoverMutedItalicAttr :: AttrName
 transcriptHoverMutedCancelledAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
+diffAddedAttr, diffRemovedAttr :: AttrName
 lambdaDimAttr, lambdaTrailAttr, lambdaGlowAttr, lambdaSparkAttr :: AttrName
 syntaxNormalAttr, syntaxKeywordAttr, syntaxTypeAttr, syntaxFunctionAttr :: AttrName
 syntaxVariableAttr, syntaxStringAttr, syntaxNumberAttr, syntaxCommentAttr :: AttrName
@@ -238,6 +241,8 @@ strongAttr = attrName "markdown-strong"
 controlLinkAttr = attrName "control-link"
 controlLinkHoverAttr = attrName "control-link-hover"
 controlLinkActiveAttr = attrName "control-link-active"
+diffAddedAttr = attrName "diff-added"
+diffRemovedAttr = attrName "diff-removed"
 syntaxNormalAttr = attrName "syntax-normal"
 syntaxKeywordAttr = attrName "syntax-keyword"
 syntaxTypeAttr = attrName "syntax-type"
@@ -325,6 +330,14 @@ terminalDefault =
         , (controlLinkHoverAttr, V.defAttr `V.withStyle` V.underline)
         , (controlLinkActiveAttr,
             raisedPanelAttr `V.withStyle` V.bold)
+        , (diffAddedAttr,
+            V.defAttr
+                `V.withForeColor` V.brightGreen
+                `V.withBackColor` Color240 22)
+        , (diffRemovedAttr,
+            V.defAttr
+                `V.withForeColor` V.brightRed
+                `V.withBackColor` Color240 52)
         , (syntaxNormalAttr, palette V.cyan)
         , (syntaxKeywordAttr, palette V.magenta)
         , (syntaxTypeAttr, palette V.yellow)
@@ -397,6 +410,8 @@ monochrome =
         , (controlLinkHoverAttr, V.defAttr
             `V.withStyle` (V.underline .|. V.bold))
         , (controlLinkActiveAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (diffAddedAttr, V.defAttr)
+        , (diffRemovedAttr, V.defAttr)
         , (syntaxNormalAttr, V.defAttr)
         , (syntaxKeywordAttr, V.defAttr `V.withStyle` V.bold)
         , (syntaxTypeAttr, V.defAttr `V.withStyle` V.bold)
@@ -474,6 +489,10 @@ mkTheme background foreground muted accent link =
         , (controlLinkHoverAttr,
             panel `V.withStyle` V.underline)
         , (controlLinkActiveAttr, panel `V.withStyle` V.bold)
+        , (diffAddedAttr,
+            greenA `V.withBackColor` diffAddedBackground)
+        , (diffRemovedAttr,
+            redA `V.withBackColor` diffRemovedBackground)
         , (syntaxNormalAttr, base)
         , (syntaxKeywordAttr, accentA)
         , (syntaxTypeAttr, yellowA)
@@ -529,6 +548,12 @@ mkTheme background foreground muted accent link =
         V.defAttr
             `V.withForeColor` (RGBColor 90 200 220)
             `V.withBackColor` background
+    diffAddedBackground =
+        fromMaybe background $
+            blendRgb background (RGBColor 45 150 85) 0.22
+    diffRemovedBackground =
+        fromMaybe background $
+            blendRgb background (RGBColor 180 55 75) 0.22
 
     lighten (RGBColor r g b) =
         RGBColor

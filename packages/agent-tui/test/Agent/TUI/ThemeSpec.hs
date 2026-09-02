@@ -103,6 +103,30 @@ spec = do
                 allSyntaxClasses
                 `shouldBe` replicate (length allSyntaxClasses) V.Default
 
+        it "uses distinct full-row backgrounds for added and removed lines" do
+            let added =
+                    attrMapLookup Theme.diffAddedAttr Theme.terminalDefault
+                removed =
+                    attrMapLookup Theme.diffRemovedAttr Theme.terminalDefault
+            V.attrBackColor added `shouldBe` V.SetTo (Color240 22)
+            V.attrBackColor removed `shouldBe` V.SetTo (Color240 52)
+            V.attrForeColor added `shouldBe` V.SetTo V.brightGreen
+            V.attrForeColor removed `shouldBe` V.SetTo V.brightRed
+
+        it "tints diff bands against the selected fixed-theme background" do
+            let theme = Theme.themeAttrMap Theme.Daylight
+                page =
+                    V.attrBackColor (attrMapLookup Theme.baseAttr theme)
+                added =
+                    V.attrBackColor
+                        (attrMapLookup Theme.diffAddedAttr theme)
+                removed =
+                    V.attrBackColor
+                        (attrMapLookup Theme.diffRemovedAttr theme)
+            added `shouldNotBe` page
+            removed `shouldNotBe` page
+            added `shouldNotBe` removed
+
         it "uses a readable neutral panel for selections" do
             let selected =
                     attrMapLookup Theme.selectedAttr Theme.terminalDefault
@@ -199,6 +223,15 @@ spec = do
                 , Theme.transcriptHoverAttr
                 ]
                 `shouldBe` replicate 5 (V.Default, V.Default)
+
+        it "does not paint diff bands in monochrome mode" do
+            map
+                ( \name ->
+                    let attr = attrMapLookup name Theme.monochrome
+                    in (V.attrForeColor attr, V.attrBackColor attr)
+                )
+                [Theme.diffAddedAttr, Theme.diffRemovedAttr]
+                `shouldBe` replicate 2 (V.Default, V.Default)
 
         it "retains reverse video for muted monochrome hover text" do
             let theme = Theme.monochrome

@@ -48,6 +48,7 @@ import Agent.Loop ()
 import Agent.Syntax ( SyntaxHighlighter )
 import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting,
+      diffWidgetWithSyntaxHighlighting,
       markdownWidgetWithLinks,
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
@@ -116,7 +117,7 @@ import Control.Exception.Safe ()
 import Control.Monad ()
 import Control.Monad.IO.Class ()
 import Control.Monad.State.Strict ()
-import Data.Char ( isDigit )
+import Data.Char ()
 import Data.Foldable ()
 import Data.IORef ()
 import Data.List ()
@@ -145,14 +146,11 @@ import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( dropWhile,
-      isPrefixOf,
-      length,
+    ( length,
       lines,
       null,
       strip,
       take,
-      uncons,
       unlines,
       unwords,
       words,
@@ -321,7 +319,12 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block)
                     block.blockTitle
                     block.blockDetail
-                    (editBodyWidgets (visibleBody block))
+                    [ diffWidgetWithSyntaxHighlighting
+                        state.appSyntaxHighlighter
+                        block.blockDetail
+                        (visibleBody block)
+                    | not (Text.null (Text.strip (visibleBody block)))
+                    ]
             BlockSystem ->
                 withAttr Theme.mutedAttr
                     (terminalTxtWrap block.blockBody)
@@ -661,31 +664,6 @@ toolBodySections syntaxHighlighter completeBody visible
     | Just language <- toolOutputCodeLanguage completeBody =
         [codeWidgetWithSyntaxHighlighting syntaxHighlighter language visible]
     | otherwise = bodySections visible
-
-editBodyWidgets :: Text -> [Widget Name]
-editBodyWidgets body
-    | Text.null (Text.strip body) = []
-    | otherwise = [vBox (map editLineWidget (Text.lines body))]
-  where
-    editLineWidget line
-        | isEditLine '-' line =
-            withAttr Theme.errorAttr (terminalTxtWrap line)
-        | isEditLine '+' line =
-            withAttr Theme.successAttr (terminalTxtWrap line)
-        | "  …" `Text.isPrefixOf` line
-            || "… +" `Text.isPrefixOf` line =
-                withAttr Theme.mutedAttr (terminalTxtWrap line)
-        | otherwise = terminalTxtWrap line
-
-    isEditLine marker line =
-        case Text.uncons (Text.dropWhile (== ' ') line) of
-            Just (first, rest)
-                | first == marker -> True
-                | first >= '0' && first <= '9' ->
-                    case Text.uncons (Text.dropWhile (== ' ') (Text.dropWhile isDigit rest)) of
-                        Just (actual, _) -> actual == marker
-                        Nothing -> False
-            _ -> False
 
 accentMarkdownBlock
     :: AppState

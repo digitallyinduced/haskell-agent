@@ -25,6 +25,7 @@ import Control.Monad (forM_)
 import Data.Char (isControl)
 import Data.Foldable (toList)
 import Data.List (find, findIndex, isInfixOf, sortOn)
+import Data.Maybe (isJust)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Graphics.Vty as V
@@ -264,6 +265,105 @@ spec = describe "fullscreen Markdown rendering" do
             widget = codeWidgetWithSyntaxHighlighting Nothing "haskell" code
         Text.concat (renderedCodePayloadRows 18 widget)
             `shouldBe` code
+
+    it "discovers every language used by a multi-file edit preview" do
+        diffSyntaxLanguages
+            "Main module.hs"
+            (Text.unlines
+                [ "  -main = old"
+                , "  update web/my app.ts"
+                , "  +const answer = 42"
+                , "  move scripts/old.py → crates/new module.rs"
+                , "  +fn main() {}"
+                ])
+            `shouldBe` ["haskell", "typescript", "python", "rust"]
+
+    it "syntax-highlights edit lines over full-width diff backgrounds" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let width = 32
+                    widget :: Widget ()
+                    widget =
+                        diffWidgetWithSyntaxHighlighting
+                            (Just highlighter)
+                            "Main module.hs"
+                            "  12 -message = \"before\"\n  12 +message = \"after\""
+                    picture =
+                        renderWidget
+                            (Just Theme.terminalDefault)
+                            [widget]
+                            (width, 4)
+                    rows =
+                        map toList $
+                            toList $
+                                displayOpsForPic picture (width, 4)
+                    findText expected =
+                        find (containsText expected) (concat rows)
+                    stringForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxStringAttr
+                                Theme.terminalDefault
+                    removedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffRemovedAttr
+                                Theme.terminalDefault
+                    addedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffAddedAttr
+                                Theme.terminalDefault
+                V.imageWidth (V.picImage picture) `shouldBe` width
+                findText "  12 -" `shouldSatisfy` isJust
+                findText "  12 +" `shouldSatisfy` isJust
+                fmap (V.attrForeColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just removedBackground
+                fmap (V.attrForeColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just addedBackground
+
+    it "uses source and destination grammars for moved diff lines" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let widget :: Widget ()
+                    widget =
+                        diffWidgetWithSyntaxHighlighting
+                            (Just highlighter)
+                            "old module.py"
+                            (Text.unlines
+                                [ "  move old module.py → new module.rs"
+                                , "  -# source comment"
+                                , "  +// destination comment"
+                                ])
+                    rows =
+                        concat $
+                            map toList $
+                                toList $
+                                    displayOpsForPic
+                                        (renderWidget
+                                            (Just Theme.terminalDefault)
+                                            [widget]
+                                            (40, 4))
+                                        (40, 4)
+                    commentForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxCommentAttr
+                                Theme.terminalDefault
+                fmap (V.attrForeColor . spanAttr)
+                    (find (containsText "source comment") rows)
+                    `shouldBe` Just commentForeground
+                fmap (V.attrForeColor . spanAttr)
+                    (find (containsText "destination comment") rows)
+                    `shouldBe` Just commentForeground
 
     it "renders terminal controls as inert visible glyphs" do
         let unsafe = "\ESC]0;owned\BEL\t\r"

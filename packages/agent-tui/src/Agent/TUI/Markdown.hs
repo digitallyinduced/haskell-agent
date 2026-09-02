@@ -2,6 +2,8 @@
 module Agent.TUI.Markdown
     ( Inline(..)
     , codeWidgetWithSyntaxHighlighting
+    , diffSyntaxLanguages
+    , diffWidgetWithSyntaxHighlighting
     , inlinePlainText
     , markdownWidget
     , markdownWidgetWithLinks
@@ -26,6 +28,7 @@ import Agent.Syntax
     ( SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
+    , resolvePathLanguage
     )
 import Agent.TUI.TextWidth
     ( displayTerminalText
@@ -37,9 +40,9 @@ import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
 import Data.Bits ((.|.))
-import Data.Char (isSpace)
+import Data.Char (isDigit, isSpace)
 import qualified Data.List as List
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
@@ -148,6 +151,318 @@ codeWidgetWithSyntaxHighlighting
 codeWidgetWithSyntaxHighlighting syntaxHighlighter language =
     renderCodeBodyWith wrapStyledCode syntaxHighlighter language
         . codeBodyLines
+
+-- | Languages needed to render a compact edit preview. The first file path is
+-- supplied separately, while later files are introduced by body headers.
+diffSyntaxLanguages :: Text -> Text -> [Text]
+diffSyntaxLanguages initialPath body =
+    List.nub
+        [ language
+        | line <- parseDiffLines initialPath body
+        , path <- diffPathHints line.diffPaths
+        , Just language <- [resolvePathLanguage path]
+        ]
+
+-- | Render a compact edit preview with token-level syntax foregrounds over
+-- full-width added/removed backgrounds.
+diffWidgetWithSyntaxHighlighting
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> Text
+    -> Widget n
+diffWidgetWithSyntaxHighlighting syntaxHighlighter initialPath body =
+    B.Widget B.Greedy B.Fixed do
+        context <- B.getContext
+        codeAttr <- B.lookupAttrName Theme.codeAttr
+        baseAttr <- B.lookupAttrName Theme.assistantAttr
+        mutedAttr <- B.lookupAttrName Theme.mutedAttr
+        addedAttr <- B.lookupAttrName Theme.diffAddedAttr
+        removedAttr <- B.lookupAttrName Theme.diffRemovedAttr
+        styledRows <-
+            fmap concat $
+                traverse
+                    (resolveDiffRun
+                        syntaxHighlighter
+                        codeAttr
+                        baseAttr
+                        mutedAttr
+                        addedAttr
+                        removedAttr)
+                    (diffRuns (parseDiffLines initialPath body))
+        let availableWidth = max 1 context.availWidth
+            rows =
+                concatMap
+                    (renderStyledDiffRow availableWidth)
+                    styledRows
+            image = V.vertCat rows
+            boundedImage
+                | V.imageWidth image > availableWidth =
+                    V.cropRight availableWidth image
+                | otherwise = image
+        pure B.emptyResult { B.image = boundedImage }
+
+data DiffLineKind
+    = DiffLineAdded
+    | DiffLineRemoved
+    | DiffLineHeader
+    | DiffLineMeta
+    | DiffLinePlain
+    deriving (Eq)
+
+data DiffPaths = DiffPaths
+    { diffRemovedPath :: !(Maybe Text)
+    , diffAddedPath :: !(Maybe Text)
+    }
+    deriving (Eq)
+
+data ParsedDiffLine = ParsedDiffLine
+    { diffLineKind :: !DiffLineKind
+    , diffPaths :: !DiffPaths
+    , diffLinePrefix :: !Text
+    , diffLineText :: !Text
+    }
+
+data DiffRun
+    = DiffChangedRun !DiffLineKind !DiffPaths ![(Text, Text)]
+    | DiffPlainRun !ParsedDiffLine
+
+data StyledDiffRow = StyledDiffRow
+    { styledDiffBackground :: !(Maybe V.Attr)
+    , styledDiffFragments :: ![(V.Attr, Text)]
+    }
+
+parseDiffLines :: Text -> Text -> [ParsedDiffLine]
+parseDiffLines initialPath =
+    go
+        (maybe emptyDiffPaths sameDiffPaths (nonEmptyText initialPath))
+        . Text.lines
+  where
+    go _ [] = []
+    go currentPaths (line : rest)
+        | Just nextPaths <- diffHeaderPaths line =
+            ParsedDiffLine DiffLineHeader nextPaths "" line
+                : go nextPaths rest
+        | Just (kind, prefix, source) <- changedDiffLine line =
+            ParsedDiffLine kind currentPaths prefix source
+                : go currentPaths rest
+        | "  …" `Text.isPrefixOf` line
+            || "… +" `Text.isPrefixOf` line =
+            ParsedDiffLine DiffLineMeta currentPaths "" line
+                : go currentPaths rest
+        | otherwise =
+            ParsedDiffLine DiffLinePlain currentPaths "" line
+                : go currentPaths rest
+
+changedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
+changedDiffLine line =
+    case Text.stripPrefix "  -" line of
+        Just source -> Just (DiffLineRemoved, "  -", source)
+        Nothing ->
+            case Text.stripPrefix "  +" line of
+                Just source -> Just (DiffLineAdded, "  +", source)
+                Nothing -> numberedDiffLine line
+
+numberedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
+numberedDiffLine line = do
+    afterIndent <- Text.stripPrefix "  " line
+    let (padding, afterPadding) = Text.span (== ' ') afterIndent
+        (digits, afterDigits) = Text.span isDigit afterPadding
+    if Text.null digits
+        then Nothing
+        else do
+            markerAndSource <- Text.stripPrefix " " afterDigits
+            (marker, source) <- Text.uncons markerAndSource
+            kind <- case marker of
+                '-' -> Just DiffLineRemoved
+                '+' -> Just DiffLineAdded
+                _ -> Nothing
+            pure
+                ( kind
+                , "  " <> padding <> digits <> " " <> Text.singleton marker
+                , source
+                )
+
+diffHeaderPaths :: Text -> Maybe DiffPaths
+diffHeaderPaths line =
+    actionPath
+        [ "  create "
+        , "  delete "
+        , "  write "
+        , "  update "
+        ]
+  where
+    actionPath [] = movePath
+    actionPath (prefix : rest) =
+        case Text.stripPrefix prefix line of
+            Just path -> sameDiffPaths <$> nonEmptyText path
+            Nothing -> actionPath rest
+
+    movePath = do
+        moved <- Text.stripPrefix "  move " line
+        let (source, destinationWithArrow) = Text.breakOn " → " moved
+        sourcePath <- nonEmptyText source
+        case Text.stripPrefix " → " destinationWithArrow of
+            Just destination -> do
+                destinationPath <- nonEmptyText destination
+                pure
+                    (DiffPaths
+                        { diffRemovedPath = Just sourcePath
+                        , diffAddedPath = Just destinationPath
+                        })
+            Nothing -> pure (sameDiffPaths sourcePath)
+
+emptyDiffPaths :: DiffPaths
+emptyDiffPaths =
+    DiffPaths
+        { diffRemovedPath = Nothing
+        , diffAddedPath = Nothing
+        }
+
+sameDiffPaths :: Text -> DiffPaths
+sameDiffPaths path =
+    DiffPaths
+        { diffRemovedPath = Just path
+        , diffAddedPath = Just path
+        }
+
+diffPathHints :: DiffPaths -> [Text]
+diffPathHints paths =
+    List.nub (catMaybes [paths.diffRemovedPath, paths.diffAddedPath])
+
+diffPathForKind :: DiffLineKind -> DiffPaths -> Maybe Text
+diffPathForKind kind paths =
+    case kind of
+        DiffLineRemoved -> paths.diffRemovedPath
+        DiffLineAdded -> paths.diffAddedPath
+        _ -> Nothing
+
+nonEmptyText :: Text -> Maybe Text
+nonEmptyText value =
+    let stripped = Text.strip value
+    in if Text.null stripped then Nothing else Just stripped
+
+diffRuns :: [ParsedDiffLine] -> [DiffRun]
+diffRuns [] = []
+diffRuns (line : rest)
+    | changedKind line.diffLineKind =
+        let (matching, remaining) =
+                span
+                    (\next ->
+                        next.diffLineKind == line.diffLineKind
+                            && next.diffPaths == line.diffPaths)
+                    rest
+        in DiffChangedRun
+                line.diffLineKind
+                line.diffPaths
+                (map
+                    (\changed ->
+                        (changed.diffLinePrefix, changed.diffLineText))
+                    (line : matching))
+                : diffRuns remaining
+    | otherwise =
+        DiffPlainRun line : diffRuns rest
+  where
+    changedKind kind =
+        kind == DiffLineAdded || kind == DiffLineRemoved
+
+resolveDiffRun
+    :: Maybe SyntaxHighlighter
+    -> V.Attr
+    -> V.Attr
+    -> V.Attr
+    -> V.Attr
+    -> V.Attr
+    -> DiffRun
+    -> B.RenderM n [StyledDiffRow]
+resolveDiffRun
+    syntaxHighlighter
+    codeAttr
+    baseAttr
+    mutedAttr
+    addedAttr
+    removedAttr = \case
+        DiffPlainRun line ->
+            pure
+                [ StyledDiffRow
+                    Nothing
+                    [ ( if line.diffLineKind == DiffLineMeta
+                            then mutedAttr
+                            else baseAttr
+                      , displayTerminalText line.diffLineText
+                      )
+                    ]
+                ]
+        DiffChangedRun kind paths changedLines -> do
+            let background =
+                    if kind == DiffLineAdded then addedAttr else removedAttr
+                sourceLines = map snd changedLines
+                highlightedLines = do
+                    highlighter <- syntaxHighlighter
+                    sourcePath <- diffPathForKind kind paths
+                    language <- resolvePathLanguage sourcePath
+                    either (const Nothing) Just $
+                        highlightCode
+                            highlighter
+                            language
+                            (Text.intercalate "\n" sourceLines)
+            contentRows <-
+                case highlightedLines of
+                    Just rows
+                        | length rows == length sourceLines ->
+                            traverse
+                                (traverse
+                                    (\span_ -> do
+                                        attr <-
+                                            B.lookupAttrName
+                                                (Theme.syntaxClassAttr
+                                                    span_.syntaxClass)
+                                        pure
+                                            ( withDiffBackground
+                                                background
+                                                attr
+                                            , displayTerminalText
+                                                span_.syntaxText
+                                            )))
+                                rows
+                    _ ->
+                        pure
+                            [ [ ( withDiffBackground background codeAttr
+                                , displayTerminalText source
+                                )
+                              ]
+                            | source <- sourceLines
+                            ]
+            pure
+                [ StyledDiffRow
+                    (Just background)
+                    ((background, prefix) : content)
+                | ((prefix, _), content) <- zip changedLines contentRows
+                ]
+
+withDiffBackground :: V.Attr -> V.Attr -> V.Attr
+withDiffBackground background attr =
+    case V.attrBackColor background of
+        V.SetTo color -> attr `V.withBackColor` color
+        _ -> attr
+
+renderStyledDiffRow :: Int -> StyledDiffRow -> [V.Image]
+renderStyledDiffRow availableWidth row =
+    map renderPhysicalRow $
+        wrapStyledCode availableWidth row.styledDiffFragments
+  where
+    renderPhysicalRow fragments =
+        let content = renderStyledLine fragments
+        in case row.styledDiffBackground of
+            Nothing -> content
+            Just background ->
+                let padding =
+                        max 0 (availableWidth - V.imageWidth content)
+                in V.horizCat
+                    [ content
+                    , if padding == 0
+                        then V.emptyImage
+                        else V.charFill background ' ' padding 1
+                    ]
 
 renderChunk
     :: Ord n
