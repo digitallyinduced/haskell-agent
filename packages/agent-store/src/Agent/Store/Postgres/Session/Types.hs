@@ -17,6 +17,7 @@ module Agent.Store.Postgres.Session.Types
     , SessionTurnPage(..)
     , SessionListCursor(..)
     , SessionListPage(..)
+    , SessionArchiveFilter(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
     ) where
@@ -34,6 +35,13 @@ data SessionLegacyTarget = SessionLegacyTarget
     , sessionLegacyEffectiveModel :: !Text
     , sessionLegacyDialect :: !Text
     }
+    deriving (Eq, Show)
+
+-- | Archive visibility applied by PostgreSQL before ordering and pagination.
+data SessionArchiveFilter
+    = SessionActive
+    | SessionArchived
+    | SessionAll
     deriving (Eq, Show)
 
 data NativeConversationSearchResult = NativeConversationSearchResult

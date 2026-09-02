@@ -539,6 +539,7 @@ spec = describe "PostgreSQL session schema" do
                                 pool
                                 pageGateway
                                 pageIdentity
+                                SessionAll
                                 Nothing
                                 2 >>= \case
                                     Left err ->
@@ -565,6 +566,7 @@ spec = describe "PostgreSQL session schema" do
                                             pool
                                             pageGateway
                                             pageIdentity
+                                            SessionAll
                                             firstPage.sessionListPageNextCursor
                                             2 >>= \case
                                                 Left err ->
@@ -586,6 +588,7 @@ spec = describe "PostgreSQL session schema" do
                                 pool
                                 pageGateway
                                 otherPageIdentity
+                                SessionAll
                                 Nothing
                                 100 >>= \case
                                     Left err ->
@@ -636,6 +639,7 @@ spec = describe "PostgreSQL session schema" do
                                 pool
                                 pageGateway
                                 Nothing
+                                SessionAll
                                 Nothing
                                 2 >>= \case
                                     Left err ->
@@ -650,6 +654,44 @@ spec = describe "PostgreSQL session schema" do
                                                 [ "page-direct-a"
                                                 , "page-direct-b"
                                                 ]
+                            setSessionArchived
+                                pool
+                                "page-authorized-a"
+                                True
+                                now
+                                `shouldReturn` Right True
+                            let
+                                expectFilteredPage archiveFilter expected =
+                                    listSessionMetadataForBoundary
+                                        pool
+                                        pageGateway
+                                        pageIdentity
+                                        archiveFilter
+                                        Nothing
+                                        100 >>= \case
+                                            Left err ->
+                                                expectationFailure
+                                                    ("could not list archive filter: "
+                                                        <> show err)
+                                            Right page ->
+                                                map
+                                                    (.sessionMetadataKey)
+                                                    page.sessionListPageSessions
+                                                    `shouldBe` expected
+                            expectFilteredPage
+                                SessionActive
+                                [ "page-authorized-b"
+                                , "page-authorized-c"
+                                ]
+                            expectFilteredPage
+                                SessionArchived
+                                ["page-authorized-a"]
+                            expectFilteredPage
+                                SessionAll
+                                [ "page-authorized-a"
+                                , "page-authorized-b"
+                                , "page-authorized-c"
+                                ]
                             setSessionArchived pool "session-2" True now
                                 `shouldReturn` Right True
                             searchNativeConversations pool "second" 10 >>= \case

@@ -440,11 +440,13 @@ listSessionMetadataForBoundary
     -- ^ Reserved organization-gateway connection identifier.
     -> Maybe Text
     -- ^ Current gateway credential identity, or 'Nothing' for direct mode.
+    -> SessionArchiveFilter
     -> Maybe SessionListCursor
     -> Int
     -> IO (Either StoreError SessionListPage)
 listSessionMetadataForBoundary
-        pool gatewayConnection gatewayIdentity cursor requestedLimit = do
+        pool gatewayConnection gatewayIdentity archiveFilter cursor
+        requestedLimit = do
     let
         limit = max 1 (min 100 requestedLimit)
         cursorUpdatedAt = (.sessionListCursorUpdatedAt) <$> cursor
@@ -457,11 +459,18 @@ listSessionMetadataForBoundary
                     Transaction.statement
                         ( gatewayConnection
                         , gatewayIdentity
+                        , archiveFilterParameter archiveFilter
                         , cursorUpdatedAt
                         , cursorKey
                         , fromIntegral (limit + 1)
                         )
                         listMetadataForBoundaryStatement
+
+archiveFilterParameter :: SessionArchiveFilter -> Text
+archiveFilterParameter = \case
+    SessionActive -> "active"
+    SessionArchived -> "archived"
+    SessionAll -> "all"
 
 toSessionListPage :: Int -> [SessionMetadata] -> SessionListPage
 toSessionListPage limit rows =
@@ -814,7 +823,7 @@ listMetadataStatement = mkStatement
 
 listMetadataForBoundaryStatement
     :: Statement
-        (Text, Maybe Text, Maybe UTCTime, Maybe Text, Int64)
+        (Text, Maybe Text, Text, Maybe UTCTime, Maybe Text, Int64)
         [SessionMetadata]
 listMetadataForBoundaryStatement = mkStatement
     (metadataSelectSql
@@ -828,21 +837,28 @@ listMetadataForBoundaryStatement = mkStatement
            \     AND gateway_identity = $2)\
            \ )\
            \ AND (\
-           \   $3 IS NULL\
-           \   OR updated_at < $3\
-           \   OR (updated_at = $3 AND session_key > $4)\
+           \   ($3 = 'active' AND archived_at IS NULL)\
+           \   OR ($3 = 'archived' AND archived_at IS NOT NULL)\
+           \   OR $3 = 'all'\
+           \ )\
+           \ AND (\
+           \   $4 IS NULL\
+           \   OR updated_at < $4\
+           \   OR (updated_at = $4 AND session_key > $5)\
            \ )\
            \ ORDER BY updated_at DESC, session_key ASC\
-           \ LIMIT $5")
-    ( ((\(value, _, _, _, _) -> value)
+           \ LIMIT $6")
+    ( ((\(value, _, _, _, _, _) -> value)
         >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((\(_, value, _, _, _) -> value)
+        <> ((\(_, value, _, _, _, _) -> value)
             >$< Encoders.param (Encoders.nullable Encoders.text))
-        <> ((\(_, _, value, _, _) -> value)
+        <> ((\(_, _, value, _, _, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, _, _, value, _, _) -> value)
             >$< Encoders.param (Encoders.nullable Encoders.timestamptz))
-        <> ((\(_, _, _, value, _) -> value)
+        <> ((\(_, _, _, _, value, _) -> value)
             >$< Encoders.param (Encoders.nullable Encoders.text))
-        <> ((\(_, _, _, _, value) -> value)
+        <> ((\(_, _, _, _, _, value) -> value)
             >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowList metadataRow)

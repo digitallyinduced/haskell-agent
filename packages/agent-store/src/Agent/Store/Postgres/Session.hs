@@ -52,6 +52,7 @@ module Agent.Store.Postgres.Session
     , listSessionMetadata
     , SessionListCursor(..)
     , SessionListPage(..)
+    , SessionArchiveFilter(..)
     , listSessionMetadataForBoundary
     , listSessionArchiveKeys
     , setSessionArchived
