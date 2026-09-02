@@ -658,6 +658,54 @@ class SessionReaderTest(unittest.TestCase):
         with self.assertRaisesRegex(reader.ReaderError, "ambiguous"):
             reader.resolve("cursor", str(self.cwd), str(database), 0)
 
+    def test_cursor_transcript_discovery_stops_after_metadata_and_title(self):
+        home = self.root / "cursor-streaming"
+        transcript = (
+            home
+            / "projects"
+            / "project"
+            / "agent-transcripts"
+            / "cursor-session"
+            / "cursor-session.jsonl"
+        )
+        transcript.parent.mkdir(parents=True)
+        transcript.touch()
+        lines = iter(
+            [
+                json.dumps({"workspacePath": str(self.cwd)}) + "\n",
+                json.dumps({"role": "user", "text": "Resume Cursor work"}) + "\n",
+            ]
+        )
+
+        class PrefixOnlyStream:
+            def __init__(self):
+                self.records_read = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.records_read += 1
+                if self.records_read > 2:
+                    raise AssertionError("Cursor discovery consumed the transcript tail")
+                return next(lines)
+
+        stream = PrefixOnlyStream()
+        with (
+            patch.dict(os.environ, {"CURSOR_HOME": str(home)}),
+            patch.object(reader, "open", return_value=stream, create=True),
+        ):
+            item = reader.cursor_transcript_candidate(transcript, str(self.cwd))
+        self.assertIsNotNone(item)
+        self.assertEqual(item["title"], "Resume Cursor work")
+        self.assertEqual(stream.records_read, 2)
+
     def test_finalise_preserves_last_request_when_old_turns_are_truncated(self):
         turns = [reader.inert_turn("user", "Original goal")]
         turns.extend(

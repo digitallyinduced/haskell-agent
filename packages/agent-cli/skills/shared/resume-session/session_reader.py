@@ -45,6 +45,14 @@ OUTER_HARNESS_RE = re.compile(
 MAX_TEXT_CHARS = 20_000
 MAX_TURNS = 200
 CURSOR_CONVERSATION_KEYS = {"messages", "turns", "conversation", "bubbles"}
+CURSOR_CWD_KEYS = {
+    "cwd",
+    "fspath",
+    "folderpath",
+    "rootpath",
+    "sourcereporootpath",
+    "workspacepath",
+}
 CLAUDE_CHAIN_TYPES = {"user", "assistant", "system", "attachment"}
 
 
@@ -1093,6 +1101,69 @@ def cursor_header_values(database: sqlite3.Connection) -> list[dict[str, Any]]:
     )
 
 
+def cursor_first_user_title(value: Any) -> str | None:
+    if isinstance(value, list):
+        for child in value:
+            if title := cursor_first_user_title(child):
+                return title
+        return None
+    if not isinstance(value, dict):
+        return None
+    role = safe_string(value.get("role") or value.get("type")).lower()
+    if role in {
+        "system",
+        "developer",
+        "instruction",
+        "instructions",
+        "thinking",
+        "reasoning",
+        "redacted_thinking",
+        "signature",
+        "encrypted_content",
+    }:
+        return None
+    if role in {"human", "user"}:
+        text = value.get("text", value.get("content", value.get("message")))
+        if isinstance(text, dict):
+            text = text.get("text", text.get("content"))
+        rendered = (
+            content_text(text)
+            if isinstance(text, list)
+            else text
+            if isinstance(text, str)
+            else ""
+        )
+        if title := user_text(rendered.strip()):
+            return title
+    for key, child in value.items():
+        if (
+            key.lower() in CURSOR_CONVERSATION_KEYS
+            and isinstance(child, (dict, list))
+            and (title := cursor_first_user_title(child))
+        ):
+            return title
+    return None
+
+
+def cursor_record_matches_cwd(value: Any, cwd: str) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if (
+                key.lower() in CURSOR_CWD_KEYS
+                and isinstance(child, str)
+                and same_cwd(child, cwd)
+            ):
+                return True
+            if (
+                isinstance(child, (dict, list))
+                and cursor_record_matches_cwd(child, cwd)
+            ):
+                return True
+    elif isinstance(value, list):
+        return any(cursor_record_matches_cwd(child, cwd) for child in value)
+    return False
+
+
 def cursor_transcript_candidate(path: Path, cwd: str) -> dict[str, Any] | None:
     transcript_root = cursor_root() / "projects"
     if (
@@ -1101,32 +1172,29 @@ def cursor_transcript_candidate(path: Path, cwd: str) -> dict[str, Any] | None:
         or not path_is_within(path, transcript_root)
     ):
         return None
+    matched_cwd = False
+    title = None
     try:
-        records, _ = read_jsonl(path)
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if not matched_cwd:
+                    matched_cwd = cursor_record_matches_cwd(record, cwd)
+                if title is None:
+                    title = cursor_first_user_title(record)
+                if matched_cwd and title:
+                    break
     except OSError:
         return None
-    paths = nested_strings(
-        records,
-        {
-            "cwd",
-            "fspath",
-            "folderpath",
-            "rootpath",
-            "sourcereporootpath",
-            "workspacepath",
-        },
-    )
-    if not any(same_cwd(recorded, cwd) for recorded in paths):
+    if not matched_cwd:
         return None
-    turns = generic_cursor_turns(records, 80)
-    title = next(
-        (
-            turn["text"]
-            for turn in turns
-            if turn["role"] == "user" and turn["text"]
-        ),
-        None,
-    )
     return candidate(
         "cursor",
         "cursor-transcript",
