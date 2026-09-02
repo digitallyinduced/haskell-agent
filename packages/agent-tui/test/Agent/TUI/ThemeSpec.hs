@@ -115,7 +115,11 @@ spec = do
             V.attrForeColor midnight
                 `shouldBe` V.SetTo (RGBColor 122 162 247)
             V.attrBackColor midnight
-                `shouldBe` V.SetTo (RGBColor 26 27 38)
+                `shouldBe`
+                    V.attrBackColor
+                        (attrMapLookup
+                            Theme.baseAttr
+                            (Theme.themeAttrMap Theme.Midnight))
             V.attrStyle noColor `shouldBe` V.SetTo V.bold
 
         it "sets backgrounds on force-painted attributes in every fixed theme" do

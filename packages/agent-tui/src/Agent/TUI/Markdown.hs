@@ -184,8 +184,11 @@ diffSyntaxLanguages :: Text -> Text -> [Text]
 diffSyntaxLanguages initialPath body =
     List.nub
         [ language
-        | line <- parseDiffLines initialPath body
-        , path <- diffPathHints line.diffPaths
+        | path <-
+            catMaybes [nonEmptyText initialPath]
+                <> concatMap
+                    (diffPathHints . (.diffPaths))
+                    (parseDiffLines initialPath body)
         , Just language <- [resolvePathLanguage path]
         ]
 
