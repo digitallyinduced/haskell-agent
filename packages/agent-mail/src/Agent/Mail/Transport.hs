@@ -8,6 +8,7 @@
 -- credentials, mailbox content, or exception text.
 module Agent.Mail.Transport
     ( mailTransportWithHooks
+    , mailTransportWithImapConnector
     , decodeImapMessageId
     , decodeGmailAttachmentRef
     , mailProviderStatusError
@@ -23,7 +24,11 @@ module Agent.Mail.Transport
     , validateMailReplyRecipient
     ) where
 
-import Agent.Mail.Imap (withMailImapConnection)
+import Agent.Mail.Imap
+    ( MailImapSocketConnector
+    , withMailImapConnection
+    , withMailImapConnectionUsing
+    )
 import Agent.Mail.Mime
     ( ParsedMailAttachment(..)
     , mailMimeAttachmentContent
@@ -86,74 +91,97 @@ import System.IO.Unsafe (unsafePerformIO)
 import Text.HTML.TagSoup (innerText, parseTags)
 
 mailTransportWithHooks :: MailTransportHooks -> MailTransport
-mailTransportWithHooks hooks = MailTransport
-    { mailTransportListMailboxes = listMailboxes hooks
-    , mailTransportSearch = searchMessages hooks
-    , mailTransportGetMessage = getMessage hooks
-    , mailTransportDownloadAttachment = downloadAttachment hooks
-    , mailTransportCreateDraft = createDraft hooks
-    , mailTransportUpdateDraft = updateDraft hooks
-    , mailTransportReplyDraft = replyDraft hooks
+mailTransportWithHooks =
+    mailTransportWithConnector Nothing
+
+-- | Construct a transport that opens custom IMAP connections through an
+-- egress-policy connector. OAuth provider endpoints remain fixed and do not
+-- use this hook.
+mailTransportWithImapConnector
+    :: MailImapSocketConnector
+    -> MailTransportHooks
+    -> MailTransport
+mailTransportWithImapConnector connector =
+    mailTransportWithConnector (Just connector)
+
+mailTransportWithConnector
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
+    -> MailTransport
+mailTransportWithConnector connector hooks = MailTransport
+    { mailTransportListMailboxes = listMailboxes connector hooks
+    , mailTransportSearch = searchMessages connector hooks
+    , mailTransportGetMessage = getMessage connector hooks
+    , mailTransportDownloadAttachment = downloadAttachment connector hooks
+    , mailTransportCreateDraft = createDraft connector hooks
+    , mailTransportUpdateDraft = updateDraft connector hooks
+    , mailTransportReplyDraft = replyDraft connector hooks
     }
 
 listMailboxes
-    :: MailTransportHooks
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
     -> MailCredential
     -> Int
     -> IO (Either Text [MailboxSummary])
-listMailboxes hooks credential requestedMaximum =
+listMailboxes connector hooks credential requestedMaximum =
     dispatchOAuth hooks credential
         (\token -> gmailListMailboxes token maximum)
         (\token -> graphListMailboxes token maximum)
-        (\settings password -> imapListMailboxes settings password maximum)
+        (\settings password ->
+            imapListMailboxes connector settings password maximum)
   where
     maximum = boundedCount 200 requestedMaximum
 
 searchMessages
-    :: MailTransportHooks
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
     -> MailCredential
     -> MailSearchRequest
     -> IO (Either Text [MailMessageSummary])
-searchMessages hooks credential request =
+searchMessages connector hooks credential request =
     dispatchOAuth hooks credential
         (\token -> gmailSearch token request)
         (\token -> graphSearch token request)
-        (\settings password -> imapSearch settings password request)
+        (\settings password -> imapSearch connector settings password request)
 
 getMessage
-    :: MailTransportHooks
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
     -> MailCredential
     -> MailGetRequest
     -> Int
     -> IO (Either Text MailMessage)
-getMessage hooks credential request requestedBodyMaximum =
+getMessage connector hooks credential request requestedBodyMaximum =
     dispatchOAuth hooks credential
         (\token -> gmailGet token request requestedBodyMaximum)
         (\token -> graphGet token request requestedBodyMaximum)
         (\settings password ->
-            imapGet settings password request requestedBodyMaximum)
+            imapGet connector settings password request requestedBodyMaximum)
 
 downloadAttachment
-    :: MailTransportHooks
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
     -> MailCredential
     -> MailAttachmentRequest
     -> Int
     -> IO (Either Text MailAttachmentContent)
-downloadAttachment hooks credential request requestedMaximum =
+downloadAttachment connector hooks credential request requestedMaximum =
     dispatchOAuth hooks credential
         (\token -> gmailDownload token request maximum)
         (\token -> graphDownload token request maximum)
         (\settings password ->
-            imapDownload settings password request maximum)
+            imapDownload connector settings password request maximum)
   where
     maximum = max 1 (min maximumAttachmentBytes requestedMaximum)
 
 createDraft
-    :: MailTransportHooks
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
     -> MailCredential
     -> MailCreateDraftRequest
     -> IO (Either Text MailDraft)
-createDraft hooks credential request =
+createDraft connector hooks credential request =
     case validateMailDraftContent defaultMailToolLimits
             request.mailCreateDraftContent of
         Left err -> pure (Left err)
@@ -162,16 +190,17 @@ createDraft hooks credential request =
                 (\token -> gmailCreateDraft token sender content Nothing Nothing)
                 (\token -> graphCreateDraft token content)
                 (\settings password ->
-                    imapCreateDraft settings password sender content)
+                    imapCreateDraft connector settings password sender content)
   where
     sender = credential.mailCredentialAccount.mailAccountEmail
 
 updateDraft
-    :: MailTransportHooks
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
     -> MailCredential
     -> MailUpdateDraftRequest
     -> IO (Either Text MailDraft)
-updateDraft hooks credential request =
+updateDraft connector hooks credential request =
     case validateMailDraftContent defaultMailToolLimits
             request.mailUpdateDraftContent of
         Left err -> pure (Left err)
@@ -183,16 +212,17 @@ updateDraft hooks credential request =
                 (\token -> graphUpdateDraft token checked.mailUpdateDraftId
                     checked.mailUpdateDraftContent)
                 (\settings password ->
-                    imapUpdateDraft settings password sender checked)
+                    imapUpdateDraft connector settings password sender checked)
   where
     sender = credential.mailCredentialAccount.mailAccountEmail
 
 replyDraft
-    :: MailTransportHooks
+    :: Maybe MailImapSocketConnector
+    -> MailTransportHooks
     -> MailCredential
     -> MailReplyDraftRequest
     -> IO (Either Text MailDraft)
-replyDraft hooks credential request =
+replyDraft connector hooks credential request =
     case validateMailDraftContent defaultMailToolLimits MailDraftContent
             { mailDraftTo = request.mailReplyDraftTo
             , mailDraftCc = []
@@ -214,7 +244,12 @@ replyDraft hooks credential request =
                 (\token -> gmailReplyDraft token sender checkedRequest)
                 (\token -> graphReplyDraft token checkedRequest)
                 (\settings password ->
-                    imapReplyDraft settings password sender checkedRequest)
+                    imapReplyDraft
+                        connector
+                        settings
+                        password
+                        sender
+                        checkedRequest)
   where
     sender = credential.mailCredentialAccount.mailAccountEmail
 
@@ -1404,22 +1439,34 @@ graphTextHeaders =
 
 -- IMAP ----------------------------------------------------------------------
 
+withConfiguredImapConnection
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings
+    -> Text
+    -> (Connection -> IO value)
+    -> IO (Either Text value)
+withConfiguredImapConnection = \case
+    Nothing -> withMailImapConnection
+    Just connector -> withMailImapConnectionUsing connector
+
 imapListMailboxes
-    :: MailImapSettings -> Text -> Int
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings -> Text -> Int
     -> IO (Either Text [MailboxSummary])
-imapListMailboxes settings password maximum =
-    withMailImapConnection settings password \connection -> do
+imapListMailboxes connector settings password maximum =
+    withConfiguredImapConnection connector settings password \connection -> do
         lines' <- imapSimpleCommand connection "m101" "LIST \"\" \"*\""
         pure . take maximum . mapMaybe parseListLine $ lines'
 
 imapSearch
-    :: MailImapSettings -> Text -> MailSearchRequest
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings -> Text -> MailSearchRequest
     -> IO (Either Text [MailMessageSummary])
-imapSearch settings password request =
+imapSearch connector settings password request =
     case traverse decodeImapMailboxId request.mailSearchMailboxId of
         Left err -> pure (Left err)
         Right selected ->
-            withMailImapConnection settings password \connection -> do
+            withConfiguredImapConnection connector settings password \connection -> do
                 let mailbox = fromMaybe "INBOX" selected
                 selectedLines <- imapSimpleCommand connection "m102"
                     ("EXAMINE " <> imapQuote mailbox)
@@ -1445,13 +1492,19 @@ imapSearch settings password request =
             request.mailSearchHasAttachments
 
 imapGet
-    :: MailImapSettings -> Text -> MailGetRequest -> Int
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings -> Text -> MailGetRequest -> Int
     -> IO (Either Text MailMessage)
-imapGet settings password request requestedMaximum =
+imapGet connector settings password request requestedMaximum =
     case decodeImapMessageId request.mailGetMessageId of
         Left err -> pure (Left err)
         Right (mailbox, expectedUidValidity, uid) -> do
-            connected <- withMailImapConnection settings password \connection -> do
+            connected <-
+                withConfiguredImapConnection
+                    connector
+                    settings
+                    password
+                    \connection -> do
                 selectedLines <- imapSimpleCommand connection "m201"
                     ("EXAMINE " <> imapQuote mailbox)
                 currentUidValidity <- maybe
@@ -1498,23 +1551,31 @@ imapGet settings password request requestedMaximum =
 -- server must advertise a RFC 6154 \Drafts mailbox and UIDPLUS APPENDUID;
 -- without a stable UID reference we cannot safely expose update_draft.
 imapCreateDraft
-    :: MailImapSettings -> Text -> Text -> MailDraftContent
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings -> Text -> Text -> MailDraftContent
     -> IO (Either Text MailDraft)
-imapCreateDraft settings password sender content =
-    fmap (>>= id) $ withMailImapConnection settings password \connection -> do
+imapCreateDraft connector settings password sender content =
+    fmap (>>= id) $
+        withConfiguredImapConnection connector settings password \connection -> do
         draftsMailbox <- imapDraftsMailbox connection
         imapRequireUidPlus connection "m401"
         imapAppendDraft connection "m402" draftsMailbox
             (renderMailDraftMime sender content Nothing)
 
 imapUpdateDraft
-    :: MailImapSettings -> Text -> Text -> MailUpdateDraftRequest
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings -> Text -> Text -> MailUpdateDraftRequest
     -> IO (Either Text MailDraft)
-imapUpdateDraft settings password sender request =
+imapUpdateDraft connector settings password sender request =
     case decodeImapDraftId request.mailUpdateDraftId of
         Left err -> pure (Left err)
         Right (mailbox, expectedUidValidity, uid) ->
-            fmap (>>= id) $ withMailImapConnection settings password \connection -> do
+            fmap (>>= id) $
+                withConfiguredImapConnection
+                    connector
+                    settings
+                    password
+                    \connection -> do
                 draftsMailbox <- imapDraftsMailbox connection
                 unless (mailbox == draftsMailbox) $
                     failText "That IMAP item is not in the server's Drafts mailbox."
@@ -1575,13 +1636,19 @@ imapUpdateDraft settings password sender request =
                             Right () -> draft
 
 imapReplyDraft
-    :: MailImapSettings -> Text -> Text -> MailReplyDraftRequest
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings -> Text -> Text -> MailReplyDraftRequest
     -> IO (Either Text MailDraft)
-imapReplyDraft settings password sender request =
+imapReplyDraft connector settings password sender request =
     case decodeImapMessageId request.mailReplyDraftMessageId of
         Left err -> pure (Left err)
         Right (mailbox, expectedUidValidity, uid) ->
-            fmap (>>= id) $ withMailImapConnection settings password \connection -> do
+            fmap (>>= id) $
+                withConfiguredImapConnection
+                    connector
+                    settings
+                    password
+                    \connection -> do
                 selected <- imapSimpleCommand connection "m421"
                     ("EXAMINE " <> imapQuote mailbox)
                 currentUidValidity <- maybe
@@ -1718,13 +1785,14 @@ imapAppendDraft connection tag mailbox bytes = do
             })
 
 imapDownload
-    :: MailImapSettings -> Text -> MailAttachmentRequest -> Int
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings -> Text -> MailAttachmentRequest -> Int
     -> IO (Either Text MailAttachmentContent)
-imapDownload settings password request maximum =
+imapDownload connector settings password request maximum =
     case decodeImapMessageId request.mailAttachmentMessageId of
         Left err -> pure (Left err)
         Right (mailbox, expectedUidValidity, uid) -> do
-            connected <- withMailImapConnection settings password
+            connected <- withConfiguredImapConnection connector settings password
                 \connection -> do
                     selectedLines <- imapSimpleCommand connection "m301"
                         ("EXAMINE " <> imapQuote mailbox)

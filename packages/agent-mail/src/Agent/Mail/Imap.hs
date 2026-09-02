@@ -5,8 +5,10 @@
 -- verified before LOGIN is sent.  Passwords are accepted as values only and
 -- are never included in an error or returned to native callers.
 module Agent.Mail.Imap
-    ( verifyMailImapCredentials
+    ( MailImapSocketConnector
+    , verifyMailImapCredentials
     , withMailImapConnection
+    , withMailImapConnectionUsing
     ) where
 
 import Agent.Mail.Types
@@ -14,7 +16,13 @@ import Agent.Mail.Types
     , MailTLSMode(..)
     , validateMailImapSettings
     )
-import Control.Exception.Safe (SomeException, bracket, finally, tryAny)
+import Control.Exception.Safe
+    ( SomeException
+    , bracket
+    , finally
+    , onException
+    , tryAny
+    )
 import Control.Monad (unless, void)
 import Data.Char (isControl)
 import Data.Text (Text)
@@ -22,8 +30,17 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.Encoding.Error as TextEncodingError
 import qualified Network.Connection as Connection
+import Network.Socket (Socket, close)
 import Network.TLS (defaultSupported)
 import System.Timeout (timeout)
+
+-- | Opens a TCP socket whose peer has already been selected by the caller.
+--
+-- The shared IMAP layer deliberately keeps the original configured hostname
+-- in its TLS parameters.  A gateway can therefore resolve and policy-check a
+-- hostname, connect a pinned public address here, and still receive normal
+-- SNI and certificate validation for that hostname.
+type MailImapSocketConnector = MailImapSettings -> IO Socket
 
 verifyMailImapCredentials
     :: MailImapSettings
@@ -45,13 +62,34 @@ withMailImapConnection
     -> Text
     -> (Connection.Connection -> IO value)
     -> IO (Either Text value)
-withMailImapConnection settings password action =
+withMailImapConnection =
+    withMailImapConnectionInternal Nothing
+
+-- | Like 'withMailImapConnection', but use a caller-owned TCP connector.
+-- This is intended for a trusted gateway egress policy, not for callers to
+-- disable TLS validation: TLS always retains the configured hostname.
+withMailImapConnectionUsing
+    :: MailImapSocketConnector
+    -> MailImapSettings
+    -> Text
+    -> (Connection.Connection -> IO value)
+    -> IO (Either Text value)
+withMailImapConnectionUsing connector =
+    withMailImapConnectionInternal (Just connector)
+
+withMailImapConnectionInternal
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings
+    -> Text
+    -> (Connection.Connection -> IO value)
+    -> IO (Either Text value)
+withMailImapConnectionInternal socketConnector settings password action =
     case (validateMailImapSettings settings, validatePassword password) of
         (Left err, _) -> pure (Left err)
         (_, Left err) -> pure (Left err)
         (Right (), Right ()) -> do
             outcome <- timeout imapConnectTimeoutMicros $
-                tryAny (withConnection settings \context connection ->
+                tryAny (withConnection socketConnector settings \context connection ->
                     (do
                         authenticate context settings password connection
                         action connection
@@ -62,25 +100,33 @@ withMailImapConnection settings password action =
                 Just (Right value) -> Right value
 
 withConnection
-    :: MailImapSettings
+    :: Maybe MailImapSocketConnector
+    -> MailImapSettings
     -> (Connection.ConnectionContext -> Connection.Connection -> IO value)
     -> IO value
-withConnection settings action =
+withConnection socketConnector settings action =
     bracket acquire (Connection.connectionClose . snd) \(context, connection) ->
         action context connection
   where
     acquire = do
         context <- Connection.initConnectionContext
-        connection <- Connection.connectTo context Connection.ConnectionParams
-            { Connection.connectionHostname = Text.unpack settings.mailImapHost
-            , Connection.connectionPort = fromIntegral settings.mailImapPort
-            , Connection.connectionUseSecure =
-                case settings.mailImapTLSMode of
-                    MailImplicitTLS -> Just tlsSettings
-                    MailStartTLS -> Nothing
-            , Connection.connectionUseSocks = Nothing
-            }
+        connection <- case socketConnector of
+            Nothing -> Connection.connectTo context connectionParams
+            Just connector -> do
+                socket <- connector settings
+                Connection.connectFromSocket context socket connectionParams
+                    `onException` close socket
         pure (context, connection)
+
+    connectionParams = Connection.ConnectionParams
+        { Connection.connectionHostname = Text.unpack settings.mailImapHost
+        , Connection.connectionPort = fromIntegral settings.mailImapPort
+        , Connection.connectionUseSecure =
+            case settings.mailImapTLSMode of
+                MailImplicitTLS -> Just tlsSettings
+                MailStartTLS -> Nothing
+        , Connection.connectionUseSocks = Nothing
+        }
 
     tlsSettings = Connection.TLSSettingsSimple
         { Connection.settingDisableCertificateValidation = False
