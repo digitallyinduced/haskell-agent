@@ -2,13 +2,16 @@ module Agent.CLI.Render.MarkdownStream
     ( MarkdownStreamState
     , emptyMarkdownStreamState
     , feedMarkdownStream
+    , feedMarkdownStreamAtWidth
     , flushMarkdownStream
+    , flushMarkdownStreamAtWidth
     , streamMarkdownText
     ) where
 
 import Agent.CLI.Markdown
     ( MarkdownFragmentSplit(..)
     , renderMarkdown
+    , renderMarkdownAtWidth
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
@@ -29,6 +32,7 @@ data MarkdownStreamState = MarkdownStreamState
     , context :: !(Maybe Char)
     , streamMode :: !MarkdownStreamMode
     , blockPending :: !Text
+    , renderWidth :: !(Maybe Int)
     }
 
 data MarkdownStreamMode
@@ -40,7 +44,7 @@ data MarkdownStreamMode
 
 emptyMarkdownStreamState :: MarkdownStreamState
 emptyMarkdownStreamState =
-    MarkdownStreamState "" Nothing StreamLineStart ""
+    MarkdownStreamState "" Nothing StreamLineStart "" Nothing
 
 streamMarkdownText
     :: MarkdownStreamState
@@ -52,7 +56,23 @@ feedMarkdownStream
     :: MarkdownStreamState
     -> Text
     -> (MarkdownStreamState, Text)
-feedMarkdownStream state input = case state.streamMode of
+feedMarkdownStream state =
+    feedMarkdownStreamCurrent state{renderWidth = Nothing}
+
+feedMarkdownStreamAtWidth
+    :: Int
+    -> MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedMarkdownStreamAtWidth width state =
+    feedMarkdownStreamCurrent
+        state{renderWidth = Just (max 1 width)}
+
+feedMarkdownStreamCurrent
+    :: MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedMarkdownStreamCurrent state input = case state.streamMode of
     StreamLineStart -> feedLineStart state input
     StreamProse -> feedProse state input
     StreamFence marker -> feedFence marker state input
@@ -86,14 +106,14 @@ classifyCompleteLine
     -> (MarkdownStreamState, Text)
 classifyCompleteLine state line rest
     | Just (marker, _) <- fenceOpener (dropLineEnding line) =
-        feedMarkdownStream
+        feedMarkdownStreamCurrent
             state
                 { streamMode = StreamFence marker
                 , blockPending = line
                 }
             rest
     | isPossibleTableHeader line =
-        feedMarkdownStream
+        feedMarkdownStreamCurrent
             state
                 { streamMode = StreamTableCandidate
                 , blockPending = line
@@ -101,13 +121,13 @@ classifyCompleteLine state line rest
             rest
     | lineIsBlock line =
         let (nextState, output) =
-                feedMarkdownStream
+                feedMarkdownStreamCurrent
                     state
                         { streamMode = StreamLineStart
                         , blockPending = ""
                         }
                     rest
-        in (nextState, renderMarkdown True line <> output)
+        in (nextState, renderBuffered state line <> output)
     | otherwise =
         feedProse
             state
@@ -177,7 +197,7 @@ feedProse state input =
                             , blockPending = ""
                             }
                     (nextState, following) =
-                        feedMarkdownStream reset (Text.drop 1 rest)
+                        feedMarkdownStreamCurrent reset (Text.drop 1 rest)
                 in (nextState, rendered <> following)
 
 feedFence
@@ -202,8 +222,9 @@ feedFence marker state input =
                         , pending = ""
                         , context = Nothing
                         }
-                (nextState, following) = feedMarkdownStream reset rest
-            in (nextState, renderMarkdown True block <> following)
+                (nextState, following) =
+                    feedMarkdownStreamCurrent reset rest
+            in (nextState, renderBuffered state block <> following)
 
 feedTableCandidate
     :: MarkdownStreamState
@@ -215,7 +236,7 @@ feedTableCandidate state input =
     in case lines_ of
         header : separator : after
             | isTableStart header separator ->
-                feedMarkdownStream
+                feedMarkdownStreamCurrent
                     state
                         { streamMode = StreamTable
                         , blockPending = header <> separator
@@ -228,9 +249,9 @@ feedTableCandidate state input =
                             , blockPending = ""
                             }
                     (nextState, following) =
-                        feedMarkdownStream reset
+                        feedMarkdownStreamCurrent reset
                             (separator <> Text.concat after <> partial)
-                in (nextState, renderMarkdown True header <> following)
+                in (nextState, renderBuffered state header <> following)
         _ -> (state{blockPending = buffered}, "")
 
 feedTable
@@ -257,22 +278,36 @@ feedTable state input =
                         , blockPending = ""
                         }
                 (nextState, following) =
-                    feedMarkdownStream reset
+                    feedMarkdownStreamCurrent reset
                         (line <> Text.concat rest <> partial)
-            in (nextState, renderMarkdown True table <> following)
+            in (nextState, renderBuffered state table <> following)
 
 flushMarkdownStream :: MarkdownStreamState -> Text
-flushMarkdownStream state = case state.streamMode of
+flushMarkdownStream = flushMarkdownStreamCurrent
+
+flushMarkdownStreamAtWidth :: Int -> MarkdownStreamState -> Text
+flushMarkdownStreamAtWidth width state =
+    flushMarkdownStreamCurrent
+        state{renderWidth = Just (max 1 width)}
+
+flushMarkdownStreamCurrent :: MarkdownStreamState -> Text
+flushMarkdownStreamCurrent state = case state.streamMode of
     StreamProse ->
         renderMarkdownFragment True state.context state.pending
     StreamLineStart ->
-        renderMarkdown True state.blockPending
+        renderBuffered state state.blockPending
     StreamFence _ ->
-        renderMarkdown True state.blockPending
+        renderBuffered state state.blockPending
     StreamTableCandidate ->
-        renderMarkdown True state.blockPending
+        renderBuffered state state.blockPending
     StreamTable ->
-        renderMarkdown True state.blockPending
+        renderBuffered state state.blockPending
+
+renderBuffered :: MarkdownStreamState -> Text -> Text
+renderBuffered state =
+    case state.renderWidth of
+        Nothing -> renderMarkdown True
+        Just width -> renderMarkdownAtWidth True width
 
 takeCompleteLine :: Text -> Maybe (Text, Text)
 takeCompleteLine text =

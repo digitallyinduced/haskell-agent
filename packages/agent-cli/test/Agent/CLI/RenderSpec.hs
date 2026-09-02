@@ -1,5 +1,6 @@
 module Agent.CLI.RenderSpec (spec) where
 
+import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Render
 import Agent.CLI.Style
     ( glyphInspect
@@ -183,6 +184,23 @@ spec = do
             output `shouldSatisfy` Text.isInfixOf "Control Center"
             output `shouldSatisfy` Text.isInfixOf "─"
             output `shouldSatisfy` (not . Text.isInfixOf "|")
+
+        it "constrains streamed tables to the terminal width" do
+            let input =
+                    "Product | Description | Difference\n\
+                    \--- | --- | ---:\n\
+                    \Codex | Compact and fast | 18%\n\
+                    \Other | Polished borders | 24%\n\
+                    \after\n"
+                (_state, output) =
+                    streamMarkdownAtWidth 24 input emptyRenderState
+                rows =
+                    filter (not . Text.null . Text.strip) $
+                        Text.lines (stripTerminalControls output)
+            map terminalTextWidth rows `shouldSatisfy` all (<= 24)
+            output `shouldSatisfy` Text.isInfixOf "Codex"
+            output `shouldSatisfy` Text.isInfixOf "24%"
+            output `shouldSatisfy` Text.isInfixOf "after"
 
         it "streams ordinary prose before its newline" do
             let (state1, first) = streamMarkdown "hello" emptyRenderState
