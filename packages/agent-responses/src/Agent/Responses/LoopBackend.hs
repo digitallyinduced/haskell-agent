@@ -109,15 +109,36 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
         case result of
             Left err -> pure (Left err)
             Right response ->
+                let normalizedRequestItems =
+                        normalizeResponseInputItems requestItems
+                    completedItems =
+                        fromMaybe
+                            (normalizedRequestItems <> response.output)
+                            (latestServerCheckpointSuffix response.output)
+                in
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
                     , backendState =
                         advanceBackendSnapshot snapshot
-                            ( normalizeResponseInputItems requestItems
-                                <> response.output
-                            )
+                            completedItems
                             Nothing
                     }
+
+-- Server compaction checkpoints replace everything that preceded them. Keep
+-- the checkpoint and later output in the stateless snapshot so subsequent
+-- requests do not replay the obsolete pre-compaction transcript.
+latestServerCheckpointSuffix
+    :: [ResponseItem]
+    -> Maybe [ResponseItem]
+latestServerCheckpointSuffix = go [] . reverse
+  where
+    go _ [] = Nothing
+    go after (item : before) = case item of
+        CompactionItemValue{} -> Just (item : after)
+        ContextCompactionItemValue{} -> Just (item : after)
+        KnownResponseItem ItemCompaction _ -> Just (item : after)
+        KnownResponseItem ItemContextCompaction _ -> Just (item : after)
+        _ -> go (item : after) before
 
 -- | Adapt a credentialed stateless Responses transport to the loop.
 --

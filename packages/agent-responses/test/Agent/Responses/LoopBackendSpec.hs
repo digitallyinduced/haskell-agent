@@ -3,11 +3,14 @@ module Agent.Responses.LoopBackendSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
+    , BackendSnapshot(..)
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TurnAttachment(..)
     , TurnInput(..)
+    , advanceBackendSnapshot
     , emptyBackendSnapshot
     , userMessageWithAttachments
     )
@@ -20,6 +23,7 @@ import Agent.Provider
     )
 import Agent.Json (rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
+import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.LoopBackend
     ( newStreamEventToLoopEvents
     , statelessResponsesBackend
@@ -33,6 +37,7 @@ import Agent.Responses.LoopBackend
 import Agent.Responses.Types
     ( MessageContent(..)
     , CodexRateLimits(..)
+    , CompactionItem(..)
     , ComputerAction(..)
     , ComputerCall(..)
     , ComputerCallOutput(..)
@@ -48,6 +53,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , Response
     , ResponseStreamEvent(..)
     , StreamEventType(..)
     , ResponseInput(..)
@@ -491,6 +497,78 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
 
         result `shouldBe` Left (ConnectionError "stopped after failover")
         readIORef attempts `shouldReturn` [first, second]
+
+    it "replaces obsolete history after a server compaction checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-1"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-1"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right [checkpoint, answer]
+
+    it "preserves retained history when only the request has a checkpoint" do
+        let retained = turnInputsToItems [UserMessage "retained context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-old"
+                , encryptedContent = Just "opaque"
+                }
+            existingItems = retained <> [checkpoint]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-ordinary"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    existingItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right (existingItems <> newItems <> [answer])
 
     it "forwards raw provider reasoning text to the UI loop" do
         events <- newIORef []
@@ -1119,6 +1197,17 @@ isUserMessage = \case
                     value == "hello"
                 _ -> False
     _ -> False
+
+responseWithOutput :: [ResponseItem] -> Response
+responseWithOutput output =
+    either error id . Codec.decodeResponse . LBS.toStrict . Aeson.encode $
+        Aeson.object
+            [ "id" Aeson..= ("resp-compacted" :: Text.Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("grok-4.6" :: Text.Text)
+            , "status" Aeson..= ("completed" :: Text.Text)
+            , "output" Aeson..= output
+            ]
 
 isEmptyAssistantFollowup :: ResponseItem -> Bool
 isEmptyAssistantFollowup = \case
