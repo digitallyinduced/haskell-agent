@@ -955,9 +955,9 @@ handleEventInner' event = case event of
         keepAgentHover target
     MouseUp AgentPane Nothing _ ->
         setHoveredControl Nothing
-    MouseUp name@(ConversationBlock _ _) Nothing _ -> do
+    MouseUp name@(ConversationBlock _ _) Nothing (Location (_, row)) -> do
         clearAgentHover
-        setHoveredControl (Just name)
+        setHoveredTranscriptLine name row
     MouseUp MarkdownLink{} Nothing _ -> do
         clearAgentHover
         setHoveredControl Nothing
@@ -974,18 +974,21 @@ handleEventInner' event = case event of
         modify' \state ->
             state
                 { appHoveredControl = Nothing
+                , appHoveredLine = Nothing
                 , appAgentHover = Nothing
                 }
     VtyEvent (V.EvMouseDown _ _ V.BLeft _) ->
         modify' \state ->
             state
                 { appHoveredControl = Nothing
+                , appHoveredLine = Nothing
                 , appAgentHover = Nothing
                 }
     VtyEvent (V.EvMouseUp _ _ _) ->
         modify' \state ->
             state
                 { appHoveredControl = Nothing
+                , appHoveredLine = Nothing
                 , appPressedControl = Nothing
                 , appAgentHover = Nothing
                 }
@@ -1125,7 +1128,19 @@ eventClearsMarkdownLinkCursor = \case
 -- extent.
 setHoveredControl :: Maybe Name -> EventM Name AppState ()
 setHoveredControl hovered =
-    modify' \state -> state{appHoveredControl = hovered}
+    modify' \state ->
+        state
+            { appHoveredControl = hovered
+            , appHoveredLine = Nothing
+            }
+
+setHoveredTranscriptLine :: Name -> Int -> EventM Name AppState ()
+setHoveredTranscriptLine name row =
+    modify' \state ->
+        state
+            { appHoveredControl = Just name
+            , appHoveredLine = Just (max 0 row)
+            }
 
 setMarkdownLinkCursor :: Bool -> EventM Name AppState ()
 setMarkdownLinkCursor hovered = do
