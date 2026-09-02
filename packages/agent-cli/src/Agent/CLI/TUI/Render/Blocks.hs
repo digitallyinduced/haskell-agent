@@ -291,9 +291,11 @@ drawBlock state target ui block =
                     waveElapsed
                     (statusAttr state target block)
                     (blockStateGlyph state target block <> block.blockTitle)
-                    block.blockDetail
+                    (if block.blockExpanded then block.blockDetail else "")
                     (visibleShellBody block)
-                    (toolImageSections state target block)
+                    (if block.blockExpanded
+                        then toolImageSections state target block
+                        else [])
             BlockEdit ->
                 accentBlockWithSections
                     state
@@ -571,13 +573,17 @@ conversationBlockHovered state target ui block =
                    ]
 
 blockStateGlyph :: AppState -> AgentTarget -> UiBlock -> Text
-blockStateGlyph state target block = case block.blockState of
-    BlockRunning -> liveGlyph
-    BlockStreaming -> liveGlyph
-    BlockComplete -> completedGlyph
-    BlockFailed -> "✗ "
-    BlockDenied -> "⊘ "
-    BlockCancelled -> "⊘ "
+blockStateGlyph state target block
+    | block.blockKind == BlockShell
+    , not block.blockExpanded =
+        "› "
+    | otherwise = case block.blockState of
+        BlockRunning -> liveGlyph
+        BlockStreaming -> liveGlyph
+        BlockComplete -> completedGlyph
+        BlockFailed -> "✗ "
+        BlockDenied -> "⊘ "
+        BlockCancelled -> "⊘ "
   where
     completedGlyph
         | block.blockKind == BlockInspect = "◇ "
@@ -821,12 +827,7 @@ truncatedLines shownCount body =
 visibleShellBody :: UiBlock -> Text
 visibleShellBody block
     | block.blockExpanded = block.blockBody
-    | otherwise =
-        let rows = Text.lines block.blockBody
-            shown
-                | length rows <= 5 = rows
-                | otherwise = take 2 rows <> ["…"] <> drop (length rows - 3) rows
-        in Text.unlines shown
+    | otherwise = ""
 
 detailSuffix :: UiBlock -> Text
 detailSuffix block

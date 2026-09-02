@@ -325,7 +325,8 @@ mergeConversationView previous incoming
                     Just old
                         | sameConversationBlock old block ->
                             block
-                                { blockExpanded = old.blockExpanded
+                                { blockExpanded =
+                                    preservedBlockExpansion old block
                                 }
                     _ -> block)
             incoming.uiBlocks
@@ -339,6 +340,14 @@ mergeConversationView previous incoming
                 , sameConversationBlock old new ->
                     Just ident
             _ -> incoming.uiSelectedBlock
+
+preservedBlockExpansion :: UiBlock -> UiBlock -> Bool
+preservedBlockExpansion previous incoming
+    | previous.blockKind == BlockShell
+    , previous.blockState `elem` [BlockStreaming, BlockRunning]
+    , incoming.blockState `notElem` [BlockStreaming, BlockRunning] =
+        incoming.blockExpanded
+    | otherwise = previous.blockExpanded
 
 sameConversationBlock :: UiBlock -> UiBlock -> Bool
 sameConversationBlock previous incoming =
