@@ -214,12 +214,12 @@ class SessionReaderTest(unittest.TestCase):
             {"type": "text", "value": "required state"},
             {"id": 1},
         ]
-        turn, skipped, omitted_images = reader.codex_turn(
+        turn, skipped, omissions = reader.codex_turn(
             {"type": "function_call_output", "output": output},
             200,
         )
         self.assertFalse(skipped)
-        self.assertEqual(omitted_images, 0)
+        self.assertEqual(omissions, reader.ContentOmissions())
         self.assertIsNotNone(turn)
         rendered = turn["tool_results"][0]["output"]
         self.assertIn("required state", rendered)
@@ -262,6 +262,163 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIn("required state", rendered)
         self.assertIn("'id': 1", rendered)
         self.assertNotIn("mixed-image-secret", json.dumps(result))
+        self.assertIn(
+            "image_content_omitted",
+            {item["code"] for item in result["warnings"]},
+        )
+
+    def test_nested_tool_content_is_sanitized_without_losing_wrapper_data(self):
+        rollout = self.root / "codex-nested-tool-output.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "output": {
+                            "status": "keep this status",
+                            "payload": {
+                                "content": [
+                                    {
+                                        "type": "input_image",
+                                        "image_url": (
+                                            "data:image/png;base64,nested-image-secret"
+                                        ),
+                                    },
+                                    {
+                                        "type": "input_file",
+                                        "filename": "private.pdf",
+                                        "file_data": "nested-file-secret",
+                                    },
+                                    {
+                                        "type": "thinking",
+                                        "thinking": "nested-reasoning-secret",
+                                    },
+                                    {"id": 1},
+                                ]
+                            },
+                        },
+                    },
+                }
+            ],
+        )
+        item = reader.candidate(
+            "codex",
+            "codex-cli",
+            "codex-nested-output",
+            rollout,
+            "Nested output",
+            str(self.cwd),
+        )
+        result = reader.read_codex(item, 1_000)
+        rendered = result["turns"][0]["tool_results"][0]["output"]
+        self.assertIn("keep this status", rendered)
+        self.assertIn("'id': 1", rendered)
+        self.assertIn(reader.OMITTED_IMAGE_MARKER, rendered)
+        self.assertIn(reader.OMITTED_ATTACHMENT_MARKER, rendered)
+        self.assertIn(reader.OMITTED_HIDDEN_CONTENT_MARKER, rendered)
+        serialized = json.dumps(result)
+        self.assertNotIn("nested-image-secret", serialized)
+        self.assertNotIn("nested-file-secret", serialized)
+        self.assertNotIn("nested-reasoning-secret", serialized)
+        warning_codes = {item["code"] for item in result["warnings"]}
+        self.assertIn("image_content_omitted", warning_codes)
+        self.assertIn("attachment_content_omitted", warning_codes)
+
+    def test_codex_warns_when_file_and_audio_attachments_are_omitted(self):
+        rollout = self.root / "codex-attachments.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Inspect these"},
+                            {
+                                "type": "input_file",
+                                "filename": "requirements.pdf",
+                                "file_data": "file-data-secret",
+                            },
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": "audio-data-secret",
+                                    "format": "wav",
+                                },
+                            },
+                        ],
+                    },
+                }
+            ],
+        )
+        item = reader.candidate(
+            "codex",
+            "codex-cli",
+            "codex-attachments",
+            rollout,
+            "Attachments",
+            str(self.cwd),
+        )
+        result = reader.read_codex(item, 200)
+        rendered = json.dumps(result)
+        self.assertEqual(result["last_user_request"], "Inspect these")
+        self.assertNotIn("file-data-secret", rendered)
+        self.assertNotIn("audio-data-secret", rendered)
+        warnings = {
+            item["code"]: item["message"] for item in result["warnings"]
+        }
+        self.assertIn("attachment_content_omitted", warnings)
+        self.assertIn("2 file/audio attachment", warnings["attachment_content_omitted"])
+
+    def test_codex_counts_native_computer_screenshots_as_omitted_images(self):
+        rollout = self.root / "codex-computer-output.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "computer_call",
+                        "call_id": "computer-1",
+                        "actions": [{"type": "screenshot"}],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "computer_call_output",
+                        "call_id": "computer-1",
+                        "output": {
+                            "type": "computer_screenshot",
+                            "image_url": (
+                                "data:image/png;base64,computer-image-secret"
+                            ),
+                        },
+                    },
+                },
+            ],
+        )
+        item = reader.candidate(
+            "codex",
+            "codex-cli",
+            "codex-computer-output",
+            rollout,
+            "Computer output",
+            str(self.cwd),
+        )
+        result = reader.read_codex(item, 200)
+        rendered = json.dumps(result)
+        self.assertNotIn("computer-image-secret", rendered)
+        self.assertEqual(result["turns"][0]["tool_calls"][0]["name"], "computer")
+        self.assertTrue(
+            result["turns"][1]["tool_results"][0]["output"].startswith(
+                reader.HISTORICAL_TOOL_RESULT_LABEL
+            )
+        )
         self.assertIn(
             "image_content_omitted",
             {item["code"] for item in result["warnings"]},
