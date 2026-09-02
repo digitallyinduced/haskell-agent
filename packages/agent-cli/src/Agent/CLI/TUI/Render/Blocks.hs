@@ -161,6 +161,7 @@ import qualified Agent.TUI.Theme as Theme
       controlLinkAttr,
       dimAttr,
       errorAttr,
+      inspectAttr,
       mutedAttr,
       successAttr,
       syntaxCommentAttr,
@@ -265,7 +266,7 @@ drawBlock state target ui block =
                     ui
                     block
                     waveElapsed
-                    (statusAttr state target block)
+                    (inspectionStatusAttr block)
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
@@ -369,6 +370,7 @@ drawBlock state target ui block =
 hoverReadableAttrs :: Widget Name -> Widget Name
 hoverReadableAttrs =
     overrideAttr Theme.mutedAttr Theme.transcriptHoverMutedAttr
+        . overrideAttr Theme.inspectAttr Theme.transcriptHoverMutedAttr
         . overrideAttr
             Theme.thinkingBodyAttr
             Theme.transcriptHoverMutedItalicAttr
@@ -845,6 +847,15 @@ statusAttr state target block
         BlockComplete -> Theme.successAttr
         BlockRunning -> Theme.toolAttr
         BlockStreaming -> Theme.thinkingAttr
+
+inspectionStatusAttr :: UiBlock -> AttrName
+inspectionStatusAttr block = case block.blockState of
+    BlockFailed -> Theme.errorAttr
+    BlockCancelled -> Theme.mutedAttr
+    BlockDenied -> Theme.errorAttr
+    BlockComplete -> Theme.inspectAttr
+    BlockRunning -> Theme.inspectAttr
+    BlockStreaming -> Theme.inspectAttr
 
 thinkingBlockAttr :: AppState -> AgentTarget -> UiBlock -> AttrName
 thinkingBlockAttr state target block

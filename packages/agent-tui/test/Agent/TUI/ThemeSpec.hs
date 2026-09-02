@@ -75,6 +75,7 @@ spec = do
                 , Theme.assistantAttr
                 , Theme.thinkingAttr
                 , Theme.toolAttr
+                , Theme.inspectAttr
                 , Theme.errorAttr
                 , Theme.successAttr
                 , Theme.codeAttr
@@ -111,6 +112,25 @@ spec = do
             V.attrForeColor active `shouldBe` V.SetTo V.brightBlack
             V.attrStyle border `shouldBe` V.SetTo V.dim
             V.attrStyle active `shouldBe` V.Default
+
+        it "styles inspection summaries as bold muted text" do
+            let terminalInspection =
+                    attrMapLookup Theme.inspectAttr Theme.terminalDefault
+                terminalMuted =
+                    attrMapLookup Theme.mutedAttr Theme.terminalDefault
+                daylight = Theme.themeAttrMap Theme.Daylight
+                daylightInspection =
+                    attrMapLookup Theme.inspectAttr daylight
+                daylightMuted =
+                    attrMapLookup Theme.mutedAttr daylight
+            V.attrForeColor terminalInspection
+                `shouldBe` V.attrForeColor terminalMuted
+            V.attrStyle terminalInspection `shouldBe` V.SetTo V.bold
+            V.attrForeColor daylightInspection
+                `shouldBe` V.attrForeColor daylightMuted
+            V.attrBackColor daylightInspection
+                `shouldBe` V.attrBackColor daylightMuted
+            V.attrStyle daylightInspection `shouldBe` V.SetTo V.bold
 
         it "gives user messages a palette gray panel distinct from assistant messages" do
             let user = attrMapLookup Theme.userAttr Theme.terminalDefault
@@ -196,6 +216,8 @@ spec = do
                 `shouldBe` RGBColor 144 80 150
             Theme.wavePeakForTheme Theme.Daylight Theme.thinkingAttr
                 `shouldBe` RGBColor 110 105 100
+            Theme.wavePeakForTheme Theme.Daylight Theme.inspectAttr
+                `shouldBe` RGBColor 110 105 100
             V.attrBackColor
                 (Theme.waitingPulseAttrForTheme
                     Theme.Daylight
@@ -225,6 +247,8 @@ spec = do
             Theme.runningWavePeak `shouldBe` RGBColor 187 154 247
             Theme.waveTrough `shouldBe` RGBColor 36 40 59
             Theme.wavePeakFor Theme.thinkingAttr
+                `shouldBe` Theme.thinkingWavePeak
+            Theme.wavePeakFor Theme.inspectAttr
                 `shouldBe` Theme.thinkingWavePeak
             Theme.wavePeakFor Theme.toolAttr
                 `shouldBe` Theme.runningWavePeak

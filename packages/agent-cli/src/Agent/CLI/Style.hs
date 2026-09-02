@@ -15,6 +15,7 @@ module Agent.CLI.Style
     , endBackground
     , rolePrompt
     , roleToolArrow
+    , roleInspectName
     , roleToolName
     , roleToolDetail
     , roleToolPath
@@ -160,6 +161,13 @@ rolePrompt color =
 
 roleToolArrow :: Bool -> Text -> Text
 roleToolArrow color = style color [terminalMuted]
+
+roleInspectName :: Bool -> Text -> Text
+roleInspectName color =
+    style color
+        [ SetConsoleIntensity BoldIntensity
+        , terminalMuted
+        ]
 
 roleToolName :: Bool -> Text -> Text
 roleToolName color =

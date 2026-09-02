@@ -33,6 +33,11 @@ spec = do
             let out = styleBase True agentBackground [] "hi"
             out `shouldSatisfy` (not . Text.isInfixOf "48;")
 
+        it "uses bold terminal gray for inspection labels" do
+            let out = roleInspectName True "Read"
+            out `shouldSatisfy` Text.isInfixOf "\ESC[1;90m"
+            out `shouldSatisfy` (not . Text.isInfixOf "\ESC[1;35m")
+
     describe "paintBackgroundLines" do
         it "leaves text unchanged when color is off" do
             paintBackgroundLines False agentBackground "a\nb" `shouldBe` "a\nb"
@@ -47,6 +52,7 @@ spec = do
 
     describe "roles" do
         it "keeps tool labels readable with color off" do
+            roleInspectName False "Read" `shouldBe` "Read"
             roleToolName False "Read" `shouldBe` "Read"
             roleToolPath False "src/A.hs" `shouldBe` "src/A.hs"
             roleToolCommand False "git status" `shouldBe` "git status"

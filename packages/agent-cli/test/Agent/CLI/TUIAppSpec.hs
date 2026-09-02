@@ -1559,6 +1559,29 @@ spec = do
             completionFlashTransitions completed completed
                 `shouldBe` []
 
+        it "does not schedule completion flashes for inspection blocks" do
+            let call =
+                    functionToolCall
+                        "inspect-1"
+                        "read_file"
+                        "{\"target_file\":\"README.md\"}"
+                running =
+                    reduceUi
+                        (UiLoop (ToolStarted call))
+                        (reduceUi (UiLoop TurnStarted) initialUiState)
+                completed =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished
+                                ToolCallResult
+                                    { callId = "inspect-1"
+                                    , output = "contents"
+                                    , callKind = FunctionCallKind
+                                    }))
+                        running
+            completionFlashTransitions running completed
+                `shouldBe` []
+
         it "ignores assistant streams and unsuccessful terminal states" do
             let assistantRunning =
                     reduceUi
