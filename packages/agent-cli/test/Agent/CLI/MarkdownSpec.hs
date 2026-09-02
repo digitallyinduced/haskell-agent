@@ -257,11 +257,15 @@ spec = do
         it "renders a basic pipe table" do
             let sample = "| file | status |\n| --- | --- |\n| a.hs | ok |"
                 out = renderMarkdown True sample
-            out `shouldSatisfy` Text.isInfixOf "file"
-            out `shouldSatisfy` Text.isInfixOf "a.hs"
+                cleaned = stripAnsi out
+            cleaned `shouldSatisfy` Text.isInfixOf "┌──────┬────────┐"
+            cleaned `shouldSatisfy` Text.isInfixOf "│ file │ status │"
+            cleaned `shouldSatisfy` Text.isInfixOf "├──────┼────────┤"
+            cleaned `shouldSatisfy` Text.isInfixOf "│ a.hs │ ok     │"
+            cleaned `shouldSatisfy` Text.isInfixOf "└──────┴────────┘"
             out `shouldSatisfy` (not . Text.isInfixOf "|")
 
-        it "renders borderless tables with GFM column alignment" do
+        it "renders full-grid tables with GFM column alignment" do
             let sample =
                     "| Name | Footprint |\n\
                     \| --- | ---: |\n\
@@ -272,22 +276,22 @@ spec = do
                         (filter (not . Text.null . Text.strip)
                             (Text.lines (renderMarkdown True sample)))
                 bodyRows =
-                    filter
-                        (\row -> not (Text.isInfixOf "─" row))
-                        (drop 2 rows)
+                    drop 1 (filter (Text.isPrefixOf "│") rows)
                 valueEnd needle row =
                     let offset = Text.length (fst (Text.breakOn needle row))
                     in offset + Text.length needle
-            rows `shouldSatisfy` all
-                (\row -> not (Text.any (`elem` ("┌┐└┘├┤┬┴┼│" :: String)) row))
-            rows `shouldSatisfy` any (Text.isInfixOf "─")
+                contentRows = filter (Text.isPrefixOf "│") rows
+            rows `shouldSatisfy` any (Text.isPrefixOf "┌")
+            rows `shouldSatisfy` any (Text.isPrefixOf "├")
+            rows `shouldSatisfy` any (Text.isPrefixOf "└")
+            contentRows `shouldSatisfy` all (Text.isSuffixOf "│")
             case bodyRows of
                 webkit : control : _ ->
                     valueEnd "27.7 GiB" webkit
                         `shouldBe` valueEnd "4.6 GiB" control
                 _ -> expectationFailure "expected two table body rows"
 
-        prop "right-aligns generated table values without box borders" $
+        prop "right-aligns generated table values inside a full grid" $
             forAll generatedRightAlignedTable $ \(firstValue, secondValue) ->
                 let sample =
                         "Name | Value\n--- | ---:\nfirst | " <> firstValue
@@ -297,17 +301,22 @@ spec = do
                             (filter (not . Text.null . Text.strip)
                                 (Text.lines (renderMarkdown True sample)))
                     bodyRows =
-                        filter (not . Text.isInfixOf "─") (drop 2 rows)
+                        drop 1 (filter (Text.isPrefixOf "│") rows)
                     valueEnd needle row =
                         Text.length (fst (Text.breakOn needle row))
                             + Text.length needle
-                    noBoxBorders = all
-                        (not . Text.any (`elem` ("┌┐└┘├┤┬┴┼│" :: String)))
-                        rows
+                    hasFullGrid = case rows of
+                        top : (_ : rest) ->
+                            Text.isPrefixOf "┌" top
+                                && any (Text.isPrefixOf "└") rest
+                                && all
+                                    (Text.isSuffixOf "│")
+                                    (filter (Text.isPrefixOf "│") rows)
+                        _ -> False
                 in case bodyRows of
                     firstRow : secondRow : _ ->
                         counterexample (show rows) $
-                            ( noBoxBorders
+                            ( hasFullGrid
                             , valueEnd firstValue firstRow
                             )
                                 === (True, valueEnd secondValue secondRow)

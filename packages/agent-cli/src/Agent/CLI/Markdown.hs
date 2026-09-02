@@ -153,11 +153,23 @@ renderTable table = case table.tableRows of
             normalizedRows = normalizedHeader : normalizedBody
             widths = columnWidths normalizedRows
             alignments = table.tableAlignments
-            rule = md [terminalMuted] $ Text.intercalate "  "
-                [Text.replicate (width + 2) "─" | width <- widths]
+            top = md [terminalMuted] (tableBorder '┌' '┬' '┐' widths)
+            divider = md [terminalMuted] (tableBorder '├' '┼' '┤' widths)
+            bottom = md [terminalMuted] (tableBorder '└' '┴' '┘' widths)
             headerRow = styleTableRow True alignments widths normalizedHeader
             bodyRows = map (styleTableRow False alignments widths) normalizedBody
-        in headerRow : rule : intersperse rule bodyRows
+            logicalRows = headerRow : bodyRows
+        in top : (intersperse divider logicalRows <> [bottom])
+
+tableBorder :: Char -> Char -> Char -> [Int] -> Text
+tableBorder left middle right widths =
+    Text.singleton left
+        <> Text.intercalate
+            (Text.singleton middle)
+            [ Text.replicate (width + 2) "─"
+            | width <- widths
+            ]
+        <> Text.singleton right
 
 columnWidths :: [[Text]] -> [Int]
 columnWidths rows =
@@ -178,8 +190,7 @@ styleTableRow isHeader alignments widths cells =
                 padding = max 0 (w - width')
                 (leftPadding, rightPadding) = alignmentPadding alignment padding
                 base
-                    | isHeader =
-                        [SetConsoleIntensity BoldIntensity, terminalYellow]
+                    | isHeader = [SetConsoleIntensity BoldIntensity]
                     | otherwise = []
             in " "
                 <> Text.replicate leftPadding " "
@@ -190,7 +201,10 @@ styleTableRow isHeader alignments widths cells =
             (alignments <> repeat Block.AlignDefault)
             widths
             (cells <> repeat "")
-    in Text.intercalate "  " (take (length widths) parts)
+        border = md [terminalMuted] "│"
+    in border
+        <> Text.intercalate border (take (length widths) parts)
+        <> border
 
 alignmentPadding :: Block.TableAlignment -> Int -> (Int, Int)
 alignmentPadding alignment padding = case alignment of

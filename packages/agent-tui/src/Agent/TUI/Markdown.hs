@@ -329,8 +329,8 @@ tableRowsWidget
 tableRowsWidget table rows headerCells =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
-        borderAttr <- B.lookupAttrName Theme.mutedAttr
-        headerAttr <- B.lookupAttrName Theme.headingAttr
+        borderAttr <- B.lookupAttrName Theme.borderAttr
+        headerAttr <- B.lookupAttrName Theme.strongAttr
         bodyAttr <- B.lookupAttrName Theme.assistantAttr
         styledRows <-
             traverse
@@ -338,15 +338,15 @@ tableRowsWidget table rows headerCells =
                     traverse
                         (resolveInline
                             (if rowIndex == 0
-                                then Theme.headingAttr
+                                then Theme.strongAttr
                                 else Theme.assistantAttr)
                             . parseInline)
                         cells)
                 (zip [0 :: Int ..] normalizedRows)
         let availableWidth = max 1 context.availWidth
-            columnGap = 2
+            borderWidth = columnCount + 1
             gridMinimumWidth =
-                columnGap * max 0 (columnCount - 1) + sum minimumWidths
+                borderWidth + sum minimumWidths
             paddedGridMinimumWidth =
                 gridMinimumWidth + 2 * columnCount
             gridFits = availableWidth >= gridMinimumWidth
@@ -355,27 +355,37 @@ tableRowsWidget table rows headerCells =
                     then 1
                     else 0
             chromeWidth =
-                columnGap * max 0 (columnCount - 1)
-                    + 2 * horizontalPadding * columnCount
+                borderWidth + 2 * horizontalPadding * columnCount
             contentBudget = max 0 (availableWidth - chromeWidth)
             widths =
                 fitColumnWidths
                     contentBudget minimumWidths naturalWidths
-            divider = tableRule borderAttr horizontalPadding columnGap widths
+            top =
+                tableRule
+                    borderAttr horizontalPadding '┌' '┬' '┐' widths
+            divider =
+                tableRule
+                    borderAttr horizontalPadding '├' '┼' '┤' widths
+            bottom =
+                tableRule
+                    borderAttr horizontalPadding '└' '┴' '┘' widths
             renderedRows =
                 case styledRows of
                     [] -> []
                     header : body ->
-                        renderTableRow
-                            headerAttr horizontalPadding columnGap
-                            table.tableAlignments widths header
-                            : divider
-                            : List.intersperse divider
-                                (map
-                                    (renderTableRow
-                                        bodyAttr horizontalPadding columnGap
-                                        table.tableAlignments widths)
-                                    body)
+                        let logicalRows =
+                                renderTableRow
+                                    borderAttr headerAttr horizontalPadding
+                                    table.tableAlignments widths header
+                                    : map
+                                        (renderTableRow
+                                            borderAttr bodyAttr
+                                            horizontalPadding
+                                            table.tableAlignments widths)
+                                        body
+                        in top
+                            : (List.intersperse divider logicalRows
+                                <> [bottom])
             image =
                 if gridFits
                     then V.vertCat renderedRows
@@ -485,37 +495,50 @@ renderStyledLine fragments =
         | (attr, text) <- fragments
         ]
 
-tableRule :: V.Attr -> Int -> Int -> [Int] -> V.Image
-tableRule attr horizontalPadding columnGap widths =
+tableRule
+    :: V.Attr
+    -> Int
+    -> Char
+    -> Char
+    -> Char
+    -> [Int]
+    -> V.Image
+tableRule attr horizontalPadding left middle right widths =
     V.text' attr $
-        Text.intercalate (Text.replicate columnGap " ")
-            [ Text.replicate
-                (width + 2 * horizontalPadding)
-                "─"
-            | width <- widths
-            ]
+        Text.singleton left
+            <> Text.intercalate
+                (Text.singleton middle)
+                [ Text.replicate
+                    (width + 2 * horizontalPadding)
+                    "─"
+                | width <- widths
+                ]
+            <> Text.singleton right
 
 renderTableRow
     :: V.Attr
-    -> Int
+    -> V.Attr
     -> Int
     -> [Block.TableAlignment]
     -> [Int]
     -> [[(V.Attr, Text)]]
     -> V.Image
-renderTableRow paddingAttr horizontalPadding columnGap alignments widths cells =
+renderTableRow
+    borderAttr paddingAttr horizontalPadding alignments widths cells =
     V.vertCat
         [ V.horizCat $
-            List.intersperse gap
-                [ renderTableCell
-                    paddingAttr alignment horizontalPadding width fragments
-                | (alignment, width, fragments) <-
-                    zip3 normalizedAlignments widths rowFragments
-                ]
+            border
+                : (List.intersperse border
+                    [ renderTableCell
+                        paddingAttr alignment horizontalPadding width fragments
+                    | (alignment, width, fragments) <-
+                        zip3 normalizedAlignments widths rowFragments
+                    ]
+                    <> [border])
         | rowFragments <- physicalRows
         ]
   where
-    gap = V.charFill paddingAttr ' ' columnGap 1
+    border = V.char borderAttr '│'
     normalizedAlignments = alignments <> repeat Block.AlignDefault
     wrappedCells =
         zipWith
