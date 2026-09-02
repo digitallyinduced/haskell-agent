@@ -407,7 +407,36 @@ spec = describe "fullscreen UI reducer" do
                 block.blockKind `shouldBe` BlockShell
                 block.blockState `shouldBe` BlockComplete
                 block.blockBody `shouldBe` "exit: 0\nclean"
+                block.blockExpanded `shouldBe` False
             _ -> expectationFailure "expected one completed tool block"
+
+    it "expands a shell command while running and allows reopening it after completion" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "run_terminal_cmd"
+                    "{\"command\":\"git status\"}"
+            running =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            completed =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished ToolCallResult
+                            { callId = "c1"
+                            , output = "exit: 0\nclean"
+                            , callKind = FunctionCallKind
+                            }))
+                    running
+            reopened = reduceUi UiToggleSelected completed
+        map (.blockExpanded) (Foldable.toList running.uiBlocks)
+            `shouldBe` [True]
+        map (.blockExpanded) (Foldable.toList completed.uiBlocks)
+            `shouldBe` [False]
+        map (.blockExpanded) (Foldable.toList reopened.uiBlocks)
+            `shouldBe` [True]
 
     it "updates an early tool start in place" do
         let early = functionToolCall "c1" "Task" "{}"
@@ -617,6 +646,7 @@ spec = describe "fullscreen UI reducer" do
                 block.blockTitle `shouldBe` "$ slow"
                 block.blockBody `shouldBe` "first\nsecond\nthird\n"
                 block.blockState `shouldBe` BlockComplete
+                block.blockExpanded `shouldBe` False
             _ -> expectationFailure "expected one coalesced shell block"
         polled.uiToolCalls `shouldBe` mempty
         polled.uiShellProcesses `shouldBe` mempty
@@ -1028,21 +1058,21 @@ spec = describe "fullscreen UI reducer" do
                 block.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected one completed tool block"
 
-    it "preserves tool folding while live snapshots arrive" do
+    it "preserves manual shell folding while live snapshots arrive" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
             started =
                 apply
                     [ UiLoop TurnStarted
                     , UiLoop (ToolStarted call)
                     ]
-            expanded = reduceUi UiToggleSelected started
+            folded = reduceUi UiToggleSelected started
             updated =
                 reduceUi
                     (UiLoop (ToolOutputUpdated "c1" "live output"))
-                    expanded
+                    folded
         case Foldable.toList updated.uiBlocks of
             [block] -> do
-                block.blockExpanded `shouldBe` True
+                block.blockExpanded `shouldBe` False
                 block.blockBody `shouldBe` "live output"
             _ -> expectationFailure "expected one running tool block"
 

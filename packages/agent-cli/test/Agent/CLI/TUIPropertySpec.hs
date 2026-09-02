@@ -270,7 +270,7 @@ spec = do
                     rendered `shouldSatisfy`
                         Text.isInfixOf ("◇ " <> inspectBlock.blockTitle)
                     rendered `shouldSatisfy`
-                        Text.isInfixOf ("◆ " <> actionBlock.blockTitle)
+                        Text.isInfixOf ("› " <> actionBlock.blockTitle)
                 _ -> expectationFailure "expected inspection and action blocks"
 
         it "keeps live todos to one row each so the prompt stays visible" do
@@ -338,6 +338,7 @@ spec = do
                                 , output = "tool output"
                                 , callKind = FunctionCallKind
                                 })
+                        , UiToggleSelected
                         , UiAssistantHistory
                             "## Result\n\nMarkdown **kept**."
                         , UiTurnEnded BlockComplete

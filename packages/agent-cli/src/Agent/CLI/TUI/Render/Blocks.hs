@@ -12,7 +12,7 @@ import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Command ()
 import Agent.CLI.Dictation ()
 import Agent.CLI.ImagePreview ()
-import Agent.CLI.Input ()
+import Agent.CLI.Input ( truncateDisplayText )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.Permission ()
 import Agent.CLI.Recap ()
@@ -150,8 +150,11 @@ import qualified Data.Text as Text
       lines,
       null,
       strip,
+      take,
       uncons,
       unlines,
+      unwords,
+      words,
       pack )
 import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
@@ -298,10 +301,13 @@ drawBlock state target ui block =
                     state.appSyntaxHighlighter
                     waveElapsed
                     (statusAttr state target block)
-                    (blockStateGlyph state target block <> block.blockTitle)
-                    block.blockDetail
+                    (blockStateGlyph state target block
+                        <> shellBlockTitle block)
+                    (if block.blockExpanded then block.blockDetail else "")
                     (visibleShellBody block)
-                    (toolImageSections state target block)
+                    (if block.blockExpanded
+                        then toolImageSections state target block
+                        else [])
             BlockEdit ->
                 accentBlockWithSections
                     state
@@ -580,14 +586,25 @@ conversationBlockHovered state target ui block =
                    ]
 
 blockStateGlyph :: AppState -> AgentTarget -> UiBlock -> Text
-blockStateGlyph state target block = case block.blockState of
-    BlockRunning -> liveGlyph
-    BlockStreaming -> liveGlyph
-    BlockComplete -> completedGlyph
-    BlockFailed -> "✗ "
-    BlockDenied -> "⊘ "
-    BlockCancelled -> "⊘ "
+blockStateGlyph state target block
+    | block.blockKind == BlockShell
+    , not block.blockExpanded =
+        "› " <> collapsedShellStateGlyph
+    | otherwise = case block.blockState of
+        BlockRunning -> liveGlyph
+        BlockStreaming -> liveGlyph
+        BlockComplete -> completedGlyph
+        BlockFailed -> "✗ "
+        BlockDenied -> "⊘ "
+        BlockCancelled -> "⊘ "
   where
+    collapsedShellStateGlyph = case block.blockState of
+        BlockRunning -> liveGlyph
+        BlockStreaming -> liveGlyph
+        BlockFailed -> "✗ "
+        BlockDenied -> "⊘ "
+        BlockCancelled -> "⊘ "
+        BlockComplete -> ""
     completedGlyph
         | block.blockKind == BlockInspect = "◇ "
         | block.blockKind
@@ -613,6 +630,19 @@ blockStateGlyph state target block = case block.blockState of
                 state.appRuntime.runtimeMotionMode
                 state.appMotionElapsedMillis
                 <> " "
+
+shellBlockTitle :: UiBlock -> Text
+shellBlockTitle block
+    | block.blockExpanded = block.blockTitle
+    | block.blockTitle `notElem` ["$ ghci", "$ exec"] = block.blockTitle
+    | Text.null invocation = block.blockTitle
+    | otherwise = block.blockTitle <> " · " <> invocation
+  where
+    invocation =
+        truncateDisplayText 120 $
+            Text.unwords $
+                Text.words $
+                    Text.take 512 block.blockDetail
 
 bodySections :: Text -> [Widget Name]
 bodySections body
@@ -743,9 +773,14 @@ accentBlockWithSections
         Theme.waveTroughForTheme
             theme
             state.appRuntime.runtimeWaveTrough
-    titleWidget = case waveElapsed of
+    titleWidget
+        | block.blockKind == BlockShell
+        , not block.blockExpanded =
+            singleLineTitle renderTitle title
+        | otherwise = renderTitle title
+    renderTitle fittedTitle = case waveElapsed of
         Nothing ->
-            withAttr accent (terminalTxtWrap title)
+            withAttr accent (terminalTxtWrap fittedTitle)
         Just elapsedMillis ->
             waveHeader
                 accent
@@ -753,7 +788,7 @@ accentBlockWithSections
                 trough
                 theme
                 elapsedMillis
-                title
+                fittedTitle
     paddedBody = map (padTop (Pad 1)) sections
     bodyWidgets
         | cacheableRunningBody state target ui block
@@ -766,6 +801,13 @@ accentBlockWithSections
                 (vBox paddedBody)
             ]
         | otherwise = paddedBody
+
+singleLineTitle :: (Text -> Widget n) -> Text -> Widget n
+singleLineTitle renderTitle title =
+    Widget Fixed Fixed do
+        context <- getContext
+        render $
+            renderTitle (truncateDisplayText context.availWidth title)
 
 -- Skip non-empty running bodies: live tool output changes without a new
 -- block id, and Brick cache keys must stay stable.
@@ -841,12 +883,7 @@ truncatedLines shownCount body =
 visibleShellBody :: UiBlock -> Text
 visibleShellBody block
     | block.blockExpanded = block.blockBody
-    | otherwise =
-        let rows = Text.lines block.blockBody
-            shown
-                | length rows <= 5 = rows
-                | otherwise = take 2 rows <> ["…"] <> drop (length rows - 3) rows
-        in Text.unlines shown
+    | otherwise = ""
 
 detailSuffix :: UiBlock -> Text
 detailSuffix block

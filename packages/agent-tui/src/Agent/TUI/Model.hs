@@ -648,6 +648,8 @@ appendBlock kind title body detail blockState callId state =
             , blockState
             , blockExpanded =
                 kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockRecap, BlockError]
+                    || (kind == BlockShell
+                        && blockState `elem` [BlockStreaming, BlockRunning])
             , blockCallId = callId
             }
     in state
@@ -693,10 +695,9 @@ completeTool blockIndex call result state =
             Seq.adjust
                 (\block ->
                     if block.blockCallId == Just result.callId
-                        then block
-                            { blockBody = body
-                            , blockState = resultState
-                            }
+                        then
+                            setBlockState resultState block
+                                { blockBody = body }
                         else block)
                 blockIndex
                 state.uiBlocks
@@ -805,8 +806,7 @@ reconcileVisibleShellContinuation call result state =
                                                 Nothing -> state.uiBlocks
                                                 Just (blockIndex, _) ->
                                                     Seq.adjust
-                                                        (\block ->
-                                                            block { blockState })
+                                                        (setBlockState blockState)
                                                         blockIndex
                                                         state.uiBlocks
                                     in state
@@ -827,10 +827,8 @@ retainRunningShell blockIndex sessionId output state =
                 { uiBlocks =
                     Seq.adjust
                         (\block ->
-                            block
-                                { blockBody = output
-                                , blockState = BlockRunning
-                                })
+                            setBlockState BlockRunning block
+                                { blockBody = output })
                         blockIndex
                         state.uiBlocks
                 , uiShellProcesses =
@@ -890,10 +888,8 @@ appendShellOutput blockIndex output blockState state =
         { uiBlocks =
             Seq.adjust
                 (\block ->
-                    block
-                        { blockBody = block.blockBody <> output
-                        , blockState
-                        })
+                    setBlockState blockState block
+                        { blockBody = block.blockBody <> output })
                 blockIndex
                 state.uiBlocks
         }
@@ -906,7 +902,7 @@ finalizeAttempt terminalState state =
                 (\index block ->
                     if index >= state.uiAttemptStartBlock
                         && block.blockState == BlockRunning
-                        then block { blockState = terminalState }
+                        then setBlockState terminalState block
                         else block)
                 state.uiBlocks
         processes = retainShellProcesses blocks state.uiShellProcesses
@@ -1074,7 +1070,7 @@ finalizeTurn terminalState state =
                             || block.blockId `elem` shellOwners)
                         && block.blockState
                             `elem` [BlockStreaming, BlockRunning]
-                        then block { blockState = terminalState }
+                        then setBlockState terminalState block
                         else block)
                 state.uiBlocks
         , uiRunning = False
@@ -1103,6 +1099,21 @@ finalizeTurn terminalState state =
         , uiShellPolls = Map.empty
         }
 
+-- Shell commands start open while output is live, then compact to a one-line
+-- summary. Preserve any manual folding while they are still running; a user
+-- can also expand the completed block again with the normal block toggle.
+setBlockState :: BlockState -> UiBlock -> UiBlock
+setBlockState blockState block =
+    block
+        { blockState
+        , blockExpanded =
+            if block.blockKind == BlockShell
+                && block.blockState `elem` [BlockStreaming, BlockRunning]
+                && blockState `notElem` [BlockStreaming, BlockRunning]
+                then False
+                else block.blockExpanded
+        }
+
 infoNotice, successNotice, warningNotice, progressNotice, errorNotice
     :: Text -> UiNotice
 infoNotice = transientNotice NoticeInfo
@@ -1129,7 +1140,7 @@ finalizeStreams state =
             fmap
                 (\block ->
                     if block.blockState == BlockStreaming
-                        then block { blockState = BlockComplete }
+                        then setBlockState BlockComplete block
                         else block)
                 state.uiBlocks
         }
