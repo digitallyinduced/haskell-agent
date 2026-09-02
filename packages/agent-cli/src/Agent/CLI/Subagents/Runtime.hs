@@ -658,13 +658,17 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                         turnState tokenProvider request)
                                 (pure childParams)
                         baseBackend =
-                            if gatewayOnly
-                                then websocketBackend
-                                else
-                                    openAiBackendWithTransportFallback
-                                        httpFallbackActive
-                                        websocketBackend
-                                        httpBackend
+                            -- Keep recovery below automatic compaction so a
+                            -- path change cannot replay a remote checkpoint.
+                            withConnectionRecoveryOn
+                                runtime.subagentNetworkRecovery $
+                                if gatewayOnly
+                                    then websocketBackend
+                                    else
+                                        openAiBackendWithTransportFallback
+                                            httpFallbackActive
+                                            websocketBackend
+                                            httpBackend
                         compactSender request =
                             if gatewayOnly
                                 then
@@ -693,9 +697,7 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                 baseBackend
                         backend =
                             withCodexTurnStateScope (pure turnState) $
-                                withConnectionRecoveryOn
-                                    runtime.subagentNetworkRecovery
-                                    compactingBackend
+                                compactingBackend
                     runPreparedChild
                         runtime env prepared.preparedSession
                         prepared.preparedToolEnv toolRegistry
