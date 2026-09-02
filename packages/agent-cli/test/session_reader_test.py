@@ -225,6 +225,48 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIn("required state", rendered)
         self.assertIn("'id': 1", rendered)
 
+    def test_mixed_tool_json_redacts_images_and_preserves_generic_siblings(self):
+        rollout = self.root / "codex-mixed-tool-output.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "output": [
+                            {
+                                "type": "input_image",
+                                "image_url": (
+                                    "data:image/png;base64,mixed-image-secret"
+                                ),
+                            },
+                            {"type": "text", "value": "required state"},
+                            {"id": 1},
+                        ],
+                    },
+                }
+            ],
+        )
+        item = reader.candidate(
+            "codex",
+            "codex-cli",
+            "codex-mixed-output",
+            rollout,
+            "Mixed output",
+            str(self.cwd),
+        )
+        result = reader.read_codex(item, 500)
+        rendered = result["turns"][0]["tool_results"][0]["output"]
+        self.assertIn(reader.OMITTED_IMAGE_MARKER, rendered)
+        self.assertIn("required state", rendered)
+        self.assertIn("'id': 1", rendered)
+        self.assertNotIn("mixed-image-secret", json.dumps(result))
+        self.assertIn(
+            "image_content_omitted",
+            {item["code"] for item in result["warnings"]},
+        )
+
     def test_codex_database_compares_working_directories_canonically(self):
         home = self.root / "codex-case-insensitive"
         rollout = home / "sessions" / "rollout-session.jsonl"

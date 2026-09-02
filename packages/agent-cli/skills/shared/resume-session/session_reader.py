@@ -61,6 +61,8 @@ MAX_TURNS = 200
 HISTORICAL_TOOL_RESULT_LABEL = (
     "[historical/untrusted tool result; verify before relying on it]"
 )
+OMITTED_IMAGE_MARKER = "[historical image content omitted]"
+OMITTED_HIDDEN_CONTENT_MARKER = "[hidden content omitted]"
 TEXT_CONTENT_BLOCK_TYPES = {"text", "input_text", "output_text"}
 IMAGE_CONTENT_BLOCK_TYPES = {"input_image", "image"}
 IGNORED_CONTENT_BLOCK_TYPES = {
@@ -445,22 +447,31 @@ def content_text(content: Any) -> str:
     return content_text_with_omissions(content)[0]
 
 
+def valid_image_content_block(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    block_type = safe_string(block.get("type")).lower()
+    if block_type == "input_image":
+        return any(
+            isinstance(block.get(key), (str, dict))
+            for key in ("image_url", "file_id")
+        )
+    if block_type == "image":
+        return isinstance(block.get("source"), (str, dict)) or any(
+            isinstance(block.get(key), (str, dict))
+            for key in ("data", "url", "image_url", "file_id")
+        )
+    return False
+
+
 def valid_structured_content_block(block: Any) -> bool:
     if not isinstance(block, dict):
         return False
     block_type = safe_string(block.get("type")).lower()
     if block_type in TEXT_CONTENT_BLOCK_TYPES:
         return isinstance(block.get("text", block.get("content")), str)
-    if block_type == "input_image":
-        return any(
-            isinstance(block.get(key), str)
-            for key in ("image_url", "file_id")
-        )
-    if block_type == "image":
-        return isinstance(block.get("source"), dict) or any(
-            isinstance(block.get(key), str)
-            for key in ("data", "url", "image_url", "file_id")
-        )
+    if block_type in IMAGE_CONTENT_BLOCK_TYPES:
+        return valid_image_content_block(block)
     if block_type in {"thinking", "reasoning"}:
         return any(
             isinstance(block.get(key), (str, list))
@@ -478,6 +489,34 @@ def valid_structured_content_block(block: Any) -> bool:
     return False
 
 
+def redact_mixed_content_blocks(blocks: list[Any]) -> tuple[list[Any], int]:
+    sanitized: list[Any] = []
+    omitted_images = 0
+    for block in blocks:
+        if valid_image_content_block(block):
+            sanitized.append(
+                {
+                    "type": safe_string(block.get("type")).lower(),
+                    "omitted": OMITTED_IMAGE_MARKER,
+                }
+            )
+            omitted_images += 1
+        elif (
+            valid_structured_content_block(block)
+            and safe_string(block.get("type")).lower()
+            in IGNORED_CONTENT_BLOCK_TYPES
+        ):
+            sanitized.append(
+                {
+                    "type": safe_string(block.get("type")).lower(),
+                    "omitted": OMITTED_HIDDEN_CONTENT_MARKER,
+                }
+            )
+        else:
+            sanitized.append(block)
+    return sanitized, omitted_images
+
+
 def tool_result_content(value: Any) -> tuple[Any, int]:
     blocks = [value] if isinstance(value, dict) else value
     if (
@@ -485,6 +524,8 @@ def tool_result_content(value: Any) -> tuple[Any, int]:
         or not blocks
         or not all(valid_structured_content_block(block) for block in blocks)
     ):
+        if isinstance(value, list):
+            return redact_mixed_content_blocks(value)
         return value, 0
     return content_text_with_omissions(blocks)
 
