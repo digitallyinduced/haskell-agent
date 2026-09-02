@@ -70,11 +70,6 @@ IGNORED_CONTENT_BLOCK_TYPES = {
     "encrypted_content",
     "signature",
 }
-STRUCTURED_CONTENT_BLOCK_TYPES = (
-    TEXT_CONTENT_BLOCK_TYPES
-    | IMAGE_CONTENT_BLOCK_TYPES
-    | IGNORED_CONTENT_BLOCK_TYPES
-)
 CURSOR_CONVERSATION_KEYS = {"messages", "turns", "conversation", "bubbles"}
 CURSOR_CWD_KEYS = {
     "cwd",
@@ -450,13 +445,45 @@ def content_text(content: Any) -> str:
     return content_text_with_omissions(content)[0]
 
 
+def valid_structured_content_block(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    block_type = safe_string(block.get("type")).lower()
+    if block_type in TEXT_CONTENT_BLOCK_TYPES:
+        return isinstance(block.get("text", block.get("content")), str)
+    if block_type == "input_image":
+        return any(
+            isinstance(block.get(key), str)
+            for key in ("image_url", "file_id")
+        )
+    if block_type == "image":
+        return isinstance(block.get("source"), dict) or any(
+            isinstance(block.get(key), str)
+            for key in ("data", "url", "image_url", "file_id")
+        )
+    if block_type in {"thinking", "reasoning"}:
+        return any(
+            isinstance(block.get(key), (str, list))
+            for key in ("thinking", "text", "summary")
+        )
+    if block_type in {
+        "redacted_thinking",
+        "encrypted_content",
+        "signature",
+    }:
+        return any(
+            isinstance(block.get(key), str)
+            for key in ("data", "encrypted_content", "signature")
+        )
+    return False
+
+
 def tool_result_content(value: Any) -> tuple[Any, int]:
     blocks = [value] if isinstance(value, dict) else value
-    if not isinstance(blocks, list) or not any(
-        isinstance(block, dict)
-        and safe_string(block.get("type")).lower()
-        in STRUCTURED_CONTENT_BLOCK_TYPES
-        for block in blocks
+    if (
+        not isinstance(blocks, list)
+        or not blocks
+        or not all(valid_structured_content_block(block) for block in blocks)
     ):
         return value, 0
     return content_text_with_omissions(blocks)
@@ -1731,13 +1758,20 @@ def cursor_cli_candidate(
         meta = {}
     if not isinstance(meta, dict):
         meta = {}
+    metadata_cwd = safe_string(meta.get("cwd"))
+    if (
+        fallback_cwd
+        and metadata_cwd
+        and not same_cwd(metadata_cwd, fallback_cwd)
+    ):
+        return None
     return candidate(
         "cursor",
         "cursor-cli",
         safe_string(meta.get("id") or session_dir.name),
         session_dir,
         meta.get("name") or meta.get("title"),
-        safe_string(meta.get("cwd")) or fallback_cwd,
+        metadata_cwd or fallback_cwd,
         meta.get("createdAt"),
         meta.get("updatedAt"),
     )

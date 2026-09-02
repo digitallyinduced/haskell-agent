@@ -209,6 +209,22 @@ class SessionReaderTest(unittest.TestCase):
             {item["code"] for item in resumed["warnings"]},
         )
 
+    def test_arbitrary_typed_tool_json_is_not_treated_as_content_parts(self):
+        output = [
+            {"type": "text", "value": "required state"},
+            {"id": 1},
+        ]
+        turn, skipped, omitted_images = reader.codex_turn(
+            {"type": "function_call_output", "output": output},
+            200,
+        )
+        self.assertFalse(skipped)
+        self.assertEqual(omitted_images, 0)
+        self.assertIsNotNone(turn)
+        rendered = turn["tool_results"][0]["output"]
+        self.assertIn("required state", rendered)
+        self.assertIn("'id': 1", rendered)
+
     def test_codex_database_compares_working_directories_canonically(self):
         home = self.root / "codex-case-insensitive"
         rollout = home / "sessions" / "rollout-session.jsonl"
@@ -1111,6 +1127,26 @@ class SessionReaderTest(unittest.TestCase):
             "turns_truncated",
             {entry["code"] for entry in result["warnings"]},
         )
+
+    def test_cursor_cli_discovery_rejects_mismatched_metadata_cwd(self):
+        home = self.root / "cursor-mismatched-cwd"
+        digest = hashlib.md5(reader.canonical(self.cwd).encode("utf-8")).hexdigest()
+        session = home / "chats" / digest / "mismatched-session"
+        session.mkdir(parents=True)
+        other_cwd = self.root / "other-repository"
+        other_cwd.mkdir()
+        (session / "meta.json").write_text(
+            json.dumps(
+                {
+                    "id": "mismatched-session",
+                    "cwd": str(other_cwd),
+                    "title": "Foreign Cursor task",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"CURSOR_HOME": str(home)}):
+            self.assertEqual(reader.discover_cursor(str(self.cwd)), [])
 
     def test_cursor_does_not_assign_pathless_desktop_sessions_to_current_repo(self):
         database = self.root / "state.vscdb"
