@@ -300,6 +300,15 @@ spec = do
                     Set.fromList
                         ["haskell", "python", "rust", "typescript"]
 
+        it "requests grammars used by edit titles and diff headers" do
+            let editBlock =
+                    (markerBlock (BlockId 1) "  update scripts/check.py")
+                        { blockKind = BlockEdit
+                        , blockTitle = "Edited src/Agent/Syntax.hs"
+                        }
+            syntaxLanguagesForBlocks [editBlock]
+                `shouldBe` Set.fromList ["haskell", "python"]
+
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
             let url = "https://github.com/digitallyinduced/haskell-agent"

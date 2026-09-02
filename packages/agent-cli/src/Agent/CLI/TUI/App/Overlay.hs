@@ -833,6 +833,10 @@ copyCodeBlock target blockId codeIndex = do
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
     state <- get
+    let previewingTheme =
+            maybe False
+                ((== ChoiceTheme) . (.choicePresentation))
+                state.appChoice
     case state.appChoiceReply of
         Nothing -> pure ()
         Just reply ->
@@ -845,6 +849,9 @@ resolveChoice confirmed = do
             { appChoice = Nothing
             , appChoiceReply = Nothing
             }
+    -- Cached transcript images already contain resolved attributes.  Closing
+    -- a live preview must repaint them with the persisted theme.
+    when previewingTheme invalidateCache
     resumeNativeProgressIfRunning
 
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
