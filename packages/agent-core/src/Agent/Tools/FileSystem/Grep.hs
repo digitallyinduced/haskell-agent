@@ -237,7 +237,7 @@ runRipgrep rgPath workspace path args emitCapture = mask \restore -> do
             | otherwise =
                 (Nothing, absoluteSearchPath)
     let rgArgs = concat
-            [ ["--heading", "--with-filename", "--line-number"]
+            [ ["--heading", "--with-filename", "--line-number", "--line-buffered"]
             , ["--no-config", "--color=never", "--max-columns", "1000"]
             , maybe [] (\g -> ["--glob", Text.unpack g]) args.glob
             , maybe [] (\n -> ["-B", show n]) args.before

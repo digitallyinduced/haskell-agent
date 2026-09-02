@@ -213,6 +213,16 @@ spec = describe "grepTool" do
             createDirectory workspace
             withFakeRg dir
                 ("#!/bin/sh\n\
+                \line_buffered=false\n\
+                \for arg do\n\
+                \  if [ \"$arg\" = \"--line-buffered\" ]; then\n\
+                \    line_buffered=true\n\
+                \  fi\n\
+                \done\n\
+                \if [ \"$line_buffered\" != true ]; then\n\
+                \  printf 'missing --line-buffered\\n' >&2\n\
+                \  exit 2\n\
+                \fi\n\
                 \printf 'first.txt\\n1:needle\\n'\n\
                 \while [ ! -f " <> shellQuote release <> " ]; do\n\
                 \  sleep 0.01\n\
