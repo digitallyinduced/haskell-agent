@@ -28,7 +28,7 @@ import Agent.Syntax
     ( SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
-    , resolveFenceLanguage
+    , resolvePathLanguage
     )
 import Agent.TUI.TextWidth
     ( displayTerminalText
@@ -40,7 +40,7 @@ import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
 import Data.Bits ((.|.))
-import Data.Char (isSpace)
+import Data.Char (isDigit, isSpace)
 import qualified Data.List as List
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -160,7 +160,7 @@ diffSyntaxLanguages initialPath body =
         [ language
         | line <- parseDiffLines initialPath body
         , Just path <- [line.diffPathHint]
-        , Just language <- [resolveFenceLanguage (diffFenceInfo path)]
+        , Just language <- [resolvePathLanguage path]
         ]
 
 -- | Render a compact edit preview with token-level syntax foregrounds over
@@ -212,11 +212,12 @@ data DiffLineKind
 data ParsedDiffLine = ParsedDiffLine
     { diffLineKind :: !DiffLineKind
     , diffPathHint :: !(Maybe Text)
+    , diffLinePrefix :: !Text
     , diffLineText :: !Text
     }
 
 data DiffRun
-    = DiffChangedRun !DiffLineKind !(Maybe Text) ![Text]
+    = DiffChangedRun !DiffLineKind !(Maybe Text) ![(Text, Text)]
     | DiffPlainRun !ParsedDiffLine
 
 data StyledDiffRow = StyledDiffRow
@@ -230,21 +231,47 @@ parseDiffLines initialPath = go (nonEmptyText initialPath) . Text.lines
     go _ [] = []
     go currentPath (line : rest)
         | Just nextPath <- diffHeaderPath line =
-            ParsedDiffLine DiffLineHeader (Just nextPath) line
+            ParsedDiffLine DiffLineHeader (Just nextPath) "" line
                 : go (Just nextPath) rest
-        | Just source <- Text.stripPrefix "  -" line =
-            ParsedDiffLine DiffLineRemoved currentPath source
-                : go currentPath rest
-        | Just source <- Text.stripPrefix "  +" line =
-            ParsedDiffLine DiffLineAdded currentPath source
+        | Just (kind, prefix, source) <- changedDiffLine line =
+            ParsedDiffLine kind currentPath prefix source
                 : go currentPath rest
         | "  …" `Text.isPrefixOf` line
             || "… +" `Text.isPrefixOf` line =
-            ParsedDiffLine DiffLineMeta currentPath line
+            ParsedDiffLine DiffLineMeta currentPath "" line
                 : go currentPath rest
         | otherwise =
-            ParsedDiffLine DiffLinePlain currentPath line
+            ParsedDiffLine DiffLinePlain currentPath "" line
                 : go currentPath rest
+
+changedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
+changedDiffLine line =
+    case Text.stripPrefix "  -" line of
+        Just source -> Just (DiffLineRemoved, "  -", source)
+        Nothing ->
+            case Text.stripPrefix "  +" line of
+                Just source -> Just (DiffLineAdded, "  +", source)
+                Nothing -> numberedDiffLine line
+
+numberedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
+numberedDiffLine line = do
+    afterIndent <- Text.stripPrefix "  " line
+    let (padding, afterPadding) = Text.span (== ' ') afterIndent
+        (digits, afterDigits) = Text.span isDigit afterPadding
+    if Text.null digits
+        then Nothing
+        else do
+            markerAndSource <- Text.stripPrefix " " afterDigits
+            (marker, source) <- Text.uncons markerAndSource
+            kind <- case marker of
+                '-' -> Just DiffLineRemoved
+                '+' -> Just DiffLineAdded
+                _ -> Nothing
+            pure
+                ( kind
+                , "  " <> padding <> digits <> " " <> Text.singleton marker
+                , source
+                )
 
 diffHeaderPath :: Text -> Maybe Text
 diffHeaderPath line =
@@ -286,7 +313,10 @@ diffRuns (line : rest)
         in DiffChangedRun
                 line.diffLineKind
                 line.diffPathHint
-                (map (.diffLineText) (line : matching))
+                (map
+                    (\changed ->
+                        (changed.diffLinePrefix, changed.diffLineText))
+                    (line : matching))
                 : diffRuns remaining
     | otherwise =
         DiffPlainRun line : diffRuns rest
@@ -321,18 +351,18 @@ resolveDiffRun
                       )
                     ]
                 ]
-        DiffChangedRun kind path sourceLines -> do
+        DiffChangedRun kind path changedLines -> do
             let background =
                     if kind == DiffLineAdded then addedAttr else removedAttr
-                prefix =
-                    if kind == DiffLineAdded then "  +" else "  -"
+                sourceLines = map snd changedLines
                 highlightedLines = do
                     highlighter <- syntaxHighlighter
                     sourcePath <- path
+                    language <- resolvePathLanguage sourcePath
                     either (const Nothing) Just $
                         highlightCode
                             highlighter
-                            (diffFenceInfo sourcePath)
+                            language
                             (Text.intercalate "\n" sourceLines)
             contentRows <-
                 case highlightedLines of
@@ -365,7 +395,7 @@ resolveDiffRun
                 [ StyledDiffRow
                     (Just background)
                     ((background, prefix) : content)
-                | content <- contentRows
+                | ((prefix, _), content) <- zip changedLines contentRows
                 ]
 
 withDiffBackground :: V.Attr -> V.Attr -> V.Attr
@@ -373,14 +403,6 @@ withDiffBackground background attr =
     case V.attrBackColor background of
         V.SetTo color -> attr `V.withBackColor` color
         _ -> attr
-
--- A bare filename is unambiguously a path in an edit preview. Prefixing it
--- keeps the general fence parser's support for dotted language identifiers
--- (for example, @asp.net@) while still resolving root-level file extensions.
-diffFenceInfo :: Text -> Text
-diffFenceInfo path
-    | Text.any (`elem` ['/', '\\']) path = path
-    | otherwise = "./" <> path
 
 renderStyledDiffRow :: Int -> StyledDiffRow -> [V.Image]
 renderStyledDiffRow availableWidth row =

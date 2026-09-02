@@ -25,6 +25,7 @@ import Control.Monad (forM_)
 import Data.Char (isControl)
 import Data.Foldable (toList)
 import Data.List (find, findIndex, isInfixOf, sortOn)
+import Data.Maybe (isJust)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Graphics.Vty as V
@@ -267,12 +268,12 @@ spec = describe "fullscreen Markdown rendering" do
 
     it "discovers every language used by a multi-file edit preview" do
         diffSyntaxLanguages
-            "Main.hs"
+            "Main module.hs"
             (Text.unlines
                 [ "  -main = old"
-                , "  update web/app.ts"
+                , "  update web/my app.ts"
                 , "  +const answer = 42"
-                , "  move scripts/old.py → crates/new.rs"
+                , "  move scripts/old.py → crates/new module.rs"
                 , "  +fn main() {}"
                 ])
             `shouldBe` ["haskell", "typescript", "rust"]
@@ -287,8 +288,8 @@ spec = describe "fullscreen Markdown rendering" do
                     widget =
                         diffWidgetWithSyntaxHighlighting
                             (Just highlighter)
-                            "Main.hs"
-                            "  -message = \"before\"\n  +message = \"after\""
+                            "Main module.hs"
+                            "  12 -message = \"before\"\n  12 +message = \"after\""
                     picture =
                         renderWidget
                             (Just Theme.terminalDefault)
@@ -316,6 +317,8 @@ spec = describe "fullscreen Markdown rendering" do
                                 Theme.diffAddedAttr
                                 Theme.terminalDefault
                 V.imageWidth (V.picImage picture) `shouldBe` width
+                findText "  12 -" `shouldSatisfy` isJust
+                findText "  12 +" `shouldSatisfy` isJust
                 fmap (V.attrForeColor . spanAttr) (findText "\"before\"")
                     `shouldBe` Just stringForeground
                 fmap (V.attrBackColor . spanAttr) (findText "\"before\"")

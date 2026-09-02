@@ -259,11 +259,11 @@ spec = do
             let patch =
                     Text.unlines
                         [ "*** Begin Patch"
-                        , "*** Update File: Main.hs"
+                        , "*** Update File: Main module.hs"
                         , "@@"
                         , "-main = old"
                         , "+main = new"
-                        , "*** Update File: web/app.ts"
+                        , "*** Update File: web/my app.ts"
                         , "@@"
                         , "-const oldValue = 1"
                         , "+const newValue = 2"

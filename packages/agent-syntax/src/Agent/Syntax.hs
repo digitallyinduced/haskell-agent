@@ -14,6 +14,7 @@ module Agent.Syntax
     , newSyntaxHighlighter
     , newSyntaxHighlighterFrom
     , resolveFenceLanguage
+    , resolvePathLanguage
     ) where
 
 import Control.Applicative ((<|>))
@@ -568,16 +569,34 @@ resolveFenceLanguage info = do
                 Just path -> languageFromPath path
                 Nothing
                     | Text.any (`elem` ['/', '\\']) normalized ->
-                        languageFromPath $
-                            Text.map
-                                (\character ->
-                                    if character == '\\'
-                                        then '/'
-                                        else character)
-                                normalized
+                        languageFromPath (normalizePathSeparators normalized)
                     | otherwise -> normalized
-        aliased = Map.findWithDefault candidate candidate languageAliases
-    if aliased `elem` plainTextAliases || Text.null aliased
+    normalizeLanguage candidate
+
+-- | Resolve a complete file path to the identifier used for syntax lookup.
+--
+-- Unlike Markdown fence info, file paths may contain whitespace and must not
+-- be truncated to their first whitespace-delimited token.
+resolvePathLanguage :: Text -> Maybe Text
+resolvePathLanguage =
+    normalizeLanguage
+        . languageFromPath
+        . normalizePathSeparators
+        . Text.toLower
+        . Text.strip
+
+normalizePathSeparators :: Text -> Text
+normalizePathSeparators =
+    Text.map
+        (\character ->
+            if character == '\\'
+                then '/'
+                else character)
+
+normalizeLanguage :: Text -> Maybe Text
+normalizeLanguage candidate =
+    let aliased = Map.findWithDefault candidate candidate languageAliases
+    in if aliased `elem` plainTextAliases || Text.null aliased
         then Nothing
         else Just aliased
 
