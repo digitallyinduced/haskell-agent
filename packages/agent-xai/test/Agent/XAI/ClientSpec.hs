@@ -56,9 +56,69 @@ spec = do
                 `shouldBe` Just "interactive"
             lookup "User-Agent" request.headers
                 `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
+            lookup "x-compaction-at" request.headers
+                `shouldBe` Just "400000"
+            lookup "x-compactions-remaining" request.headers
+                `shouldBe` Just "1"
             requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
             requestInputRoles request `shouldBe` Just ["system", "user"]
+
+        it "omits x-compaction-at after a local compaction checkpoint" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-compacted" []
+                    ]
+                checkpoint = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "Compacted conversation summary:\nretained state"
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just (ResponseInputItems [checkpoint])
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Nothing
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+
+        it "does not invent server compaction metadata for unknown Grok models" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "future")
+                    , completedEvent "resp-future" []
+                    ]
+                request = (helloRequest "hi")
+                    { model = Just "grok-future"
+                    , input = Just (ResponseInputText "hi")
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            requestModel sent `shouldBe` Just "grok-future"
+            lookup "x-compaction-at" sent.headers `shouldBe` Nothing
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Nothing
 
         it "streams callbacks before the response completes" do
             recorded <- newIORef []
@@ -278,6 +338,15 @@ spec = do
                     >> pure (Left quota :: Either ApiError Text))
             result `shouldBe` Left quota
             readIORef attempts `shouldReturn` 1
+
+    describe "Grok automatic compaction policy" do
+        it "uses the current 80% model override and 85% fallback" do
+            grokAutoCompactTokenLimit "grok-4.6" 500_000
+                `shouldBe` 400_000
+            grokAutoCompactTokenLimit "grok-4.5" 500_000
+                `shouldBe` 400_000
+            grokAutoCompactTokenLimit "grok-future" 500_000
+                `shouldBe` 425_000
 
 --------------------------------------------------------------------------------
 -- Mock server

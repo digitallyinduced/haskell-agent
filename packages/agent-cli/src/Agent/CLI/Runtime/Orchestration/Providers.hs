@@ -241,7 +241,12 @@ import qualified Agent.CLI.Session.Runner as SessionRunner
     ( runSession, SessionRunnerContinuation(..) )
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, unpack )
-import qualified Agent.XAI.Options as XAI ( clientOptionsFromEnv )
+import qualified Agent.XAI.Options as XAI
+    ( ClientOptions(..)
+    , clientOptionsFromEnv
+    , grokAutoCompactTokenLimit
+    , grokDefaultContextWindow
+    )
 import qualified Agent.XAI.Client as XAIClient
     ( createResponseWith )
 import qualified Agent.XAI.Request as XAIRequest ( mapModel )
@@ -684,7 +689,23 @@ runAgentProviders
                         let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
-                                    500_000
+                                    XAI.grokDefaultContextWindow
+                            xaiWireModel params =
+                                maybe xaiOptions.defaultModel
+                                    (XAIRequest.mapModel xaiOptions)
+                                    params.model
+                            xaiCompactThreshold = do
+                                currentParams <- readIORef paramsRef
+                                let contextWindow =
+                                        xaiContextWindow currentParams
+                                pure $
+                                    max 1 $
+                                        min contextWindow $
+                                            fromMaybe
+                                                (XAI.grokAutoCompactTokenLimit
+                                                    (xaiWireModel currentParams)
+                                                    contextWindow)
+                                                options.optCompactThreshold
                             protectXaiOverflow occupancy getParams backend =
                                 boundCompletedToolContinuations
                                     xaiContextWindow
@@ -705,18 +726,43 @@ runAgentProviders
                                                 (xaiBackend xaiOptions tokenProvider
                                                     (pure childParams)))
                             Nothing -> pure ()
-                        let backend =
-                                withPendingInputs pendingNotices $
-                                    withConnectionRecoveryOn
-                                        startup.startupNetworkRecovery $
-                                        protectXaiOverflow
-                                            contextTokensRef
-                                            (readIORef paramsRef)
-                                            (xaiBackend xaiOptions tokenProvider
-                                                (readIORef paramsRef))
-                            btwBackend privateParams =
+                        let btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
                                     (pure privateParams)
+                            compactHistory history _inputs = do
+                                currentParams <- readIORef paramsRef
+                                runBackendCompactHistoryWithContextWindow
+                                    (xaiContextWindow currentParams)
+                                    btwBackend
+                                    recordCompactionUsage
+                                    currentParams
+                                    history
+                                    Nothing
+                            -- Reconnection wraps only the continuation. Keeping
+                            -- automatic compaction outside it prevents a
+                            -- failed continuation from rerunning the summary.
+                            requestBackend =
+                                withConnectionRecoveryOn
+                                    startup.startupNetworkRecovery $
+                                    protectXaiOverflow
+                                        contextTokensRef
+                                        (readIORef paramsRef)
+                                        (xaiBackend xaiOptions tokenProvider
+                                            (readIORef paramsRef))
+                            compactingBackend =
+                                autoCompactBackendWith
+                                    xaiCompactThreshold
+                                    compactHistory
+                                    (\outcome inputs ->
+                                        readIORef automaticCompactionHookRef
+                                            >>= \hook ->
+                                                hook outcome inputs)
+                                    (readIORef paramsRef)
+                                    contextTokensRef
+                                    requestBackend
+                            backend =
+                                withPendingInputs pendingNotices
+                                    compactingBackend
                             compactRunner focus = do
                                 contextWindow <-
                                     currentModelContextWindow

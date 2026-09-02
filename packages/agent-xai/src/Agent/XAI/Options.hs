@@ -4,8 +4,13 @@ module Agent.XAI.Options
     , defaultClientOptions
     , clientOptionsFromEnv
     , defaultGrokClientVersion
+    , grokAutoCompactThresholdPercent
+    , grokAutoCompactTokenLimit
     , grokAuthenticateResponseValue
     , grokClientIdentifier
+    , grokDefaultContextWindow
+    , grokServerCompactionAtTokens
+    , grokServerCompactionsRemaining
     , grokTokenAuthValue
     , grokUserAgent
     ) where
@@ -30,6 +35,37 @@ grokClientIdentifier = "grok-shell"
 -- version-gates on @x-grok-client-version@.
 defaultGrokClientVersion :: Text
 defaultGrokClientVersion = "1.0.8"
+
+-- | Context window advertised by the current Grok 4.5/4.6 model catalog.
+grokDefaultContextWindow :: Int
+grokDefaultContextWindow = 500_000
+
+-- | Grok 4.5/4.6 override the Grok Build global 85% fallback with 80%.
+grokAutoCompactThresholdPercent :: Text -> Int
+grokAutoCompactThresholdPercent model
+    | model `elem` ["grok-4.5", "grok-4.6"] = 80
+    | otherwise = 85
+
+-- | Resolve the client-side automatic compaction threshold for a model.
+grokAutoCompactTokenLimit :: Text -> Int -> Int
+grokAutoCompactTokenLimit model contextWindow =
+    max 1 $
+        contextWindow * grokAutoCompactThresholdPercent model `div` 100
+
+-- | Server hint enabled by the current Grok model catalog. Unknown future
+-- models keep the global client-side fallback but do not receive metadata that
+-- their server configuration has not opted into.
+grokServerCompactionAtTokens :: Text -> Maybe Int
+grokServerCompactionAtTokens model
+    | model `elem` ["grok-4.5", "grok-4.6"] =
+        Just (grokAutoCompactTokenLimit model grokDefaultContextWindow)
+    | otherwise = Nothing
+
+-- | Current Grok metadata uses a fixed integer, rather than the dynamic
+-- boolean mode that changes from one to zero after a compaction.
+grokServerCompactionsRemaining :: Text -> Maybe Int
+grokServerCompactionsRemaining model =
+    1 <$ grokServerCompactionAtTokens model
 
 -- | Value Grok Build injects as @X-XAI-Token-Auth@ on cli-chat-proxy.
 grokTokenAuthValue :: Text

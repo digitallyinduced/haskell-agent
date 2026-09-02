@@ -26,7 +26,7 @@ import Agent.XAI.Error
     , isCapacityBody
     )
 import Agent.XAI.Options
-import Agent.XAI.Request (buildRequest)
+import Agent.XAI.Request (buildRequest, mapModel)
 import Agent.XAI.Stream (streamAssemblyConfig)
 import Control.Retry
     ( RetryPolicyM
@@ -34,6 +34,8 @@ import Control.Retry
     , limitRetries
     , retrying
     )
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.Text as TextValue
 import qualified Data.Text.Encoding as Text
 import Network.HTTP.Simple hiding (Response)
 
@@ -115,7 +117,7 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
     | otherwise =
         createResponseWithProviderPolicy
             policy
-            (xaiProviderConfig options credential)
+            (xaiProviderConfig options credential request)
             request
             onEvent
 
@@ -126,14 +128,16 @@ defaultTransientPolicy =
 xaiProviderConfig
     :: ClientOptions
     -> Credential
+    -> ResponseCreateParams
     -> ProviderClientConfig
-xaiProviderConfig options credential = ProviderClientConfig
+xaiProviderConfig options credential request = ProviderClientConfig
     { providerExceptionPrefix = "xAI request failed"
     , providerBaseUrl = options.baseUrl
     , providerRequestTimeoutSeconds = options.requestTimeoutSeconds
     , providerBuildRequest = buildRequest options
     , providerConfigureRequest =
-        setRequestHeader "Authorization"
+        configureCompactionHeaders options request
+            . setRequestHeader "Authorization"
             ["Bearer " <> Text.encodeUtf8 credential.accessToken]
             . setRequestHeader "X-XAI-Token-Auth"
                 [Text.encodeUtf8 grokTokenAuthValue]
@@ -150,6 +154,74 @@ xaiProviderConfig options credential = ProviderClientConfig
     , providerAssemblyConfig = streamAssemblyConfig
     , providerRetryableFailure = isCapacityRetryable
     }
+
+-- | Mirror the model metadata headers emitted by Grok Build. The fixed
+-- remaining count is sent on every request. The compaction point is omitted
+-- once the stateless transcript contains a checkpoint, matching Grok Build's
+-- @has_compaction_summary@ gate.
+configureCompactionHeaders
+    :: ClientOptions
+    -> ResponseCreateParams
+    -> Request
+    -> Request
+configureCompactionHeaders options request =
+    addCompactionAt . addCompactionsRemaining
+  where
+    wireModel =
+        maybe options.defaultModel (mapModel options) request.model
+
+    addCompactionsRemaining =
+        maybe id
+            (setRequestHeader "x-compactions-remaining" . pure . renderInt)
+            (grokServerCompactionsRemaining wireModel)
+
+    addCompactionAt
+        | requestHasCompactionCheckpoint request = id
+        | otherwise =
+            maybe id
+                (setRequestHeader "x-compaction-at" . pure . renderInt)
+                (grokServerCompactionAtTokens wireModel)
+
+    renderInt = BS8.pack . show
+
+requestHasCompactionCheckpoint :: ResponseCreateParams -> Bool
+requestHasCompactionCheckpoint request = case request.input of
+    Just (ResponseInputItems items) -> any isCompactionCheckpoint items
+    _ -> False
+
+isCompactionCheckpoint :: ResponseItem -> Bool
+isCompactionCheckpoint = \case
+    CompactionItemValue{} -> True
+    ContextCompactionItemValue{} -> True
+    KnownResponseItem ItemCompaction _ -> True
+    KnownResponseItem ItemContextCompaction _ -> True
+    MessageItem message
+        | message.role == RoleAssistant ->
+            maybe False
+                (TextValue.isPrefixOf localSummaryPrefix . TextValue.stripStart)
+                (responseMessageText message)
+    _ -> False
+
+responseMessageText :: ResponseMessage -> Maybe TextValue.Text
+responseMessageText message = case message.content of
+    MessageContentText value -> Just value
+    MessageContentParts parts ->
+        case
+            [ value
+            | part <- parts
+            , value <- case part of
+                InputTextPart { text = value } -> [value]
+                OutputTextPart { text = value } -> [value]
+                _ -> []
+            ]
+        of
+            [] -> Nothing
+            values -> Just (TextValue.intercalate "\n" values)
+
+-- Kept in sync with the portable checkpoint emitted by
+-- Agent.OpenAI.Compaction.assistantSummaryItem.
+localSummaryPrefix :: TextValue.Text
+localSummaryPrefix = "Compacted conversation summary:"
 
 -- | Retry capacity / overload pressure and short-lived 5xx failures. Generic
 -- connection drops and quota errors are left to the caller. Production uses a
