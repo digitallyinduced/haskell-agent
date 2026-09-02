@@ -13,9 +13,15 @@ import Agent.Tools.Types
     , ToolSchema(..)
     , defaultToolEnv
     )
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (cancel, waitCatch, withAsync)
+import Control.Concurrent
+    ( newEmptyMVar
+    , takeMVar
+    , threadDelay
+    , tryPutMVar
+    )
+import Control.Concurrent.Async (cancel, wait, waitCatch, withAsync)
 import Control.Exception.Safe (bracket)
+import Control.Monad (void)
 import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Text as Text
@@ -199,6 +205,40 @@ spec = describe "grepTool" do
                     result.output `shouldSatisfy` Text.isInfixOf "partial.txt"
                     result.output `shouldSatisfy`
                         Text.isInfixOf "fatal diagnostic"
+
+    it "publishes matching output while rg is still running" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                release = dir </> "release"
+            createDirectory workspace
+            withFakeRg dir
+                ("#!/bin/sh\n\
+                \printf 'first.txt\\n1:needle\\n'\n\
+                \while [ ! -f " <> shellQuote release <> " ]; do\n\
+                \  sleep 0.01\n\
+                \done\n\
+                \printf 'second.txt\\n1:needle\\n'\n")
+                do
+                    env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                    progress <- newEmptyMVar
+                    let config = testConfig
+                            { toolDispatchOnOutput = \_ output ->
+                                void (tryPutMVar progress output)
+                            }
+                        action = dispatchToolCall config
+                            [(grepTool env).appToolHandler]
+                            (functionToolCall "grep-streaming" "grep"
+                                "{\"pattern\":\"needle\"}")
+                    withAsync action \worker -> do
+                        first <- timeout 3000000 (takeMVar progress)
+                        first `shouldSatisfy` maybe False
+                            (Text.isInfixOf "first.txt")
+                        first `shouldSatisfy` maybe False
+                            (not . Text.isInfixOf "second.txt")
+                        writeFile release ""
+                        result <- wait worker
+                        result.output `shouldSatisfy`
+                            Text.isInfixOf "second.txt"
 
     it "terminates and joins rg when the grep call is cancelled" do
         withTempDir \dir -> do
