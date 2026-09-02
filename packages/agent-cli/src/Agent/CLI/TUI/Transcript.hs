@@ -46,6 +46,7 @@ coalesceInspectionBlocks =
                 inspectionRunBody representative.blockExpanded run
             , blockDetail = ""
             , blockState = inspectionRunState run
+            , blockInspectionGroupable = False
             }
 
 coalescibleInspection :: UiBlock -> Bool

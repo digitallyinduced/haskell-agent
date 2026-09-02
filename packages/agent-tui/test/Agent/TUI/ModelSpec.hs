@@ -1468,6 +1468,7 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldSatisfy` Text.isInfixOf "Read src/A.hs"
                 block.blockBody `shouldSatisfy` Text.isInfixOf "module B where"
                 block.blockState `shouldBe` BlockComplete
+                block.blockInspectionGroupable `shouldBe` False
             _ -> expectationFailure "expected one grouped inspection block"
 
     it "retracts completed inspection-group calls independently" do

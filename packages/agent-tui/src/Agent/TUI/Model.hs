@@ -677,6 +677,8 @@ renderInspectionGroup group block =
         , blockState = inspectionGroupState items
         , blockDetail = inspectionGroupDetail items
         , blockCallId = (.inspectionCallId) <$> listToMaybe items
+        , blockInspectionGroupable =
+            block.blockInspectionGroupable && length items == 1
         }
   where
     items = group.inspectionGroupItems

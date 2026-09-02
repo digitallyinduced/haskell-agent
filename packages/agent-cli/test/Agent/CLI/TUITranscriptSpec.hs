@@ -106,6 +106,36 @@ spec = describe "fullscreen transcript caching" do
                     Text.isInfixOf "    src/B.hs:2"
             _ -> expectationFailure "expected one inspection summary"
 
+    it "does not recoalesce an inspection summary with later calls" do
+        let first =
+                (groupableInspection 1)
+                    { blockTitle = "Read"
+                    , blockDetail = "src/A.hs"
+                    }
+            second =
+                (groupableInspection 2)
+                    { blockTitle = "Listed"
+                    , blockDetail = "src"
+                    }
+            search =
+                (groupableInspection 3)
+                    { blockTitle = "Searched"
+                    , blockDetail = "needle"
+                    }
+            initial =
+                coalesceInspectionBlocks (Seq.fromList [first, second])
+            continued =
+                toList
+                    (coalesceInspectionBlocks (initial Seq.|> search))
+        case continued of
+            [summary, later] -> do
+                summary.blockTitle `shouldBe` "Read 1 file, Listed 1 dir"
+                summary.blockBody
+                    `shouldBe` "  ◇ Read src/A.hs\n  ◇ Listed src"
+                summary.blockInspectionGroupable `shouldBe` False
+                later.blockTitle `shouldBe` "Searched"
+            _ -> expectationFailure "expected a summary and a later call"
+
     it "does not merge running, failed, or non-adjacent inspection blocks" do
         let inspect ident state =
                 (groupableInspection ident)
