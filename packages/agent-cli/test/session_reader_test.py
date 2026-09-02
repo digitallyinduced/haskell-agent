@@ -550,6 +550,37 @@ class SessionReaderTest(unittest.TestCase):
         call = result["turns"][-1]["tool_calls"][0]
         self.assertLessEqual(len(call["arguments"]), 40)
 
+    def test_claude_metadata_skips_json_recursion_errors(self):
+        home = self.root / "claude-recursion"
+        slug = reader.claude_project_slug(str(self.cwd))
+        transcript = home / "projects" / slug / "claude-session.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("deep\nmetadata\n", encoding="utf-8")
+        recovered = {
+            "type": "user",
+            "uuid": "u1",
+            "parentUuid": None,
+            "sessionId": "claude-session",
+            "cwd": str(self.cwd),
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "Recovered Claude work"},
+        }
+        with (
+            patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}),
+            patch.object(
+                reader.json,
+                "loads",
+                side_effect=[
+                    RecursionError("too deeply nested"),
+                    recovered,
+                ],
+            ),
+        ):
+            items = reader.discover("claude", str(self.cwd), 0)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["session_id"], "claude-session")
+        self.assertEqual(items[0]["title"], "Recovered Claude work")
+
     def test_harness_wrapper_uses_prior_request_when_current_request_is_empty(self):
         wrapped = (
             "Instructions supplied by the outer agent harness:\n"
@@ -795,6 +826,41 @@ class SessionReaderTest(unittest.TestCase):
             item = reader.cursor_transcript_candidate(transcript, str(self.cwd))
         self.assertIsNotNone(item)
         self.assertEqual(item["title"], "Recovered Cursor work")
+
+    def test_cursor_selected_transcript_streams_and_bounds_turns(self):
+        transcript = self.root / "cursor-session.jsonl"
+        write_jsonl(
+            transcript,
+            [{"role": "user", "text": "Original Cursor request"}]
+            + [
+                {"role": "assistant", "text": f"Cursor answer {index}"}
+                for index in range(reader.MAX_TURNS + 50)
+            ],
+        )
+        item = reader.candidate(
+            "cursor",
+            "cursor-transcript",
+            "cursor-session",
+            transcript,
+            "Original Cursor request",
+            str(self.cwd),
+        )
+        with patch.object(
+            reader,
+            "read_jsonl",
+            side_effect=AssertionError("selected Cursor transcript was buffered"),
+        ):
+            result = reader.read_cursor(item, 100)
+        self.assertEqual(len(result["turns"]), reader.MAX_TURNS)
+        self.assertEqual(result["last_user_request"], "Original Cursor request")
+        self.assertEqual(
+            result["last_assistant_action"],
+            f"Cursor answer {reader.MAX_TURNS + 49}",
+        )
+        self.assertIn(
+            "turns_truncated",
+            {entry["code"] for entry in result["warnings"]},
+        )
 
     def test_finalise_preserves_last_request_when_old_turns_are_truncated(self):
         turns = [reader.inert_turn("user", "Original goal")]

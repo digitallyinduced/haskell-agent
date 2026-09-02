@@ -20,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -704,7 +705,7 @@ def codex_turn(
     return None, True
 
 
-class BoundedCodexTurns:
+class BoundedTurns:
     def __init__(self):
         self.turns: list[dict[str, Any]] = []
         self.prefix_last_text: dict[str, str] = {}
@@ -878,7 +879,7 @@ def process_codex_stream(
 
 
 def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
-    bounded = BoundedCodexTurns()
+    bounded = BoundedTurns()
     malformed, skipped, requires_journal = process_codex_stream(
         item["path"], max_tool_chars, bounded
     )
@@ -997,7 +998,7 @@ def claude_metadata(path: Path) -> dict[str, Any] | None:
         for line in handle:
             try:
                 record = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, RecursionError, ValueError):
                 continue
             if not isinstance(record, dict):
                 continue
@@ -1493,8 +1494,11 @@ def discover_cursor(cwd: str) -> list[dict[str, Any]]:
     return found
 
 
-def generic_cursor_turns(value: Any, max_tool_chars: int) -> list[dict[str, Any]]:
-    turns: list[dict[str, Any]] = []
+def consume_cursor_turns(
+    value: Any,
+    max_tool_chars: int,
+    consume: Callable[[dict[str, Any]], None],
+) -> None:
     pending = [value]
     while pending:
         current = pending.pop()
@@ -1590,7 +1594,7 @@ def generic_cursor_turns(value: Any, max_tool_chars: int) -> list[dict[str, Any]
                     )
             turn = inert_turn(role, rendered, calls, results)
             if turn:
-                turns.append(turn)
+                consume(turn)
                 continue
         elif role in {"tool", "tool_result", "tool_output"}:
             result = {
@@ -1607,7 +1611,7 @@ def generic_cursor_turns(value: Any, max_tool_chars: int) -> list[dict[str, Any]
             }
             turn = inert_turn("assistant", tool_results=[result])
             if turn:
-                turns.append(turn)
+                consume(turn)
                 continue
         children = [
             child
@@ -1616,13 +1620,24 @@ def generic_cursor_turns(value: Any, max_tool_chars: int) -> list[dict[str, Any]
             and isinstance(child, (dict, list))
         ]
         pending.extend(reversed(children))
+
+
+def generic_cursor_turns(
+    value: Any, max_tool_chars: int
+) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    consume_cursor_turns(value, max_tool_chars, turns.append)
     return turns
 
 
 def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     path = Path(item["path"])
-    turns: list[dict[str, Any]] = []
+    bounded = BoundedTurns()
     warnings: list[dict[str, str]] = []
+
+    def consume_value(value: Any) -> None:
+        consume_cursor_turns(value, max_tool_chars, bounded.append)
+
     if path.is_file() and not path.is_symlink() and path.suffix == ".jsonl":
         transcript = path
     else:
@@ -1640,8 +1655,7 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
             None,
         )
     if transcript:
-        records, malformed = read_jsonl(transcript)
-        turns = generic_cursor_turns(records, max_tool_chars)
+        malformed = consume_jsonl(transcript, consume_value)
         if malformed:
             warnings.append(
                 warning("malformed_records", f"Skipped {malformed} malformed record(s).")
@@ -1654,27 +1668,26 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
             and path_is_within(store, path)
         ):
             try:
-                db = open_sqlite_readonly(store)
-                columns = table_columns(db, "blobs")
-                key = next(
-                    (name for name in ("id", "key", "hash") if name in columns),
-                    None,
-                )
-                data = next(
-                    (name for name in ("data", "value", "blob") if name in columns),
-                    None,
-                )
                 unavailable = 0
-                if key and data:
-                    for _, raw in db.execute(
-                        f'SELECT "{key}", "{data}" FROM blobs ORDER BY "{key}"'
-                    ):
-                        value = decode_jsonish(raw)
-                        if value is None:
-                            unavailable += 1
-                        else:
-                            turns.extend(generic_cursor_turns(value, max_tool_chars))
-                db.close()
+                with closing(open_sqlite_readonly(store)) as db:
+                    columns = table_columns(db, "blobs")
+                    key = next(
+                        (name for name in ("id", "key", "hash") if name in columns),
+                        None,
+                    )
+                    data = next(
+                        (name for name in ("data", "value", "blob") if name in columns),
+                        None,
+                    )
+                    if key and data:
+                        for _, raw in db.execute(
+                            f'SELECT "{key}", "{data}" FROM blobs ORDER BY "{key}"'
+                        ):
+                            value = decode_jsonish(raw)
+                            if value is None:
+                                unavailable += 1
+                            else:
+                                consume_value(value)
                 if unavailable:
                     warnings.append(
                         warning(
@@ -1687,22 +1700,22 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                 warnings.append(warning("cursor_store_error", one_line(exc, 200)))
     else:
         try:
-            db = open_sqlite_readonly(path)
-            rows = db.execute(
+            query = (
                 "SELECT value FROM cursorDiskKV "
-                "WHERE key = ? OR key LIKE ? ORDER BY key",
-                (
-                    "composerData:" + item["session_id"],
-                    "bubbleId:" + item["session_id"] + ":%",
-                ),
-            ).fetchall()
-            db.close()
-            for row in rows:
-                value = decode_jsonish(row[0])
-                if value is not None:
-                    turns.extend(generic_cursor_turns(value, max_tool_chars))
+                "WHERE key = ? OR key LIKE ? ORDER BY key"
+            )
+            parameters = (
+                "composerData:" + item["session_id"],
+                "bubbleId:" + item["session_id"] + ":%",
+            )
+            with closing(open_sqlite_readonly(path)) as db:
+                for row in db.execute(query, parameters):
+                    value = decode_jsonish(row[0])
+                    if value is not None:
+                        consume_value(value)
         except (ReaderError, sqlite3.Error) as exc:
             warnings.append(warning("cursor_store_error", one_line(exc, 200)))
+    turns = bounded.recent()
     if not turns:
         warnings.append(
             warning(
@@ -1711,7 +1724,10 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                 "binary/protobuf content was not inferred.",
             )
         )
-    return finalise({**public_candidate(item), "turns": turns}, warnings)
+    result = finalise({**public_candidate(item), "turns": turns}, warnings)
+    result["last_user_request"] = bounded.last_text("user")
+    result["last_assistant_action"] = bounded.last_text("assistant")
+    return result
 
 
 DISCOVERERS = {
