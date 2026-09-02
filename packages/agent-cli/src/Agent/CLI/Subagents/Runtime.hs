@@ -13,7 +13,10 @@ module Agent.CLI.Subagents.Runtime
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
-    ( autoCompactOpenAiBackendWithSender )
+    ( CompactionInstall(..)
+    , autoCompactOpenAiBackendWithSenderHookAndDecorator
+    , decorateCompactOutcomeWithTaskPlan
+    )
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
 import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
@@ -688,11 +691,14 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                         tokenProvider
                                         request
                         compactingBackend =
-                            autoCompactOpenAiBackendWithSender
+                            autoCompactOpenAiBackendWithSenderHookAndDecorator
                                 runtime.subagentOptions.optCompactThreshold
                                 compactSender
                                 (const (pure ()))
                                 (pure childParams)
+                                (decorateCompactOutcomeWithTaskPlan
+                                    coding.codingTaskPlan)
+                                (\_ _ -> pure CompactionNotInstalled)
                                 prepared.preparedSession.subSessionContextTokens
                                 baseBackend
                         backend =

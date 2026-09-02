@@ -19,9 +19,11 @@ module Agent.Tools.TaskPlan
     , readTaskPlan
     , replaceTaskPlan
     , clearTaskPlan
+    , resetTaskPlanState
     , taskPlanContextText
     , currentTaskPlanContextText
     , takeTaskPlanReminder
+    , restoreTaskPlanReminder
     , isTaskPlanContextText
     , taskPlanContextMarker
     ) where
@@ -29,6 +31,7 @@ module Agent.Tools.TaskPlan
 import qualified Agent.Json.Decode as Json
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception.Safe (mask)
+import Control.Monad (when)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Text (Text)
@@ -182,6 +185,20 @@ clearTaskPlan env =
                 writeIORef env.taskPlanReminderPendingRef False
                 pure (lock, Right ())
 
+-- | Replace only the in-memory projection after the host switches the
+-- persistence hooks to a different session. The supplied value must already
+-- reflect that session's authoritative database state.
+resetTaskPlanState
+    :: TaskPlanEnv
+    -> Maybe CurrentTaskPlan
+    -> IO ()
+resetTaskPlanState env current =
+    modifyMVar env.taskPlanMutationLock \lock -> do
+        writeIORef env.taskPlanStateRef current
+        writeIORef env.taskPlanReminderPendingRef
+            (maybe False (const True) current)
+        pure (lock, ())
+
 taskPlanContextMarker :: Text
 taskPlanContextMarker = "<task-plan-state"
 
@@ -217,6 +234,14 @@ takeTaskPlanReminder :: TaskPlanEnv -> IO (Maybe Text)
 takeTaskPlanReminder env = do
     pending <- atomicModifyIORef' env.taskPlanReminderPendingRef (\value -> (False, value))
     if pending then currentTaskPlanContextText env else pure Nothing
+
+-- | Requeue a consumed resume reminder when prompt preparation fails before
+-- the corresponding input can become part of canonical history.
+restoreTaskPlanReminder :: TaskPlanEnv -> IO ()
+restoreTaskPlanReminder env = do
+    current <- readTaskPlan env
+    when (maybe False (const True) current) $
+        writeIORef env.taskPlanReminderPendingRef True
 
 isTaskPlanContextText :: Text -> Bool
 isTaskPlanContextText =

@@ -56,13 +56,15 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "turnInputsWithContext" do
-        it "orders plan, startup, and submitted inputs" do
+        it "orders plan-mode, task-plan, startup, and submitted inputs" do
             turnInputsWithContext
                 (Just "plan reminder")
+                (Just "task plan")
                 (Just "startup instructions")
                 [UserMessage "fix it"]
                 `shouldBe`
                     [ UserMessage "plan reminder"
+                    , UserMessage "task plan"
                     , UserMessage "startup instructions"
                     , UserMessage "fix it"
                     ]

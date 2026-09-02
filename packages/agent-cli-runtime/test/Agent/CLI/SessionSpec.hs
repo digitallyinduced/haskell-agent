@@ -988,6 +988,23 @@ spec = describe "Agent.CLI.Session" do
                 hooks.taskPlanPersistClear `shouldReturn` Right ()
                 loadCurrentTaskPlan persistence `shouldReturn` Right Nothing
 
+        it "does not materialize a pending session when clearing its task plan" $
+            withTempStore \store root -> do
+                PersistenceEnabled slot <-
+                    newPendingPersistence (testCreate (trustedPool store) root)
+                hooks <- case taskPlanHooksForPersistence
+                    (PersistenceEnabled slot) of
+                    Nothing ->
+                        expectationFailure "missing task-plan hooks"
+                            >> fail "hooks"
+                    Just value -> pure value
+                hooks.taskPlanPersistClear `shouldReturn` Right ()
+                readIORef slot >>= \case
+                    PersistencePending{} -> pure ()
+                    PersistenceActive{} ->
+                        expectationFailure
+                            "clearing an absent plan materialized the session"
+
         it "rejects inconsistent gateway identities at every creation boundary" $
             withTempStore \store root -> do
                 let pool = trustedPool store

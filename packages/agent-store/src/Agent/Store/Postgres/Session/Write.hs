@@ -15,6 +15,7 @@ module Agent.Store.Postgres.Session.Write
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedWithPromptReset
+    , appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
     , appendSessionTurns
     , appendSessionTurnsClearingTaskPlan
     , setSessionArchived
@@ -256,7 +257,7 @@ appendSessionTurnIndexed
     -> SessionMetadata
     -> IO (Either StoreError (Maybe Int64))
 appendSessionTurnIndexed =
-    appendSessionTurnIndexedInternal False
+    appendSessionTurnIndexedInternal False False
 
 -- | Append a turn and retire the current provider-visible prompt prefix in
 -- the same transaction. The next request must establish a new prompt epoch.
@@ -266,15 +267,26 @@ appendSessionTurnIndexedWithPromptReset
     -> SessionMetadata
     -> IO (Either StoreError (Maybe Int64))
 appendSessionTurnIndexedWithPromptReset =
-    appendSessionTurnIndexedInternal True
+    appendSessionTurnIndexedInternal True False
+
+-- | Append a transcript reset while atomically retiring both the current
+-- provider-visible prompt prefix and current task plan.
+appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
+    :: StorePool
+    -> SessionTurn
+    -> SessionMetadata
+    -> IO (Either StoreError (Maybe Int64))
+appendSessionTurnIndexedWithPromptResetAndTaskPlanClear =
+    appendSessionTurnIndexedInternal True True
 
 appendSessionTurnIndexedInternal
     :: Bool
+    -> Bool
     -> StorePool
     -> SessionTurn
     -> SessionMetadata
     -> IO (Either StoreError (Maybe Int64))
-appendSessionTurnIndexedInternal resetPrompt pool turn metadata =
+appendSessionTurnIndexedInternal resetPrompt clearTaskPlan pool turn metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
             _ <- Transaction.statement
@@ -311,6 +323,11 @@ appendSessionTurnIndexedInternal resetPrompt pool turn metadata =
                             , turn.sessionTurnOccurredAt
                             )
                             invalidatePromptEpochStatement
+                        pure ()
+                    when clearTaskPlan do
+                        _ <- Transaction.statement
+                            metadata.sessionMetadataKey
+                            clearTaskPlanStatement
                         pure ()
                     pure (Just turnIndex)
 

@@ -9,7 +9,7 @@ import Agent.CLI.Compaction
     , CompactionInstall
     , OccupancySnapshot
     , OpenAiCompactionSender
-    , autoCompactOpenAiBackendWithSenderAndHook
+    , autoCompactOpenAiBackendWithSenderHookAndDecorator
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.Connectivity.NetworkPath (NetworkRecovery)
@@ -72,12 +72,13 @@ lockedOpenAiSession
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
     -> (TokenUsage -> IO ())
+    -> (CompactOutcome -> IO CompactOutcome)
     -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> (OpenAiCompactionSender, Backend)
 lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
         showRawReasoning wsLock fallbackActive provider activeConnection
         getParams contextTokens
-        recordCompactionUsage onCompacted =
+        recordCompactionUsage decorateCompaction onCompacted =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
                 credential
@@ -163,11 +164,12 @@ lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
                                 sendHttpCompaction request
                         _ -> pure result
         compactingBackend =
-            autoCompactOpenAiBackendWithSenderAndHook
+            autoCompactOpenAiBackendWithSenderHookAndDecorator
                 compactThreshold
                 compactSender
                 recordCompactionUsage
                 getParams
+                decorateCompaction
                 onCompacted
                 contextTokens
                 baseBackend

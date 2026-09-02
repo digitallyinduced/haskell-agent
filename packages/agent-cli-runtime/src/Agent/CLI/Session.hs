@@ -36,6 +36,7 @@ module Agent.CLI.Session
     , appendTurnWithMetaUpdate
     , appendTurnWithMetaUpdateIndexed
     , appendTurnWithPromptResetIndexed
+    , appendTurnWithPromptResetAndTaskPlanClearIndexed
     , appendTurnKeepTitle
     , appendTurnKeepTitleIndexed
     , sessionRewindChoices
@@ -1071,12 +1072,14 @@ taskPlanHooksForPersistence (PersistenceEnabled slotRef) =
                         Right (Just revision) -> pure (Right revision)
         , taskPlanPersistClear =
             mapStoreException "could not clear session task plan" do
-                handle <- ensureSession slotRef
-                Store.clearSessionTaskPlan
-                    handle.sessionPool
-                    handle.sessionMeta.metaId >>= \case
-                        Left err -> pure (Left err)
-                        Right _ -> pure (Right ())
+                readIORef slotRef >>= \case
+                    PersistencePending{} -> pure (Right ())
+                    PersistenceActive handle ->
+                        Store.clearSessionTaskPlan
+                            handle.sessionPool
+                            handle.sessionMeta.metaId >>= \case
+                                Left err -> pure (Left err)
+                                Right _ -> pure (Right ())
         }
 
 mapStoreException
@@ -1265,6 +1268,23 @@ appendTurnWithPromptResetIndexed
 appendTurnWithPromptResetIndexed handle turn transition =
     appendTurnWithMetaTransitionIndexedUsing
         Store.appendSessionTurnIndexedWithPromptReset
+        handle
+        turn
+        (\meta ->
+            (transition meta)
+                { metaPromptSnapshot = Nothing
+                })
+
+-- | Append a reset turn while atomically retiring the prompt epoch and
+-- clearing the session's current task plan.
+appendTurnWithPromptResetAndTaskPlanClearIndexed
+    :: SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> IO (SessionHandle, Int64)
+appendTurnWithPromptResetAndTaskPlanClearIndexed handle turn transition =
+    appendTurnWithMetaTransitionIndexedUsing
+        Store.appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
         handle
         turn
         (\meta ->

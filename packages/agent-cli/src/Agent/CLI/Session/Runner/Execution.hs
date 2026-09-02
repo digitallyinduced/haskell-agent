@@ -920,6 +920,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionTitleManager = titleManager
             , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
+            , sessionTaskPlan = taskPlan
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
             , sessionHome = home

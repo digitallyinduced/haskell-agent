@@ -80,6 +80,7 @@ spec = describe "PostgreSQL session schema" do
             "CREATE TABLE IF NOT EXISTS harness.session_task_plan_items"
         ddl `shouldContainBytes`
             "status IN ('pending', 'in_progress', 'completed')"
+        ddl `shouldContainBytes` "session_task_plan_one_active_idx"
 
     it "tracks restart-safe legacy imports" do
         let ddl = ByteString.intercalate "\n" sessionSchemaStatements
@@ -252,6 +253,31 @@ spec = describe "PostgreSQL session schema" do
                                             , sessionTaskPlanItems =
                                                 replacementItems
                                             })
+                            replaceSessionTaskPlan
+                                pool
+                                "session-1"
+                                Nothing
+                                [ SessionTaskPlanItem
+                                    "one"
+                                    SessionTaskPlanInProgress
+                                , SessionTaskPlanItem
+                                    "two"
+                                    SessionTaskPlanInProgress
+                                ] >>= \case
+                                    Left _ -> pure ()
+                                    Right value ->
+                                        expectationFailure
+                                            ("accepted invalid task plan: "
+                                                <> show value)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 2
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
                             appendSessionTurn pool turn metadata
                                 `shouldReturn` Right True
                             loadSession pool "session-1" >>= \case
@@ -290,6 +316,24 @@ spec = describe "PostgreSQL session schema" do
                                             , sessionTaskPlanItems =
                                                 replacementItems
                                             })
+                            let clearMetadata = metadata
+                                    { sessionMetadataKey = "session-clear"
+                                    , sessionMetadataTitle = "clear"
+                                    }
+                                clearTurn = turn
+                                    { sessionTurnEffect = TranscriptReset
+                                    , sessionTurnUserText = "/clear"
+                                    }
+                            createSession pool clearMetadata
+                                `shouldReturn` Right True
+                            copySessionTaskPlan
+                                pool "session-1" "session-clear"
+                                `shouldReturn` Right True
+                            appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
+                                pool clearTurn clearMetadata
+                                `shouldReturn` Right (Just 0)
+                            loadSessionTaskPlan pool "session-clear"
+                                `shouldReturn` Right Nothing
                             clearSessionTaskPlan pool "session-1"
                                 `shouldReturn` Right True
                             loadSessionTaskPlan pool "session-1"

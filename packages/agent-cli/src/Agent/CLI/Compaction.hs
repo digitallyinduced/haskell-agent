@@ -9,6 +9,7 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithThreshold
     , autoCompactOpenAiBackendWithSender
     , autoCompactOpenAiBackendWithSenderAndHook
+    , autoCompactOpenAiBackendWithSenderHookAndDecorator
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactBackendWith
@@ -16,6 +17,8 @@ module Agent.CLI.Compaction
     , compactOpenAIWith
     , installCompactOutcome
     , installLiveCompactOutcome
+    , decorateCompactOutcomeWithTaskPlan
+    , decorateCompactOutcomeWithTaskPlanWithin
     , runProviderCompact
     , runProviderCompactWith
     , runProviderCompactWithContextWindow
@@ -61,6 +64,7 @@ import Agent.OpenAI.Compaction
     ( buildLocalCompactedHistoryToFit
     , buildRemoteCompactedHistory
     , buildRemoteCompactionRequest
+    , compactTranscriptAtLastCheckpoint
     , extractRemoteCompactionItem
     , estimateItemsTokens
     , estimateRequestTokensWithItems
@@ -83,6 +87,13 @@ import Agent.Responses.LoopBackend
     , withRequestInput
     )
 import Agent.Responses.Types
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan
+    , TaskPlanEnv
+    , isTaskPlanContextText
+    , readTaskPlan
+    , taskPlanContextText
+    )
 import Agent.Provider
     ( Provider(..)
     , TokenProvider
@@ -532,6 +543,81 @@ installCompactionOutcome installState contextTokens runCompact focus =
                                 (length outcome.compactHistory)
         pure result
 
+-- | Add the authoritative database-backed task plan to a compacted context.
+-- Existing generated copies are removed first; the task-plan environment,
+-- rather than provider history, is the source of truth.
+decorateCompactOutcomeWithTaskPlan
+    :: Maybe TaskPlanEnv
+    -> CompactOutcome
+    -> IO CompactOutcome
+decorateCompactOutcomeWithTaskPlan taskPlanEnv outcome = do
+    current <- maybe (pure Nothing) readTaskPlan taskPlanEnv
+    let history =
+            filter (not . isTaskPlanContextItem) outcome.compactHistory
+                <> maybe [] (pure . taskPlanContextItem) current
+    pure outcome
+        { compactHistory = history
+        , compactAfterTokens = estimateItemsTokens history
+        }
+
+-- | Decorate a compacted snapshot, rejecting it rather than installing state
+-- that cannot fit in the next provider request.
+decorateCompactOutcomeWithTaskPlanWithin
+    :: Int
+    -> ResponseCreateParams
+    -> Maybe TaskPlanEnv
+    -> CompactOutcome
+    -> IO (Either Text CompactOutcome)
+decorateCompactOutcomeWithTaskPlanWithin
+        contextWindow params taskPlanEnv outcome = do
+    decorated <- decorateCompactOutcomeWithTaskPlan taskPlanEnv outcome
+    let requestTokens =
+            estimateRequestTokensWithItems params decorated.compactHistory
+    pure $
+        if requestTokens <= contextWindow
+            then Right decorated
+            else
+                Left
+                    ( "the authoritative task plan does not fit in the "
+                        <> "compacted model context ("
+                        <> Text.pack (show requestTokens)
+                        <> " tokens for a "
+                        <> Text.pack (show contextWindow)
+                        <> "-token context window)"
+                    )
+
+taskPlanContextItem :: CurrentTaskPlan -> ResponseItem
+taskPlanContextItem current =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content =
+            MessageContentParts
+                [InputTextPart (taskPlanContextText current) Nothing]
+        , role = RoleDeveloper
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        }
+
+isTaskPlanContextItem :: ResponseItem -> Bool
+isTaskPlanContextItem = \case
+    MessageItem message ->
+        any isTaskPlanContextText (taskPlanMessageTexts message.content)
+    _ -> False
+
+taskPlanMessageTexts :: MessageContent -> [Text]
+taskPlanMessageTexts = \case
+    MessageContentText text -> [text]
+    MessageContentParts parts ->
+        [ text
+        | part <- parts
+        , text <- case part of
+            InputTextPart{text} -> [text]
+            OutputTextPart{text} -> [text]
+            PlainTextPart{text} -> [text]
+            _ -> []
+        ]
+
 sendOpenAIRemoteCompaction
     :: TokenProvider
     -> ResponseCreateParams
@@ -880,6 +966,31 @@ autoCompactOpenAiBackendWithSenderAndHook
     -> Backend
 autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
         getParams onCompacted contextTokensRef backend =
+    autoCompactOpenAiBackendWithSenderHookAndDecorator
+        configuredThreshold
+        send
+        recordUsage
+        getParams
+        pure
+        onCompacted
+        contextTokensRef
+        backend
+
+-- | Variant whose decorator installs harness-owned state in the compacted
+-- history before size validation, durable publication, and continuation.
+autoCompactOpenAiBackendWithSenderHookAndDecorator
+    :: Maybe Int
+    -> OpenAiCompactionSender
+    -> (TokenUsage -> IO ())
+    -> IO ResponseCreateParams
+    -> (CompactOutcome -> IO CompactOutcome)
+    -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
+    -> IORef (Maybe OccupancySnapshot)
+    -> Backend
+    -> Backend
+autoCompactOpenAiBackendWithSenderHookAndDecorator
+        configuredThreshold send recordUsage getParams decorateOutcome
+        onCompacted contextTokensRef backend =
     rejectOversizedInitialRequest getParams $
         boundCompletedToolContinuations
             (codexEffectiveContextWindowFor . (.model))
@@ -913,8 +1024,6 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
             pendingItems = turnInputsToItems inputs
             contextWindow =
                 codexEffectiveContextWindowFor params.model
-            checkpointBaseTokens checkpoint =
-                estimateRequestTokensWithItems params [checkpoint]
             continuationBaseTokens checkpoint =
                 estimateRequestTokensWithItems
                     params
@@ -940,13 +1049,20 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
                 pure $ CompactAttempt emptyTokenUsage $
                     Left (thresholdError fixedRequestTokens)
             else do
-                attempt <-
+                rawAttempt <-
                     compactRemoteV2AttemptWithRetainedBudget
                         send
                         params
                         history
                         (estimateItemsTokens history)
                         retainedBudget
+                attempt <-
+                    case rawAttempt.compactAttemptResult of
+                        Left _ -> pure rawAttempt
+                        Right outcome -> do
+                            decorated <- decorateOutcome outcome
+                            pure rawAttempt
+                                { compactAttemptResult = Right decorated }
                 pure $
                     case attempt.compactAttemptResult of
                         Right outcome ->
@@ -954,17 +1070,24 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
                                     estimateRequestTokensWithItems
                                         params
                                         (outcome.compactHistory <> pendingItems)
+                                compactedBase =
+                                    compactTranscriptAtLastCheckpoint
+                                        outcome.compactHistory
                                 (baseTokens, baseWithPendingTokens) =
-                                    case reverse outcome.compactHistory of
-                                        checkpoint : _ ->
-                                            ( checkpointBaseTokens checkpoint
-                                            , continuationBaseTokens checkpoint
-                                            )
+                                    case compactedBase of
                                         [] ->
                                             ( fixedRequestTokens
                                             , estimateRequestTokensWithItems
                                                 params
                                                 pendingItems
+                                            )
+                                        fixedItems ->
+                                            ( estimateRequestTokensWithItems
+                                                params
+                                                fixedItems
+                                            , estimateRequestTokensWithItems
+                                                params
+                                                (fixedItems <> pendingItems)
                                             )
                             in if continuationTokens > contextWindow
                                 then

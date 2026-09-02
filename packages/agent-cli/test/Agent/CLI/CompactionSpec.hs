@@ -8,9 +8,12 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithApi
     , autoCompactOpenAiBackendWithSender
     , autoCompactOpenAiBackendWithSenderAndHook
+    , autoCompactOpenAiBackendWithSenderHookAndDecorator
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
     , compactOpenAIWith
+    , decorateCompactOutcomeWithTaskPlan
+    , decorateCompactOutcomeWithTaskPlanWithin
     , estimatedOccupancy
     , installCompactOutcome
     , reportedOccupancy
@@ -40,6 +43,16 @@ import Agent.ToolDispatch
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan(..)
+    , TaskPlan(..)
+    , TaskPlanItem(..)
+    , TaskPlanStatus(..)
+    , isTaskPlanContextText
+    , newTaskPlanEnv
+    , replaceTaskPlan
+    , taskPlanContextText
+    )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider
@@ -1198,7 +1211,132 @@ spec = do
                 Right _ ->
                     expectationFailure "expected compaction to fail"
 
+    describe "task-plan compaction context" do
+        it "replaces stale generated copies from authoritative state" do
+            let stale =
+                    taskPlanContextText $
+                        CurrentTaskPlan 8 $
+                            TaskPlan Nothing
+                                [TaskPlanItem "stale" TaskPlanPending]
+                plan = TaskPlan
+                    (Just "continue here")
+                    [TaskPlanItem "current" TaskPlanInProgress]
+                current = CurrentTaskPlan 1 plan
+                outcome = CompactOutcome
+                    { compactBeforeTokens = 20
+                    , compactAfterTokens = 10
+                    , compactHistory =
+                        [userTextItem stale, userTextItem "retained"]
+                    , compactSummary = "summary"
+                    }
+            env <- newTaskPlanEnv Nothing Nothing
+            replaceTaskPlan env plan `shouldReturn` Right current
+            decorated <-
+                decorateCompactOutcomeWithTaskPlan (Just env) outcome
+            filter responseItemHasTaskPlan decorated.compactHistory
+                `shouldSatisfy` \case
+                    [MessageItem message] ->
+                        message.role == RoleDeveloper
+                            && responseMessageHasText
+                                (taskPlanContextText current)
+                                message
+                    _ -> False
+
+        it "does not reconstruct a plan from pre-compaction history" do
+            let stale =
+                    taskPlanContextText $
+                        CurrentTaskPlan 8 $
+                            TaskPlan Nothing
+                                [TaskPlanItem "stale" TaskPlanInProgress]
+                outcome = CompactOutcome
+                    { compactBeforeTokens = 20
+                    , compactAfterTokens = 10
+                    , compactHistory =
+                        [userTextItem stale, userTextItem "retained"]
+                    , compactSummary = "summary"
+                    }
+            env <- newTaskPlanEnv Nothing Nothing
+            decorated <-
+                decorateCompactOutcomeWithTaskPlan (Just env) outcome
+            decorated.compactHistory
+                `shouldBe` [userTextItem "retained"]
+
+        it "rejects a generated plan that cannot fit the compacted request" do
+            let plan = TaskPlan Nothing
+                    [TaskPlanItem "current" TaskPlanInProgress]
+                outcome = CompactOutcome
+                    { compactBeforeTokens = 20
+                    , compactAfterTokens = 1
+                    , compactHistory = []
+                    , compactSummary = "summary"
+                    }
+                rawLimit =
+                    estimateRequestTokensWithItems
+                        defaultResponseCreateParams
+                        outcome.compactHistory
+            env <- newTaskPlanEnv Nothing Nothing
+            _ <- replaceTaskPlan env plan
+            result <-
+                decorateCompactOutcomeWithTaskPlanWithin
+                    rawLimit
+                    defaultResponseCreateParams
+                    (Just env)
+                    outcome
+            result `shouldSatisfy` \case
+                Left message ->
+                    "authoritative task plan does not fit"
+                        `Text.isInfixOf` message
+                Right _ -> False
+
     describe "autoCompactOpenAiBackendWith" do
+        it "decorates before publishing and continuing automatic compaction" do
+            let history = [userTextItem "old"]
+                threshold = 2_000
+                plan = TaskPlan Nothing
+                    [TaskPlanItem "continue implementation" TaskPlanInProgress]
+            taskPlanEnv <- newTaskPlanEnv Nothing Nothing
+            _ <- replaceTaskPlan taskPlanEnv plan
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
+            hookHistory <- newIORef []
+            continuationHistory <- newIORef []
+            let sender _request =
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _previous _inputs _onEvent -> do
+                    writeIORef continuationHistory state.backendItems
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSenderHookAndDecorator
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        (decorateCompactOutcomeWithTaskPlan
+                            (Just taskPlanEnv))
+                        (\outcome _inputs -> do
+                            writeIORef hookHistory outcome.compactHistory
+                            pure CompactionInstalled)
+                        contextState
+                        base
+            result <-
+                backend.submitTurn
+                    (initialBackendSnapshot history)
+                    Nothing
+                    [UserMessage "new"]
+                    (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef hookHistory
+                >>= (`shouldSatisfy` any responseItemHasTaskPlan)
+            readIORef continuationHistory
+                >>= (`shouldSatisfy` any responseItemHasTaskPlan)
+
         it "compacts at a configured threshold below the model default" do
             let history = [userTextItem "old"]
                 threshold = 20
@@ -2137,6 +2275,30 @@ spec = do
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
+
+responseItemHasTaskPlan :: ResponseItem -> Bool
+responseItemHasTaskPlan = \case
+    MessageItem message ->
+        any isTaskPlanContextText (responseMessageTexts message)
+    _ -> False
+
+responseMessageHasText :: Text -> ResponseMessage -> Bool
+responseMessageHasText expected =
+    elem expected . responseMessageTexts
+
+responseMessageTexts :: ResponseMessage -> [Text]
+responseMessageTexts message =
+    case message.content of
+        MessageContentText text -> [text]
+        MessageContentParts parts ->
+            [ text
+            | part <- parts
+            , text <- case part of
+                InputTextPart{text} -> [text]
+                OutputTextPart{text} -> [text]
+                PlainTextPart{text} -> [text]
+                _ -> []
+            ]
 
 successful
     :: BackendSnapshot

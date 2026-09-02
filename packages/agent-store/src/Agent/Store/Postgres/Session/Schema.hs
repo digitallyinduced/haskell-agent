@@ -181,6 +181,9 @@ sessionTaskPlanSchemaStatements =
       \   CHECK (status IN ('pending', 'in_progress', 'completed')),\
       \ PRIMARY KEY (session_id, item_index)\
       \ )"
+    , "CREATE UNIQUE INDEX IF NOT EXISTS session_task_plan_one_active_idx\
+      \ ON harness.session_task_plan_items (session_id)\
+      \ WHERE status = 'in_progress'"
     ]
 
 sessionPromptEpochSchemaStatements :: [ByteString]

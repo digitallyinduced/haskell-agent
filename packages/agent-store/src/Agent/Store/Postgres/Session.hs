@@ -28,6 +28,7 @@ module Agent.Store.Postgres.Session
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedWithPromptReset
+    , appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
     , appendSessionTurns
     , appendSessionTurnsClearingTaskPlan
     , loadSession

@@ -60,6 +60,25 @@ spec = describe "task plans" do
         Text.count "<task-plan-state" reminder `shouldBe` 1
         reminder `shouldSatisfy` Text.isInfixOf "‹evil›"
         takeTaskPlanReminder env `shouldReturn` Nothing
+        restoreTaskPlanReminder env
+        takeTaskPlanReminder env `shouldReturn` Just reminder
+
+    it "resets the in-memory projection when the host changes sessions" do
+        let oldPlan = TaskPlan Nothing
+                [TaskPlanItem "old session" TaskPlanInProgress]
+            newPlan = TaskPlan (Just "resumed")
+                [TaskPlanItem "new session" TaskPlanPending]
+            current = CurrentTaskPlan 4 newPlan
+        env <- newTaskPlanEnv
+            (Just (CurrentTaskPlan 9 oldPlan))
+            Nothing
+        resetTaskPlanState env Nothing
+        readTaskPlan env `shouldReturn` Nothing
+        takeTaskPlanReminder env `shouldReturn` Nothing
+        resetTaskPlanState env (Just current)
+        readTaskPlan env `shouldReturn` Just current
+        takeTaskPlanReminder env
+            `shouldReturn` Just (taskPlanContextText current)
 
     it "bounds rendered context" do
         let plan = TaskPlan Nothing

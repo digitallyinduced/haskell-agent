@@ -62,17 +62,6 @@ coreMigrations =
             <> sessionSchemaStatements
         }
     , Migration
-        { migrationVersion = 109
-        , migrationName = "durable session task plans"
-        , migrationStatements =
-            sessionTaskPlanSchemaStatements
-            <> [ "GRANT SELECT, INSERT, UPDATE, DELETE\
-                 \ ON harness.session_task_plans TO ha_runtime"
-               , "GRANT SELECT, INSERT, DELETE\
-                 \ ON harness.session_task_plan_items TO ha_runtime"
-               ]
-        }
-    , Migration
         { migrationVersion = 2
         , migrationName = "restricted harness runtime role"
         , migrationStatements =
@@ -270,6 +259,17 @@ coreMigrations =
             [ "ALTER TABLE IF EXISTS harness.sessions\
               \ ADD COLUMN IF NOT EXISTS gateway_identity text"
             ]
+        }
+    , Migration
+        { migrationVersion = 109
+        , migrationName = "durable session task plans"
+        , migrationStatements =
+            sessionTaskPlanSchemaStatements
+            <> [ "GRANT SELECT, INSERT, UPDATE, DELETE\
+                 \ ON harness.session_task_plans TO ha_runtime"
+               , "GRANT SELECT, INSERT, DELETE\
+                 \ ON harness.session_task_plan_items TO ha_runtime"
+               ]
         }
     ]
 
