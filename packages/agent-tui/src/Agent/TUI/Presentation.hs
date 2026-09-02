@@ -856,8 +856,8 @@ qualifiedMcpDisplayName name =
         _ -> name
   where
     unescape =
-        Text.replace "%5F%5F" "__"
-            . Text.replace "%25" "%"
+        Text.replace "%25" "%"
+            . Text.replace "%5F%5F" "__"
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case canonicalToolName call.name of

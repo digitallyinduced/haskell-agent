@@ -175,6 +175,12 @@ spec = describe "tool presentation" do
             `shouldBe` "seo-mcp: search_performance"
         permissionToolCallPrompt call
             `shouldBe` "Allow seo-mcp: search_performance?"
+        summarizeToolCall
+            (functionToolCall
+                "mcp"
+                "mcp_call"
+                "{\"name\":\"a%255F%255Fb__tool%5F%5Fname\"}")
+            `shouldBe` "a%5F%5Fb: tool__name"
 
     it "unwraps MCP text envelopes and pretty-prints embedded JSON" do
         let call =
