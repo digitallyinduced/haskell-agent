@@ -17,7 +17,9 @@ import Agent.Codex.Dialect.ProjectInstructions (formatCodexAgentsMd)
 import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
+    , newCodexCodingToolsWithTaskPlan
     )
+import Agent.Tools.TaskPlan (TaskPlanEnv)
 import Agent.Dialect
     ( Dialect
     , InstructionHomeStyle(..)
@@ -76,6 +78,7 @@ sanitizeTaskName =
 data CodingTools = CodingTools
     { codingAppTools :: ![AppTool]
     , codingPlanMode :: !PlanModeEnv
+    , codingTaskPlan :: !(Maybe TaskPlanEnv)
     , codingSuspendGhci :: !(IO ())
     , codingResetSessionTemp :: !(OsPath -> IO ())
     , codingClose :: !(IO ())
@@ -94,7 +97,7 @@ codingToolsFor
 codingToolsFor dialect env planHooks secretHooks imageHooks multi = do
     typesRef <- newIORef Map.empty
     codingToolsForWithTypes
-        dialect env planHooks secretHooks imageHooks multi typesRef
+        dialect env planHooks Nothing secretHooks imageHooks multi typesRef
 
 -- | Host-presented tools (@ask_secret@, @show_image@) are registered only
 -- when the host supplies the matching hooks, so headless and child sessions
@@ -103,13 +106,14 @@ codingToolsForWithTypes
     :: Dialect
     -> ToolEnv
     -> Maybe PlanModeHooks
+    -> Maybe TaskPlanEnv
     -> Maybe SecretPromptHooks
     -> Maybe ImageDisplayHooks
     -> Maybe MultiAgentContext
     -> GrokSubagentSpecs
     -> IO CodingTools
 codingToolsForWithTypes
-        dialect env planHooks secretHooks imageHooks multi typesRef = do
+        dialect env planHooks taskPlan secretHooks imageHooks multi typesRef = do
     secretStore <- traverse (newSecretStore env) secretHooks
     let closeSecrets = mapM_ closeSecretStore secretStore
         analysisSpawner =
@@ -139,7 +143,7 @@ codingToolsForWithTypes
                 _ -> Nothing
         secretTools = maybe [] (pure . askSecretTool) secretStore
         imageTools = maybe [] (pure . showImageTool env) imageHooks
-        finish tools includeArtifacts plan suspendGhci resetSessionTemp
+        finish tools includeArtifacts plan currentTaskPlan suspendGhci resetSessionTemp
                 close agentTypes grokRuntime =
             CodingTools
                 { codingAppTools =
@@ -150,6 +154,7 @@ codingToolsForWithTypes
                         <> secretTools
                         <> imageTools
                 , codingPlanMode = plan
+                , codingTaskPlan = currentTaskPlan
                 , codingSuspendGhci = suspendGhci
                 , codingResetSessionTemp = resetSessionTemp
                 , codingClose = close `finally` closeSecrets
@@ -158,12 +163,17 @@ codingToolsForWithTypes
                 }
     flip onException closeSecrets $ case dialectToolSurface dialect of
         CodexToolSurface -> do
-            coding <- newCodexCodingTools env planHooks multi
+            coding <- case taskPlan of
+                Nothing -> newCodexCodingTools env planHooks multi
+                Just current ->
+                    newCodexCodingToolsWithTaskPlan
+                        env planHooks current multi
             pure $
                 finish
                     coding.codexAppTools
                     True
                     coding.codexPlanMode
+                    (Just coding.codexTaskPlan)
                     coding.codexSuspendGhci
                     coding.codexResetSessionTemp
                     coding.codexClose
@@ -176,6 +186,7 @@ codingToolsForWithTypes
                     coding.grokAppTools
                     True
                     coding.grokPlanMode
+                    taskPlan
                     coding.grokSuspendGhci
                     coding.grokResetSessionTemp
                     coding.grokClose
@@ -188,6 +199,7 @@ codingToolsForWithTypes
                     [askUserQuestionTool plan]
                     False
                     plan
+                    taskPlan
                     (pure ())
                     (\_tempDir -> pure ())
                     (pure ())

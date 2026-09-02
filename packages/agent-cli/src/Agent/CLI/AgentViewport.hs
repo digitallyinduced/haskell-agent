@@ -38,6 +38,7 @@ import Agent.CLI.AgentViewport.Status
     ( agentStatusGlyph
     , formatAgentStatus
     )
+import Agent.Tools.TaskPlan (isTaskPlanContextText)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -587,9 +588,12 @@ responseItemFirstLine = go
 responseItemFirstItemLine :: ResponseItem -> Maybe Text
 responseItemFirstItemLine = \case
     MessageItem message ->
-        labelledFirst
-            (responseRoleLabel message.role)
-            (responseMessageText message.content)
+        if isTaskPlanContextMessage message
+            then Nothing
+            else
+                labelledFirst
+                    (responseRoleLabel message.role)
+                    (responseMessageText message.content)
     FunctionCallItem call ->
         Just ("tool: " <> call.name)
     CustomToolCallItem call ->
@@ -601,9 +605,12 @@ responseItemFirstItemLine = \case
 responseItemLineList :: ResponseItem -> [Text]
 responseItemLineList = \case
     MessageItem message ->
-        labelled
-            (responseRoleLabel message.role)
-            (responseMessageText message.content)
+        if isTaskPlanContextMessage message
+            then []
+            else
+                labelled
+                    (responseRoleLabel message.role)
+                    (responseMessageText message.content)
     FunctionCallItem call ->
         ["tool: " <> call.name]
     CustomToolCallItem call ->
@@ -628,6 +635,10 @@ responseMessageText = \case
     MessageContentParts parts ->
         Text.intercalate "\n" (concatMap responseContentText parts)
 
+isTaskPlanContextMessage :: ResponseMessage -> Bool
+isTaskPlanContextMessage message =
+    isTaskPlanContextText (responseMessageText message.content)
+
 responseContentText :: ResponseContentPart -> [Text]
 responseContentText = \case
     InputTextPart{text} -> [text]
@@ -645,7 +656,9 @@ responseContentText = \case
 appendResponseItem :: Bool -> UiState -> ResponseItem -> UiState
 appendResponseItem showRawReasoning state = \case
     MessageItem message ->
-        appendResponseMessage message state
+        if isTaskPlanContextMessage message
+            then state
+            else appendResponseMessage message state
     FunctionCallItem item ->
         maybe state
             (\call -> reduceUi (UiLoop (ToolStarted call)) state)

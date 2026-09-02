@@ -5,6 +5,13 @@ import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan(..)
+    , TaskPlan(..)
+    , TaskPlanItem(..)
+    , TaskPlanStatus(..)
+    , taskPlanContextText
+    )
 import Agent.TUI.Model
     ( BlockKind(..)
     , BlockState(..)
@@ -240,6 +247,22 @@ spec = do
                 , messageItem RoleAssistant "answer"
                 ]
                 `shouldBe` ["user: request"]
+
+        it "hides generated task-plan context but keeps ordinary developer text" do
+            let context =
+                    taskPlanContextText $
+                        CurrentTaskPlan 2 $
+                            TaskPlan Nothing
+                                [TaskPlanItem "implement" TaskPlanInProgress]
+                items =
+                    [ messageItem RoleDeveloper context
+                    , messageItem RoleUser context
+                    , messageItem RoleDeveloper "ordinary instruction"
+                    ]
+            responseItemLines items
+                `shouldBe` ["developer: ordinary instruction"]
+            responseItemPreviewLines 4 items
+                `shouldBe` ["developer: ordinary instruction"]
 
     describe "responseItemsToUiState" do
         it "replays child messages, reasoning, and tools into retained blocks" do

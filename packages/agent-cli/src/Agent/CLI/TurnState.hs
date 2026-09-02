@@ -383,10 +383,12 @@ data TurnAbort
 turnInputsWithContext
     :: Maybe Text
     -> Maybe Text
+    -> Maybe Text
     -> [TurnInput]
     -> [TurnInput]
-turnInputsWithContext planReminder startup inputs =
+turnInputsWithContext planReminder taskPlanReminder startup inputs =
     contextInput planReminder
+        <> contextInput taskPlanReminder
         <> contextInput startup
         <> inputs
   where
