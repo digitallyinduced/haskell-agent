@@ -83,7 +83,12 @@ def canonical(path: str | Path) -> str:
 
 
 def same_cwd(left: str | None, right: str) -> bool:
-    return bool(left) and canonical(left) == canonical(right)
+    if not left:
+        return False
+    try:
+        return canonical(left) == canonical(right)
+    except (OSError, ValueError):
+        return False
 
 
 def path_is_within(path: str | Path, root: str | Path) -> bool:
@@ -777,7 +782,7 @@ class CodexTurnJournal:
             "CREATE TABLE turns ("
             "sequence INTEGER PRIMARY KEY, "
             "role TEXT NOT NULL, "
-            "text TEXT NOT NULL, "
+            "text BLOB NOT NULL, "
             "payload TEXT NOT NULL)"
         )
         self.database.execute(
@@ -792,8 +797,11 @@ class CodexTurnJournal:
             "INSERT INTO turns (role, text, payload) VALUES (?, ?, ?)",
             (
                 safe_string(turn.get("role")),
-                safe_string(turn.get("text")),
-                json.dumps(turn, ensure_ascii=False, separators=(",", ":")),
+                safe_string(turn.get("text")).encode(
+                    "utf-8",
+                    errors="surrogatepass",
+                ),
+                json.dumps(turn, ensure_ascii=True, separators=(",", ":")),
             ),
         )
 
@@ -829,11 +837,20 @@ class CodexTurnJournal:
 
     def last_text(self, role: str) -> str | None:
         row = self.database.execute(
-            "SELECT text FROM turns WHERE role = ? AND text <> '' "
+            "SELECT text FROM turns WHERE role = ? AND length(text) > 0 "
             "ORDER BY sequence DESC LIMIT 1",
             (role,),
         ).fetchone()
-        return safe_string(row[0]) if row else None
+        if not row:
+            return None
+        text = row[0]
+        if isinstance(text, memoryview):
+            text = text.tobytes()
+        return (
+            text.decode("utf-8", errors="surrogatepass")
+            if isinstance(text, bytes)
+            else safe_string(text)
+        )
 
 
 def process_codex_stream(

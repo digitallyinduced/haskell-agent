@@ -273,6 +273,10 @@ class SessionReaderTest(unittest.TestCase):
         )
         self.assertIsNone(reader.iso_time(10**1000))
 
+    def test_cwd_matching_rejects_embedded_nul(self):
+        self.assertFalse(reader.same_cwd("\0", str(self.cwd)))
+        self.assertFalse(reader.same_cwd(str(self.cwd), "\0"))
+
     def test_codex_fallback_sanitizes_outer_harness_title(self):
         home = self.root / "codex-sanitized-title"
         rollout = home / "sessions" / "rollout-session.jsonl"
@@ -411,7 +415,14 @@ class SessionReaderTest(unittest.TestCase):
                             "type": "message",
                             "role": "user",
                             "content": [
-                                {"type": "input_text", "text": f"Request {index}"}
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "Request 0 \ud800"
+                                        if index == 0
+                                        else f"Request {index}"
+                                    ),
+                                }
                             ],
                         },
                     },
@@ -439,6 +450,7 @@ class SessionReaderTest(unittest.TestCase):
         )
         result = reader.read_codex(item, 100)
         self.assertEqual(len(result["turns"]), 20)
+        self.assertEqual(result["turns"][0]["text"], "Request 0 \ud800")
         self.assertEqual(result["last_user_request"], "Request 9")
         self.assertEqual(result["last_assistant_action"], "Answer 9")
 
