@@ -105,6 +105,9 @@ data ClientOptions = ClientOptions
       -- ^ Exact-match request-model to xAI-model overrides.
     , defaultModel :: !Text
       -- ^ Target for non-Grok model names without an explicit override.
+    , autoCompactTokenLimit :: !(Maybe Int)
+      -- ^ Explicit automatic-compaction threshold. 'Nothing' uses the
+      -- model-specific Grok Build default.
     , requestTimeoutSeconds :: !Int
       -- ^ Full-response timeout. Reasoning turns can stream for minutes.
     , clientVersion :: !Text
@@ -116,6 +119,7 @@ defaultClientOptions = ClientOptions
     { baseUrl = "https://cli-chat-proxy.grok.com/v1"
     , modelOverrides = Map.empty
     , defaultModel = "grok-4.6"
+    , autoCompactTokenLimit = Nothing
     , requestTimeoutSeconds = 600
     , clientVersion = defaultGrokClientVersion
     }
@@ -132,6 +136,7 @@ clientOptionsFromEnv = do
         { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl baseUrl
         , modelOverrides = maybe Map.empty (parseModelOverrides . Text.pack) modelMap
         , defaultModel = maybe defaultClientOptions.defaultModel Text.pack defaultModel
+        , autoCompactTokenLimit = Nothing
         , requestTimeoutSeconds = Maybe.fromMaybe defaultClientOptions.requestTimeoutSeconds
             timeoutSeconds
         , clientVersion = maybe defaultClientOptions.clientVersion Text.pack clientVersion

@@ -685,8 +685,12 @@ runAgentProviders
                                             startupFailure err
                                 Right result -> pure result
                     XAIProvider -> do
-                        xaiOptions <- XAI.clientOptionsFromEnv
-                        let xaiContextWindow =
+                        baseXaiOptions <- XAI.clientOptionsFromEnv
+                        let xaiOptions = baseXaiOptions
+                                { XAI.autoCompactTokenLimit =
+                                    options.optCompactThreshold
+                                }
+                            xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
                                     XAI.grokDefaultContextWindow

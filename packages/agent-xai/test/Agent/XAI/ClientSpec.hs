@@ -64,6 +64,23 @@ spec = do
             -- instructions travel as the leading system item
             requestInputRoles request `shouldBe` Just ["system", "user"]
 
+        it "applies an explicit threshold to the server compaction hint" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "hello")
+                    , completedEvent "resp-override" []
+                    ]
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options { autoCompactTokenLimit = Just 450_000 }
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "450000"
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+
         it "omits x-compaction-at after a local compaction checkpoint" do
             recorded <- newIORef []
             let handler _request = pure $ sseResponse

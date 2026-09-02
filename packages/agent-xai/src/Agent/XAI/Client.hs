@@ -180,7 +180,11 @@ configureCompactionHeaders options request =
         | otherwise =
             maybe id
                 (setRequestHeader "x-compaction-at" . pure . renderInt)
-                (grokServerCompactionAtTokens wireModel)
+                serverCompactionAtTokens
+
+    serverCompactionAtTokens = do
+        modelDefault <- grokServerCompactionAtTokens wireModel
+        pure $ max 1 $ maybe modelDefault id options.autoCompactTokenLimit
 
     renderInt = BS8.pack . show
 
