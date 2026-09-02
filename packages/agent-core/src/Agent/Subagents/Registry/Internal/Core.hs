@@ -72,6 +72,7 @@ newSubagentRegistry config cwd run onEvent = do
     agents <- newTVarIO Map.empty
     paths <- newTVarIO Map.empty
     live <- newTVarIO 0
+    rootTurnSpawnCounts <- newTVarIO Map.empty
     nextUpdateSeq <- newTVarIO 0
     waitCursors <- newTVarIO Map.empty
     activeWaits <- newTVarIO Map.empty
@@ -81,6 +82,7 @@ newSubagentRegistry config cwd run onEvent = do
     abortedRootTurns <- newTVarIO Set.empty
     configVar <- newTVarIO config
         { maxConcurrent = max 1 config.maxConcurrent
+        , maxSpawnedPerTurn = fmap (max 1) config.maxSpawnedPerTurn
         }
     lifecycle <- newMVar ()
     runRef <- newIORef run
@@ -90,6 +92,7 @@ newSubagentRegistry config cwd run onEvent = do
         { registryAgents = agents
         , registryPaths = paths
         , registryLiveCount = live
+        , registryRootTurnSpawnCounts = rootTurnSpawnCounts
         , registryNextUpdateSeq = nextUpdateSeq
         , registryWaitCursors = waitCursors
         , registryActiveWaits = activeWaits
@@ -173,6 +176,7 @@ resetSubagentRegistry registry =
             writeTVar registry.registryAgents Map.empty
             writeTVar registry.registryPaths Map.empty
             writeTVar registry.registryLiveCount 0
+            writeTVar registry.registryRootTurnSpawnCounts Map.empty
             writeTVar registry.registryNextUpdateSeq 0
             writeTVar registry.registryWaitCursors Map.empty
             writeTVar registry.registryActiveWaits Map.empty
@@ -357,8 +361,22 @@ spawnSubagentAtWithIdPreparedForTurn
                         Left err -> pure (Left err)
                         Right (parentPath, nextDepth) -> do
                             config <- readTVar registry.registryConfig
-                            case config.maxDepth of
-                                Just limit | nextDepth > limit ->
+                            budgetExceeded <- case
+                                    (rootTurnId, config.maxSpawnedPerTurn) of
+                                (Just turnId, Just limit) -> do
+                                    counts <- readTVar
+                                        registry.registryRootTurnSpawnCounts
+                                    pure $
+                                        if Map.findWithDefault 0 turnId counts >= limit
+                                            then Just limit
+                                            else Nothing
+                                _ -> pure Nothing
+                            case (budgetExceeded, config.maxDepth) of
+                                (Just limit, _) -> pure $ Left
+                                    ("Subagent budget reached for this turn (maximum "
+                                        <> Text.pack (show limit)
+                                        <> "). Solve the remaining task yourself.")
+                                (_, Just limit) | nextDepth > limit ->
                                     pure $ Left
                                         ("Agent depth limit reached (maximum depth "
                                             <> Text.pack (show limit)
@@ -409,6 +427,12 @@ spawnSubagentAtWithIdPreparedForTurn
                                                                 }
                                                         modifyTVar'
                                                             registry.registryLiveCount (+ 1)
+                                                        case rootTurnId of
+                                                            Just turnId ->
+                                                                modifyTVar'
+                                                                    registry.registryRootTurnSpawnCounts
+                                                                    (Map.insertWith (+) turnId 1)
+                                                            Nothing -> pure ()
                                                         writeTVar registry.registryAgents
                                                             (Map.insert agentId record agents)
                                                         writeTVar registry.registryPaths
