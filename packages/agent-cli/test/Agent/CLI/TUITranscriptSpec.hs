@@ -86,12 +86,12 @@ spec = describe "fullscreen transcript caching" do
                 (groupableInspection 1)
                     { blockTitle = "Searched needle"
                     , blockBody = "src/A.hs:1"
+                    , blockExpanded = True
                     }
             second =
                 (groupableInspection 2)
                     { blockTitle = "Searched another"
                     , blockBody = "src/B.hs:2"
-                    , blockExpanded = True
                     }
             grouped =
                 toList
@@ -100,6 +100,7 @@ spec = describe "fullscreen transcript caching" do
             [summary] -> do
                 summary.blockTitle `shouldBe` "Searched 2 queries"
                 summary.blockState `shouldBe` BlockComplete
+                summary.blockExpanded `shouldBe` True
                 summary.blockBody `shouldSatisfy`
                     Text.isInfixOf "    src/A.hs:1"
                 summary.blockBody `shouldSatisfy`

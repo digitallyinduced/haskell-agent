@@ -39,13 +39,15 @@ coalesceInspectionBlocks =
 
     mergeRun [block] = block
     mergeRun run =
-        let representative = last run
+        let
+            representative = last run
+            expanded = any (.blockExpanded) run
         in representative
             { blockTitle = inspectionRunTitle run
-            , blockBody =
-                inspectionRunBody representative.blockExpanded run
+            , blockBody = inspectionRunBody expanded run
             , blockDetail = ""
             , blockState = inspectionRunState run
+            , blockExpanded = expanded
             , blockInspectionGroupable = False
             }
 
