@@ -95,6 +95,8 @@ module Agent.CLI.Session
     , ensurePersistenceSessionId
     , ensurePersistenceSessionIdWithMaterializationHook
     , ensureSessionWithPromptSnapshot
+    , loadCurrentTaskPlan
+    , taskPlanHooksForPersistence
     , resumeHint
     , sessionUsageFromTurns
     ) where
@@ -152,6 +154,13 @@ import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (StoreError, renderStoreError)
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan(..)
+    , TaskPlan(..)
+    , TaskPlanHooks(..)
+    , TaskPlanItem(..)
+    , TaskPlanStatus(..)
+    )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
     ( SomeException
@@ -571,7 +580,18 @@ forkSessionAt root source turns requestedTitle targetCwd
                                         pure
                                             (Left
                                                 "could not allocate a unique PostgreSQL session id")
-                                    Right True -> pure (Right handle)
+                                    Right True -> do
+                                        copied <- restore
+                                            (Store.copySessionTaskPlan
+                                                source.sessionPool
+                                                source.sessionMeta.metaId
+                                                meta.metaId)
+                                            `onException` cleanupOwned
+                                        case copied of
+                                            Left err -> do
+                                                cleanupOwned
+                                                pure (Left (renderStoreError err))
+                                            Right _ -> pure (Right handle)
   where
     exceptionText = Text.pack . displayException
 
@@ -1013,6 +1033,88 @@ ensurePersistenceSessionIdWithMaterializationHook
     handle <- ensureSessionWithMaterializationHook afterStored slotRef
     pure (Just handle.sessionMeta.metaId)
 
+-- | Load the authoritative current plan for an already-active persistence
+-- slot. Pending sessions cannot yet have durable plan state.
+loadCurrentTaskPlan
+    :: Persistence
+    -> IO (Either Text (Maybe CurrentTaskPlan))
+loadCurrentTaskPlan PersistenceDisabled = pure (Right Nothing)
+loadCurrentTaskPlan (PersistenceEnabled slotRef) =
+    readIORef slotRef >>= \case
+        PersistencePending{} -> pure (Right Nothing)
+        PersistenceActive handle ->
+            mapStoreException "could not load session task plan" $
+                fmap (fmap (fmap fromStoredTaskPlan))
+                    (Store.loadSessionTaskPlan
+                        handle.sessionPool
+                        handle.sessionMeta.metaId)
+
+-- | Construct write-through hooks for the task-plan environment. A write
+-- materializes pending persistence before mutating plan state.
+taskPlanHooksForPersistence :: Persistence -> Maybe TaskPlanHooks
+taskPlanHooksForPersistence PersistenceDisabled = Nothing
+taskPlanHooksForPersistence (PersistenceEnabled slotRef) =
+    Just TaskPlanHooks
+        { taskPlanPersistReplace = \plan ->
+            mapStoreException "could not persist session task plan" do
+                handle <- ensureSession slotRef
+                Store.replaceSessionTaskPlan
+                    handle.sessionPool
+                    handle.sessionMeta.metaId
+                    plan.taskPlanExplanation
+                    (map toStoredTaskPlanItem plan.taskPlanItems) >>= \case
+                        Left err -> pure (Left err)
+                        Right Nothing ->
+                            fail
+                                ("session not found: "
+                                    <> Text.unpack handle.sessionMeta.metaId)
+                        Right (Just revision) -> pure (Right revision)
+        , taskPlanPersistClear =
+            mapStoreException "could not clear session task plan" do
+                handle <- ensureSession slotRef
+                Store.clearSessionTaskPlan
+                    handle.sessionPool
+                    handle.sessionMeta.metaId >>= \case
+                        Left err -> pure (Left err)
+                        Right _ -> pure (Right ())
+        }
+
+mapStoreException
+    :: Text
+    -> IO (Either StoreError a)
+    -> IO (Either Text a)
+mapStoreException label action =
+    tryAny action <&> \case
+        Left err -> Left (label <> ": " <> Text.pack (displayException err))
+        Right result -> either (Left . renderStoreError) Right result
+
+fromStoredTaskPlan :: Store.SessionTaskPlan -> CurrentTaskPlan
+fromStoredTaskPlan stored = CurrentTaskPlan
+    { currentTaskPlanRevision = stored.sessionTaskPlanRevision
+    , currentTaskPlanValue = TaskPlan
+        { taskPlanExplanation = stored.sessionTaskPlanExplanation
+        , taskPlanItems = map fromStoredTaskPlanItem stored.sessionTaskPlanItems
+        }
+    }
+
+fromStoredTaskPlanItem :: Store.SessionTaskPlanItem -> TaskPlanItem
+fromStoredTaskPlanItem stored = TaskPlanItem
+    { taskPlanStep = stored.sessionTaskPlanItemStep
+    , taskPlanStatus = case stored.sessionTaskPlanItemStatus of
+        Store.SessionTaskPlanPending -> TaskPlanPending
+        Store.SessionTaskPlanInProgress -> TaskPlanInProgress
+        Store.SessionTaskPlanCompleted -> TaskPlanCompleted
+    }
+
+toStoredTaskPlanItem :: TaskPlanItem -> Store.SessionTaskPlanItem
+toStoredTaskPlanItem item = Store.SessionTaskPlanItem
+    { Store.sessionTaskPlanItemStep = item.taskPlanStep
+    , Store.sessionTaskPlanItemStatus = case item.taskPlanStatus of
+        TaskPlanPending -> Store.SessionTaskPlanPending
+        TaskPlanInProgress -> Store.SessionTaskPlanInProgress
+        TaskPlanCompleted -> Store.SessionTaskPlanCompleted
+    }
+
 -- | Ensure the durable session exists and atomically persist the
 -- provider-visible request prefix before it can be sent. Subsequent calls only
 -- append an immutable epoch when the prefix or pending generated context
@@ -1353,7 +1455,7 @@ rewindSession handle retained = do
             , turnUsage = Nothing
             , turnProviderTelemetry = []
             }
-    Store.appendSessionTurns
+    Store.appendSessionTurnsClearingTaskPlan
         handle.sessionPool
         (map toStoredTurn (marker : retained))
         (toStoredMetadata meta) >>= \case
@@ -1706,7 +1808,8 @@ importSessionTransfer pool root cwd transfer = runExceptT do
     _ <- lift (ensureSessionTemp root sessionId) >>= except
     let meta = transfer.transferMeta
             { metaCwd = fromMaybe transfer.transferMeta.metaCwd cwd }
-        bytes = Aeson.encode (SessionTransfer meta transfer.transferTurns)
+        bytes = Aeson.encode
+            (SessionTransfer meta transfer.transferTaskPlan transfer.transferTurns)
         legacy = Store.LegacySession
             { legacySourcePath = "afk:" <> transfer.transferMeta.metaId
             , legacyContentHash = contentFingerprint bytes
@@ -1722,12 +1825,31 @@ importSessionTransfer pool root cwd transfer = runExceptT do
         Right False -> do
             lift (cleanupTransfer dir sessionId)
             throwE ("session already exists: " <> sessionId)
-        Right True -> pure sessionId
+        Right True -> do
+            case transfer.transferTaskPlan of
+                Nothing -> pure sessionId
+                Just plan ->
+                    lift (Store.replaceSessionTaskPlan
+                        pool
+                        sessionId
+                        plan.taskPlanExplanation
+                        (map toStoredTaskPlanItem plan.taskPlanItems)) >>= \case
+                            Left err -> do
+                                lift (cleanupImportedSession dir sessionId)
+                                throwE (renderStoreError err)
+                            Right Nothing -> do
+                                lift (cleanupImportedSession dir sessionId)
+                                throwE ("session not found: " <> sessionId)
+                            Right (Just _) -> pure sessionId
   where
     cleanupTransfer dir sessionId = do
         _ <- tryIO (removePathForcibly dir)
         _ <- removeSessionTemp root sessionId
         pure ()
+    cleanupImportedSession dir sessionId = do
+        now <- getCurrentTime
+        _ <- Store.deleteSession pool sessionId now
+        cleanupTransfer dir sessionId
 
 -- | Import a validated transfer as a new session. The source id is never
 -- reused, which makes importing the same file safe and preserves the source
@@ -1760,13 +1882,20 @@ exportSessionTransfer
     -> Text
     -> IO (Either Text SessionTransferEnvelope)
 exportSessionTransfer pool root sessionId =
-    loadSession pool root sessionId <&> \result -> do
-        (meta, turns) <- result
-        validateSessionTransferEnvelope SessionTransferEnvelope
-            { transferFormat = sessionTransferFormatName
-            , transferFormatVersion = sessionTransferFormatVersion
-            , transferSession = SessionTransfer meta turns
-            }
+    loadSession pool root sessionId >>= \case
+        Left err -> pure (Left err)
+        Right (meta, turns) ->
+            Store.loadSessionTaskPlan pool sessionId <&> \result -> do
+                storedPlan <- either (Left . renderStoreError) Right result
+                validateSessionTransferEnvelope SessionTransferEnvelope
+                    { transferFormat = sessionTransferFormatName
+                    , transferFormatVersion = sessionTransferFormatVersion
+                    , transferSession =
+                        SessionTransfer
+                            meta
+                            ((.currentTaskPlanValue) . fromStoredTaskPlan <$> storedPlan)
+                            turns
+                    }
 
 -- | Stream a transfer document in bounded turn pages. Callback bytes are
 -- valid only for the duration of the callback. The export captures the turn
@@ -1781,11 +1910,16 @@ streamSessionTransfer
 streamSessionTransfer pool root sessionId emit = runExceptT do
     (meta, snapshotStart, snapshotTotal) <-
         lift (loadSessionHistorySnapshot pool root sessionId) >>= except
+    storedPlan <- lift (Store.loadSessionTaskPlan pool sessionId)
+        >>= either (throwE . renderStoreError) pure
+    let taskPlan = ((.currentTaskPlanValue) . fromStoredTaskPlan) <$> storedPlan
     let snapshotEnd = snapshotStart + max 0 snapshotTotal
     lift $ emitLazy
         ("{\"format\":\"haskell-agent.session-transfer\","
             <> "\"version\":1,\"session\":{\"meta\":"
             <> Aeson.encode meta
+            <> ",\"currentTaskPlan\":"
+            <> Aeson.encode (fmap taskPlanTransferJson taskPlan)
             <> ",\"turns\":[")
     firstPage <- lift
         (loadSessionHistoryTurnsRangeBounded
@@ -1824,6 +1958,20 @@ streamSessionTransfer pool root sessionId emit = runExceptT do
                 when (next <= emitted) $
                     throwE "session export paging made no progress"
                 when (next < total) (streamRest snapshotEnd total next page)
+
+taskPlanTransferJson :: TaskPlan -> Aeson.Value
+taskPlanTransferJson plan = Aeson.object
+    [ "explanation" Aeson..= plan.taskPlanExplanation
+    , "plan" Aeson..= map itemJson plan.taskPlanItems
+    ]
+  where
+    itemJson item = Aeson.object
+        [ "step" Aeson..= item.taskPlanStep
+        , "status" Aeson..= case item.taskPlanStatus of
+            TaskPlanPending -> ("pending" :: Text)
+            TaskPlanInProgress -> "in_progress"
+            TaskPlanCompleted -> "completed"
+        ]
 
 -- | Fork a source session through an inclusive durable turn index. The source
 -- remains untouched. Transcript effects are copied verbatim, while derived
@@ -1865,7 +2013,7 @@ forkSessionAtTurn pool root sourceId throughIndex = runExceptT do
         envelope = SessionTransferEnvelope
             { transferFormat = sessionTransferFormatName
             , transferFormatVersion = sessionTransferFormatVersion
-            , transferSession = SessionTransfer meta turns
+            , transferSession = SessionTransfer meta Nothing turns
             }
     lift (importSessionTransferRemapped pool root Nothing envelope) >>= except
   where
