@@ -166,7 +166,7 @@ import qualified Brick.Widgets.Border as Border
     ( borderAttr, hBorder )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
-    ( wrapDraftWindow, draftCursorLocation, controlInteractionAttr )
+    ( wrapDraftWindow, controlInteractionAttr )
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
@@ -891,10 +891,7 @@ drawTextPrompt state prompt =
                                         withBorderStyle unicodeRounded $
                                             borderWithLabel (txt " Answer ") $
                                                 padLeftRight 1 $
-                                                    hBox
-                                                        [ renderTextDraft prompt
-                                                        , vLimit 1 (fill ' ')
-                                                        ]
+                                                    renderTextDraft prompt
                                     ]
 
 drawMetaConsole :: AppState -> MetaConsoleOverlay -> Widget Name
@@ -955,14 +952,34 @@ renderMetaConsoleDraft overlay =
 
 renderTextDraft :: TextOverlay -> Widget Name
 renderTextDraft prompt =
-    let displayDraft = textOverlayDisplayText prompt
-        content =
-            if Text.null displayDraft
-                then withAttr Theme.mutedAttr (txt " ")
-                else terminalTxt displayDraft
-        (row, column) =
-            Composer.draftCursorLocation displayDraft prompt.textCursor
-    in showCursor OverlayCursor (Location (column, row)) content
+    Widget Greedy Fixed do
+        context <- getContext
+        let maxRows = 8
+            rowLimit = max 1 (min maxRows context.availHeight)
+            width = max 1 context.availWidth
+            displayDraft = textOverlayDisplayText prompt
+            (rows, (cursorRow, cursorColumn)) =
+                Composer.wrapDraftWindow
+                    rowLimit
+                    width
+                    displayDraft
+                    prompt.textCursor
+            height = min rowLimit (length rows)
+            firstVisibleRow = max 0 (cursorRow - height + 1)
+            visibleRows = take height (drop firstVisibleRow rows)
+            visibleCursorRow = cursorRow - firstVisibleRow
+            renderRow row
+                | Text.null row = txt " "
+                | otherwise = terminalTxt row
+            content = vBox (map renderRow visibleRows)
+        render $
+            hBox
+                [ showCursor
+                    OverlayCursor
+                    (Location (cursorColumn, visibleCursorRow))
+                    content
+                , vLimit height (fill ' ')
+                ]
 
 -- | Replace every code point with one fixed-width masking glyph.
 maskedSecretText :: Text -> Text

@@ -302,6 +302,43 @@ spec = do
             normalizeTextOverlayInsertion TextInputSecret value
                 `shouldBe` "first"
 
+        it "wraps long plain answers so the draft tail stays visible" do
+            runtime <- newScriptRuntime initialUiState
+            let marker = "TAILVISIBLE"
+                draft = Text.replicate 1000 "a" <> marker
+                size = (80, 24)
+                state =
+                    (initialFullscreenAppState
+                        runtime
+                        []
+                        AgentRoot
+                        []
+                        0)
+                        { appTextPrompt =
+                            Just
+                                (textOverlay draft (Text.length draft))
+                                    { textTitle = "Request changes"
+                                    , textBody =
+                                        "What should be changed in the plan?"
+                                    }
+                        }
+                rendered =
+                    Text.unlines $
+                        map
+                            (Text.concat . map spanText . toList)
+                            (toList
+                                (displayOpsForPic
+                                    (renderWidget
+                                        Nothing
+                                        (drawApp state)
+                                        size)
+                                    size))
+                spanText = \case
+                    TextSpan _ _ _ text -> LazyText.toStrict text
+                    Skip width -> Text.replicate width " "
+                    RowEnd width -> Text.replicate width " "
+            rendered `shouldSatisfy` Text.isInfixOf marker
+
     describe "text overlay grapheme editing" do
         it "moves across a ZWJ emoji as one visible glyph" do
             let emoji = Text.pack ['\x1f469', '\x200d', '\x1f4bb']
