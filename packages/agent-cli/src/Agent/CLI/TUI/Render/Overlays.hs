@@ -24,7 +24,11 @@ import Agent.CLI.Clipboard ()
 import Agent.CLI.Command ()
 import Agent.CLI.Dictation ()
 import Agent.CLI.ImagePreview ()
-import Agent.CLI.Input ( terminalTextWidth, truncateDisplayText )
+import Agent.CLI.Input
+    ( terminalTextWidth
+    , truncateDisplayText
+    , visibleEditorText
+    )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.Permission ()
 import Agent.CLI.Recap ()
@@ -166,7 +170,7 @@ import qualified Brick.Widgets.Border as Border
     ( borderAttr, hBorder )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
-    ( wrapDraftWindow, draftCursorLocation, controlInteractionAttr )
+    ( wrapDraftWindow, controlInteractionAttr )
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
@@ -348,8 +352,7 @@ drawResume state overlay =
 resumeHeader :: ResumeBrowser -> Widget Name
 resumeHeader browser =
     hBox
-        [ search
-        , vLimit 1 (fill ' ')
+        [ padRight Max search
         , withAttr Theme.mutedAttr $
             terminalTxt
                 (resumeSourceLabel browser.resumeBrowserSource <> "  f")
@@ -361,18 +364,17 @@ resumeHeader browser =
         | otherwise = "search: "
     search
         | browser.resumeBrowserSearching =
-            showCursor
+            singleLineOverlayInput
                 ResumeSearchCursor
-                (Location
-                    (resumeSearchCursorColumn
-                        prefix
-                        browser.resumeBrowserQuery, 0))
-                (terminalTxt
-                    (prefix <> browser.resumeBrowserQuery <> " "))
+                prefix
+                browser.resumeBrowserQuery
+                " "
         | Text.null browser.resumeBrowserQuery =
             withAttr Theme.mutedAttr (terminalTxt prefix)
         | otherwise =
-            terminalTxt (prefix <> browser.resumeBrowserQuery)
+            singleLineOverlayText
+                prefix
+                browser.resumeBrowserQuery
 
 resumeSearchCursorColumn :: Text -> Text -> Int
 resumeSearchCursorColumn prefix query =
@@ -578,22 +580,85 @@ filterChoiceQuery :: ChoiceOverlay -> Widget Name
 filterChoiceQuery choice =
     let adjustable = isJust choice.choiceAdjustments
         prefix = if adjustable then "/ " else "search: "
-        query = if Text.null choice.choiceQuery
-            then withAttr Theme.mutedAttr $
-                txt
-                    (if adjustable
-                        then "Type to search"
-                        else "(type to filter)")
-            else terminalTxt choice.choiceQuery
-        content = hBox
-            [ terminalTxt prefix
-            , query
-            , terminalTxt " "
-            ]
-        cursorColumn =
-            terminalTextWidth prefix
-                + terminalTextWidth choice.choiceQuery
-    in showCursor OverlayCursor (Location (cursorColumn, 0)) content
+        emptyHint =
+            if adjustable
+                then "Type to search"
+                else "(type to filter)"
+    in singleLineOverlayInput
+        OverlayCursor
+        prefix
+        choice.choiceQuery
+        emptyHint
+
+-- | Render an append-only single-line input inside its available width.
+-- Keep the fixed prompt visible when possible and horizontally window the
+-- editable value around its cursor. One trailing cell is reserved so Vty can
+-- always paint the insertion cursor.
+singleLineOverlayInput
+    :: Name
+    -> Text
+    -> Text
+    -> Text
+    -> Widget Name
+singleLineOverlayInput cursorName prefix value emptyHint =
+    singleLineOverlayField
+        (Just cursorName)
+        prefix
+        value
+        emptyHint
+
+singleLineOverlayText :: Text -> Text -> Widget Name
+singleLineOverlayText prefix value =
+    singleLineOverlayField Nothing prefix value " "
+
+singleLineOverlayField
+    :: Maybe Name
+    -> Text
+    -> Text
+    -> Text
+    -> Widget Name
+singleLineOverlayField cursorName prefix value emptyHint =
+    Widget Greedy Fixed do
+        context <- getContext
+        let width = max 1 context.availWidth
+            availableTextWidth = max 0 (width - 1)
+            prefixWidth = terminalTextWidth prefix
+            (shown, cursorColumn)
+                | prefixWidth < availableTextWidth =
+                    let (shownValue, valueCursorColumn) =
+                            visibleEditorText
+                                (availableTextWidth - prefixWidth)
+                                value
+                                (Text.length value)
+                    in
+                        ( prefix <> shownValue
+                        , prefixWidth + valueCursorColumn
+                        )
+                | otherwise =
+                    visibleEditorText
+                        availableTextWidth
+                        (prefix <> value)
+                        (Text.length prefix + Text.length value)
+            suffix
+                | Text.null value = emptyHint
+                | otherwise = " "
+            shownSuffix =
+                truncateDisplayText
+                    (max 1 (width - terminalTextWidth shown))
+                    suffix
+            content =
+                hBox
+                    [ terminalTxt shown
+                    , withAttr Theme.mutedAttr (terminalTxt shownSuffix)
+                    ]
+            renderedContent = case cursorName of
+                Nothing -> content
+                Just name ->
+                    showCursor
+                        name
+                        (Location (cursorColumn, 0))
+                        content
+        render renderedContent
 
 filterChoiceRows :: Int -> AppState -> ChoiceOverlay -> Widget Name
 filterChoiceRows rowLimit appState choice =
@@ -891,10 +956,7 @@ drawTextPrompt state prompt =
                                         withBorderStyle unicodeRounded $
                                             borderWithLabel (txt " Answer ") $
                                                 padLeftRight 1 $
-                                                    hBox
-                                                        [ renderTextDraft prompt
-                                                        , vLimit 1 (fill ' ')
-                                                        ]
+                                                    renderTextDraft prompt
                                     ]
 
 drawMetaConsole :: AppState -> MetaConsoleOverlay -> Widget Name
@@ -955,14 +1017,34 @@ renderMetaConsoleDraft overlay =
 
 renderTextDraft :: TextOverlay -> Widget Name
 renderTextDraft prompt =
-    let displayDraft = textOverlayDisplayText prompt
-        content =
-            if Text.null displayDraft
-                then withAttr Theme.mutedAttr (txt " ")
-                else terminalTxt displayDraft
-        (row, column) =
-            Composer.draftCursorLocation displayDraft prompt.textCursor
-    in showCursor OverlayCursor (Location (column, row)) content
+    Widget Greedy Fixed do
+        context <- getContext
+        let maxRows = 8
+            rowLimit = max 1 (min maxRows context.availHeight)
+            width = max 1 context.availWidth
+            displayDraft = textOverlayDisplayText prompt
+            (rows, (cursorRow, cursorColumn)) =
+                Composer.wrapDraftWindow
+                    rowLimit
+                    width
+                    displayDraft
+                    prompt.textCursor
+            height = min rowLimit (length rows)
+            firstVisibleRow = max 0 (cursorRow - height + 1)
+            visibleRows = take height (drop firstVisibleRow rows)
+            visibleCursorRow = cursorRow - firstVisibleRow
+            renderRow row
+                | Text.null row = txt " "
+                | otherwise = terminalTxt row
+            content = vBox (map renderRow visibleRows)
+        render $
+            hBox
+                [ showCursor
+                    OverlayCursor
+                    (Location (cursorColumn, visibleCursorRow))
+                    content
+                , vLimit height (fill ' ')
+                ]
 
 -- | Replace every code point with one fixed-width masking glyph.
 maskedSecretText :: Text -> Text

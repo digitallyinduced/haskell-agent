@@ -12,6 +12,10 @@ import Agent.CLI.Command
     ( SlashCatalog(slashCatalogToolNames)
     , defaultSlashCatalog
     )
+import Agent.CLI.Resume
+    ( ResumeBrowser(..)
+    , initialResumeBrowser
+    )
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
     , applyMetaConsoleEdit
@@ -85,6 +89,7 @@ import Agent.CLI.TUI.Types
     , HistoryCommit(..)
     , MetaConsoleOverlay(..)
     , Name(..)
+    , ResumeOverlay(..)
     , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
@@ -156,6 +161,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.Lazy as LazyText
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Output.Mock as VMock
 import Graphics.Vty.PictureToSpans (displayOpsForPic)
@@ -301,6 +307,103 @@ spec = do
                 `shouldBe` value
             normalizeTextOverlayInsertion TextInputSecret value
                 `shouldBe` "first"
+
+        it "wraps long plain answers so the draft tail stays visible" do
+            runtime <- newScriptRuntime initialUiState
+            let marker = "TAILVISIBLE"
+                draft = Text.replicate 1000 "a" <> marker
+                size = (80, 24)
+                state =
+                    (initialFullscreenAppState
+                        runtime
+                        []
+                        AgentRoot
+                        []
+                        0)
+                        { appTextPrompt =
+                            Just
+                                (textOverlay draft (Text.length draft))
+                                    { textTitle = "Request changes"
+                                    , textBody =
+                                        "What should be changed in the plan?"
+                                    }
+                        }
+                rendered =
+                    Text.unlines $
+                        map
+                            (Text.concat . map spanText . toList)
+                            (toList
+                                (displayOpsForPic
+                                    (renderWidget
+                                        Nothing
+                                        (drawApp state)
+                                        size)
+                                    size))
+                spanText = \case
+                    TextSpan _ _ _ text -> LazyText.toStrict text
+                    Skip width -> Text.replicate width " "
+                    RowEnd width -> Text.replicate width " "
+            rendered `shouldSatisfy` Text.isInfixOf marker
+
+    describe "search overlay input viewport" do
+        it "keeps the tail of a long searchable choice query visible" do
+            runtime <- newScriptRuntime initialUiState
+            let marker = "CHOICETAIL"
+                query = Text.replicate 1000 "a" <> marker
+                state =
+                    (initialFullscreenAppState
+                        runtime
+                        []
+                        AgentRoot
+                        []
+                        0)
+                        { appChoice =
+                            Just
+                                (choiceOverlay False)
+                                    { choiceSearch = True
+                                    , choiceQuery = query
+                                    }
+                        }
+            renderedAppText (80, 24) state
+                `shouldSatisfy` Text.isInfixOf marker
+
+        it "keeps a long resume query visible while editing and afterward" do
+            runtime <- newScriptRuntime initialUiState
+            let marker = "RESUMETAIL"
+                query = Text.replicate 1000 "a" <> marker
+                browser =
+                    (initialResumeBrowser
+                        (posixSecondsToUTCTime 0)
+                        [])
+                        { resumeBrowserQuery = query
+                        , resumeBrowserSearching = True
+                        }
+                state =
+                    (initialFullscreenAppState
+                        runtime
+                        []
+                        AgentRoot
+                        []
+                        0)
+                        { appResume =
+                            Just ResumeOverlay
+                                { resumeOverlayBrowser = browser
+                                }
+                        }
+                inactiveState =
+                    state
+                        { appResume =
+                            Just ResumeOverlay
+                                { resumeOverlayBrowser =
+                                    browser
+                                        { resumeBrowserSearching = False
+                                        }
+                                }
+                        }
+            renderedAppText (80, 24) state
+                `shouldSatisfy` Text.isInfixOf marker
+            renderedAppText (80, 24) inactiveState
+                `shouldSatisfy` Text.isInfixOf marker
 
     describe "text overlay grapheme editing" do
         it "moves across a ZWJ emoji as one visible glyph" do
@@ -2409,6 +2512,21 @@ markerBlock blockId body = UiBlock
     , blockExpanded = False
     , blockCallId = Nothing
     }
+
+renderedAppText :: (Int, Int) -> AppState -> Text
+renderedAppText size state =
+    Text.unlines $
+        map
+            (Text.concat . map spanText . toList)
+            (toList
+                (displayOpsForPic
+                    (renderWidget Nothing (drawApp state) size)
+                    size))
+  where
+    spanText = \case
+        TextSpan _ _ _ text -> LazyText.toStrict text
+        Skip width -> Text.replicate width " "
+        RowEnd width -> Text.replicate width " "
 
 encoded :: Text -> ByteString.ByteString
 encoded = TextEncoding.encodeUtf8
