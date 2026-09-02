@@ -26,6 +26,7 @@ import Agent.CLI.TUI.App
     , agentPaneEntryLimit
     , agentPaneVisible
     , backgroundActivityText
+    , cacheableBlock
     , completionFlashTransitions
     , completionRequiresRedraw
     , conversationScrollbarRenderer
@@ -115,7 +116,6 @@ import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     )
-import Agent.CLI.TUI.Render.Blocks (cacheableBlock)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , TerminalKind(..)

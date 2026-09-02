@@ -11,6 +11,7 @@ module Agent.CLI.TUI.App
     , agentPaneEntryLimit
     , agentPaneVisible
     , backgroundActivityText
+    , cacheableBlock
     , completionFlashTransitions
     , completionRequiresRedraw
     , conversationScrollbarRenderer
