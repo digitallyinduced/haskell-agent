@@ -26,6 +26,7 @@ module Agent.TUI.Theme
     , mutedAttr
     , selectedAttr
     , selectedMutedAttr
+    , slashCommandAttr
     , transcriptHoverAttr
     , transcriptHoverMutedAttr
     , transcriptHoverMutedCancelledAttr
@@ -184,7 +185,8 @@ fixedThemePalette = \case
         (RGBColor 65 210 190) (RGBColor 80 170 255))
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
-userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr, toolPathAttr :: AttrName
+userAttr, userMutedAttr, assistantAttr, slashCommandAttr :: AttrName
+thinkingAttr, thinkingBodyAttr, toolAttr, toolPathAttr :: AttrName
 inspectAttr :: AttrName
 todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
 errorAttr, successAttr, selectedAttr, selectedMutedAttr, borderAttr, borderActiveAttr :: AttrName
@@ -207,6 +209,7 @@ mutedAttr = attrName "muted"
 userAttr = attrName "user"
 userMutedAttr = attrName "user-muted"
 assistantAttr = attrName "assistant"
+slashCommandAttr = attrName "slash-command"
 thinkingAttr = attrName "thinking"
 thinkingBodyAttr = attrName "thinking-body"
 toolAttr = attrName "tool"
@@ -289,6 +292,7 @@ terminalDefault =
         , (userAttr, raisedPanelAttr `V.withStyle` V.bold)
         , (userMutedAttr, raisedPanelMutedAttr)
         , (assistantAttr, V.defAttr)
+        , (slashCommandAttr, palette V.blue)
         , (thinkingAttr, palette V.yellow)
         , (thinkingBodyAttr, palette V.brightBlack `V.withStyle` (V.dim .|. V.italic))
         , (waitingDimAttr, palette V.brightBlack)
@@ -366,6 +370,7 @@ monochrome =
         , (userAttr, V.defAttr `V.withStyle` V.bold)
         , (userMutedAttr, V.defAttr `V.withStyle` V.dim)
         , (assistantAttr, V.defAttr)
+        , (slashCommandAttr, V.defAttr `V.withStyle` V.bold)
         , (thinkingAttr, V.defAttr)
         , (thinkingBodyAttr, V.defAttr `V.withStyle` (V.dim .|. V.italic))
         , (waitingDimAttr, V.defAttr)
@@ -454,6 +459,7 @@ mkTheme background foreground muted accent link =
         , (userAttr, panel `V.withStyle` V.bold)
         , (userMutedAttr, panelMuted)
         , (assistantAttr, base)
+        , (slashCommandAttr, linkA)
         , (thinkingAttr, accentA)
         , (thinkingBodyAttr, mutedA `V.withStyle` (V.dim .|. V.italic))
         , (waitingDimAttr, mutedA)

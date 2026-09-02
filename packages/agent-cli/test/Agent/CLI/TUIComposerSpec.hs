@@ -120,6 +120,10 @@ spec = describe "fullscreen composer" do
             (rows, location) = wrapDraftWindow 8 10 draft cursor
         rows `shouldBe` map (Text.pack . show) [93 :: Int .. 100]
         location `shouldBe` (7, 3)
+        Text.drop (draftWindowStart 8 draft cursor) draft
+            `shouldBe` Text.intercalate
+                "\n"
+                (map (Text.pack . show) [93 :: Int .. 100])
 
     it "keeps enough following rows when the cursor is near the start" do
         let draft =
@@ -129,6 +133,7 @@ spec = describe "fullscreen composer" do
             (rows, location) = wrapDraftWindow 8 10 draft 0
         take 8 rows `shouldBe` map (Text.pack . show) [1 :: Int .. 8]
         location `shouldBe` (0, 0)
+        draftWindowStart 8 draft 0 `shouldBe` 0
 
     it "distinguishes the cursor positions before and after a full-row newline" do
         wrapDraft 2 "ab\nc" 2

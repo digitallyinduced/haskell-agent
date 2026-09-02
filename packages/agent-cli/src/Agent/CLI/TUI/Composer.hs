@@ -15,6 +15,7 @@ module Agent.CLI.TUI.Composer
     , dictationKeyAction
     , dictationProgressNotice
     , draftCursorLocation
+    , draftWindowStart
     , drawComposer
     , drawQueuedInputs
     , drawSlashMenu

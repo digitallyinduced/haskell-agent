@@ -69,6 +69,22 @@ spec = do
                     (Theme.themeAttrMap Theme.Daylight))
                 `shouldBe` V.SetTo (RGBColor 144 80 150)
 
+        it "uses the link color for recognized slash commands" do
+            let terminal =
+                    attrMapLookup Theme.slashCommandAttr Theme.terminalDefault
+                midnight =
+                    attrMapLookup
+                        Theme.slashCommandAttr
+                        (Theme.themeAttrMap Theme.Midnight)
+                noColor =
+                    attrMapLookup Theme.slashCommandAttr Theme.monochrome
+            V.attrForeColor terminal `shouldBe` V.SetTo V.blue
+            V.attrForeColor midnight
+                `shouldBe` V.SetTo (RGBColor 122 162 247)
+            V.attrBackColor midnight
+                `shouldBe` V.SetTo (RGBColor 26 27 38)
+            V.attrStyle noColor `shouldBe` V.SetTo V.bold
+
         it "sets a daylight background on semantic text attributes" do
             map
                 ( V.attrBackColor
@@ -82,6 +98,7 @@ spec = do
                 , Theme.footerAttr
                 , Theme.mutedAttr
                 , Theme.assistantAttr
+                , Theme.slashCommandAttr
                 , Theme.thinkingAttr
                 , Theme.toolAttr
                 , Theme.inspectAttr
