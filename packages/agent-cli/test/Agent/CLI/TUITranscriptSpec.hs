@@ -60,12 +60,14 @@ spec = describe "fullscreen transcript caching" do
     it "coalesces adjacent completed inspection blocks under the newest ID" do
         let first =
                 (groupableInspection 1)
-                    { blockTitle = "Read src/A.hs"
+                    { blockTitle = "Read"
+                    , blockDetail = "src/A.hs"
                     , blockBody = "module A where"
                     }
             second =
                 (groupableInspection 2)
-                    { blockTitle = "Listed src"
+                    { blockTitle = "Listed"
+                    , blockDetail = "src"
                     , blockBody = "A.hs"
                     }
             grouped =

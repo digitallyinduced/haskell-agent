@@ -445,12 +445,56 @@ spec = describe "tool presentation" do
                            ]
         case parseApplyPatchDiffs patch of
             [parsed] -> do
-                length parsed.diffLines `shouldBe` 20
+                length
+                    (filter
+                        (\case
+                            SearchReplaceOmitted{} -> False
+                            _ -> True)
+                        parsed.diffLines)
+                    `shouldBe` 20
                 parsed.diffHiddenLines `shouldBe` 7
+                parsed.diffLines `shouldSatisfy`
+                    elem (SearchReplaceOmitted 7 7 7)
                 parsed.diffLines `shouldSatisfy`
                     elem (SearchReplaceRemoved "old")
                 parsed.diffLines `shouldSatisfy`
                     elem (SearchReplaceAdded "new")
+            _ -> expectationFailure "expected one parsed patch"
+
+    it "marks every omitted region inside capped patch previews" do
+        let contexts =
+                [ " context-" <> Text.pack (show number)
+                | number <- [1 :: Int .. 30]
+                ]
+            patch =
+                Text.unlines $
+                    [ "*** Begin Patch"
+                    , "*** Update File: src/Main.hs"
+                    , "@@"
+                    , "-first-old"
+                    , "+first-new"
+                    ]
+                        <> contexts
+                        <> [ "-last-old"
+                           , "+last-new"
+                           , "*** End Patch"
+                           ]
+        case parseApplyPatchDiffs patch of
+            [parsed] -> do
+                parsed.diffHiddenLines `shouldBe` 14
+                case break
+                    (== SearchReplaceOmitted 14 14 14)
+                    parsed.diffLines of
+                    (before, _ : after) -> do
+                        before `shouldSatisfy`
+                            elem (SearchReplaceAdded "first-new")
+                        after `shouldSatisfy`
+                            elem (SearchReplaceRemoved "last-old")
+                    _ ->
+                        expectationFailure
+                            "expected an internal omission marker"
+                formatToolDiffRelative "" (customToolCall "patch" "apply_patch" patch)
+                    `shouldSatisfy` Text.isInfixOf "  … 14 omitted"
             _ -> expectationFailure "expected one parsed patch"
 
     it "decodes semantic diff headers and numbered rows for rich rendering" do

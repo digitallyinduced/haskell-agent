@@ -986,12 +986,18 @@ paintDiffRelative color workspace diff =
                     <> renderToolPath color workspace destination
             Nothing -> ""
         shown = map paintLine diffLines
+        unmarkedHidden =
+            max 0
+                (diffHiddenLines - sum
+                    [ rows
+                    | SearchReplaceOmitted rows _ _ <- diffLines
+                    ])
         more =
-            if diffHiddenLines == 0
+            if unmarkedHidden == 0
                 then []
                 else
                     [ roleMuted color
-                        ("  … " <> Text.pack (show diffHiddenLines) <> " more")
+                        ("  … " <> Text.pack (show unmarkedHidden) <> " more")
                     ]
         body = shown <> more
     in Text.intercalate "\n" (filter (not . Text.null) (header : body))
@@ -1003,6 +1009,9 @@ paintDiffRelative color workspace diff =
             style color [terminalGreen] ("  +" <> line)
         SearchReplaceContext line ->
             roleMuted color ("   " <> line)
+        SearchReplaceOmitted rows _ _ ->
+            roleMuted color
+                ("  … " <> Text.pack (show rows) <> " omitted")
 
 renderToolPath :: Bool -> Text -> Text -> Text
 renderToolPath color =

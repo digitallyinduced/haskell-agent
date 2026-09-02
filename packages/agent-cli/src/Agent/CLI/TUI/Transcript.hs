@@ -139,7 +139,9 @@ inspectionRunBody expanded =
         "  "
             <> inspectionStateGlyph block.blockState
             <> " "
-            <> block.blockTitle
+            <> if Text.null (Text.strip block.blockDetail)
+                then block.blockTitle
+                else block.blockTitle <> " " <> block.blockDetail
 
 inspectionStateGlyph :: BlockState -> Text
 inspectionStateGlyph = \case
