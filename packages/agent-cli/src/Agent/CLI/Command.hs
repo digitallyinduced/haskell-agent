@@ -34,6 +34,7 @@ module Agent.CLI.Command
     , slashCompletionCandidatesWithModels
     , slashCompletionCandidatesWithSkills
     , slashCompletionCandidatesWithSkillsAndModels
+    , slashCommandHighlightToken
     , slashMenuFor
     , slashMenuForCatalog
     , slashMenuForWithModels
@@ -162,6 +163,24 @@ lookupSlashCommand =
 lookupSlashCommandIn :: SlashCatalog -> Text -> Maybe SlashCommand
 lookupSlashCommandIn catalog raw =
     Map.lookup (normalizeSlashName raw) catalog.slashCatalogCommandByName
+
+-- | The leading command token when it is a prefix of an available slash
+-- command, alias, or runtime skill. This stays independent of the completion
+-- menu because a completed no-argument command may close that menu while its
+-- token should remain highlighted.
+slashCommandHighlightToken :: SlashCatalog -> Text -> Maybe Text
+slashCommandHighlightToken catalog text =
+    case Text.uncons text of
+        Just ('/', _) ->
+            let token = Text.takeWhile (not . isSpace) text
+                query = Text.toLower (Text.drop 1 token)
+                names =
+                    Map.keys catalog.slashCatalogCommandByName
+                        <> Map.keys catalog.slashCatalogSkillByName
+            in if any (query `Text.isPrefixOf`) names
+                then Just token
+                else Nothing
+        _ -> Nothing
 
 lookupSlashCommandFrom :: [SlashCommand] -> Text -> Maybe SlashCommand
 lookupSlashCommandFrom commands raw =

@@ -1,6 +1,7 @@
 -- | Pure text decoding and visual layout for the fullscreen composer.
 module Agent.CLI.TUI.Composer.Edit
     ( decodePaste
+    , draftWindowStart
     , draftCursorLocation
     , verticalCursorMove
     , wrapDraft
@@ -140,12 +141,18 @@ wrapDraftWindow :: Int -> Int -> Text -> Int -> ([Text], (Int, Int))
 wrapDraftWindow requestedRows requestedWidth text requestedCursor =
     let rows = max 1 requestedRows
         cursor = max 0 (min (Text.length text) requestedCursor)
-        before = Text.take cursor text
-        start = precedingLineStart rows before
+        start = draftWindowStart rows text cursor
         after = Text.drop cursor text
         end = cursor + followingLinesLength rows after
         window = Text.take (end - start) (Text.drop start text)
     in wrapDraft requestedWidth window (cursor - start)
+
+-- | Source offset at which 'wrapDraftWindow' starts its bounded layout.
+draftWindowStart :: Int -> Text -> Int -> Int
+draftWindowStart requestedRows text requestedCursor =
+    let rows = max 1 requestedRows
+        cursor = max 0 (min (Text.length text) requestedCursor)
+    in precedingLineStart rows (Text.take cursor text)
 
 precedingLineStart :: Int -> Text -> Int
 precedingLineStart lineCount text =
